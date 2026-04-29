@@ -595,7 +595,7 @@ func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, 
 	return fmt.Sprintf("PLAN_MODE_%s: %s", mode, reason), nil
 }
 
-func (r *toolRuntime) runEnterWorktree(rawArgs []byte) (string, error) {
+func (r *toolRuntime) runEnterWorktree(ctx context.Context, rawArgs []byte) (string, error) {
 	var args struct {
 		Path       string `json:"path"`
 		Branch     string `json:"branch"`
@@ -614,12 +614,12 @@ func (r *toolRuntime) runEnterWorktree(rawArgs []byte) (string, error) {
 	}
 	branch := strings.TrimSpace(args.Branch)
 	if !args.AllowDirty {
-		if dirty, err := isGitDirty(r.cwd); err == nil && dirty {
+		if dirty, err := isGitDirty(ctx, r.cwd); err == nil && dirty {
 			return "", fmt.Errorf("enter-worktree: repository has uncommitted changes (set allow_dirty=true to bypass)")
 		}
 	}
 	if branch != "" {
-		exists, err := localBranchExists(r.cwd, branch)
+		exists, err := localBranchExists(ctx, r.cwd, branch)
 		if err != nil {
 			return "", fmt.Errorf("enter-worktree: check branch: %w", err)
 		}
@@ -631,7 +631,7 @@ func (r *toolRuntime) runEnterWorktree(rawArgs []byte) (string, error) {
 	if branch != "" {
 		cmdArgs = append(cmdArgs, "-b", branch)
 	}
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -640,7 +640,7 @@ func (r *toolRuntime) runEnterWorktree(rawArgs []byte) (string, error) {
 	return truncate(string(out), 2000), nil
 }
 
-func (r *toolRuntime) runExitWorktree(rawArgs []byte) (string, error) {
+func (r *toolRuntime) runExitWorktree(ctx context.Context, rawArgs []byte) (string, error) {
 	var args struct {
 		Path  string `json:"path"`
 		Force bool   `json:"force"`
@@ -657,7 +657,7 @@ func (r *toolRuntime) runExitWorktree(rawArgs []byte) (string, error) {
 		return "", err
 	}
 	if !args.Force {
-		dirty, err := isGitDirty(abs)
+		dirty, err := isGitDirty(ctx, abs)
 		if err == nil && dirty {
 			return "", fmt.Errorf("exit-worktree: worktree has uncommitted changes (use force=true)")
 		}
@@ -666,7 +666,7 @@ func (r *toolRuntime) runExitWorktree(rawArgs []byte) (string, error) {
 	if args.Force {
 		cmdArgs = append(cmdArgs, "--force")
 	}
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -877,8 +877,8 @@ func isConfigKeyPreset(raw map[string]json.RawMessage, key string) bool {
 	return trimmed != "" && trimmed != "null"
 }
 
-func isGitDirty(dir string) (bool, error) {
-	cmd := exec.Command("git", "status", "--porcelain")
+func isGitDirty(ctx context.Context, dir string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -887,8 +887,8 @@ func isGitDirty(dir string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-func localBranchExists(dir, branch string) (bool, error) {
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+func localBranchExists(ctx context.Context, dir, branch string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	cmd.Dir = dir
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() != 0 {

@@ -755,9 +755,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "file-edit":
 		return r.runFileEdit(call.Args)
 	case "enter-worktree":
-		return r.runEnterWorktree(call.Args)
+		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
-		return r.runExitWorktree(call.Args)
+		return r.runExitWorktree(ctx, call.Args)
 	case "send-message":
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
