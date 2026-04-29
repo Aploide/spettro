@@ -129,7 +129,8 @@ type toolLoopConfig struct {
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
-	MaxTokens       int // max tokens per request; 0 = unlimited
+	MaxTokens       int                    // max tokens per request; 0 = unlimited
+	Thinking        provider.ThinkingLevel // forwarded to provider.Request.Thinking
 	RequiredReads   []string
 	Images          []string        // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
@@ -172,7 +173,8 @@ type toolRuntime struct {
 	providerMgr  *provider.Manager
 	providerName func() string
 	modelName    func() string
-	maxTokens    int
+	maxTokens     int
+	thinkingLevel provider.ThinkingLevel
 	toolCallback func(ToolTrace)
 	sessionDir   string
 	agentID      string
@@ -313,6 +315,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		req := provider.Request{
 			Prompt:    prompt,
 			MaxTokens: cfg.MaxTokens,
+			Thinking:  cfg.Thinking,
 		}
 		if step == 1 && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
@@ -853,6 +856,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			ModelName:       r.modelName,
 			CWD:             r.cwd,
 			MaxTokens:       r.maxTokens,
+			Thinking:        r.thinkingLevel,
 			ToolCallback:    r.toolCallback,
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,

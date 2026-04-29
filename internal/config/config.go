@@ -30,6 +30,16 @@ type UserConfig struct {
 	LastAgentID             string            `json:"last_agent_id,omitempty"`
 	ShowSidePanel           bool              `json:"show_side_panel,omitempty"`
 	ShowPermissionDebug     bool              `json:"show_permission_debug,omitempty"`
+	// ThinkingLevel selects extended-thinking compute when the active model
+	// supports it. Allowed values are "off", "low", "medium", "high", "x-high"
+	// (or empty, which is treated as "off"). Toggleable at runtime via the
+	// /thinking command and honoured by the Anthropic and Devin Sessions
+	// adapters; other providers ignore it.
+	ThinkingLevel string `json:"thinking_level,omitempty"`
+	// DevinOrgID is required when ActiveProvider is "devin". The Devin v3 API
+	// scopes session endpoints under /v3/organizations/{org_id}/sessions, and
+	// the org id is discoverable from the Devin dashboard.
+	DevinOrgID string `json:"devin_org_id,omitempty"`
 }
 
 func Default() UserConfig {
@@ -80,6 +90,13 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 	}
 	if cfg.AutoCompactMaxFailures <= 0 {
 		cfg.AutoCompactMaxFailures = def.AutoCompactMaxFailures
+		changed = true
+	}
+	switch cfg.ThinkingLevel {
+	case "", "off", "low", "medium", "high", "x-high":
+		// valid
+	default:
+		cfg.ThinkingLevel = ""
 		changed = true
 	}
 	return cfg, changed

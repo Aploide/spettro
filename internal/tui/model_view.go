@@ -110,6 +110,12 @@ func (m Model) viewHeader() string {
 		modelLabel = modelLabel[:12]
 	}
 	permText := string(m.cfg.Permission)
+	// Append a "thinking:<level>" marker when extended thinking is on so
+	// users always see at a glance which compute budget is active.
+	thinkingTag := ""
+	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" {
+		thinkingTag = "thinking:" + level
+	}
 	logoW := lipgloss.Width(logo)
 	permW := lipgloss.Width(permText)
 	maxMetaWidth := m.width - logoW - permW - 8
@@ -120,6 +126,9 @@ func (m Model) viewHeader() string {
 	right := lipgloss.NewStyle().Foreground(mc).Render(permText)
 	if metaText != "" {
 		right = styleMuted.Render(metaText) + "  " + right
+	}
+	if thinkingTag != "" {
+		right = styleMuted.Render(thinkingTag) + "  " + right
 	}
 
 	rightW := lipgloss.Width(right)

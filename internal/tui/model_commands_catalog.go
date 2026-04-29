@@ -37,6 +37,14 @@ var permissionCommands = []commandDef{
 	{"/permission ask-first", "always ask before executing"},
 }
 
+var thinkingCommands = []commandDef{
+	{"/thinking off", "no extended thinking (default)"},
+	{"/thinking low", "short reasoning budget (~2k thinking tokens)"},
+	{"/thinking medium", "medium reasoning budget (~5k thinking tokens)"},
+	{"/thinking high", "long reasoning budget (~16k thinking tokens)"},
+	{"/thinking x-high", "maximum reasoning budget (~32k thinking tokens)"},
+}
+
 func filterCommands(query string) []commandDef {
 	if query == "" {
 		return append([]commandDef(nil), allCommands...)
@@ -71,6 +79,7 @@ func isInstantCommand(input string) bool {
 	case "/help",
 		"/permission", "/permissions",
 		"/budget",
+		"/thinking",
 		"/connect",
 		"/models",
 		"/skill", "/skills",

@@ -31,6 +31,26 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 		maxTokens := int64(req.MaxTokens)
 		call.MaxOutputTokens = &maxTokens
 	}
+	if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
+		// Fantasy threads thinking config via per-provider ProviderOptions.
+		// Currently we only know how to express it for Anthropic; other
+		// providers ignore the field and the fantasy fallback path simply
+		// won't include reasoning. This matches Spettro's documented
+		// behaviour: thinking levels are honoured by Anthropic and Devin
+		// Sessions, ignored elsewhere.
+		if providerName == "anthropic" {
+			budgetInt := int64(budget)
+			call.ProviderOptions = fantasy.ProviderOptions{
+				"anthropic": &fantasyanthropic.ProviderOptions{
+					Thinking: &fantasyanthropic.ThinkingProviderOption{BudgetTokens: budgetInt},
+				},
+			}
+			needed := budgetInt + 4096
+			if call.MaxOutputTokens == nil || *call.MaxOutputTokens < needed {
+				call.MaxOutputTokens = &needed
+			}
+		}
+	}
 
 	resp, err := model.Generate(ctx, call)
 	if err != nil {

@@ -1146,6 +1146,36 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "/thinking":
+		// /thinking [off|low|medium|high|x-high] toggles the extended-thinking
+		// budget passed to providers that support it (Anthropic Claude Opus
+		// and Sonnet, Devin Sessions). Without an argument we report the
+		// current setting.
+		current := strings.TrimSpace(m.cfg.ThinkingLevel)
+		if current == "" {
+			current = "off"
+		}
+		if len(fields) < 2 {
+			m.showBanner("thinking: "+current+"  usage: /thinking <off|low|medium|high|x-high>", "info")
+		} else {
+			level := strings.ToLower(strings.TrimSpace(fields[1]))
+			if !provider.IsValidThinkingLevel(level) {
+				m.showBanner("usage: /thinking <off|low|medium|high|x-high>", "error")
+			} else {
+				if level == "off" {
+					level = ""
+				}
+				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					cfg.ThinkingLevel = level
+					return nil
+				})
+				display := level
+				if display == "" {
+					display = "off"
+				}
+				m.showBanner("thinking level set to "+display, "success")
+			}
+		}
 	case "/approve":
 		if m.pendingPlan == "" {
 			m.showBanner("no pending plan — run a plan prompt first", "info")

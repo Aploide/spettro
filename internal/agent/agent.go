@@ -88,12 +88,14 @@ type Chatter struct {
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
+	Thinking        provider.ThinkingLevel
 }
 
 func (c Chatter) Reply(ctx context.Context, prompt string, images []string) (provider.Response, error) {
 	return c.ProviderManager.Send(ctx, c.ProviderName(), c.ModelName(), provider.Request{
-		Prompt: prompt,
-		Images: images,
+		Prompt:   prompt,
+		Images:   images,
+		Thinking: c.Thinking,
 	})
 }
 
@@ -107,6 +109,7 @@ type LLMAgent struct {
 	ModelName       func() string
 	CWD             string
 	MaxTokens       int
+	Thinking        provider.ThinkingLevel
 	RequiredReads   []string
 	Images          []string // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace)
@@ -162,6 +165,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ProviderName:    a.ProviderName,
 		ModelName:       a.ModelName,
 		MaxTokens:       a.MaxTokens,
+		Thinking:        a.Thinking,
 		RequiredReads:   a.RequiredReads,
 		Images:          a.Images,
 		ToolCallback:    a.ToolCallback,
