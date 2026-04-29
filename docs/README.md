@@ -6,6 +6,8 @@
 - [Architecture overview](architecture.md)
 - [Agent Skills](skills.md)
 - [Remote control plane](remote.md)
+- [Extended thinking levels](thinking.md)
+- [Devin Sessions provider](devin.md)
 - [Troubleshooting](troubleshooting.md)
 - [Agent Manifest](../AGENTS.md)
 - [Agent Prompts](../agents/README.md)

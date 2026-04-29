@@ -14,6 +14,8 @@
 | `/permissions [ask-first\|restricted\|yolo]` | Show or set policy alias. |
 | `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
 | `/budget <n\|0>` | Set request token budget (`0` = unlimited). |
+| `/thinking <off\|low\|medium\|high\|x-high>` | Set extended-thinking compute budget for the active model. Honoured by Anthropic Claude Opus / Sonnet; ignored by providers that don't expose a thinking parameter. |
+| `/devin <org-id>` | Show or set the Devin organization id (e.g. `org-abc123`). Required when the active provider is `devin` and the API key is a v3 `cog_*` Service User credential. |
 | `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
 | `/approve` | Execute pending plan through `coding` agent. |
 | `/tasks [list\|add\|done\|set\|show]` | Manage session tasks. |
