@@ -87,6 +87,7 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
+	schemaSection := buildToolSchemaSection(cfg.AllowedTools)
 	commentGuidance := ""
 	for _, tool := range cfg.AllowedTools {
 		if tool == "comment" {
@@ -112,7 +113,7 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 
 You can use tools iteratively.
 Allowed tools: %s
-
+%s
 Output protocol (strict):
 1) To call tools (all executed in parallel), output one TOOL_CALL per line:
 TOOL_CALL {"name":"<tool-name>","arguments":{...}}
@@ -123,6 +124,7 @@ FINAL
 
 Rules:
 - Known aliases accepted by runtime: tool/args and function{name,arguments}.
+- Use ONLY the field names listed in the tool argument schemas above. Unknown fields will be rejected.
 - For the agent tool, arguments must include {"agent":"<handoff-id>","task":"..."}.
 - Prefer reading/searching before writing.
 - Never edit an existing file unless it has been read first.
@@ -141,5 +143,84 @@ Working directory:
 Current step: %d/%d
 
 Previous tool interaction log:
-%s`, base, toolList, commentGuidance, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
+%s`, base, toolList, schemaSection, commentGuidance, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
+}
+
+// builtinToolSchemas describes the JSON arguments object accepted by every
+// built-in tool dispatched in llm_runtime.go (and friends). The runtime decodes
+// each tool's arguments with json.Decoder.DisallowUnknownFields(), so the LLM
+// MUST use these exact field names. Optional fields are flagged with a `?`.
+//
+// When a manifest exposes additional tools (mcp/script/http), they will simply
+// be omitted from the rendered schema section; the agent prompt should mention
+// their schema separately if needed.
+var builtinToolSchemas = map[string]string{
+	"comment":           `{"message": string}`,
+	"ls":                `{"path"?: string}`,
+	"file-read":         `{"path": string, "start_line"?: int, "end_line"?: int}`,
+	"file-write":        `{"path": string, "content": string, "append"?: bool}`,
+	"file-edit":         `{"path": string, "old_string"?: string, "new_string"?: string, "replace_all"?: bool, "start_line"?: int, "end_line"?: int, "expected_replacements"?: int, "edits"?: [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
+	"glob":              `{"pattern": string, "path"?: string}`,
+	"grep":              `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
+	"repo-search":       `{"query": string}`,
+	"shell-exec":        `{"command": string}`,
+	"bash":              `{"command": string}`,
+	"bash-output":       `{"command": string}`,
+	"web-fetch":         `{"url": string}`,
+	"web-search":        `{"query": string, "max_results"?: int}`,
+	"ask-user":          `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
+	"agent":             `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
+	"todo-write":        `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
+	"task-create":       `{"id"?: string, "content": string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
+	"task-get":          `{"id": string}`,
+	"task-update":       `{"id": string, "content"?: string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
+	"task-list":         `{"status"?: string}`,
+	"task-stop":         `{"reason"?: string}`,
+	"tool-search":       `{"query": string}`,
+	"skill-list":        `{"query"?: string}`,
+	"skill-read":        `{"name"?: string, "skill"?: string, "location"?: string}`,
+	"activate-skill":    `{"name"?: string, "skill"?: string, "location"?: string}`,
+	"skill-activate":    `{"name"?: string, "skill"?: string, "location"?: string}`,
+	"config":            `{"action": "get"|"set", "key"?: string, "value"?: string, "force"?: bool}`,
+	"mcp-list-resources": `{"server_id": string}`,
+	"mcp-read-resource":  `{"server_id": string, "resource_id": string}`,
+	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
+	"enter-plan-mode":   `{"reason"?: string}`,
+	"exit-plan-mode":    `{"reason"?: string}`,
+	"enter-worktree":    `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
+	"exit-worktree":     `{"path": string, "force"?: bool}`,
+	"send-message":      `{"target"?: string, "message": string}`,
+}
+
+// buildToolSchemaSection renders a per-tool argument schema section to inject
+// into the system prompt. Tools without a registered built-in schema are
+// skipped (e.g. mcp/script/http tools defined by the manifest); duplicate
+// entries — for example when both a tool and its alias are listed — are
+// rendered once.
+func buildToolSchemaSection(allowedTools []string) string {
+	if len(allowedTools) == 0 {
+		return ""
+	}
+	seen := map[string]struct{}{}
+	var lines []string
+	for _, name := range allowedTools {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		schema, ok := builtinToolSchemas[name]
+		if !ok {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		lines = append(lines, fmt.Sprintf("- %s arguments: %s", name, schema))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	sort.Strings(lines)
+	return "\nTool argument schemas (JSON object passed as \"arguments\"; ? marks optional fields):\n" + strings.Join(lines, "\n") + "\n"
 }

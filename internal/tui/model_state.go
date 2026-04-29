@@ -230,6 +230,10 @@ func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
 	} else {
 		m.showBanner("stopped", "warn")
 	}
+	// Refresh the remote snapshot and emit a state event so external clients
+	// observe the run ending. Without this, GET /status keeps reporting
+	// thinking:true until the next user message updates the snapshot.
+	m.publishRemoteState("agent_interrupted")
 	m.refreshViewport()
 }
 

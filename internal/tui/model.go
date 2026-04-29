@@ -567,6 +567,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:      time.Now(),
 			}}
 		}
+		m.publishRemoteState("compact_done")
 		m.refreshViewport()
 	case agentTickMsg:
 		m.tickCount++

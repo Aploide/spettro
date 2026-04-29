@@ -303,3 +303,44 @@ func TestServer_StopIsIdempotent(t *testing.T) {
 		t.Fatalf("second Stop: %v", err)
 	}
 }
+
+// TestServer_PublishRaceWithDisconnect exercises the formerly-broken cleanup
+// path: a client connects to /events, disconnects, and the server keeps
+// publishing. Before the fix, the handler's defer closed the per-subscriber
+// channel under lock, but Publish snapshotted the subscribers map BEFORE
+// release, then sent on those channels AFTER release. When the cleanup
+// raced with the fan-out, Publish would send to a closed channel and panic
+// (the `default` branch on a select does NOT rescue sends to a closed
+// channel). This test loops enough times under `-race` to surface that bug
+// reliably; it must complete without crashing the test binary.
+func TestServer_PublishRaceWithDisconnect(t *testing.T) {
+	srv, base := startTestServer(t)
+
+	for i := 0; i < 30; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/events", nil)
+		if err != nil {
+			t.Fatalf("new req: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer test-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			cancel()
+			t.Fatalf("connect /events: %v", err)
+		}
+		// Drain a couple of bytes so we know the handler is up before we
+		// disconnect, then immediately drop the connection while flooding
+		// the publisher.
+		go func() {
+			buf := make([]byte, 512)
+			_, _ = resp.Body.Read(buf)
+		}()
+		// Cause the cleanup defer to run roughly concurrently with the
+		// publish below.
+		cancel()
+		_ = resp.Body.Close()
+		for j := 0; j < 100; j++ {
+			srv.Publish("test", map[string]interface{}{"i": i, "j": j})
+		}
+	}
+}

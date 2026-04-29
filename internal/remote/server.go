@@ -442,10 +442,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		s.mu.Lock()
-		if _, exists := s.subs[ch]; exists {
-			delete(s.subs, ch)
-			close(ch)
-		}
+		// Just unregister; do NOT close ch. A concurrent Publish may have
+		// snapshotted this subscriber slice while still holding ch, and
+		// closing it would race the `select { case ch <- ev: default: }`
+		// fan-out (sends to a closed channel panic; the default branch
+		// does not rescue that). The goroutine that owned ch is already
+		// returning, so the channel will be garbage-collected once the
+		// publisher's snapshot is released.
+		delete(s.subs, ch)
 		s.mu.Unlock()
 	}()
 
