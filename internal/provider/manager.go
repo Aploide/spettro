@@ -45,6 +45,31 @@ func (m *Manager) SetDevinOrgID(orgID string) {
 	m.mu.Unlock()
 }
 
+// CallDevin delegates a task to a fresh Devin session via the DevinAdapter
+// and blocks (with ctx cancellation) until the session reaches a terminal
+// status. Returns the final agent message body followed by a session-URL
+// footer, ready to be embedded as a tool result in the caller's prompt.
+//
+// The API key is pulled from the manager's api_keys["devin"] entry and the
+// org id from SetDevinOrgID. Callers that want to customise the HTTP
+// client, poll cadence, or max-wait deadline should construct a
+// DevinAdapter directly.
+//
+// This helper exists so the agent runtime can expose a devin-session tool
+// without having to re-read UserConfig.
+func (m *Manager) CallDevin(ctx context.Context, prompt string) (string, error) {
+	m.mu.RLock()
+	apiKey := m.apiKeys["devin"]
+	orgID := m.devinOrgID
+	m.mu.RUnlock()
+	adapter := DevinAdapter{APIKey: apiKey, OrgID: orgID}
+	resp, err := adapter.Send(ctx, "session", Request{Prompt: prompt})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
 func (m *Manager) SetCatalog(cat models.Catalog) {
 	built := buildModels(cat)
 	apis := make(map[string]string, len(cat))

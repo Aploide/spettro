@@ -160,6 +160,19 @@ risk_level = "medium"
 primary_only = true
 
 [[tools]]
+id = "devin-session"
+name = "Devin Session"
+description = "Delegate a self-contained subtask to a fresh Cognition Devin session and wait for its result."
+kind = "builtin"
+enabled = true
+timeout_sec = 1800
+requires_approval = true
+permitted_actions = ["plan", "network", "execute", "write"]
+aliases = []
+risk_level = "high"
+primary_only = true
+
+[[tools]]
 id = "file-edit"
 name = "File Edit"
 description = "Apply targeted edits to existing files."
@@ -428,7 +441,7 @@ mode = "orchestrator"
 role = "orchestrator"
 color = "blue"
 prompt_file = "agents/planning.md"
-allowed_tools = ["agent", "glob", "grep", "file-read", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
+allowed_tools = ["agent", "devin-session", "glob", "grep", "file-read", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
 permitted_actions = ["read", "search", "plan", "write"]
 permission = "ask-first"
 temperature = 0.2
@@ -446,7 +459,7 @@ mode = "orchestrator"
 role = "primary"
 color = "green"
 prompt_file = "agents/coding.md"
-allowed_tools = ["agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
+allowed_tools = ["agent", "devin-session", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
 permitted_actions = ["read", "search", "plan", "write", "execute", "git"]
 permission = "restricted"
 temperature = 0.1
@@ -464,7 +477,7 @@ mode = "orchestrator"
 role = "primary"
 color = "cyan"
 prompt_file = "agents/chat.md"
-allowed_tools = ["agent", "glob", "grep", "file-read", "tool-search", "web-search", "mcp-list-resources", "mcp-read-resource", "comment", "skill-read", "skill-list"]
+allowed_tools = ["agent", "devin-session", "glob", "grep", "file-read", "tool-search", "web-search", "mcp-list-resources", "mcp-read-resource", "comment", "skill-read", "skill-list"]
 permitted_actions = ["ask", "read", "search"]
 permission = "ask-first"
 temperature = 0.4

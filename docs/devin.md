@@ -1,90 +1,115 @@
-# Devin Sessions provider
+# Devin integration
 
-Spettro can drive [Cognition's Devin](https://devin.ai) agent sessions
-through the same UI it uses for Anthropic, OpenAI, and other LLM
-providers. Picking the **Devin Session** model in `/models` makes every
-prompt create a fresh Devin session, polls it until it reaches a terminal
-status, and surfaces the final agent message back into the conversation.
+Spettro integrates with [Cognition's Devin](https://devin.ai) agent in
+two complementary ways. Pick the one that matches how you want to work.
 
-## What's different about this provider
+## Two modes
 
-Devin is an *agent runner*, not a chat-completion endpoint:
+### 1. `devin-session` tool — delegation (recommended)
 
-- **Model selection happens on Devin's side.** The `--model opus` /
-  `--model sonnet` / `--model swe` choices documented in the Devin CLI
-  are owned by your Devin account and are not selectable per-call from
-  Spettro. Whichever model is the default for your account is what Devin
-  will use for the session.
-- **Thinking levels are owned by Devin too.** Spettro's `/thinking`
-  setting is accepted on the call but ignored by the Devin backend.
-  Toggle thinking inside Devin's UI / CLI instead (`Alt+T` /
-  `Opt+T` in `devin`).
-- **Latency is multi-minute.** Devin sessions can take 10+ minutes for
-  non-trivial tasks. Spettro blocks (with `/interrupt`-aware cancellation)
-  on the session until it reaches a terminal state, then returns the last
-  assistant message together with a footer linking the session in
-  `app.devin.ai`.
-- **Billing is in ACUs, not tokens.** Token counters in the status bar
-  will report `0` for Devin runs. Use the Devin dashboard for ACU
-  consumption.
+From inside any Spettro run — planner, coding, ask — the active agent
+can call a `devin-session` tool to delegate a **self-contained subtask**
+to a fresh Cognition Devin session. Your own conversation, model
+(Claude Opus with thinking, or whatever you picked), tool history, and
+todos all stay put; the Devin call just shows up as another tool result
+in the log.
+
+Typical trigger: the model decides a task is too big for its local
+tool loop (wide multi-file refactor, long-running migration,
+PR-producing work, sandboxed execution). It emits:
+
+```text
+TOOL_CALL {"name":"devin-session","arguments":{
+  "task":"refactor the auth module across the 12 files using the new Session type",
+  "constraints":"do not touch internal/admin/*, keep go fmt clean",
+  "expected_output":"diff summary and a PR url"
+}}
+```
+
+Spettro's runtime:
+
+1. Reads your saved `api_keys.devin` and, for `cog_*` keys, your
+   `devin_org_id`.
+2. POSTs to the right Devin Sessions endpoint (v1 `/sessions` for
+   `apk_*` keys, v3 `/v3/organizations/{org_id}/sessions` for `cog_*`).
+3. Polls the session every ~5s until it reaches a terminal status
+   (`finished`, `expired`, `blocked` for v1; `exit`, `error`,
+   `suspended`, or `running+finished` for v3). Max wait: 30 minutes.
+4. Returns Devin's final agent message (plus an `app.devin.ai` session
+   URL footer) as the tool output. The calling agent continues from
+   there; your session history, `ThinkingLevel`, and model choice are
+   unaffected.
+
+`/interrupt` on the Spettro side cancels the polling goroutine; the
+Devin session itself keeps running on Cognition's infrastructure and
+has to be cancelled from the Devin dashboard.
+
+Available out of the box to the `plan`, `coding`, and `ask`
+orchestrator agents in the default manifest. Flip it off per-project
+by removing `"devin-session"` from the agent's `allowed_tools` list in
+`spettro.agents.toml`.
+
+### 2. `devin` provider — Devin IS the model
+
+If you want every Spettro prompt to run as a Devin session end-to-end
+(no local planner / coder, no Anthropic key, Cognition owns model
+selection and billing), pick Devin as the model:
+
+```text
+/connect                   # save your cog_* (v3) or apk_* (v1) key as devin
+/devin org-abc123def456    # only needed for cog_ keys
+/models devin:session
+```
+
+This is the right mode when you don't want local tools and just want
+Devin to handle the full task. Spettro essentially becomes a thin UI
+around `app.devin.ai` in this mode: the `/thinking` slash command is
+accepted but ignored, the token counter reads 0 (Devin bills in ACUs),
+and every prompt creates a fresh session.
 
 ## Authentication
 
-Both Devin API generations are supported. The adapter auto-detects which
-one to use based on the prefix of your API key:
+Both modes use the same key storage. Spettro auto-detects the API
+generation based on the prefix of your key:
 
 | API generation | Key prefix | Endpoint base | Org id needed |
 | --- | --- | --- | --- |
 | **v3** (Service Users + RBAC, current) | `cog_*` | `POST /v3/organizations/{org_id}/sessions` | yes |
 | **v1** (Personal/Service API keys, legacy) | `apk_*` | `POST /v1/sessions` | no |
 
-To configure:
+The full key is stored encrypted in `~/.spettro/keys.enc`; only the
+`cog_` / `apk_` prefix is visible in logs. The org id is stored in
+plaintext in `config.json` under `devin_org_id` (it is not a secret).
 
-```text
-/connect                   # save the cog_/apk_ key as the api_keys.devin entry
-/devin org-abc123def456    # only needed for cog_ keys
-/models devin:session
-```
+## Why delegation is the better default
 
-The full key is stored encrypted in `keys.enc`; only the `cog_` /
-`apk_` prefix and a short hash are visible in the logs. The org id is
-stored as plaintext in `config.json` (it is not a secret).
+- Your Claude/Opus/Sonnet session keeps its thinking budget, tool
+  history, and ongoing conversation intact while Devin handles one
+  subtask.
+- You see the delegation as a single tool trace in the log; you can
+  cite it, follow up on it, or ignore it exactly like any other tool
+  result.
+- ACU consumption on Cognition's side is scoped to the delegated
+  subtask, not the whole conversation.
+- If Devin fails or times out, the calling agent gets the error back
+  and can retry, work around it, or surface it to you.
 
-## How a turn works
+## Constraints / gotchas
 
-1. Spettro POSTs `{"prompt": "...", "tags": ["spettro"], "unlisted": true}`
-   to the right `sessions` endpoint and gets back a session id and url.
-2. Spettro polls the session (every 5 seconds by default) until it hits
-   a terminal status:
-   - **v3**: `status` is one of `exit`, `error`, `suspended`, or
-     `running` with `status_detail = "finished"`.
-   - **v1**: `status_enum` is one of `finished`, `expired`, `blocked`.
-3. On terminal, Spettro reads the latest `source: "devin"` message
-   (v3) or the last non-user message in the inline `messages[]` array
-   (v1). If the session produced a structured output it is preferred
-   over free-text messages.
-4. The full response is returned as the assistant message in your
-   conversation, with a `— Devin session: <url>` footer so you can open
-   the run in `app.devin.ai`.
-
-## Cancelling a long-running session
-
-Spettro's normal `/interrupt` (or pressing `Esc`) cancels the polling
-goroutine. The Devin session itself keeps running on Cognition's side —
-use the Devin dashboard or `devin` CLI to stop it there if needed.
-
-## Limitations
-
-- Attachments (`attachment_urls`), repos, knowledge ids, secrets, and
-  playbooks are not yet wired through the Spettro provider; if you need
-  those, create the session in Devin's UI/CLI directly.
-- ACU consumption is not surfaced in the Spettro status bar.
-- Image inputs are not forwarded — Devin sessions don't accept inline
-  images via the v1 / v3 create endpoint anyway.
+- Devin sessions can take many minutes; the tool call blocks the
+  Spettro tool loop until the session finishes or you `/interrupt`.
+- The Spettro runtime has a per-step `max_tool_calls_per_step` cap
+  (default 32). A single `devin-session` call counts as one tool call
+  against that cap — so you'll never accidentally spawn 30 parallel
+  Devin sessions.
+- Devin sessions don't accept image attachments via the session
+  create endpoint; vision inputs stay on providers that support them.
+- Devin's session URL is included in the tool output so you can inspect
+  the run, cancel it, or share it.
 
 ## Related commands
 
 - `/connect` — save or replace the Devin API key.
 - `/devin <org-id>` — show or set the v3 organization id.
-- `/models devin:session` — make Devin the active model.
-- `/thinking <level>` — accepted but ignored by Devin sessions.
+- `/models devin:session` — switch Spettro to Devin-as-provider mode.
+- `/thinking <level>` — affects Anthropic/etc.; ignored by both Devin paths.

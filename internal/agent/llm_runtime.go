@@ -763,6 +763,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runExitWorktree(ctx, call.Args)
 	case "send-message":
 		return r.runSendMessage(call.Args)
+	case "devin-session":
+		return r.runDevinSession(ctx, call.Args)
 	case "bash", "bash-output":
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "comment":

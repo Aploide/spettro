@@ -21,7 +21,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Anthropic [extended-thinking levels](docs/thinking.md) (`/thinking off|low|medium|high|x-high`)
-- [Devin Sessions provider](docs/devin.md) — drive `app.devin.ai` agent runs with v1 (`apk_*`) or v3 (`cog_*`) keys
+- [Cognition Devin integration](docs/devin.md) — either delegate heavy subtasks via the `devin-session` tool (recommended) or make Devin the active model directly
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
 
@@ -95,7 +95,7 @@ For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 - [Architecture overview](docs/architecture.md)
 - [Remote control plane](docs/remote.md)
 - [Extended thinking levels](docs/thinking.md)
-- [Devin Sessions provider](docs/devin.md)
+- [Devin integration](docs/devin.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Documentation Index](docs/README.md)
 

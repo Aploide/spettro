@@ -14,6 +14,34 @@ import (
 // DevinSessionsBaseURL is the public Cognition / Devin API host.
 const DevinSessionsBaseURL = "https://api.devin.ai"
 
+// devinBaseURLOverride lets tests redirect the Manager.CallDevin path to a
+// scripted httptest server. Production code leaves this empty and the
+// adapter uses DevinSessionsBaseURL. Override is package-level so both
+// DevinAdapter.Send (when BaseURL is unset) and the manager helper see it.
+var devinBaseURLOverride string
+
+// devinPollOverride lets tests shrink the adapter's poll cadence so
+// scripted test servers don't sit idle for seconds. Production stays at
+// devinDefaultPollInterval.
+var devinPollOverride time.Duration
+
+// OverrideDevinBaseURLForTesting points subsequent Manager.CallDevin invocations
+// at a custom base URL (e.g. an httptest server) and shrinks the poll
+// interval to 5ms so the test runs in milliseconds rather than seconds.
+// It returns a restore function that resets both overrides when the test
+// cleans up. Not safe for concurrent tests; intended for single-goroutine
+// integration tests only.
+func OverrideDevinBaseURLForTesting(url string) (restore func()) {
+	prevURL := devinBaseURLOverride
+	prevPoll := devinPollOverride
+	devinBaseURLOverride = url
+	devinPollOverride = 5 * time.Millisecond
+	return func() {
+		devinBaseURLOverride = prevURL
+		devinPollOverride = prevPoll
+	}
+}
+
 // Default polling cadence and overall deadline for DevinAdapter. Devin
 // sessions can take many minutes; the adapter blocks until completion or
 // until ctx is cancelled, whichever comes first.
@@ -64,9 +92,15 @@ func (a DevinAdapter) Send(ctx context.Context, model string, req Request) (Resp
 	}
 	baseURL := strings.TrimRight(a.BaseURL, "/")
 	if baseURL == "" {
+		baseURL = devinBaseURLOverride
+	}
+	if baseURL == "" {
 		baseURL = DevinSessionsBaseURL
 	}
 	pollInterval := a.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = devinPollOverride
+	}
 	if pollInterval <= 0 {
 		pollInterval = devinDefaultPollInterval
 	}

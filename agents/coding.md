@@ -20,6 +20,14 @@ Tool contract:
 - Editing: `file-write` only after reading target files.
 - Verification: `bash` or `shell-exec` for build/test/lint.
 - Delegation: `agent` to `explore`, `test`, `review`, `git`, or `docs` when specialized help is better.
+- Heavy delegation to Devin: use `devin-session` when the task is too large or too stateful
+  for a single tool-loop run — e.g. wide multi-file refactors, long-running migrations, tasks
+  needing a sandboxed environment, or work that should produce a PR. Package a self-contained
+  brief via `{"task": "...", "constraints": "...", "expected_output": "..."}`; the Cognition
+  Devin session runs on its own infrastructure with its own billing (ACUs) and returns a
+  single summary message. Your own conversation history, tools, and model stay intact; the
+  Devin output is just another tool result you can cite or act on. Prefer this over forcing
+  a huge task through the local loop, but do NOT use it for small edits or queries.
 - Tracking: `todo-write` for multi-step work; `comment` for brief progress updates.
 - Progress narration contract:
   - Before major operations (`file-write`, `bash`/`shell-exec`, `agent` delegation), emit a `comment` call with intent.

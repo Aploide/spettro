@@ -170,6 +170,7 @@ var builtinToolSchemas = map[string]string{
 	"web-search":        `{"query": string, "max_results"?: int}`,
 	"ask-user":          `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
 	"agent":             `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
+	"devin-session":     `{"task": string, "constraints"?: string, "expected_output"?: string}`,
 	"todo-write":        `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
 	"task-create":       `{"id"?: string, "content": string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
 	"task-get":          `{"id": string}`,
