@@ -1244,6 +1244,8 @@ func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []st
 
 func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFiles []string, images []string, approved bool) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.activeAgentID = spec.ID
+	m.publishRemoteState("agent_start")
 	m.refreshModifiedFiles()
 	m.liveTools = nil
 	m.currentTool = nil
@@ -1255,7 +1257,6 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		MentionedFiles: append([]string(nil), mentionedFiles...),
 		Images:         append([]string(nil), images...),
 	}
-	m.activeAgentID = spec.ID
 	m.startAgentActivity(spec.ID, input)
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh

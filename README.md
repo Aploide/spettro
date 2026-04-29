@@ -68,7 +68,7 @@ Spettro commands are entered with a leading `/`.
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
 - `/mcp <list|read|auth>` manage MCP resources and auth tokens
-- `/skills` list local skills/prompts
+- `/skill <list|install|info|uninstall|enable|disable|where>` manage Agent Skills (Claude Code / OpenAI / Anthropic format)
 - `/hooks` show effective runtime hooks
 - `/compact [focus]` summarize conversation history
 - `/compact auto <status|on|off>` configure auto-compact
@@ -76,6 +76,7 @@ Spettro commands are entered with a leading `/`.
 - `/clear` auto-save and clear current conversation
 - `/resume` load a previous saved conversation
 - `/init` analyze the repo and create/update `SPETTRO.md`
+- `/remote [:port]` expose a local HTTP/SSE control plane (see [`docs/remote.md`](docs/remote.md))
 
 For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
@@ -83,10 +84,12 @@ For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
 - [Agent Manifest](AGENTS.md)
 - [Agent Prompts](agents/README.md)
+- [Agent Skills](docs/skills.md)
 - [Getting started and workflow](docs/getting-started.md)
 - [Commands and keybindings](docs/commands.md)
 - [Configuration and storage](docs/configuration.md)
 - [Architecture overview](docs/architecture.md)
+- [Remote control plane](docs/remote.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Documentation Index](docs/README.md)
 

@@ -58,11 +58,13 @@ func (m *Model) pushSystemMsg(content string) {
 		Content: content,
 		At:      time.Now(),
 	})
+	m.publishRemote("system_message", map[string]interface{}{"content": content})
 }
 
 func (m *Model) showBanner(text, kind string) {
 	m.banner = text
 	m.bannerKind = kind
+	m.publishRemote("banner", map[string]interface{}{"text": text, "level": kind})
 }
 
 func (m *Model) persistUIState() {
@@ -98,6 +100,7 @@ func (m *Model) setProgressNote(text string) {
 		Content: text,
 		At:      time.Now(),
 	})
+	m.publishRemote("comment", map[string]interface{}{"message": text})
 }
 
 func (m *Model) appendToolStreamMessage(item ToolItem) {

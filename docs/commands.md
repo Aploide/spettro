@@ -18,7 +18,13 @@
 | `/approve` | Execute pending plan through `coding` agent. |
 | `/tasks [list\|add\|done\|set\|show]` | Manage session tasks. |
 | `/mcp <list\|read\|auth>` | Manage MCP resources and auth. |
-| `/skills` | List local skills/prompts found in `agents/`. |
+| `/skill list` | List installed Agent Skills. |
+| `/skill install <source>` | Install a skill from a local path, https git URL, or `owner/repo` shorthand. |
+| `/skill info <name>` | Show metadata + body excerpt for an installed skill. |
+| `/skill enable <name>` / `disable <name>` | Toggle whether a skill is exposed to agents. |
+| `/skill uninstall <name>` | Remove a previously installed skill. |
+| `/skill where` | Show the discovery roots being scanned. |
+| `/skills` | Alias of `/skill`. |
 | `/hooks` | Show effective runtime hooks (project + global). |
 | `/compact [focus...]` | Summarize the current conversation. |
 | `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
@@ -26,6 +32,10 @@
 | `/clear` | Save and clear the current conversation. |
 | `/resume` | Open saved conversation picker. |
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
+| `/remote` | Start the local HTTP/SSE control plane on `127.0.0.1` (default port `7878`). |
+| `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
+| `/remote stop` | Stop the running control plane. |
+| `/remote status` | Print the current URL and bearer token. |
 
 ## Agent usage
 

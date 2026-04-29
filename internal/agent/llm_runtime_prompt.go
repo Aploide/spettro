@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"spettro/internal/skills"
 )
 
 func summarizeLoopToolResult(name, args, status, output string) string {
@@ -81,6 +83,9 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
 		base = "You are an assistant."
+	}
+	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
+		base = base + catalog
 	}
 	commentGuidance := ""
 	for _, tool := range cfg.AllowedTools {

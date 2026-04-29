@@ -19,6 +19,7 @@ import (
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/skills"
 )
 
 const (
@@ -134,6 +135,7 @@ type toolLoopConfig struct {
 	MaxWorkers      int
 	MaxMicroagents  int
 	MaxDepth        int
+	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
 }
 
 type toolCall struct {
@@ -174,6 +176,7 @@ type toolRuntime struct {
 	hooksConfig          hooks.EffectiveConfig
 	stopRequested        bool
 	stopReason           string
+	skillsCatalog        skills.Catalog
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -232,6 +235,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		agentID:         cfg.AgentID,
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
+		skillsCatalog:   cfg.SkillsCatalog,
 	}
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
@@ -638,6 +642,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskStop(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
+	case "skill-read", "activate-skill", "skill-activate":
+		return r.runSkillRead(call.Args)
+	case "skill-list":
+		return r.runSkillList(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
 	case "mcp-list-resources":

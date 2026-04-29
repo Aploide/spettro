@@ -16,6 +16,7 @@ import (
 	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/remote"
 	"spettro/internal/session"
 	"spettro/internal/storage"
 )
@@ -268,6 +269,9 @@ type Model struct {
 
 	todos []session.Todo
 
+	remoteServer        *remote.Server
+	remoteRequestedPort int
+
 	cwd       string
 	store     *storage.Store
 	providers *provider.Manager
@@ -418,6 +422,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("error: "+msg.err.Error(), "error")
+			m.publishRemote("assistant_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
 			main, thinking := stripThinking(msg.content)
@@ -430,7 +435,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:       time.Now(),
 			})
 			m.finishAgentActivity(m.mode, "done", main, thinking)
+			m.publishRemote("assistant_message", map[string]interface{}{
+				"content":     main,
+				"thinking":    thinking,
+				"meta":        msg.meta,
+				"tools_count": len(msg.tools),
+				"tokens_used": msg.tokensUsed,
+			})
 		}
+		m.publishRemoteState("agent_done")
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -464,6 +477,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("plan error: "+msg.err.Error(), "error")
+			m.publishRemote("plan_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
 			m.pendingPlan = msg.plan
@@ -477,7 +491,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.finishAgentActivity(m.mode, "done", msg.plan, "")
 			m.showPlanApproval = true
 			m.planApprovalCursor = 0
+			m.publishRemote("plan", map[string]interface{}{
+				"plan":        msg.plan,
+				"tools_count": len(msg.tools),
+				"tokens_used": msg.tokensUsed,
+			})
 		}
+		m.publishRemoteState("plan_done")
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -491,13 +511,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		if msg.err != nil {
 			m.showBanner("commit error: "+msg.err.Error(), "error")
+			m.publishRemote("commit_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleSystem,
 				Content: fmt.Sprintf("committed: %s\n\n%s", msg.commitMsg, coAuthorInfo),
 				At:      time.Now(),
 			})
+			m.publishRemote("commit", map[string]interface{}{"message": msg.commitMsg})
 		}
+		m.publishRemoteState("commit_done")
 		m.refreshViewport()
 	case searchDoneMsg:
 		if !m.thinking {
@@ -507,13 +530,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelAgent = nil
 		if msg.err != nil {
 			m.showBanner("search error: "+msg.err.Error(), "error")
+			m.publishRemote("search_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleSystem,
 				Content: msg.result,
 				At:      time.Now(),
 			})
+			m.publishRemote("search", map[string]interface{}{"result": msg.result})
 		}
+		m.publishRemoteState("search_done")
 		m.refreshViewport()
 	case compactDoneMsg:
 		if !m.thinking {
@@ -555,6 +581,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.thinking {
 			t := msg.trace
 			m.applyToolTraceToObservability(t)
+			m.publishRemoteToolTrace(t)
 			if t.Name == "comment" {
 				if t.Status == "success" {
 					if message := extractCommentMessage(t.Args, t.Output); message != "" {
@@ -605,6 +632,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.approvalCursor = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
+			m.publishRemote("approval_request", map[string]interface{}{
+				"command":  msg.request.Command,
+				"tool_id":  msg.request.ToolID,
+				"segments": msg.request.Segments,
+				"reason":   msg.request.Reason,
+			})
 			if m.approvalCh != nil {
 				cmds = append(cmds, waitForShellApproval(m.approvalCh))
 			}
@@ -617,6 +650,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionFreeform = len(msg.request.Options) == 0
 			m.ta.Reset()
 			m.showBanner("agent is waiting for your answer", "info")
+			m.publishRemote("ask_user", map[string]interface{}{
+				"question":            msg.request.Question,
+				"options":             msg.request.Options,
+				"context":             msg.request.Context,
+				"default":             msg.request.DefaultOption,
+				"allow_free_response": msg.request.AllowFreeResponse,
+			})
 			if m.askUserCh != nil {
 				cmds = append(cmds, waitForAskUser(m.askUserCh))
 			}
@@ -625,6 +665,27 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bannerClearMsg:
 		m.banner = ""
 		m.bannerKind = ""
+	case remoteSubmitMsg:
+		newModel, cmd := m.handleRemoteSubmission(msg.req)
+		nm, _ := newModel.(Model)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if nm.remoteServer != nil {
+			cmds = append(cmds, waitForRemoteSubmit(nm.remoteServer))
+		}
+		return nm, tea.Batch(cmds...)
+	case remoteInterruptMsg:
+		if m.thinking {
+			m.interruptRun("Interrupted by remote client.", false)
+			m.publishRemote("remote_interrupt", map[string]interface{}{"thinking": true})
+			m.refreshViewport()
+		} else {
+			m.publishRemote("remote_interrupt", map[string]interface{}{"thinking": false})
+		}
+		if m.remoteServer != nil {
+			cmds = append(cmds, waitForRemoteInterrupt(m.remoteServer))
+		}
 	case quitWarningMsg:
 		if m.banner == "press again ctrl C to exit" {
 			m.banner = ""
@@ -836,6 +897,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = nextAgent(m.manifest, m.mode)
 		m.persistUIState()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
+		m.publishRemoteState("mode_change")
 		return m, nil
 	case "ctrl+o":
 		m.showTools = !m.showTools
@@ -904,6 +966,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cmdItems = nil
 				m.cmdCursor = 0
 				m.mentionItems = nil
+				if m.thinking && !isInstantCommand(chosen) {
+					m.showBanner("commands cannot be queued while an agent is running", "warn")
+					return m, nil
+				}
 				return m.handleCommand(chosen)
 			}
 			m.ta.SetValue(chosen + " ")
@@ -921,15 +987,19 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if input == "" {
 			return m, nil
 		}
-		m.pushInputHistory(input)
+		isCmd := strings.HasPrefix(input, "/")
+		instant := isCmd && isInstantCommand(input)
+		if !instant {
+			m.pushInputHistory(input)
+		}
 		m.ta.Reset()
 		m.cmdItems = nil
 		m.mentionItems = nil
-		if m.pendingPlan != "" && !strings.HasPrefix(input, "/") {
+		if m.pendingPlan != "" && !isCmd {
 			return m.handlePlanEdit(input)
 		}
-		if strings.HasPrefix(input, "/") {
-			if m.thinking {
+		if isCmd {
+			if m.thinking && !instant {
 				m.showBanner("commands cannot be queued while an agent is running", "warn")
 				return m, nil
 			}
@@ -979,6 +1049,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.mode = nextAgent(m.manifest, m.mode)
 		m.persistUIState()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
+		m.publishRemoteState("mode_change")
 	case "/connect":
 		m = m.openConnect()
 	case "/models":
@@ -1071,8 +1142,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleTasksCommand(input)
 	case "/mcp":
 		return m.handleMCPCommand(input)
-	case "/skills":
-		return m.handleSkillsCommand()
+	case "/skills", "/skill":
+		return m.handleSkillsCommand(input)
 	case "/hooks":
 		return m.handleHooksCommand()
 	case "/plan":
@@ -1089,6 +1160,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			m.resumeCursor = 0
 			m.resumeScroll = 0
 		}
+	case "/remote":
+		return m.handleRemoteCommand(input)
 	default:
 		m.showBanner("unknown command: "+cmd, "error")
 	}
@@ -1139,6 +1212,11 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 		At:      time.Now(),
 	})
 	m.awaitingInstead = false
+	m.publishRemote("user_message", map[string]interface{}{
+		"content":         req.Input,
+		"mentioned_files": req.MentionedFiles,
+	})
+	m.publishRemoteState("user_message")
 	m.refreshViewport()
 
 	spec, ok := m.manifest.AgentByID(m.mode)
