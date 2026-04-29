@@ -49,3 +49,7 @@ func AuthorizeShellCommandForTesting(r *toolRuntime, ctx context.Context, comman
 func BuildToolSchemaSectionForTesting(allowedTools []string) string {
 	return buildToolSchemaSection(allowedTools)
 }
+
+func TailTrimHistoryForTesting(history string, maxBytes int) string {
+	return tailTrimHistory(history, maxBytes)
+}

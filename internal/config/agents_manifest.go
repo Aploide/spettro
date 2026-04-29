@@ -48,8 +48,9 @@ type PermissionRule struct {
 }
 
 type DelegationPolicy struct {
-	MaxParallelWorkers int `toml:"max_parallel_workers"`
-	MaxDepth           int `toml:"max_depth"`
+	MaxParallelWorkers  int `toml:"max_parallel_workers"`
+	MaxDepth            int `toml:"max_depth"`
+	MaxToolCallsPerStep int `toml:"max_tool_calls_per_step"`
 }
 
 type AgentManifest struct {
@@ -301,6 +302,10 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Runtime.Delegation.MaxDepth = 2
 		changed = true
 	}
+	if m.Runtime.Delegation.MaxToolCallsPerStep <= 0 {
+		m.Runtime.Delegation.MaxToolCallsPerStep = 32
+		changed = true
+	}
 	for i := range m.Tools {
 		if m.Tools[i].RiskLevel == "" {
 			m.Tools[i].RiskLevel = "medium"
@@ -362,6 +367,9 @@ func (m AgentManifest) Validate() error {
 	}
 	if m.Runtime.Delegation.MaxDepth <= 0 {
 		return fmt.Errorf("agent manifest: runtime.delegation.max_depth must be > 0")
+	}
+	if m.Runtime.Delegation.MaxToolCallsPerStep <= 0 {
+		return fmt.Errorf("agent manifest: runtime.delegation.max_tool_calls_per_step must be > 0")
 	}
 	if err := validatePermissionRules(m.Runtime.PermissionRules, "runtime.permission_rules"); err != nil {
 		return err

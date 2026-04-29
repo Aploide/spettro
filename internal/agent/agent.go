@@ -133,6 +133,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
+	maxToolCallsPerStep := 32
 	if a.Manifest != nil {
 		logToolCalls = a.Manifest.Runtime.LogToolCalls
 		if a.Manifest.Runtime.Delegation.MaxParallelWorkers > 0 {
@@ -140,6 +141,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		}
 		if a.Manifest.Runtime.Delegation.MaxDepth > 0 {
 			maxDelegationDepth = a.Manifest.Runtime.Delegation.MaxDepth
+		}
+		if a.Manifest.Runtime.Delegation.MaxToolCallsPerStep > 0 {
+			maxToolCallsPerStep = a.Manifest.Runtime.Delegation.MaxToolCallsPerStep
 		}
 	}
 	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
@@ -170,6 +174,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ParentAgentID:   a.ParentAgentID,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,
+		MaxToolCalls:    maxToolCallsPerStep,
 		SkillsCatalog:   catalog,
 	})
 	if err != nil {

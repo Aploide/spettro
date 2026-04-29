@@ -39,6 +39,13 @@ type ToolItem struct {
 	Open   bool
 }
 
+// maxLiveTools bounds how many completed ToolItem entries we retain in
+// m.liveTools for a single run. The slice feeds compactRunSummary at
+// interrupt time and is otherwise informational; older entries get dropped
+// FIFO once the cap is hit so a runaway batch of tool calls cannot bloat
+// memory or the run summary.
+const maxLiveTools = 200
+
 type ChatMessage struct {
 	Role     Role
 	Content  string
@@ -617,7 +624,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Args:   t.Args,
 					Output: t.Output,
 				}
+				// Cap m.liveTools to bound memory and the run summary built
+				// at interrupt time. When the LLM emits very large tool
+				// batches we keep the most recent maxLiveTools entries so
+				// the most useful context (what just happened) survives.
 				m.liveTools = append(m.liveTools, completed)
+				if len(m.liveTools) > maxLiveTools {
+					m.liveTools = append([]ToolItem(nil), m.liveTools[len(m.liveTools)-maxLiveTools:]...)
+				}
 				m.currentTool = nil
 				m.updateToolStreamMessage(completed)
 			}

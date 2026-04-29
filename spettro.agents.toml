@@ -14,6 +14,7 @@ sandbox_mode = "workspace-write"
 [runtime.delegation]
 max_parallel_workers = 4
 max_depth = 2
+max_tool_calls_per_step = 32
 
 [[tools]]
 id = "glob"
