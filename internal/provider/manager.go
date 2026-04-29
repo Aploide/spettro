@@ -82,7 +82,10 @@ func (m *Manager) CallDevin(ctx context.Context, prompt string) (string, error) 
 }
 
 func (m *Manager) SetCatalog(cat models.Catalog) {
-	built := buildModels(cat)
+	// Keep natively-implemented providers (Devin today) visible after a
+	// models.dev refresh; the upstream catalog only covers chat providers
+	// and would otherwise drop Devin from the /connect picker.
+	built := mergeAlwaysIncluded(buildModels(cat))
 	apis := make(map[string]string, len(cat))
 	for id, prov := range cat {
 		if prov.API != "" {
@@ -138,7 +141,12 @@ func (m *Manager) Models() []Model {
 	m.mu.RUnlock()
 	base := cat
 	if len(base) == 0 {
-		base = fallbackModels
+		// Fallback path (pre-fetch / offline / cache miss). Start with
+		// the static fallback list and layer on anything from
+		// alwaysIncludedModels — if we skipped this, Devin (and any
+		// future natively-implemented provider) would be unreachable
+		// until the first successful models.dev fetch.
+		base = mergeAlwaysIncluded(fallbackModels)
 	}
 	out := make([]Model, len(base)+len(local))
 	copy(out, base)
@@ -161,18 +169,18 @@ func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
 }
 
 func (m *Manager) AllProviderInfos() []ProviderInfo {
-	m.mu.RLock()
-	cat := m.catalog
-	m.mu.RUnlock()
-
-	src := cat
-	if len(src) == 0 {
-		src = fallbackModels
-	}
+	// Delegate to Models() so the alwaysIncludedModels merge (Devin etc.)
+	// applies in both the fallback and post-catalog paths. A duplicate
+	// lookup here would silently hide natively-implemented providers
+	// the moment models.dev replaces the fallback list.
+	src := m.Models()
 
 	seen := map[string]bool{}
 	var out []ProviderInfo
 	for _, mod := range src {
+		if mod.Local {
+			continue
+		}
 		if seen[mod.Provider] {
 			continue
 		}

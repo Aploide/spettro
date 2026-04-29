@@ -406,7 +406,7 @@ func (m Model) openConnect() Model {
 	return m
 }
 
-var suggestedProviderIDs = []string{localConnectProviderID, "anthropic", "openai", "mistral", "x-ai", "zai"}
+var suggestedProviderIDs = []string{localConnectProviderID, "anthropic", "devin", "openai", "mistral", "x-ai", "zai"}
 
 func isSuggested(id string) bool {
 	for _, s := range suggestedProviderIDs {
