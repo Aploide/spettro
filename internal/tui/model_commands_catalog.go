@@ -127,6 +127,7 @@ keys:
   f2             cycle to next favorite model
   shift+f2       cycle to previous favorite model
   ctrl+b         toggle side activity panel
+  ctrl+t         toggle text-select mode (release mouse for terminal selection)
 
 in model selector:
   f              toggle favorite (★) for highlighted model

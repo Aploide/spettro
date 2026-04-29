@@ -230,6 +230,8 @@ type Model struct {
 
 	showTools bool
 
+	mouseCaptureOff bool
+
 	liveTools        []ToolItem
 	currentTool      *ToolItem
 	toolCh           chan agent.ToolTrace
@@ -708,6 +710,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ctrlCAt = time.Time{}
 		}
 	case tea.MouseMsg:
+		if m.mouseCaptureOff {
+			return m, tea.Batch(cmds...)
+		}
 		if m.showResume {
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -818,6 +823,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+t" {
+			m.mouseCaptureOff = !m.mouseCaptureOff
+			var mouseCmd tea.Cmd
+			if m.mouseCaptureOff {
+				mouseCmd = tea.DisableMouse
+				m.showBanner("text-select mode — mouse off, ctrl+t to re-enable", "info")
+			} else {
+				mouseCmd = tea.EnableMouseCellMotion
+				m.showBanner("mouse on — scroll wheel and side panel clicks active", "info")
+			}
+			return m, tea.Batch(append(cmds, mouseCmd)...)
+		}
 		if m.showTrust {
 			return m.updateTrust(msg)
 		}

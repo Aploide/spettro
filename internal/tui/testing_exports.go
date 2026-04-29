@@ -305,6 +305,10 @@ func (m Model) StatusBarMessageForTesting() string {
 	return m.statusBarMessage()
 }
 
+func (m Model) MouseCaptureOffForTesting() bool {
+	return m.mouseCaptureOff
+}
+
 func PrimaryAgentIDsForTesting(manifest config.AgentManifest) []string {
 	return primaryAgentIDs(manifest)
 }

@@ -488,11 +488,17 @@ func (m Model) statusBarMessage() string {
 	if m.banner != "" {
 		return renderStatusBanner(m.banner, m.bannerKind)
 	}
-	return strings.Join([]string{
+	hints := []string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("ctrl+b: panel"),
 		styleMuted.Render("ctrl+o: context"),
-	}, styleDim.Render("  ·  "))
+	}
+	if m.mouseCaptureOff {
+		hints = append(hints, styleWarn.Render("ctrl+t: mouse off"))
+	} else {
+		hints = append(hints, styleMuted.Render("ctrl+t: select"))
+	}
+	return strings.Join(hints, styleDim.Render("  ·  "))
 }
 
 func renderStatusBanner(text, kind string) string {
