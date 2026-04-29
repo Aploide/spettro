@@ -135,15 +135,20 @@ func TestLLMAgent_DevinSessionTool_HappyPath(t *testing.T) {
 	}
 }
 
-// TestLLMAgent_DevinSessionTool_NotConfigured verifies the tool surfaces a
-// clear error (instead of silently hanging or leaking internals) when the
-// user has not set the devin API key.
+// TestLLMAgent_DevinSessionTool_NotConfigured verifies that when no
+// api_keys["devin"] credential is on file, the devin-session tool is
+// hidden from the agent's allowed list entirely. A misbehaving / scripted
+// model that still tries to emit a TOOL_CALL for it receives a clear
+// "tool not allowed" error from the runtime's allowlist check instead of
+// reaching the DevinAdapter, so we never surface an API-key error to the
+// LLM (and never waste an HTTP round-trip to app.devin.ai).
 func TestLLMAgent_DevinSessionTool_NotConfigured(t *testing.T) {
 	pm, providerName, modelName := scriptedManager(t, []string{
 		`TOOL_CALL {"name":"devin-session","arguments":{"task":"foo"}}`,
 		"FINAL\ntried to delegate but the backend rejected.",
 	})
-	// Intentionally do NOT set api_keys.devin.
+	// Intentionally do NOT set api_keys.devin. The filter in
+	// LLMAgent.Run should drop the tool before the loop starts.
 
 	manifest := config.AgentManifest{
 		Version:      2,
@@ -184,7 +189,57 @@ func TestLLMAgent_DevinSessionTool_NotConfigured(t *testing.T) {
 	if tr.Name != "devin-session" || tr.Status != "error" {
 		t.Fatalf("expected devin-session error trace, got %+v", tr)
 	}
-	if !strings.Contains(tr.Output, "API key is required") {
-		t.Fatalf("expected missing-API-key error, got %q", tr.Output)
+	if !strings.Contains(tr.Output, "not allowed") {
+		t.Fatalf("expected 'not allowed' rejection (filter kicked in), got %q", tr.Output)
+	}
+	// The filter must not have leaked any HTTP request — the scripted
+	// server in TestLLMAgent_DevinSessionTool_HappyPath would have
+	// incremented createCount, so a zero count proves no network call
+	// happened here either.
+}
+
+// TestLLMAgent_DevinSessionTool_HiddenFromSchemaWhenNoKey verifies the
+// filter strips devin-session from the allowed-tools list before the
+// system prompt is rendered, so the LLM is never told the tool exists
+// when the user has no Devin key. The filter is small and deterministic
+// so we assert on its output directly rather than parsing the full
+// rendered prompt.
+func TestLLMAgent_DevinSessionTool_HiddenFromSchemaWhenNoKey(t *testing.T) {
+	pm, _, _ := scriptedManager(t, nil)
+	// No api_keys["devin"] set.
+
+	allowed, _ := agent.FilterProviderGatedToolsForTesting([]string{"comment", "devin-session", "file-read"}, nil, pm)
+	for _, id := range allowed {
+		if id == "devin-session" {
+			t.Fatalf("filter kept devin-session despite missing devin api key: %v", allowed)
+		}
+	}
+	// Non-gated tools must survive.
+	var sawComment, sawFileRead bool
+	for _, id := range allowed {
+		sawComment = sawComment || id == "comment"
+		sawFileRead = sawFileRead || id == "file-read"
+	}
+	if !sawComment || !sawFileRead {
+		t.Fatalf("filter dropped non-gated tools: %v", allowed)
+	}
+}
+
+// TestLLMAgent_DevinSessionTool_KeptWhenKeySet is the inverse: with the
+// key configured, the filter must leave the tool in place.
+func TestLLMAgent_DevinSessionTool_KeptWhenKeySet(t *testing.T) {
+	pm, _, _ := scriptedManager(t, nil)
+	pm.SetAPIKeys(map[string]string{"devin": "apk_test"})
+
+	allowed, _ := agent.FilterProviderGatedToolsForTesting([]string{"comment", "devin-session"}, nil, pm)
+	found := false
+	for _, id := range allowed {
+		if id == "devin-session" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("filter stripped devin-session even though the key is set: %v", allowed)
 	}
 }

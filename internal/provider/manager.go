@@ -36,6 +36,17 @@ func (m *Manager) SetAPIKeys(keys map[string]string) {
 	m.mu.Unlock()
 }
 
+// HasAPIKey reports whether a non-empty credential is on file for the given
+// provider id. Callers outside the provider package use this to gate
+// features that depend on a specific key being present — e.g. the agent
+// runtime hides the devin-session tool from LLMs whose runtime has no
+// api_keys["devin"] entry.
+func (m *Manager) HasAPIKey(providerID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return strings.TrimSpace(m.apiKeys[providerID]) != ""
+}
+
 // SetDevinOrgID stores the organization id used by the v3 Devin Sessions
 // endpoints. v3 cog_ keys require this; v1 apk_ keys do not. The TUI calls
 // this whenever UserConfig.DevinOrgID changes.

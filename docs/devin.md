@@ -45,8 +45,15 @@ Devin session itself keeps running on Cognition's infrastructure and
 has to be cancelled from the Devin dashboard.
 
 Available out of the box to the `plan`, `coding`, and `ask`
-orchestrator agents in the default manifest. Flip it off per-project
-by removing `"devin-session"` from the agent's `allowed_tools` list in
+orchestrator agents in the default manifest — but only when an
+`api_keys.devin` credential is actually configured. If you haven't run
+`/connect` (and `/devin <org-id>` for `cog_*` keys), Spettro silently
+strips `devin-session` from those agents' allowed-tools list for the
+whole run, so the LLM never even sees the tool in its system-prompt
+schema and can't be tempted to call something it can't use. As soon as
+you add the key the tool reappears on the next turn with no restart
+needed. Flip it off explicitly per-project by removing
+`"devin-session"` from the agent's `allowed_tools` list in
 `spettro.agents.toml`.
 
 ### 2. `devin` provider — Devin IS the model

@@ -128,6 +128,13 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	}
 	systemPrompt := loadPromptOrFallback(a.CWD, a.Spec.PromptFile, a.Spec.Description)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
+	// Hide provider-gated tools the current runtime can't actually use so
+	// the LLM isn't tempted to call them and waste a turn getting an error
+	// back. Today only devin-session is gated: Cognition sessions require
+	// an api_keys["devin"] credential (apk_* for v1 or cog_* for v3), and
+	// the agent loop has no way to recover if the call fails for missing
+	// auth. More gated tools can be added here as needed.
+	allowedTools, policies = filterProviderGatedTools(allowedTools, policies, a.ProviderManager)
 	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
 	maxSteps := a.Spec.MaxSteps
 	if maxSteps <= 0 {
@@ -218,4 +225,43 @@ func filterDisabledSkills(c skills.Catalog) skills.Catalog {
 	}
 	c.Skills = keep
 	return c
+}
+
+// providerGatedTools maps built-in tool ids to the api_keys.* credential
+// they require to function. Tools listed here are stripped from an agent's
+// allowed_tools (and the policy map) when the runtime lacks the matching
+// credential, so the LLM never even sees them in its system-prompt schema.
+var providerGatedTools = map[string]string{
+	"devin-session": "devin",
+}
+
+// filterProviderGatedTools is a no-op when every listed tool either isn't
+// gated or has its credential configured. When a tool's required key is
+// missing we drop it from the allowed list and the policy map so the
+// prompt builder, tool-search, and execute() all treat it as absent.
+//
+// Passing a nil manager is allowed (e.g. in legacy tests); gated tools are
+// removed in that case since nothing can satisfy the key check.
+func filterProviderGatedTools(allowed []string, policies map[string]config.ToolSpec, mgr *provider.Manager) ([]string, map[string]config.ToolSpec) {
+	if len(allowed) == 0 || len(providerGatedTools) == 0 {
+		return allowed, policies
+	}
+	out := allowed[:0:0]
+	for _, id := range allowed {
+		needed, gated := providerGatedTools[id]
+		if !gated {
+			out = append(out, id)
+			continue
+		}
+		if mgr != nil && mgr.HasAPIKey(needed) {
+			out = append(out, id)
+			continue
+		}
+		// Drop the tool. Also drop its policy entry so tool-search and
+		// alias resolution both treat it as absent.
+		if policies != nil {
+			delete(policies, id)
+		}
+	}
+	return out, policies
 }
