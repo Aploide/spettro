@@ -19,11 +19,20 @@ import (
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/skills"
 )
 
 const (
 	toolCallPrefix = "TOOL_CALL"
 	finalPrefix    = "FINAL"
+
+	// maxHistoryBytes caps the size of the rolling tool-loop history that
+	// gets embedded into every prompt. Without this, a long run with many
+	// tool calls (or a single misbehaving step that emits hundreds of
+	// calls) would balloon the prompt indefinitely. The cap is generous —
+	// the most recent ~32 KB of conversation are kept, older entries are
+	// dropped FIFO with a "(history truncated)" marker.
+	maxHistoryBytes = 32 * 1024
 )
 
 const codingSystemPromptFallback = `You are a coding agent that can use tools.
@@ -120,7 +129,8 @@ type toolLoopConfig struct {
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
-	MaxTokens       int // max tokens per request; 0 = unlimited
+	MaxTokens       int                    // max tokens per request; 0 = unlimited
+	Thinking        provider.ThinkingLevel // forwarded to provider.Request.Thinking
 	RequiredReads   []string
 	Images          []string        // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
@@ -134,6 +144,8 @@ type toolLoopConfig struct {
 	MaxWorkers      int
 	MaxMicroagents  int
 	MaxDepth        int
+	MaxToolCalls    int            // max tool calls per LLM step (0 → default 32)
+	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
 }
 
 type toolCall struct {
@@ -161,7 +173,8 @@ type toolRuntime struct {
 	providerMgr  *provider.Manager
 	providerName func() string
 	modelName    func() string
-	maxTokens    int
+	maxTokens     int
+	thinkingLevel provider.ThinkingLevel
 	toolCallback func(ToolTrace)
 	sessionDir   string
 	agentID      string
@@ -171,9 +184,11 @@ type toolRuntime struct {
 	maxParallelWorkers   int
 	maxParallelMicroagnt int
 	maxDelegationDepth   int
+	maxToolCallsPerStep  int
 	hooksConfig          hooks.EffectiveConfig
 	stopRequested        bool
 	stopReason           string
+	skillsCatalog        skills.Catalog
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -232,6 +247,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		agentID:         cfg.AgentID,
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
+		skillsCatalog:   cfg.SkillsCatalog,
 	}
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
@@ -260,9 +276,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	if cfg.MaxDepth <= 0 {
 		cfg.MaxDepth = 2
 	}
+	if cfg.MaxToolCalls <= 0 {
+		cfg.MaxToolCalls = 32
+	}
 	runtime.maxParallelWorkers = cfg.MaxWorkers
 	runtime.maxParallelMicroagnt = cfg.MaxMicroagents
 	runtime.maxDelegationDepth = cfg.MaxDepth
+	runtime.maxToolCallsPerStep = cfg.MaxToolCalls
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
 		return "", nil, 0, err
@@ -288,13 +308,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 
 	var history strings.Builder
 	for step := 1; step <= cfg.MaxSteps; step++ {
-		prompt := buildLoopPrompt(cfg, history.String(), step)
+		prompt := buildLoopPrompt(cfg, tailTrimHistory(history.String(), maxHistoryBytes), step)
 		if err := budget.Validate(cfg.MaxTokens, prompt); err != nil {
 			return "", traces, totalTokens, err
 		}
 		req := provider.Request{
 			Prompt:    prompt,
 			MaxTokens: cfg.MaxTokens,
+			Thinking:  cfg.Thinking,
 		}
 		if step == 1 && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
@@ -373,15 +394,35 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
+//
+// It enforces two limits:
+//   - r.maxToolCallsPerStep caps the total batch size; calls beyond the limit
+//     get a synthetic error result so the LLM sees the deny in the next step
+//     and adapts. This protects against the model emitting hundreds of tool
+//     calls in a single response (which would otherwise spawn a goroutine per
+//     call and balloon history/cost).
+//   - agentBudget caps how many `agent` (sub-agent) calls execute in parallel
+//     within a single batch.
 func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowed map[string]struct{}, callback func(ToolTrace)) []parallelResult {
 	results := make([]parallelResult, len(calls))
 	agentBudget := r.maxParallelWorkers
 	if r.delegationDepth > 0 {
 		agentBudget = r.maxParallelMicroagnt
 	}
+	toolCap := r.maxToolCallsPerStep
 	agentCalls := 0
 	var wg sync.WaitGroup
 	for i, call := range calls {
+		if toolCap > 0 && i >= toolCap {
+			results[i] = parallelResult{
+				agentID: r.agentID,
+				name:    call.Tool,
+				args:    singleLine(string(call.Args)),
+				output:  fmt.Sprintf("error: too many tool calls in one step (limit %d, batch %d); this call was skipped — emit a smaller batch", toolCap, len(calls)),
+				status:  "error",
+			}
+			continue
+		}
 		if call.Tool == "agent" {
 			agentCalls++
 			if agentCalls > agentBudget {
@@ -638,6 +679,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskStop(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
+	case "skill-read", "activate-skill", "skill-activate":
+		return r.runSkillRead(call.Args)
+	case "skill-list":
+		return r.runSkillList(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
 	case "mcp-list-resources":
@@ -713,9 +758,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "file-edit":
 		return r.runFileEdit(call.Args)
 	case "enter-worktree":
-		return r.runEnterWorktree(call.Args)
+		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
-		return r.runExitWorktree(call.Args)
+		return r.runExitWorktree(ctx, call.Args)
 	case "send-message":
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
@@ -811,6 +856,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			ModelName:       r.modelName,
 			CWD:             r.cwd,
 			MaxTokens:       r.maxTokens,
+			Thinking:        r.thinkingLevel,
 			ToolCallback:    r.toolCallback,
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,
@@ -1180,6 +1226,10 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 	return abs, rel, nil
 }
 
+// searchLineNumberRE matches ":<digits>" segments in repo-search output, used
+// by markReadFromSearch to detect ripgrep-style "path:lineno:..." rows.
+var searchLineNumberRE = regexp.MustCompile(`^\d+$`)
+
 func (r *toolRuntime) markReadFromSearch(out string) {
 	lines := strings.Split(out, "\n")
 	for _, line := range lines {
@@ -1187,7 +1237,7 @@ func (r *toolRuntime) markReadFromSearch(out string) {
 		if len(parts) < 2 {
 			continue
 		}
-		if !regexp.MustCompile(`^\d+$`).MatchString(parts[1]) {
+		if !searchLineNumberRE.MatchString(parts[1]) {
 			continue
 		}
 		r.mu.Lock()

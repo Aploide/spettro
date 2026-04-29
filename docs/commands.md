@@ -14,11 +14,18 @@
 | `/permissions [ask-first\|restricted\|yolo]` | Show or set policy alias. |
 | `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
 | `/budget <n\|0>` | Set request token budget (`0` = unlimited). |
+| `/thinking <off\|low\|medium\|high\|x-high>` | Set extended-thinking compute budget for the active model. Honoured by Anthropic Claude Opus / Sonnet; ignored by providers that don't expose a thinking parameter. |
 | `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
 | `/approve` | Execute pending plan through `coding` agent. |
 | `/tasks [list\|add\|done\|set\|show]` | Manage session tasks. |
 | `/mcp <list\|read\|auth>` | Manage MCP resources and auth. |
-| `/skills` | List local skills/prompts found in `agents/`. |
+| `/skill list` | List installed Agent Skills. |
+| `/skill install <source>` | Install a skill from a local path, https git URL, or `owner/repo` shorthand. |
+| `/skill info <name>` | Show metadata + body excerpt for an installed skill. |
+| `/skill enable <name>` / `disable <name>` | Toggle whether a skill is exposed to agents. |
+| `/skill uninstall <name>` | Remove a previously installed skill. |
+| `/skill where` | Show the discovery roots being scanned. |
+| `/skills` | Alias of `/skill`. |
 | `/hooks` | Show effective runtime hooks (project + global). |
 | `/compact [focus...]` | Summarize the current conversation. |
 | `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
@@ -26,6 +33,10 @@
 | `/clear` | Save and clear the current conversation. |
 | `/resume` | Open saved conversation picker. |
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
+| `/remote` | Start the local HTTP/SSE control plane on `127.0.0.1` (default port `7878`). |
+| `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
+| `/remote stop` | Stop the running control plane. |
+| `/remote status` | Print the current URL and bearer token. |
 
 ## Agent usage
 

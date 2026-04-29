@@ -78,6 +78,14 @@ func (m *Model) SetInputHistoryForTesting(history []string) {
 	m.historyIndex = -1
 }
 
+func (m Model) InputHistoryForTesting() []string {
+	return append([]string(nil), m.inputHistory...)
+}
+
+func IsInstantCommandForTesting(input string) bool {
+	return isInstantCommand(input)
+}
+
 func (m *Model) SetPendingShellApprovalForTesting(cursor int) {
 	m.pendingAuth = &shellApprovalRequestMsg{response: make(chan shellApprovalResponse, 1)}
 	m.approvalCursor = cursor
@@ -152,6 +160,13 @@ func (m Model) AwaitingInsteadForTesting() bool {
 
 func (m Model) BannerForTesting() string {
 	return m.banner
+}
+
+// ThinkingLevelForTesting returns the persisted extended-thinking level so
+// tests can assert that /thinking <level> took effect. The value mirrors
+// UserConfig.ThinkingLevel and is empty when thinking is off (default).
+func (m Model) ThinkingLevelForTesting() string {
+	return m.cfg.ThinkingLevel
 }
 
 func (m *Model) SetCtrlCAtForTesting(t time.Time) {
@@ -297,6 +312,10 @@ func (m Model) StatusBarMessageForTesting() string {
 	return m.statusBarMessage()
 }
 
+func (m Model) MouseCaptureOffForTesting() bool {
+	return m.mouseCaptureOff
+}
+
 func PrimaryAgentIDsForTesting(manifest config.AgentManifest) []string {
 	return primaryAgentIDs(manifest)
 }
@@ -311,4 +330,36 @@ func (m *Model) SetModeForTesting(mode string) {
 
 func (m *Model) RebuildActivitiesFromEventsForTesting(events []session.AgentEvent) {
 	m.rebuildActivitiesFromEvents(events)
+}
+
+func ParseRemotePortForTesting(arg string) (int, error) {
+	return parseRemotePort(arg)
+}
+
+func (m Model) HasRemoteServerForTesting() bool {
+	return m.remoteServer != nil
+}
+
+func (m Model) RemoteAddressForTesting() string {
+	return m.remoteAddress()
+}
+
+func (m Model) RemoteTokenForTesting() string {
+	if m.remoteServer == nil {
+		return ""
+	}
+	return m.remoteServer.Token()
+}
+
+// MarkReadyAndTrustedForTesting bypasses the first-run trust dialog so tests
+// can drive the chat viewport directly.
+func (m *Model) MarkReadyAndTrustedForTesting() {
+	m.ready = true
+	m.showTrust = false
+}
+
+// RecalcLayoutForTesting forces the layout pass that the public Update would
+// normally run after every message.
+func (m Model) RecalcLayoutForTesting() Model {
+	return m.recalcLayout()
 }

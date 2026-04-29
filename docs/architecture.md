@@ -19,6 +19,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 - `internal/storage`: project/global `.spettro` directory setup.
 - `internal/hooks`: global/project hook loading, merge, and execution.
 - `internal/compact`: context usage policy and compaction guardrails.
+- `internal/skills`: Agent Skills discovery, parsing, install/uninstall, and prompt rendering. Discovers `SKILL.md` packs from `<cwd>/.spettro|.agents|.claude|.openai/skills/` and `~/.spettro|.agents|.claude|.openai/skills/` so Claude Code and OpenAI skills work without conversion. See [skills.md](skills.md).
 
 ## Agent manifest
 

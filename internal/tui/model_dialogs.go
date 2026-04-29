@@ -646,6 +646,23 @@ func (m *Model) syncInputSuggestions() {
 			m.mentionCursor = 0
 			return
 		}
+		if strings.HasPrefix(val, "/thinking") && len(val) > len("/thinking") {
+			filter := strings.TrimPrefix(val, "/thinking")
+			filter = strings.TrimPrefix(filter, " ")
+			var items []commandDef
+			for _, c := range thinkingCommands {
+				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
+					items = append(items, c)
+				}
+			}
+			m.cmdItems = items
+			if m.cmdCursor >= len(m.cmdItems) {
+				m.cmdCursor = 0
+			}
+			m.mentionItems = nil
+			m.mentionCursor = 0
+			return
+		}
 		query := val[1:]
 		m.cmdItems = filterCommands(query)
 		if m.cmdCursor >= len(m.cmdItems) {
@@ -1244,6 +1261,8 @@ func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []st
 
 func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFiles []string, images []string, approved bool) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.activeAgentID = spec.ID
+	m.publishRemoteState("agent_start")
 	m.refreshModifiedFiles()
 	m.liveTools = nil
 	m.currentTool = nil
@@ -1255,7 +1274,6 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		MentionedFiles: append([]string(nil), mentionedFiles...),
 		Images:         append([]string(nil), images...),
 	}
-	m.activeAgentID = spec.ID
 	m.startAgentActivity(spec.ID, input)
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh
@@ -1282,6 +1300,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		ModelName:       func() string { return modelName },
 		CWD:             cwd,
 		MaxTokens:       m.cfg.TokenBudget,
+		Thinking:        provider.ThinkingLevel(m.cfg.ThinkingLevel),
 		RequiredReads:   mentionedFiles,
 		Images:          images,
 		Manifest:        &manifest,

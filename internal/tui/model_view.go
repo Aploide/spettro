@@ -110,6 +110,12 @@ func (m Model) viewHeader() string {
 		modelLabel = modelLabel[:12]
 	}
 	permText := string(m.cfg.Permission)
+	// Append a "thinking:<level>" marker when extended thinking is on so
+	// users always see at a glance which compute budget is active.
+	thinkingTag := ""
+	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" {
+		thinkingTag = "thinking:" + level
+	}
 	logoW := lipgloss.Width(logo)
 	permW := lipgloss.Width(permText)
 	maxMetaWidth := m.width - logoW - permW - 8
@@ -120,6 +126,9 @@ func (m Model) viewHeader() string {
 	right := lipgloss.NewStyle().Foreground(mc).Render(permText)
 	if metaText != "" {
 		right = styleMuted.Render(metaText) + "  " + right
+	}
+	if thinkingTag != "" {
+		right = styleMuted.Render(thinkingTag) + "  " + right
 	}
 
 	rightW := lipgloss.Width(right)
@@ -488,11 +497,17 @@ func (m Model) statusBarMessage() string {
 	if m.banner != "" {
 		return renderStatusBanner(m.banner, m.bannerKind)
 	}
-	return strings.Join([]string{
+	hints := []string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("ctrl+b: panel"),
 		styleMuted.Render("ctrl+o: context"),
-	}, styleDim.Render("  ·  "))
+	}
+	if m.mouseCaptureOff {
+		hints = append(hints, styleWarn.Render("ctrl+t: mouse off"))
+	} else {
+		hints = append(hints, styleMuted.Render("ctrl+t: select"))
+	}
+	return strings.Join(hints, styleDim.Render("  ·  "))
 }
 
 func renderStatusBanner(text, kind string) string {

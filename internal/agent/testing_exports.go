@@ -45,3 +45,11 @@ func SplitShellCommandSegmentsForTesting(command string) []string {
 func AuthorizeShellCommandForTesting(r *toolRuntime, ctx context.Context, command string) error {
 	return r.authorizeShellCommand(ctx, "shell-exec", command)
 }
+
+func BuildToolSchemaSectionForTesting(allowedTools []string) string {
+	return buildToolSchemaSection(allowedTools)
+}
+
+func TailTrimHistoryForTesting(history string, maxBytes int) string {
+	return tailTrimHistory(history, maxBytes)
+}

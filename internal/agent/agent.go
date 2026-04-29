@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/skills"
 )
 
 // Legacy interfaces — kept for backward compatibility with existing tests and callers.
@@ -85,12 +88,14 @@ type Chatter struct {
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
+	Thinking        provider.ThinkingLevel
 }
 
 func (c Chatter) Reply(ctx context.Context, prompt string, images []string) (provider.Response, error) {
 	return c.ProviderManager.Send(ctx, c.ProviderName(), c.ModelName(), provider.Request{
-		Prompt: prompt,
-		Images: images,
+		Prompt:   prompt,
+		Images:   images,
+		Thinking: c.Thinking,
 	})
 }
 
@@ -104,6 +109,7 @@ type LLMAgent struct {
 	ModelName       func() string
 	CWD             string
 	MaxTokens       int
+	Thinking        provider.ThinkingLevel
 	RequiredReads   []string
 	Images          []string // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace)
@@ -130,6 +136,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
+	maxToolCallsPerStep := 32
 	if a.Manifest != nil {
 		logToolCalls = a.Manifest.Runtime.LogToolCalls
 		if a.Manifest.Runtime.Delegation.MaxParallelWorkers > 0 {
@@ -138,7 +145,12 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		if a.Manifest.Runtime.Delegation.MaxDepth > 0 {
 			maxDelegationDepth = a.Manifest.Runtime.Delegation.MaxDepth
 		}
+		if a.Manifest.Runtime.Delegation.MaxToolCallsPerStep > 0 {
+			maxToolCallsPerStep = a.Manifest.Runtime.Delegation.MaxToolCallsPerStep
+		}
 	}
+	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
+	catalog = filterDisabledSkills(catalog)
 	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
@@ -153,6 +165,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ProviderName:    a.ProviderName,
 		ModelName:       a.ModelName,
 		MaxTokens:       a.MaxTokens,
+		Thinking:        a.Thinking,
 		RequiredReads:   a.RequiredReads,
 		Images:          a.Images,
 		ToolCallback:    a.ToolCallback,
@@ -165,6 +178,8 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ParentAgentID:   a.ParentAgentID,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,
+		MaxToolCalls:    maxToolCallsPerStep,
+		SkillsCatalog:   catalog,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
@@ -187,4 +202,20 @@ func compact(s string) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// filterDisabledSkills removes skills that have a sentinel `.spettro-disabled`
+// file in their directory. The TUI command `/skill disable <name>` writes this
+// marker so the user can opt out of a discovered skill without uninstalling.
+func filterDisabledSkills(c skills.Catalog) skills.Catalog {
+	keep := make([]skills.Skill, 0, len(c.Skills))
+	for _, s := range c.Skills {
+		flag := filepath.Join(s.Directory, ".spettro-disabled")
+		if _, err := os.Stat(flag); err == nil {
+			continue
+		}
+		keep = append(keep, s)
+	}
+	c.Skills = keep
+	return c
 }

@@ -94,6 +94,23 @@ func singleLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// tailTrimHistory caps the rolling tool-loop history embedded in each prompt
+// to maxBytes. When the input exceeds the cap we drop entries from the head
+// (oldest) and prepend a one-line marker, then snap to the next "\n" boundary
+// so we never split a half-line.
+//
+// maxBytes <= 0 disables trimming.
+func tailTrimHistory(history string, maxBytes int) string {
+	if maxBytes <= 0 || len(history) <= maxBytes {
+		return history
+	}
+	tail := history[len(history)-maxBytes:]
+	if idx := strings.IndexByte(tail, '\n'); idx >= 0 && idx < len(tail)-1 {
+		tail = tail[idx+1:]
+	}
+	return "(history truncated)\n" + tail
+}
+
 func isMajorOperationTool(name string) bool {
 	switch name {
 	case "file-write", "file-edit", "shell-exec", "bash", "bash-output", "agent", "enter-worktree", "exit-worktree":

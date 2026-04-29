@@ -70,13 +70,34 @@ type AnthropicAdapter struct {
 func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
 	client := anthropic.NewClient(anthropicOption.WithAPIKey(a.APIKey))
 
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	maxTokens := int64(8096)
+	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
-		MaxTokens: 8096,
+		MaxTokens: maxTokens,
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)),
 		},
-	})
+	}
+
+	// Honour the runtime "thinking level" when the model supports extended
+	// thinking. Anthropic requires thinking.budget_tokens < max_tokens, so we
+	// also bump max_tokens above the budget when needed. Off levels (or empty)
+	// are sent as a disabled config to make intent explicit.
+	if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
+		// Ensure max_tokens > thinking.budget_tokens. Add headroom for the
+		// actual answer (4k) on top of the thinking budget.
+		needed := int64(budget) + 4096
+		if needed > params.MaxTokens {
+			params.MaxTokens = needed
+		}
+	} else if ThinkingLevel(req.Thinking) == ThinkingOff {
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+		}
+	}
+
+	msg, err := client.Messages.New(ctx, params)
 	if err != nil {
 		return Response{}, err
 	}

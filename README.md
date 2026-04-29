@@ -20,6 +20,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Live tool traces in planning/coding runs
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
+- Anthropic [extended-thinking levels](docs/thinking.md) (`/thinking off|low|medium|high|x-high`)
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
 
@@ -64,11 +65,12 @@ Spettro commands are entered with a leading `/`.
 - `/permissions [ask-first|restricted|yolo]` show/set permission policy
 - `/permissions debug <on|off>` toggle permission diagnostics
 - `/budget <n|0>` set request token budget (`0` = unlimited)
+- `/thinking <off|low|medium|high|x-high>` set extended-thinking budget (Anthropic Claude Opus/Sonnet; ignored by providers without thinking)
 - `/plan [prompt]` switch to plan mode or run plan prompt
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
 - `/mcp <list|read|auth>` manage MCP resources and auth tokens
-- `/skills` list local skills/prompts
+- `/skill <list|install|info|uninstall|enable|disable|where>` manage Agent Skills (Claude Code / OpenAI / Anthropic format)
 - `/hooks` show effective runtime hooks
 - `/compact [focus]` summarize conversation history
 - `/compact auto <status|on|off>` configure auto-compact
@@ -76,6 +78,7 @@ Spettro commands are entered with a leading `/`.
 - `/clear` auto-save and clear current conversation
 - `/resume` load a previous saved conversation
 - `/init` analyze the repo and create/update `SPETTRO.md`
+- `/remote [:port]` expose a local HTTP/SSE control plane (see [`docs/remote.md`](docs/remote.md))
 
 For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
@@ -83,10 +86,13 @@ For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
 - [Agent Manifest](AGENTS.md)
 - [Agent Prompts](agents/README.md)
+- [Agent Skills](docs/skills.md)
 - [Getting started and workflow](docs/getting-started.md)
 - [Commands and keybindings](docs/commands.md)
 - [Configuration and storage](docs/configuration.md)
 - [Architecture overview](docs/architecture.md)
+- [Remote control plane](docs/remote.md)
+- [Extended thinking levels](docs/thinking.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Documentation Index](docs/README.md)
 

@@ -6,7 +6,7 @@ Spettro uses both project-local and user-global storage.
 
 | Path | Purpose |
 | --- | --- |
-| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints. |
+| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md). |
 | `keys.enc` | Encrypted API keys map by provider ID. |
 | `trusted.json` | Permanently trusted project paths. |
 | `models.json` | Cached `models.dev` catalog. |
