@@ -80,6 +80,7 @@ func isInstantCommand(input string) bool {
 		"/permission", "/permissions",
 		"/budget",
 		"/thinking",
+		"/devin",
 		"/connect",
 		"/models",
 		"/skill", "/skills",
@@ -114,6 +115,9 @@ const helpText = `commands:
   /connect       connect a provider or local endpoint
   /permission    set permission: yolo | restricted | ask-first
   /permissions   show/set permission level, debug details
+  /budget [n|0]  set token budget per request (0 = unlimited)
+  /thinking <l>  set extended-thinking level (off|low|medium|high|x-high)
+  /devin <org>   set the Devin organization id for v3 cog_ API keys
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /tasks         manage tasks (list/add/done/set/show)

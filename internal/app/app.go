@@ -77,6 +77,7 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 
 	pm := provider.NewManager()
 	pm.SetAPIKeys(cfg.APIKeys)
+	pm.SetDevinOrgID(cfg.DevinOrgID)
 	for _, endpoint := range cfg.LocalEndpoints {
 		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
 		if err != nil {

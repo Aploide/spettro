@@ -1176,6 +1176,30 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				m.showBanner("thinking level set to "+display, "success")
 			}
 		}
+	case "/devin":
+		// /devin [<org-id>] reads or sets the Devin organization id used by
+		// v3 cog_ API keys when the active provider is "devin". With no
+		// argument we report the current org id (or "not set"). With one
+		// argument we persist it. Use /connect for the API key itself.
+		if len(fields) < 2 {
+			cur := strings.TrimSpace(m.cfg.DevinOrgID)
+			if cur == "" {
+				m.showBanner("devin org: not set  usage: /devin <org-id> (e.g. org-abc123)", "info")
+			} else {
+				m.showBanner("devin org: "+cur+"  usage: /devin <org-id>", "info")
+			}
+		} else {
+			orgID := strings.TrimSpace(fields[1])
+			if orgID == "" || (!strings.HasPrefix(orgID, "org-") && !strings.HasPrefix(orgID, "org_")) {
+				m.showBanner("devin org id should start with org- (e.g. org-abc123)", "error")
+			} else {
+				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					cfg.DevinOrgID = orgID
+					return nil
+				})
+				m.showBanner("devin org set to "+orgID, "success")
+			}
+		}
 	case "/approve":
 		if m.pendingPlan == "" {
 			m.showBanner("no pending plan — run a plan prompt first", "info")

@@ -169,6 +169,12 @@ func (m Model) ThinkingLevelForTesting() string {
 	return m.cfg.ThinkingLevel
 }
 
+// DevinOrgIDForTesting returns the persisted Devin organization id so
+// tests can assert that /devin <org-id> took effect.
+func (m Model) DevinOrgIDForTesting() string {
+	return m.cfg.DevinOrgID
+}
+
 func (m *Model) SetCtrlCAtForTesting(t time.Time) {
 	m.ctrlCAt = t
 }

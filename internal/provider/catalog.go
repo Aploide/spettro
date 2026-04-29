@@ -40,6 +40,12 @@ var fallbackModels = []Model{
 	{Provider: "google", ProviderName: "Google", Name: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
 	{Provider: "x-ai", ProviderName: "xAI", Name: "grok-3", DisplayName: "Grok 3", Vision: true, ToolCall: true, EnvKey: "XAI_API_KEY"},
 	{Provider: "groq", ProviderName: "Groq", Name: "llama-3.3-70b-versatile", DisplayName: "Llama 3.3 70B", ToolCall: true, EnvKey: "GROQ_API_KEY"},
+	// Devin Sessions are agent runs, not chat completions: model selection,
+	// thinking level, billing, and capabilities are owned by the user's
+	// Devin account. We expose a single "session" entry so users can pick
+	// "Devin / session" in the model picker; the runtime dispatches to
+	// DevinAdapter regardless of the per-call model name.
+	{Provider: "devin", ProviderName: "Devin (Cognition)", Name: "session", DisplayName: "Devin Session", Reasoning: true, ToolCall: true, EnvKey: "DEVIN_API_KEY"},
 }
 
 func buildModels(cat models.Catalog) []Model {

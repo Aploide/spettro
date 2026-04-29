@@ -17,6 +17,7 @@ type Manager struct {
 	localModels  []Model
 	apiKeys      map[string]string
 	providerAPIs map[string]string
+	devinOrgID   string
 }
 
 func NewManager() *Manager {
@@ -32,6 +33,15 @@ func (m *Manager) SetAPIKeys(keys map[string]string) {
 	for k, v := range keys {
 		m.apiKeys[k] = v
 	}
+	m.mu.Unlock()
+}
+
+// SetDevinOrgID stores the organization id used by the v3 Devin Sessions
+// endpoints. v3 cog_ keys require this; v1 apk_ keys do not. The TUI calls
+// this whenever UserConfig.DevinOrgID changes.
+func (m *Manager) SetDevinOrgID(orgID string) {
+	m.mu.Lock()
+	m.devinOrgID = strings.TrimSpace(orgID)
 	m.mu.Unlock()
 }
 
@@ -201,6 +211,7 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	m.mu.RLock()
 	apiKey := m.apiKeys[providerName]
 	baseURL := m.providerAPIs[providerName]
+	devinOrg := m.devinOrgID
 	m.mu.RUnlock()
 
 	if len(req.Images) > 0 && !m.SupportsVision(providerName, modelName) {
@@ -211,6 +222,21 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	allParts = append(allParts, req.Images...)
 	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
 		return Response{}, err
+	}
+
+	// Devin Sessions are agent runs, not chat completions; they have a
+	// completely different lifecycle (create + poll). Dispatch to the
+	// dedicated adapter without going through the openai/anthropic paths.
+	if providerName == "devin" {
+		adapter := DevinAdapter{
+			APIKey: apiKey,
+			OrgID:  devinOrg,
+		}
+		resp, err := adapter.Send(ctx, modelName, req)
+		if err != nil {
+			return Response{}, err
+		}
+		return finalizeResponse(resp, providerName, modelName, allParts), nil
 	}
 
 	if len(req.Images) == 0 {
