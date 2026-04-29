@@ -83,7 +83,6 @@ func (m *Model) updateConfig(mut func(*config.UserConfig) error) error {
 	m.cfg = cfg
 	if m.providers != nil {
 		m.providers.SetAPIKeys(cfg.APIKeys)
-		m.providers.SetDevinOrgID(cfg.DevinOrgID)
 	}
 	return nil
 }

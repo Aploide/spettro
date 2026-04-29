@@ -1,11 +1,6 @@
 package agent
 
-import (
-	"context"
-
-	"spettro/internal/config"
-	"spettro/internal/provider"
-)
+import "context"
 
 func ParseToolCallForTesting(s string) (toolCall, bool, error) {
 	return parseToolCall(s)
@@ -57,11 +52,4 @@ func BuildToolSchemaSectionForTesting(allowedTools []string) string {
 
 func TailTrimHistoryForTesting(history string, maxBytes int) string {
 	return tailTrimHistory(history, maxBytes)
-}
-
-// FilterProviderGatedToolsForTesting exposes the allowed-tools filter so
-// tests can verify that devin-session (and any future provider-gated tool)
-// is stripped when its API key is absent and kept when present.
-func FilterProviderGatedToolsForTesting(allowed []string, policies map[string]config.ToolSpec, mgr *provider.Manager) ([]string, map[string]config.ToolSpec) {
-	return filterProviderGatedTools(allowed, policies, mgr)
 }

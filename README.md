@@ -2,7 +2,7 @@
 
 [![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
 [![UI Bubble Tea](https://img.shields.io/badge/UI-Bubble%20Tea-ff69b4)](https://github.com/charmbracelet/bubbletea)
-[![Providers](https://img.shields.io/badge/LLM-OpenAI%20Compatible%20%7C%20Anthropic%20%7C%20Devin-6f42c1)](#provider-setup)
+[![Providers](https://img.shields.io/badge/LLM-OpenAI%20Compatible%20%7C%20Anthropic-6f42c1)](#provider-setup)
 [![Status](https://img.shields.io/badge/status-experimental-orange)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-green)](LICENSE)
 
@@ -21,7 +21,6 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Anthropic [extended-thinking levels](docs/thinking.md) (`/thinking off|low|medium|high|x-high`)
-- [Cognition Devin integration](docs/devin.md) — either delegate heavy subtasks via the `devin-session` tool (recommended) or make Devin the active model directly
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
 
@@ -67,7 +66,6 @@ Spettro commands are entered with a leading `/`.
 - `/permissions debug <on|off>` toggle permission diagnostics
 - `/budget <n|0>` set request token budget (`0` = unlimited)
 - `/thinking <off|low|medium|high|x-high>` set extended-thinking budget (Anthropic Claude Opus/Sonnet; ignored by providers without thinking)
-- `/devin <org-id>` show or set the Devin organization id for v3 `cog_*` keys
 - `/plan [prompt]` switch to plan mode or run plan prompt
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
@@ -95,7 +93,6 @@ For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 - [Architecture overview](docs/architecture.md)
 - [Remote control plane](docs/remote.md)
 - [Extended thinking levels](docs/thinking.md)
-- [Devin integration](docs/devin.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Documentation Index](docs/README.md)
 

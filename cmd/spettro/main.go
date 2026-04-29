@@ -32,7 +32,6 @@ func main() {
 
 	pm := provider.NewManager()
 	pm.SetAPIKeys(cfg.APIKeys)
-	pm.SetDevinOrgID(cfg.DevinOrgID)
 
 	if _, err := config.LoadAgentManifestForProject(cwd); err != nil {
 		fatal("agent manifest error: %v", err)

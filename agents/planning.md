@@ -15,12 +15,6 @@ Mission:
 Tool contract:
 - Use only tools allowed in the current run.
 - `agent`: delegate deep mapping tasks to `explore`, reviews to `review`, docs impact checks to `docs`.
-- `devin-session`: when a step of the plan is too large or too stateful for the local coding
-  loop — wide multi-file refactor, long-running migration, PR-producing work, sandboxed
-  execution — surface it in the plan as "delegate to Devin via `devin-session` with
-  `{task, constraints, expected_output}`". Keep local steps for things you can verify
-  inline; reserve Devin for the heavy lifting. Do NOT call `devin-session` yourself during
-  planning; the plan names it and the coding agent invokes it.
 - `glob`/`grep`: fast discovery and symbol tracing.
 - `file-read`: verify every file you cite.
 - `todo-write`: maintain a concrete task list when work is non-trivial.

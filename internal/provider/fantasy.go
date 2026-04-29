@@ -36,8 +36,8 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 		// Currently we only know how to express it for Anthropic; other
 		// providers ignore the field and the fantasy fallback path simply
 		// won't include reasoning. This matches Spettro's documented
-		// behaviour: thinking levels are honoured by Anthropic and Devin
-		// Sessions, ignored elsewhere.
+		// behaviour: thinking levels are honoured by Anthropic, ignored
+		// elsewhere.
 		if providerName == "anthropic" {
 			budgetInt := int64(budget)
 			call.ProviderOptions = fantasy.ProviderOptions{

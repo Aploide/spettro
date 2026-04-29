@@ -17,7 +17,6 @@ type Manager struct {
 	localModels  []Model
 	apiKeys      map[string]string
 	providerAPIs map[string]string
-	devinOrgID   string
 }
 
 func NewManager() *Manager {
@@ -36,56 +35,8 @@ func (m *Manager) SetAPIKeys(keys map[string]string) {
 	m.mu.Unlock()
 }
 
-// HasAPIKey reports whether a non-empty credential is on file for the given
-// provider id. Callers outside the provider package use this to gate
-// features that depend on a specific key being present — e.g. the agent
-// runtime hides the devin-session tool from LLMs whose runtime has no
-// api_keys["devin"] entry.
-func (m *Manager) HasAPIKey(providerID string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return strings.TrimSpace(m.apiKeys[providerID]) != ""
-}
-
-// SetDevinOrgID stores the organization id used by the v3 Devin Sessions
-// endpoints. v3 cog_ keys require this; v1 apk_ keys do not. The TUI calls
-// this whenever UserConfig.DevinOrgID changes.
-func (m *Manager) SetDevinOrgID(orgID string) {
-	m.mu.Lock()
-	m.devinOrgID = strings.TrimSpace(orgID)
-	m.mu.Unlock()
-}
-
-// CallDevin delegates a task to a fresh Devin session via the DevinAdapter
-// and blocks (with ctx cancellation) until the session reaches a terminal
-// status. Returns the final agent message body followed by a session-URL
-// footer, ready to be embedded as a tool result in the caller's prompt.
-//
-// The API key is pulled from the manager's api_keys["devin"] entry and the
-// org id from SetDevinOrgID. Callers that want to customise the HTTP
-// client, poll cadence, or max-wait deadline should construct a
-// DevinAdapter directly.
-//
-// This helper exists so the agent runtime can expose a devin-session tool
-// without having to re-read UserConfig.
-func (m *Manager) CallDevin(ctx context.Context, prompt string) (string, error) {
-	m.mu.RLock()
-	apiKey := m.apiKeys["devin"]
-	orgID := m.devinOrgID
-	m.mu.RUnlock()
-	adapter := DevinAdapter{APIKey: apiKey, OrgID: orgID}
-	resp, err := adapter.Send(ctx, "session", Request{Prompt: prompt})
-	if err != nil {
-		return "", err
-	}
-	return resp.Content, nil
-}
-
 func (m *Manager) SetCatalog(cat models.Catalog) {
-	// Keep natively-implemented providers (Devin today) visible after a
-	// models.dev refresh; the upstream catalog only covers chat providers
-	// and would otherwise drop Devin from the /connect picker.
-	built := mergeAlwaysIncluded(buildModels(cat))
+	built := buildModels(cat)
 	apis := make(map[string]string, len(cat))
 	for id, prov := range cat {
 		if prov.API != "" {
@@ -141,12 +92,7 @@ func (m *Manager) Models() []Model {
 	m.mu.RUnlock()
 	base := cat
 	if len(base) == 0 {
-		// Fallback path (pre-fetch / offline / cache miss). Start with
-		// the static fallback list and layer on anything from
-		// alwaysIncludedModels — if we skipped this, Devin (and any
-		// future natively-implemented provider) would be unreachable
-		// until the first successful models.dev fetch.
-		base = mergeAlwaysIncluded(fallbackModels)
+		base = fallbackModels
 	}
 	out := make([]Model, len(base)+len(local))
 	copy(out, base)
@@ -169,18 +115,18 @@ func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
 }
 
 func (m *Manager) AllProviderInfos() []ProviderInfo {
-	// Delegate to Models() so the alwaysIncludedModels merge (Devin etc.)
-	// applies in both the fallback and post-catalog paths. A duplicate
-	// lookup here would silently hide natively-implemented providers
-	// the moment models.dev replaces the fallback list.
-	src := m.Models()
+	m.mu.RLock()
+	cat := m.catalog
+	m.mu.RUnlock()
+
+	src := cat
+	if len(src) == 0 {
+		src = fallbackModels
+	}
 
 	seen := map[string]bool{}
 	var out []ProviderInfo
 	for _, mod := range src {
-		if mod.Local {
-			continue
-		}
 		if seen[mod.Provider] {
 			continue
 		}
@@ -255,7 +201,6 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	m.mu.RLock()
 	apiKey := m.apiKeys[providerName]
 	baseURL := m.providerAPIs[providerName]
-	devinOrg := m.devinOrgID
 	m.mu.RUnlock()
 
 	if len(req.Images) > 0 && !m.SupportsVision(providerName, modelName) {
@@ -266,21 +211,6 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	allParts = append(allParts, req.Images...)
 	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
 		return Response{}, err
-	}
-
-	// Devin Sessions are agent runs, not chat completions; they have a
-	// completely different lifecycle (create + poll). Dispatch to the
-	// dedicated adapter without going through the openai/anthropic paths.
-	if providerName == "devin" {
-		adapter := DevinAdapter{
-			APIKey: apiKey,
-			OrgID:  devinOrg,
-		}
-		resp, err := adapter.Send(ctx, modelName, req)
-		if err != nil {
-			return Response{}, err
-		}
-		return finalizeResponse(resp, providerName, modelName, allParts), nil
 	}
 
 	if len(req.Images) == 0 {

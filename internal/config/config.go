@@ -33,13 +33,9 @@ type UserConfig struct {
 	// ThinkingLevel selects extended-thinking compute when the active model
 	// supports it. Allowed values are "off", "low", "medium", "high", "x-high"
 	// (or empty, which is treated as "off"). Toggleable at runtime via the
-	// /thinking command and honoured by the Anthropic and Devin Sessions
-	// adapters; other providers ignore it.
+	// /thinking command and honoured by the Anthropic adapter; other
+	// providers ignore it.
 	ThinkingLevel string `json:"thinking_level,omitempty"`
-	// DevinOrgID is required when ActiveProvider is "devin". The Devin v3 API
-	// scopes session endpoints under /v3/organizations/{org_id}/sessions, and
-	// the org id is discoverable from the Devin dashboard.
-	DevinOrgID string `json:"devin_org_id,omitempty"`
 }
 
 func Default() UserConfig {

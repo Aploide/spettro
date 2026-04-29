@@ -26,7 +26,6 @@ to test.
 | Provider | Honours thinking? | Notes |
 | --- | --- | --- |
 | **Anthropic** (`claude-opus-4*`, `claude-sonnet-4-5`, etc.) | yes | Maps to `thinking.type=enabled` + `thinking.budget_tokens`. Spettro automatically bumps `max_tokens` so it stays > the budget (Anthropic rejects requests where they meet or overlap). |
-| **Devin Sessions** | no | Devin owns thinking on its side via the Devin CLI / web app. The Spettro setting is accepted but ignored on this path. |
 | Other providers (OpenAI, Google, Groq, xAI, OpenAI-compatible local) | no | The field is silently dropped. |
 
 ## Slash commands
