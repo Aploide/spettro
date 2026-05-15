@@ -6,6 +6,7 @@
 - [Architecture overview](architecture.md)
 - [Agent Skills](skills.md)
 - [Remote control plane](remote.md)
+- [Telegram relay](telegram.md)
 - [Extended thinking levels](thinking.md)
 - [Troubleshooting](troubleshooting.md)
 - [Agent Manifest](../AGENTS.md)
