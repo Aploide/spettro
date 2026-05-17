@@ -26,6 +26,8 @@ var allCommands = []commandDef{
 	{"/plan", "switch plan mode or run plan task"},
 	{"/permissions", "show/set permission level"},
 	{"/remote", "start local HTTP control plane (optional :PORT, /remote stop|status)"},
+	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
+	{"/tg", "alias of /telegram"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/exit", "exit spettro"},
@@ -88,6 +90,7 @@ func isInstantCommand(input string) bool {
 		"/mcp",
 		"/mode", "/next",
 		"/remote",
+		"/telegram", "/tg",
 		"/exit", "/quit":
 		return true
 	case "/plan":
@@ -130,6 +133,9 @@ const helpText = `commands:
   /remote [:port] start local HTTP/SSE control plane on 127.0.0.1
   /remote stop   stop the running remote control plane
   /remote status print remote control URL and bearer token
+  /telegram setup <token>  configure BotFather token (alias /tg)
+  /telegram allow <@u|id>  allow a username or chat ID to drive Spettro
+  /telegram start|stop|status  control the Telegram relay
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
 

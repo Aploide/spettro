@@ -283,19 +283,20 @@ func (m Model) remoteStatusSnapshot() remote.Status {
 	}
 }
 
-// publishRemote forwards an event to the optional remote server. It is the
-// single funnel through which all observability events leave the TUI.
+// publishRemote forwards an event to the optional remote server AND the
+// optional Telegram relay. It is the single funnel through which all
+// observability events leave the TUI.
 func (m *Model) publishRemote(kind string, data map[string]interface{}) {
-	if m.remoteServer == nil {
-		return
-	}
 	if data == nil {
 		data = map[string]interface{}{}
 	}
 	if _, ok := data["mode"]; !ok && m.mode != "" {
 		data["mode"] = m.mode
 	}
-	m.remoteServer.Publish(kind, data)
+	if m.remoteServer != nil {
+		m.remoteServer.Publish(kind, data)
+	}
+	m.dispatchTelegramEvent(kind, data)
 }
 
 func (m *Model) publishRemoteState(reason string) {

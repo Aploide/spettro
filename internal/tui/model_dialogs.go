@@ -263,6 +263,7 @@ func (m Model) resolveAskUser(answer, banner string) Model {
 	m.questionCursor = 0
 	m.questionFreeform = false
 	m.ta.Reset()
+	m.telegramClearAnswerExpectations()
 	m.showBanner(banner, "info")
 	m.refreshViewport()
 	return m
@@ -279,6 +280,7 @@ func (m Model) rejectAskUser(banner string) Model {
 	m.questionCursor = 0
 	m.questionFreeform = false
 	m.ta.Reset()
+	m.telegramClearAnswerExpectations()
 	m.showBanner(banner, "warn")
 	m.refreshViewport()
 	return m
