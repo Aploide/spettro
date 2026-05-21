@@ -37,6 +37,11 @@
 | `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
 | `/remote stop` | Stop the running control plane. |
 | `/remote status` | Print the current URL and bearer token. |
+| `/telegram setup <token>` | Save a Telegram BotFather token (encrypted) and validate it via `getMe`. Alias: `/tg`. |
+| `/telegram allow <@u\|id>` | Add a Telegram username or chat ID to the allowlist. |
+| `/telegram start` / `/telegram stop` | Start or stop the relay's long-poll worker. Autostarted on next launch when previously running. |
+| `/telegram status` / `/telegram list` | Print runtime state, bound chats and allowlist. |
+| `/telegram deny <@u\|id>` / `/telegram reset` | Remove an allowlist entry or wipe the entire relay configuration. |
 
 ## Agent usage
 

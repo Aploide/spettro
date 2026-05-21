@@ -19,9 +19,10 @@ import (
 	"spettro/internal/remote"
 	"spettro/internal/session"
 	"spettro/internal/storage"
+	"spettro/internal/telegram"
 )
 
-const coAuthorInfo = "Co-Authored-By: Spettro <spettro@eyed.to>"
+const coAuthorInfo = "Co-Authored-By: Spettro spettro@eyed.to"
 
 type Role string
 
@@ -281,6 +282,13 @@ type Model struct {
 	remoteServer        *remote.Server
 	remoteRequestedPort int
 
+	telegramRelay *telegram.Relay
+
+	// startupCmds are tea.Cmds that need to fire on Init. Populated by
+	// New() when initial state requires background work (e.g. autostarting
+	// the Telegram relay) before the first tea event is processed.
+	startupCmds []tea.Cmd
+
 	cwd       string
 	store     *storage.Store
 	providers *provider.Manager
@@ -342,6 +350,9 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		historyIndex: -1,
 	}
 	m.refreshModifiedFiles()
+	if cmd := m.autostartTelegram(); cmd != nil {
+		m.startupCmds = append(m.startupCmds, cmd)
+	}
 	return m
 }
 
@@ -357,7 +368,9 @@ func (m Model) currentColor() lipgloss.Color {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, tick(), m.spin.Tick)
+	cmds := []tea.Cmd{textarea.Blink, tick(), m.spin.Tick}
+	cmds = append(cmds, m.startupCmds...)
+	return tea.Batch(cmds...)
 }
 
 func tick() tea.Cmd {
@@ -702,6 +715,27 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.remoteServer != nil {
 			cmds = append(cmds, waitForRemoteInterrupt(m.remoteServer))
+		}
+	case telegramSubmitMsg:
+		newModel, cmd := m.handleTelegramSubmission(msg.req)
+		nm, _ := newModel.(Model)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if nm.telegramRelay != nil {
+			cmds = append(cmds, waitForTelegramSubmit(nm.telegramRelay))
+		}
+		return nm, tea.Batch(cmds...)
+	case telegramInterruptMsg:
+		if m.thinking {
+			m.interruptRun("Interrupted via Telegram.", false)
+			m.publishRemote("telegram_interrupt", map[string]interface{}{"thinking": true})
+			m.refreshViewport()
+		} else {
+			m.publishRemote("telegram_interrupt", map[string]interface{}{"thinking": false})
+		}
+		if m.telegramRelay != nil {
+			cmds = append(cmds, waitForTelegramInterrupt(m.telegramRelay))
 		}
 	case quitWarningMsg:
 		if m.banner == "press again ctrl C to exit" {
@@ -1223,6 +1257,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	case "/remote":
 		return m.handleRemoteCommand(input)
+	case "/telegram", "/tg":
+		return m.handleTelegramCommand(input)
 	default:
 		m.showBanner("unknown command: "+cmd, "error")
 	}
