@@ -5,6 +5,7 @@
 [![Providers](https://img.shields.io/badge/LLM-OpenAI%20Compatible%20%7C%20Anthropic-6f42c1)](#provider-setup)
 [![Status](https://img.shields.io/badge/status-experimental-orange)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-green)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cesp99/spettro)
 
 CA: C3fawupKrXdn3X7KPTmmnkwzJQ9qycMNag55ZzQ8pump
 
