@@ -10,14 +10,34 @@ import (
 	"spettro/internal/provider"
 )
 
-const coAuthor = "Co-Authored-By: Spettro <spettro@eyed.to>"
+// coAuthor is the canonical commit trailer Spettro stamps onto every commit
+// it writes. The exact string is also auto-injected by EnforceCommitCoAuthor
+// when an LLM agent issues `git commit` through shell-exec/bash, so keep both
+// callers in sync via the single shared spettroCoAuthorTrailer constant.
+const coAuthor = spettroCoAuthorTrailer
 
-const commitSystemPrompt = `You are a git commit message writer.
-Given a git diff, write a concise conventional commit message.
-Format: type(scope): short description (max 72 chars)
-Valid types: feat, fix, refactor, chore, docs, test, style, perf, ci
-Use imperative mood ("add" not "added").
-Output ONLY the commit message subject line — no markdown, no explanation, no quotes.`
+const commitSystemPrompt = `You are a git commit message writer for the Spettro project.
+Given a git diff, write a single Conventional Commits subject line.
+
+Format: <type>(<scope>): <imperative summary>
+- <type> is exactly one of: feat, fix, perf, refactor, docs, test, chore, ci, build, style, revert.
+- <scope> is the most specific subsystem touched. For this repo, prefer:
+  agent, tui, provider, config, telegram, remote, mcp, skills, session, hooks, agents, cli.
+  When the diff genuinely spans subsystems, omit the scope (just "<type>: ...").
+- <summary> is imperative ("add", "fix", "remove", "wire"), lowercase after the type
+  prefix, no trailing period, ≤72 chars total including the type/scope prefix
+  (~50 chars is ideal).
+
+Pick the type from the actual change:
+- feat: new user-visible capability
+- fix: bug fix or correctness regression
+- perf: same behavior, measurably faster/lighter
+- refactor: code restructure with no behavior change
+- docs/test/chore/ci/build/style/revert: per the matching conventional meaning
+
+Output ONLY the subject line. No markdown, no explanation, no quotes,
+no body, no trailers (Spettro's runtime adds the Co-Authored-By trailer
+automatically when committing).`
 
 // CommitAgent generates a commit message via the LLM and commits the changes.
 type CommitAgent interface {

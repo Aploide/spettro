@@ -96,6 +96,8 @@ the chat stays useful rather than noisy:
 | Ask-user dialog | `❓` + options + “reply with your answer” hint |
 | Shell-approval request | `🔐` + the command (handle inside the TUI) |
 | Successful commits | `🟢 commit` |
+| Generated image (`grok-image`) | `sendPhoto` with the prompt as caption (`🖼 …`); falls back to `sendDocument` when the file is over Telegram's 10 MB photo cap. |
+| Generated video (`grok-video`) | `sendVideo` with the prompt as caption (`🎬 …`); falls back to `sendDocument` over 50 MB. |
 
 Tool traces (e.g. every `file-write` and `shell-exec`) are **not**
 forwarded by default to keep the chat readable. State changes

@@ -623,6 +623,45 @@ func (r *Relay) sendRaw(ctx context.Context, chatID int64, text string) {
 	}
 }
 
+// BroadcastMedia uploads a generated asset (image, video, or arbitrary
+// file) to every currently bound chat. The relay picks the most specific
+// Bot API method (`sendPhoto`/`sendVideo`/`sendDocument`) based on `kind`
+// and the file size, and falls back to `sendDocument` when the file
+// exceeds the inline media cap so the user always receives something.
+//
+// caption is optional. When empty no caption is attached. The function
+// blocks until every send completes — call from a worker goroutine if you
+// don't want to block the caller.
+func (r *Relay) BroadcastMedia(localPath string, kind MediaKind, caption string) {
+	chats := r.BoundChats()
+	if len(chats) == 0 {
+		return
+	}
+	for _, chatID := range chats {
+		r.BroadcastMediaTo(chatID, localPath, kind, caption)
+	}
+}
+
+// BroadcastMediaTo uploads localPath to a single chat with the given
+// kind and caption. Errors are recorded via recordSendErr so callers can
+// inspect the most recent failure through LastSendError().
+//
+// The upload uses a generous 5-minute context: Telegram caps photos at
+// 10 MB and videos at 50 MB, both of which can take a while on flaky
+// links. We deliberately do NOT thread the caller's context here — the
+// upload should survive a brief TUI Update cycle even if the calling
+// goroutine returns.
+func (r *Relay) BroadcastMediaTo(chatID int64, localPath string, kind MediaKind, caption string) {
+	if chatID == 0 || strings.TrimSpace(localPath) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if _, err := r.client.SendMediaFile(ctx, chatID, kind, localPath, caption); err != nil {
+		r.recordSendErr(chatID, err)
+	}
+}
+
 // recordSendErr stashes the most recent send failure for diagnostics
 // surfaced via /telegram status. Held under sendMu only briefly — the HTTP
 // call must not hold this lock or AnySubscriber would block on the

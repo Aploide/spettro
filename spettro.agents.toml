@@ -316,6 +316,32 @@ risk_level = "medium"
 primary_only = false
 
 [[tools]]
+id = "grok-image"
+name = "Grok Image"
+description = "Generate images via the xAI Grok Imagine API and save them to the workspace (defaults to assets/ or Next.js public/)."
+kind = "builtin"
+enabled = true
+timeout_sec = 120
+requires_approval = false
+permitted_actions = ["write", "network"]
+aliases = []
+risk_level = "medium"
+primary_only = false
+
+[[tools]]
+id = "grok-video"
+name = "Grok Video"
+description = "Generate videos via the xAI Grok Imagine API (polled until ready) and save them to the workspace."
+kind = "builtin"
+enabled = true
+timeout_sec = 900
+requires_approval = false
+permitted_actions = ["write", "network"]
+aliases = []
+risk_level = "medium"
+primary_only = false
+
+[[tools]]
 id = "mcp-list-resources"
 name = "MCP List Resources"
 description = "List resources exposed by MCP servers."
@@ -422,13 +448,13 @@ primary_only = false
 [[agents]]
 id = "plan"
 name = "Plan"
-description = "Planning orchestrator that coordinates workers and todo state."
+description = "Planning orchestrator that coordinates workers and todo state. Pure orchestrator: cannot read files directly — must delegate all discovery to the explore worker."
 skill = "planning"
 mode = "orchestrator"
 role = "orchestrator"
 color = "blue"
 prompt_file = "agents/planning.md"
-allowed_tools = ["agent", "glob", "grep", "file-read", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
+allowed_tools = ["agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
 permitted_actions = ["read", "search", "plan", "write"]
 permission = "ask-first"
 temperature = 0.2
@@ -446,8 +472,8 @@ mode = "orchestrator"
 role = "primary"
 color = "green"
 prompt_file = "agents/coding.md"
-allowed_tools = ["agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list"]
-permitted_actions = ["read", "search", "plan", "write", "execute", "git"]
+allowed_tools = ["agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list", "grok-image", "grok-video"]
+permitted_actions = ["read", "search", "plan", "write", "execute", "git", "network"]
 permission = "restricted"
 temperature = 0.1
 max_tokens = 8192
@@ -494,14 +520,14 @@ enabled = true
 [[agents]]
 id = "code"
 name = "Code"
-description = "Implementation worker that can edit files and run checks."
+description = "Implementation worker that can edit files and run checks. Receives a focused task from the coding orchestrator and executes it end-to-end (read, write, verify)."
 skill = "implementation"
 mode = "worker"
 role = "worker"
 color = "green"
-prompt_file = "agents/coding.md"
-allowed_tools = ["agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "todo-write", "comment", "skill-read", "skill-list"]
-permitted_actions = ["read", "search", "write", "execute", "git"]
+prompt_file = "agents/code.md"
+allowed_tools = ["agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "todo-write", "comment", "skill-read", "skill-list", "grok-image", "grok-video"]
+permitted_actions = ["read", "search", "write", "execute", "git", "network"]
 permission = "restricted"
 temperature = 0.1
 max_tokens = 8192

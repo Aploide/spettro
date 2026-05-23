@@ -47,3 +47,13 @@ func TestBuildToolSchemaSection_EmptyWhenNoMatches(t *testing.T) {
 		t.Fatalf("expected empty section when no allowed tool has a known schema, got:\n%q", got)
 	}
 }
+
+func TestBuildToolSchemaSection_AdvertisesGrokMediaTools(t *testing.T) {
+	got := agent.BuildToolSchemaSectionForTesting([]string{"grok-image", "grok-video"})
+	if !strings.Contains(got, `grok-image arguments: {"prompt": string, "path"?: string`) {
+		t.Fatalf("grok-image schema missing:\n%s", got)
+	}
+	if !strings.Contains(got, `grok-video arguments: {"prompt": string, "path"?: string`) {
+		t.Fatalf("grok-video schema missing:\n%s", got)
+	}
+}

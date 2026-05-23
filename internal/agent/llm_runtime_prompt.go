@@ -74,6 +74,23 @@ func summarizeLoopToolArgs(name, args string) string {
 				return "pattern=" + truncate(payload.Pattern, 120)
 			}
 		}
+	case "grok-image", "grok-video":
+		var payload struct {
+			Prompt string `json:"prompt"`
+			Path   string `json:"path"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil {
+			parts := []string{}
+			if payload.Prompt != "" {
+				parts = append(parts, "prompt="+truncate(payload.Prompt, 80))
+			}
+			if payload.Path != "" {
+				parts = append(parts, "path="+payload.Path)
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, " ")
+			}
+		}
 	}
 	return truncate(strings.TrimSpace(args), 120)
 }
@@ -168,6 +185,8 @@ var builtinToolSchemas = map[string]string{
 	"bash-output":       `{"command": string}`,
 	"web-fetch":         `{"url": string}`,
 	"web-search":        `{"query": string, "max_results"?: int}`,
+	"grok-image":        `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
+	"grok-video":        `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
 	"ask-user":          `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
 	"agent":             `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
 	"todo-write":        `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
