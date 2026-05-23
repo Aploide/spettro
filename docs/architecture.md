@@ -35,6 +35,16 @@ See [AGENTS.md](../AGENTS.md) for schema details (`version = 2`, `[runtime]`, `[
 4. Plans can be queued and executed via `/approve` through `coding`.
 5. Outputs, tool traces, and session events are appended to timeline/session storage.
 
+## Orchestration contract (orchestrators vs workers)
+
+Spettro deliberately splits the agent roster into **orchestrators** (`plan`, `coding`, `ask`) and **workers** (`explore`, `code`, `git`, `test`, `review`, `docs`). The orchestration contract is:
+
+- Orchestrators are coordinators. They decompose the user's request and spawn workers via the `agent` tool, preferring parallel batches (the runtime allows up to 4 concurrent sub-agents per step). Their prompts in `agents/planning.md`, `agents/coding.md`, and `agents/chat.md` enforce "delegate first".
+- `plan` is enforced at the manifest level: it has **no** direct read tools (`glob`/`grep`/`file-read`/`ls`). Discovery must go through an `explore` worker. The corresponding contract tests live in `tests/config/manifest_test.go`.
+- `coding` keeps its raw write/exec tools as an emergency escape hatch, but the prompt strongly discourages using them directly. The expected default path is `coding → {explore, docs}` (parallel) `→ code` (impl) `→ {test, review}` (parallel) `→ git`.
+- Workers are individual contributors. `agents/code.md` is the dedicated `code` worker prompt; the orchestrator-style `agents/coding.md` is used only by the `coding` orchestrator. Workers do not re-delegate (and `code` is the only worker that has the `agent` tool, gated by handoffs).
+- The runtime's `agent` dispatch already validates role + handoff compatibility (`isDelegationRoleAllowed` in `internal/agent/llm_runtime_shell.go`), so workers can't accidentally spawn an orchestrator.
+
 ## Provider abstraction
 
 - Text requests route through Charm's `fantasy` SDK for `anthropic`, `openai`, and OpenAI-compatible providers.
