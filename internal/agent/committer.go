@@ -10,7 +10,11 @@ import (
 	"spettro/internal/provider"
 )
 
-const coAuthor = "Co-Authored-By: Spettro <spettro@eyed.to>"
+// coAuthor is the canonical commit trailer Spettro stamps onto every commit
+// it writes. The exact string is also auto-injected by EnforceCommitCoAuthor
+// when an LLM agent issues `git commit` through shell-exec/bash, so keep both
+// callers in sync via the single shared spettroCoAuthorTrailer constant.
+const coAuthor = spettroCoAuthorTrailer
 
 const commitSystemPrompt = `You are a git commit message writer.
 Given a git diff, write a concise conventional commit message.

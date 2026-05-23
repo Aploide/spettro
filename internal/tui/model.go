@@ -22,7 +22,7 @@ import (
 	"spettro/internal/telegram"
 )
 
-const coAuthorInfo = "Co-Authored-By: Spettro spettro@eyed.to"
+const coAuthorInfo = "Co-Authored-By: Spettro <spettro@eyed.to>"
 
 type Role string
 

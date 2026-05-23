@@ -51,6 +51,19 @@ Spettro uses both project-local and user-global storage.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
 
+### Commit co-authoring (mandatory)
+
+- Every commit Spettro produces — directly via the built-in committer or indirectly when an agent runs `git commit` through `shell-exec`/`bash` — carries the trailer `Co-Authored-By: Spettro <spettro@eyed.to>`.
+- The trailer is auto-injected by the runtime when missing. It is idempotent: if you (or the agent) already supplied the trailer, no second copy is added.
+- Only the porcelain `git commit` is rewritten; plumbing such as `git commit-tree` is left untouched.
+
+### Media generation (xAI Grok Imagine)
+
+- `grok-image` and `grok-video` are built-in tools that call `https://api.x.ai/v1/images/generations` and `https://api.x.ai/v1/videos/generations` respectively.
+- Both look up the xAI key from the encrypted store (`x-ai`/`xai`) or `$XAI_API_KEY`; configure it once via `/connect x-ai` or by exporting the env var.
+- Outputs are written into the workspace. When no `path` is given, Spettro picks `public/` for Next.js projects and `assets/` everywhere else, slugging the prompt for the filename.
+- These tools are listed in `coding`/`code` agents by default; add them to other agents in `spettro.agents.toml` if you want broader access.
+
 ## Runtime hooks
 
 - Hook files are JSON and can be configured globally (`~/.spettro/hooks.json`) and per-project (`.spettro/hooks.json`).

@@ -45,6 +45,10 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	if err := r.authorizeShellCommand(ctx, toolID, cmdText); err != nil {
 		return "", err
 	}
+	// Spettro mandates that every commit carries its Co-Authored-By trailer.
+	// Auto-inject the `--trailer` flag whenever an LLM agent runs `git commit`
+	// through shell/bash so the policy holds even if the model forgets it.
+	cmdText = EnforceCommitCoAuthor(cmdText)
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdText)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()

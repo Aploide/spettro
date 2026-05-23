@@ -53,3 +53,39 @@ func BuildToolSchemaSectionForTesting(allowedTools []string) string {
 func TailTrimHistoryForTesting(history string, maxBytes int) string {
 	return tailTrimHistory(history, maxBytes)
 }
+
+func EnforceCommitCoAuthorForTesting(command string) string {
+	return EnforceCommitCoAuthor(command)
+}
+
+func IsGitCommitInvocationForTesting(seg string) bool {
+	return isGitCommitInvocation(seg)
+}
+
+func LexShellTokensForTesting(seg string) []string {
+	return lexShellTokens(seg)
+}
+
+func SpettroCoAuthorTrailerForTesting() string {
+	return spettroCoAuthorTrailer
+}
+
+func ResolveMediaPathForTesting(cwd, requested, prompt, kind string) (dir, baseName, fixedExt string, hasExt, dirOnly bool) {
+	return resolveMediaPath(cwd, requested, prompt, kind)
+}
+
+func SlugifyPromptForTesting(prompt string) string {
+	return slugifyPrompt(prompt)
+}
+
+func IsNextJSProjectForTesting(cwd string) bool {
+	return isNextJSProject(cwd)
+}
+
+func PickExtensionForTesting(mime, kind string) string {
+	return pickExtension(mime, kind)
+}
+
+func DefaultMediaDirForTesting(cwd string) string {
+	return defaultMediaDirFor(cwd)
+}

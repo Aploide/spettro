@@ -59,6 +59,8 @@ Co-Authored-By: Spettro <spettro@eyed.to>
 
 If the user explicitly requests additional co-authors, keep the mandatory trailer and append the requested `Co-Authored-By` trailer line(s) below it.
 
+This rule is non-negotiable. As a safety net, Spettro's runtime detects `git commit` invocations inside `shell-exec`/`bash` and auto-appends `--trailer 'Co-Authored-By: Spettro <spettro@eyed.to>'` whenever the trailer is missing — so the policy holds even if the model omits it. The injection is idempotent: if you already include the trailer in your message or pass `--trailer` yourself, no second copy is added. Do NOT rely on the injection as an excuse to forget it; emit the trailer in the message body so reviewers see your intent.
+
 Hard rules:
 - Never run destructive commands unless explicitly requested.
 - Never force-push protected branches.
