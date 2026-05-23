@@ -605,6 +605,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t := msg.trace
 			m.applyToolTraceToObservability(t)
 			m.publishRemoteToolTrace(t)
+			// When an agent finishes generating an image/video, push the
+			// produced files into every bound Telegram chat. The
+			// dispatcher is a no-op when the relay is offline or nobody
+			// is subscribed, so it stays cheap on the hot path.
+			m.dispatchTelegramMedia(t)
 			if t.Name == "comment" {
 				if t.Status == "success" {
 					if message := extractCommentMessage(t.Args, t.Output); message != "" {

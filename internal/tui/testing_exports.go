@@ -358,6 +358,25 @@ func (m *Model) MarkReadyAndTrustedForTesting() {
 	m.showTrust = false
 }
 
+// ParseMediaTraceOutputForTesting exposes the JSON envelope parser the
+// Telegram media dispatcher uses to extract file paths from grok-image /
+// grok-video tool traces.
+func ParseMediaTraceOutputForTesting(output string) ([]string, string) {
+	return parseMediaTraceOutput(output)
+}
+
+// MediaCaptionForTesting renders the tool-specific Telegram caption the
+// dispatcher would attach to an upload.
+func MediaCaptionForTesting(toolName, prompt string) string {
+	return mediaCaption(toolName, prompt)
+}
+
+// MediaAbsolutePathForTesting resolves a workspace-relative path against a
+// cwd, mirroring the logic used by the Telegram dispatcher.
+func MediaAbsolutePathForTesting(cwd, p string) string {
+	return mediaAbsolutePath(cwd, p)
+}
+
 // RecalcLayoutForTesting forces the layout pass that the public Update would
 // normally run after every message.
 func (m Model) RecalcLayoutForTesting() Model {

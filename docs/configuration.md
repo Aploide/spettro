@@ -63,6 +63,7 @@ Spettro uses both project-local and user-global storage.
 - Both look up the xAI key from the encrypted store (`x-ai`/`xai`) or `$XAI_API_KEY`; configure it once via `/connect x-ai` or by exporting the env var.
 - Outputs are written into the workspace. When no `path` is given, Spettro picks `public/` for Next.js projects and `assets/` everywhere else, slugging the prompt for the filename.
 - These tools are listed in `coding`/`code` agents by default; add them to other agents in `spettro.agents.toml` if you want broader access.
+- When the Telegram relay is running and at least one chat is bound, every successful `grok-image` / `grok-video` call is also broadcast to those chats: images via `sendPhoto`, videos via `sendVideo`, falling back to `sendDocument` for files that exceed Telegram's inline-media caps (10 MB for photos, 50 MB for videos). The originating prompt becomes the Telegram caption (truncated). Upload errors surface through `/telegram status`.
 
 ## Runtime hooks
 
