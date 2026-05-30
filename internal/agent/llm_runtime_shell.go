@@ -17,18 +17,17 @@ import (
 )
 
 func isBlockedCommand(cmd string) bool {
-	l := strings.ToLower(cmd)
+	l := strings.ToLower(normalizeCommand(cmd))
 	blocked := []string{
 		"git reset --hard",
 		"git checkout --",
-		"rm -rf /",
 	}
 	for _, b := range blocked {
 		if strings.Contains(l, b) {
 			return true
 		}
 	}
-	return false
+	return isDangerousRM(cmd)
 }
 
 func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
@@ -144,24 +143,23 @@ func summarizeSubagentToolResults(traces []ToolTrace, limit int) []map[string]st
 	return out
 }
 
-var alwaysAllowedCommandPrefixes = []string{
-	"ls",
-	"pwd",
-	"cat",
-	"head",
-	"tail",
-	"wc",
-	"grep",
-	"rg",
-	"find",
-	"stat",
-	"git status",
-	"git diff",
-	"go test",
-	"go build",
-	"go vet",
-	"make test",
-	"make build",
+var alwaysAllowedCommandTokens = [][]string{
+	{"ls"},
+	{"pwd"},
+	{"cat"},
+	{"head"},
+	{"tail"},
+	{"wc"},
+	{"grep"},
+	{"rg"},
+	{"stat"},
+	{"git", "status"},
+	{"git", "diff"},
+	{"go", "test"},
+	{"go", "build"},
+	{"go", "vet"},
+	{"make", "test"},
+	{"make", "build"},
 }
 
 func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command string) error {
@@ -192,10 +190,10 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		if segNorm == "" {
 			continue
 		}
-		if isBlockedCommand(segNorm) {
+		if isBlockedCommand(seg) {
 			return fmt.Errorf("blocked dangerous command")
 		}
-		if isAlwaysAllowedCommand(segNorm) {
+		if isAlwaysAllowedCommand(seg) {
 			continue
 		}
 		switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
@@ -274,10 +272,10 @@ func splitShellCommandSegments(command string) []string {
 		return nil
 	}
 	var (
-		segments                []string
-		buf                     strings.Builder
-		inSingle, inDouble, esc bool
-		subDepth                int
+		segments                            []string
+		buf                                 strings.Builder
+		inSingle, inDouble, inBacktick, esc bool
+		subDepth                            int
 	)
 	flush := func() {
 		seg := strings.TrimSpace(buf.String())
@@ -299,33 +297,38 @@ func splitShellCommandSegments(command string) []string {
 			esc = true
 			buf.WriteByte(ch)
 		case '\'':
-			if !inDouble {
+			if !inDouble && !inBacktick {
 				inSingle = !inSingle
 			}
 			buf.WriteByte(ch)
 		case '"':
-			if !inSingle {
+			if !inSingle && !inBacktick {
 				inDouble = !inDouble
 			}
 			buf.WriteByte(ch)
+		case '`':
+			if !inSingle && !esc {
+				inBacktick = !inBacktick
+			}
+			buf.WriteByte(ch)
 		case '(':
-			if !inSingle && !inDouble && i > 0 && command[i-1] == '$' {
+			if !inSingle && !inDouble && !inBacktick && i > 0 && command[i-1] == '$' {
 				subDepth++
 			}
 			buf.WriteByte(ch)
 		case ')':
-			if !inSingle && !inDouble && subDepth > 0 {
+			if !inSingle && !inDouble && !inBacktick && subDepth > 0 {
 				subDepth--
 			}
 			buf.WriteByte(ch)
 		case ';':
-			if inSingle || inDouble || subDepth > 0 {
+			if inSingle || inDouble || inBacktick || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
 			flush()
 		case '|':
-			if inSingle || inDouble || subDepth > 0 {
+			if inSingle || inDouble || inBacktick || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
@@ -336,7 +339,7 @@ func splitShellCommandSegments(command string) []string {
 			}
 			flush()
 		case '&':
-			if inSingle || inDouble || subDepth > 0 {
+			if inSingle || inDouble || inBacktick || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
@@ -347,7 +350,7 @@ func splitShellCommandSegments(command string) []string {
 			}
 			buf.WriteByte(ch)
 		case '\n':
-			if inSingle || inDouble || subDepth > 0 {
+			if inSingle || inDouble || inBacktick || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
@@ -360,13 +363,154 @@ func splitShellCommandSegments(command string) []string {
 	return segments
 }
 
-func isAlwaysAllowedCommand(command string) bool {
-	for _, prefix := range alwaysAllowedCommandPrefixes {
-		if command == prefix || strings.HasPrefix(command, prefix+" ") {
+func isAlwaysAllowedCommand(segment string) bool {
+	if segmentHasUnsafeShellFeatures(segment) {
+		return false
+	}
+	tokens := commandTokens(segment)
+	if len(tokens) == 0 {
+		return false
+	}
+	for _, allow := range alwaysAllowedCommandTokens {
+		if len(tokens) < len(allow) {
+			continue
+		}
+		match := true
+		for i := range allow {
+			if strings.ToLower(tokens[i]) != allow[i] {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
 	return false
+}
+
+func segmentHasUnsafeShellFeatures(segment string) bool {
+	var (
+		inSingle, inDouble, esc bool
+	)
+	for i := 0; i < len(segment); i++ {
+		ch := segment[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			esc = true
+			continue
+		}
+		switch ch {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '`':
+			if !inSingle {
+				return true
+			}
+		case '$':
+			if !inSingle && i+1 < len(segment) && segment[i+1] == '(' {
+				return true
+			}
+		case '&':
+			if !inSingle && !inDouble {
+				if i+1 >= len(segment) || segment[i+1] != '&' {
+					return true
+				}
+			}
+		case '<', '>':
+			if !inSingle && !inDouble {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandTokens(segment string) []string {
+	tokens := lexShellTokens(segment)
+	idx := 0
+	for idx < len(tokens) {
+		t := tokens[idx]
+		if t == "" {
+			idx++
+			continue
+		}
+		if t == "env" {
+			idx++
+			continue
+		}
+		if looksLikeEnvAssignment(t) {
+			idx++
+			continue
+		}
+		break
+	}
+	if idx >= len(tokens) {
+		return nil
+	}
+	return tokens[idx:]
+}
+
+func isDangerousRM(command string) bool {
+	tokens := commandTokens(command)
+	if len(tokens) == 0 {
+		return false
+	}
+	idx := 0
+	if strings.ToLower(tokens[idx]) == "sudo" {
+		idx++
+	}
+	if idx >= len(tokens) {
+		return false
+	}
+	cmd := strings.ToLower(tokens[idx])
+	if cmd != "rm" && !strings.HasSuffix(cmd, "/rm") {
+		return false
+	}
+	idx++
+	hasR := false
+	hasF := false
+	targetsRoot := false
+	for ; idx < len(tokens); idx++ {
+		t := tokens[idx]
+		if t == "" {
+			continue
+		}
+		l := strings.ToLower(t)
+		if strings.HasPrefix(l, "-") {
+			switch l {
+			case "--recursive":
+				hasR = true
+			case "--force":
+				hasF = true
+			}
+			if strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "--") {
+				for i := 1; i < len(l); i++ {
+					switch l[i] {
+					case 'r':
+						hasR = true
+					case 'f':
+						hasF = true
+					}
+				}
+			}
+			continue
+		}
+		switch l {
+		case "/", "/.", "/..", "/*":
+			targetsRoot = true
+		}
+	}
+	return hasR && hasF && targetsRoot
 }
 
 func allowedCommandsPath(cwd string) string {

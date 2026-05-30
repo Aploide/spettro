@@ -26,6 +26,10 @@ func IsAlwaysAllowedCommandForTesting(cmd string) bool {
 	return isAlwaysAllowedCommand(cmd)
 }
 
+func IsBlockedCommandForTesting(cmd string) bool {
+	return isBlockedCommand(cmd)
+}
+
 func AllowedCommandsPathForTesting(cwd string) string {
 	return allowedCommandsPath(cwd)
 }

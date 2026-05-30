@@ -21,6 +21,18 @@ func TestIsAlwaysAllowedCommand(t *testing.T) {
 	if !agent.IsAlwaysAllowedCommandForTesting("git diff --staged") {
 		t.Fatal("expected git diff prefix to be always allowed")
 	}
+	if agent.IsAlwaysAllowedCommandForTesting("ls $(rm -rf /)") {
+		t.Fatal("expected command substitution to require approval")
+	}
+	if agent.IsAlwaysAllowedCommandForTesting("cat `rm -rf /`") {
+		t.Fatal("expected backticks to require approval")
+	}
+	if agent.IsAlwaysAllowedCommandForTesting("grep foo file > out.txt") {
+		t.Fatal("expected redirection to require approval")
+	}
+	if agent.IsAlwaysAllowedCommandForTesting("ls & echo hi") {
+		t.Fatal("expected backgrounding to require approval")
+	}
 	if agent.IsAlwaysAllowedCommandForTesting("npm publish") {
 		t.Fatal("npm publish should not be always allowed")
 	}
@@ -76,5 +88,27 @@ func TestSplitShellCommandSegments_RespectsQuotedAndSubshellOperators(t *testing
 		if parts[i] != want[i] {
 			t.Fatalf("segment %d mismatch: want %q, got %q", i, want[i], parts[i])
 		}
+	}
+}
+
+func TestSplitShellCommandSegments_RespectsBackticks(t *testing.T) {
+	parts := agent.SplitShellCommandSegmentsForTesting("echo `a; b` && pwd")
+	want := []string{"echo `a; b`", "pwd"}
+	if len(parts) != len(want) {
+		t.Fatalf("expected %d segments, got %d: %#v", len(want), len(parts), parts)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("segment %d mismatch: want %q, got %q", i, want[i], parts[i])
+		}
+	}
+}
+
+func TestIsBlockedCommand(t *testing.T) {
+	if !agent.IsBlockedCommandForTesting("rm -fr /") {
+		t.Fatal("expected rm -fr / to be blocked")
+	}
+	if agent.IsBlockedCommandForTesting("rm -rf /tmp") {
+		t.Fatal("expected rm -rf /tmp to be allowed by blocklist")
 	}
 }
