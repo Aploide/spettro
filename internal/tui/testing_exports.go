@@ -333,7 +333,8 @@ func (m *Model) RebuildActivitiesFromEventsForTesting(events []session.AgentEven
 }
 
 func ParseRemotePortForTesting(arg string) (int, error) {
-	return parseRemotePort(arg)
+	_, port, err := parseRemoteArg(arg)
+	return port, err
 }
 
 func (m Model) HasRemoteServerForTesting() bool {
@@ -342,6 +343,13 @@ func (m Model) HasRemoteServerForTesting() bool {
 
 func (m Model) RemoteAddressForTesting() string {
 	return m.remoteAddress()
+}
+
+func (m Model) RemoteHostForTesting() string {
+	if m.remoteServer == nil {
+		return ""
+	}
+	return m.remoteServer.Host()
 }
 
 func (m Model) RemoteTokenForTesting() string {

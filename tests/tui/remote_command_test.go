@@ -101,6 +101,25 @@ func TestRemoteCommand_StartStopLifecycle(t *testing.T) {
 	}
 }
 
+func TestRemoteCommand_LocalBindsToLAN(t *testing.T) {
+	m := tui.NewModelForTesting()
+
+	newModel, _ := m.HandleCommandForTesting("/remote local")
+	mm := newModel.(tui.Model)
+	if !mm.HasRemoteServerForTesting() {
+		t.Fatalf("expected remote server to be running after /remote local")
+	}
+	if host := mm.RemoteHostForTesting(); host != "0.0.0.0" {
+		t.Fatalf("expected bind host 0.0.0.0, got %q", host)
+	}
+
+	stopped, _ := mm.HandleCommandForTesting("/remote stop")
+	mmStopped := stopped.(tui.Model)
+	if mmStopped.HasRemoteServerForTesting() {
+		t.Fatalf("expected remote server to be stopped")
+	}
+}
+
 // TestRemoteCommand_TokenIsVisibleInViewport regression-tests the bug where
 // /remote pushed a system message containing the bearer token but never
 // refreshed the viewport, so the user only saw the banner and never the

@@ -1,8 +1,9 @@
 // Package remote exposes a small HTTP/SSE control plane so that an external
 // process can drive a running Spettro session: submit prompts, observe live
 // progress (tool calls, comments, agent output, banners) and request an
-// interrupt. The server only ever binds to 127.0.0.1 and is gated by a bearer
-// token printed when /remote is invoked.
+// interrupt. The server binds to 127.0.0.1 by default (loopback only), but can
+// be configured to listen on 0.0.0.0 when LAN access is desired. It is gated by
+// a bearer token printed when /remote is invoked.
 package remote
 
 import (
@@ -79,6 +80,7 @@ type Server struct {
 	listener   net.Listener
 	httpServer *http.Server
 	port       int
+	bindHost   string
 
 	mu      sync.RWMutex
 	subs    map[chan Event]struct{}
@@ -99,6 +101,9 @@ type Options struct {
 	// Token, if empty, will be generated automatically. Pass a fixed value
 	// only for tests.
 	Token string
+	// BindHost is the interface address to listen on. Defaults to "127.0.0.1"
+	// (loopback only). Set to "0.0.0.0" to accept connections from the LAN.
+	BindHost string
 }
 
 // NewServer constructs a server but does not bind a port yet.
@@ -115,13 +120,21 @@ func NewServer(opts Options) (*Server, error) {
 		}
 		token = generated
 	}
+	host := opts.BindHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	return &Server{
 		token:       token,
+		bindHost:    host,
 		submitCh:    make(chan SubmitRequest, buf),
 		interruptCh: make(chan struct{}, 8),
 		subs:        map[chan Event]struct{}{},
 	}, nil
 }
+
+// Host returns the interface address the server is bound to (e.g. "127.0.0.1" or "0.0.0.0").
+func (s *Server) Host() string { return s.bindHost }
 
 // SetStatus updates the snapshot returned by GET /status. It is safe for
 // concurrent callers.
@@ -163,11 +176,12 @@ func (s *Server) Start(preferredPort int) (port int, fellBack bool, err error) {
 	}
 	s.mu.Unlock()
 
+	bind := s.bindHost
 	var ln net.Listener
 	if preferredPort > 0 {
-		ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferredPort))
+		ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", bind, preferredPort))
 		if err != nil {
-			altLn, altErr := net.Listen("tcp", "127.0.0.1:0")
+			altLn, altErr := net.Listen("tcp", bind+":0")
 			if altErr != nil {
 				return 0, false, fmt.Errorf("remote: listen fallback: %w", altErr)
 			}
@@ -177,7 +191,7 @@ func (s *Server) Start(preferredPort int) (port int, fellBack bool, err error) {
 	} else {
 		for i := 0; i < portScanLimit; i++ {
 			candidate := DefaultPort + i
-			scanLn, scanErr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", candidate))
+			scanLn, scanErr := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, candidate))
 			if scanErr == nil {
 				ln = scanLn
 				fellBack = i > 0
@@ -185,7 +199,7 @@ func (s *Server) Start(preferredPort int) (port int, fellBack bool, err error) {
 			}
 		}
 		if ln == nil {
-			altLn, altErr := net.Listen("tcp", "127.0.0.1:0")
+			altLn, altErr := net.Listen("tcp", bind+":0")
 			if altErr != nil {
 				return 0, false, fmt.Errorf("remote: listen: %w", altErr)
 			}

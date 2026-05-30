@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -66,7 +67,8 @@ func remoteListenCmds(server *remote.Server) []tea.Cmd {
 	}
 }
 
-// handleRemoteCommand implements `/remote`, `/remote :PORT`, `/remote stop`.
+// handleRemoteCommand implements `/remote`, `/remote :PORT`, `/remote local`,
+// and `/remote stop`.
 //
 // All branches must call m.refreshViewport() before returning because the
 // outer handleCommand dispatch returns early for /remote and so doesn't run
@@ -91,17 +93,33 @@ func (m Model) handleRemoteCommand(input string) (tea.Model, tea.Cmd) {
 	}
 
 	preferredPort := 0
+	preferredHost := "127.0.0.1"
 	if len(fields) >= 2 {
-		port, err := parseRemotePort(fields[1])
-		if err != nil {
-			m.showBanner("remote: "+err.Error(), "error")
-			m.refreshViewport()
-			return m, nil
+		switch strings.ToLower(fields[1]) {
+		case "local":
+			preferredHost = "0.0.0.0"
+			if len(fields) >= 3 {
+				_, port, err := parseRemoteArg(fields[2])
+				if err != nil {
+					m.showBanner("remote: "+err.Error(), "error")
+					m.refreshViewport()
+					return m, nil
+				}
+				preferredPort = port
+			}
+		default:
+			host, port, err := parseRemoteArg(fields[1])
+			if err != nil {
+				m.showBanner("remote: "+err.Error(), "error")
+				m.refreshViewport()
+				return m, nil
+			}
+			preferredPort = port
+			preferredHost = host
 		}
-		preferredPort = port
 	}
 
-	server, err := remote.NewServer(remote.Options{})
+	server, err := remote.NewServer(remote.Options{BindHost: preferredHost})
 	if err != nil {
 		m.showBanner("remote: "+err.Error(), "error")
 		m.refreshViewport()
@@ -118,6 +136,16 @@ func (m Model) handleRemoteCommand(input string) (tea.Model, tea.Cmd) {
 
 	m.remoteServer = server
 	m.remoteRequestedPort = preferredPort
+
+	// When binding to all interfaces, show the detected LAN IP so it can be
+	// pasted directly into Spettro Remote on Android.
+	displayHost := server.Host()
+	if displayHost == "0.0.0.0" {
+		if lan := detectLANIP(); lan != "" {
+			displayHost = lan
+		}
+	}
+
 	if fellBack {
 		switch {
 		case preferredPort > 0:
@@ -126,13 +154,17 @@ func (m Model) handleRemoteCommand(input string) (tea.Model, tea.Cmd) {
 			m.showBanner(fmt.Sprintf("default port %d unavailable — listening on %d instead", remote.DefaultPort, port), "warn")
 		}
 	} else {
-		m.showBanner(fmt.Sprintf("remote listening on http://127.0.0.1:%d", port), "success")
+		m.showBanner(fmt.Sprintf("remote listening on http://%s:%d", displayHost, port), "success")
 	}
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d", port)
+	addr := fmt.Sprintf("http://%s:%d", displayHost, port)
+	lanNote := ""
+	if server.Host() == "0.0.0.0" {
+		lanNote = "\n  lan:    accessible from other devices on this network"
+	}
 	m.pushSystemMsg(strings.Join([]string{
 		"remote control enabled",
-		"  url:    " + addr,
+		"  url:    " + addr + lanNote,
 		"  token:  " + server.Token(),
 		"  send:   POST " + addr + "/messages    {\"message\":\"...\"}",
 		"  events: GET  " + addr + "/events     (text/event-stream)",
@@ -179,10 +211,16 @@ func (m Model) printRemoteStatus() (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
+	host := m.remoteServer.Host()
+	if host == "0.0.0.0" {
+		if lan := detectLANIP(); lan != "" {
+			host = lan
+		}
+	}
 	port := m.remoteServer.Port()
 	m.pushSystemMsg(strings.Join([]string{
 		"remote: running",
-		fmt.Sprintf("  url:   http://127.0.0.1:%d", port),
+		fmt.Sprintf("  url:   http://%s:%d", host, port),
 		"  token: " + m.remoteServer.Token(),
 	}, "\n"))
 	m.refreshViewport()
@@ -193,24 +231,55 @@ func (m Model) remoteAddress() string {
 	if m.remoteServer == nil {
 		return ""
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", m.remoteServer.Port())
+	host := m.remoteServer.Host()
+	if host == "0.0.0.0" {
+		if lan := detectLANIP(); lan != "" {
+			host = lan
+		}
+	}
+	return fmt.Sprintf("http://%s:%d", host, m.remoteServer.Port())
 }
 
-// parseRemotePort accepts ":7878" or "7878" and returns a TCP port.
-func parseRemotePort(arg string) (int, error) {
+// parseRemoteArg accepts ":7878", "7878", or "0.0.0.0:7878" and returns
+// (host, port). host defaults to "127.0.0.1" when no host is specified.
+func parseRemoteArg(arg string) (host string, port int, err error) {
 	arg = strings.TrimSpace(arg)
+	// HOST:PORT form
+	if strings.Contains(arg, ".") || strings.Contains(arg, "[") {
+		h, p, splitErr := net.SplitHostPort(arg)
+		if splitErr != nil {
+			return "", 0, fmt.Errorf("invalid address %q (use HOST:PORT or :PORT)", arg)
+		}
+		v, convErr := strconv.Atoi(p)
+		if convErr != nil || v <= 0 || v > 65535 {
+			return "", 0, fmt.Errorf("invalid port %q", p)
+		}
+		return h, v, nil
+	}
+	// :PORT or PORT form
 	arg = strings.TrimPrefix(arg, ":")
 	if arg == "" {
-		return 0, fmt.Errorf("missing port number")
+		return "", 0, fmt.Errorf("missing port number")
 	}
-	v, err := strconv.Atoi(arg)
-	if err != nil {
-		return 0, fmt.Errorf("invalid port %q", arg)
+	v, convErr := strconv.Atoi(arg)
+	if convErr != nil {
+		return "", 0, fmt.Errorf("invalid port %q", arg)
 	}
 	if v <= 0 || v > 65535 {
-		return 0, fmt.Errorf("port out of range: %d", v)
+		return "", 0, fmt.Errorf("port out of range: %d", v)
 	}
-	return v, nil
+	return "127.0.0.1", v, nil
+}
+
+// detectLANIP returns the machine's outbound LAN IP by probing a UDP route.
+// No actual packet is sent; this just asks the OS which source IP it would use.
+func detectLANIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
 // handleRemoteSubmission accepts a prompt that arrived through the remote

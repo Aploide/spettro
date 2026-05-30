@@ -35,6 +35,8 @@
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
 | `/remote` | Start the local HTTP/SSE control plane on `127.0.0.1` (default port `7878`). |
 | `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
+| `/remote local` | Start the LAN HTTP/SSE control plane on `0.0.0.0` (default port `7878`). |
+| `/remote local :PORT` | Start the LAN control plane on a specific port; falls back to a free port if it is busy. |
 | `/remote stop` | Stop the running control plane. |
 | `/remote status` | Print the current URL and bearer token. |
 | `/telegram setup <token>` | Save a Telegram BotFather token (encrypted) and validate it via `getMe`. Alias: `/tg`. |
