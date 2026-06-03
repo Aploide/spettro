@@ -33,9 +33,13 @@ func modeColor(colorName string) lipgloss.Color {
 		return lipgloss.Color("#F59E0B")
 	case "magenta":
 		return lipgloss.Color("#C084FC")
+	case "purple":
+		return lipgloss.Color("#BD93F9")
 	case "red":
 		return lipgloss.Color("#EF4444")
 	// Legacy mode-name fallbacks for backward compatibility
+	case "plan":
+		return lipgloss.Color("#BD93F9")
 	case "planning":
 		return lipgloss.Color("#A78BFA")
 	case "coding":

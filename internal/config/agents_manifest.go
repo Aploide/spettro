@@ -533,11 +533,12 @@ var validAgentColors = map[string]struct{}{
 	"magenta": {},
 	"red":     {},
 	"white":   {},
+	"purple":  {},
 }
 
 func validateAgentColor(color string) error {
 	if _, ok := validAgentColors[color]; !ok {
-		return fmt.Errorf("unsupported color %q; must be one of: blue, green, cyan, yellow, magenta, red, white", color)
+		return fmt.Errorf("unsupported color %q; must be one of: blue, green, cyan, yellow, magenta, red, white, purple", color)
 	}
 	return nil
 }
