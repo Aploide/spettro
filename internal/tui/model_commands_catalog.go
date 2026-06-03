@@ -25,7 +25,10 @@ var allCommands = []commandDef{
 	{"/hooks", "list effective runtime hooks"},
 	{"/plan", "switch plan mode or run plan task"},
 	{"/permissions", "show/set permission level"},
-	{"/remote", "start local HTTP control plane (optional :PORT, /remote stop|status)"},
+	{"/remote", "start loopback HTTP control plane on 127.0.0.1 (optional :PORT)"},
+	{"/remote local", "start LAN HTTP control plane on 0.0.0.0 (optional :PORT)"},
+	{"/remote stop", "stop the running remote control plane"},
+	{"/remote status", "print remote control URL and bearer token"},
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
 	{"/clear", "clear conversation history"},
@@ -130,9 +133,10 @@ const helpText = `commands:
   /compact [x]   summarize conversation (optional focus instruction)
   /compact auto  view/set auto-compact (status|on|off)
   /compact policy show compact thresholds and counters
-  /remote [:port] start local HTTP/SSE control plane on 127.0.0.1
-  /remote stop   stop the running remote control plane
-  /remote status print remote control URL and bearer token
+  /remote [:port]       start local HTTP/SSE control plane on 127.0.0.1
+  /remote local [:port] start LAN HTTP/SSE control plane on 0.0.0.0
+  /remote stop          stop the running remote control plane
+  /remote status        print remote control URL and bearer token
   /telegram setup <token>  configure BotFather token (alias /tg)
   /telegram allow <@u|id>  allow a username or chat ID to drive Spettro
   /telegram start|stop|status  control the Telegram relay
@@ -143,7 +147,11 @@ keys:
   shift+tab      cycle mode (plan → coding → ask)
   f2             cycle to next favorite model
   shift+f2       cycle to previous favorite model
+  ctrl+y         copy last assistant response to clipboard
+  ctrl+f         attach a file to the next message
+  ctrl+r         remove last file attachment
   ctrl+b         toggle side activity panel
+  ctrl+o         toggle expanded tool context in side panel
   ctrl+t         toggle text-select mode (release mouse for terminal selection)
 
 in model selector:

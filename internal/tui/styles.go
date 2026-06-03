@@ -16,6 +16,9 @@ var (
 	colorToolRun  = lipgloss.Color("#60A5FA")
 	colorToolOK   = lipgloss.Color("#10B981")
 	colorToolErr  = lipgloss.Color("#EF4444")
+
+	colorHeaderBg = lipgloss.Color("#0D0D0D")
+	colorSelBg    = lipgloss.Color("#1F2937") // selection highlight bg (new)
 )
 
 func modeColor(colorName string) lipgloss.Color {
@@ -30,9 +33,13 @@ func modeColor(colorName string) lipgloss.Color {
 		return lipgloss.Color("#F59E0B")
 	case "magenta":
 		return lipgloss.Color("#C084FC")
+	case "purple":
+		return lipgloss.Color("#BD93F9")
 	case "red":
 		return lipgloss.Color("#EF4444")
 	// Legacy mode-name fallbacks for backward compatibility
+	case "plan":
+		return lipgloss.Color("#BD93F9")
 	case "planning":
 		return lipgloss.Color("#A78BFA")
 	case "coding":

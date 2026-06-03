@@ -190,7 +190,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		if segNorm == "" {
 			continue
 		}
-		if isBlockedCommand(seg) {
+		if r.permission != config.PermissionYOLO && isBlockedCommand(seg) {
 			return fmt.Errorf("blocked dangerous command")
 		}
 		if isAlwaysAllowedCommand(seg) {

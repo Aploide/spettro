@@ -79,7 +79,8 @@ Spettro commands are entered with a leading `/`.
 - `/clear` auto-save and clear current conversation
 - `/resume` load a previous saved conversation
 - `/init` analyze the repo and create/update `SPETTRO.md`
-- `/remote [:port]` expose a local HTTP/SSE control plane (see [`docs/remote.md`](docs/remote.md))
+- `/remote [:port]` expose a loopback HTTP/SSE control plane (see [`docs/remote.md`](docs/remote.md))
+- `/remote local [:port]` expose the control plane to LAN devices on `0.0.0.0` (see [`docs/remote.md`](docs/remote.md))
 - `/telegram setup <token>` configure a Telegram bot relay so you can drive Spettro from a chat (see [`docs/telegram.md`](docs/telegram.md)). Alias: `/tg`.
 
 For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).

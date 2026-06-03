@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -26,7 +27,7 @@ var planApprovalOptions = []string{
 func (m Model) updatePlanApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	n := len(planApprovalOptions)
 	switch msg.String() {
-	case "up", "ctrl+p":
+	case "up":
 		if m.planApprovalCursor > 0 {
 			m.planApprovalCursor--
 		}
@@ -123,7 +124,7 @@ func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	n := len(shellApprovalOptions)
 	switch msg.String() {
-	case "up", "ctrl+p":
+	case "up":
 		if m.approvalCursor > 0 {
 			m.approvalCursor--
 		}
@@ -227,7 +228,7 @@ func (m Model) updateAskUserQuestion(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
-	case "up", "ctrl+p":
+	case "up":
 		if m.questionCursor > 0 {
 			m.questionCursor--
 		}
@@ -481,7 +482,7 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "ctrl+c":
 			m.showConnect = false
 			return m, nil
-		case "up", "ctrl+p", "shift+tab":
+		case "up", "shift+tab":
 			if m.connectCursor > 0 {
 				m.connectCursor--
 			}
@@ -915,7 +916,7 @@ func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.showSelector = false
 		return m, nil
-	case "up", "ctrl+p", "shift+tab":
+	case "up", "shift+tab":
 		if m.selCursor > 0 {
 			m.selCursor--
 		}
@@ -974,7 +975,18 @@ func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) viewSelector() string {
 	mc := m.currentColor()
-	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select model")
+
+	dialogWidth := 70
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+	innerW := dialogInnerWidth(dialogWidth)
+
+	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select model")
+	title := diagFillTitle(titleLabel, innerW)
 
 	if len(m.providers.ConnectedModels(m.cfg.APIKeys)) == 0 {
 		msg := lipgloss.JoinVertical(lipgloss.Left,
@@ -988,7 +1000,7 @@ func (m Model) viewSelector() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(50).
+			Width(dialogWidth).
 			Padding(2, 4).
 			Render(msg)
 		return lipgloss.Place(m.width, m.height,
@@ -999,8 +1011,9 @@ func (m Model) viewSelector() string {
 		)
 	}
 
-	cursor := lipgloss.NewStyle().Foreground(mc).Render("_")
-	filterLine := styleMuted.Render("search  ") +
+	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
+	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
+	filterLine := promptStyle.Render(">") + " " +
 		lipgloss.NewStyle().Foreground(colorText).Render(m.selFilter) +
 		cursor
 
@@ -1025,50 +1038,53 @@ func (m Model) viewSelector() string {
 		isCurrent := mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel
 		isFav := m.favorites[mod.Provider+":"+mod.Name]
 
-		var prefix string
-		var nameStyle, tagStyle lipgloss.Style
-		if isSelected {
-			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			nameStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
-			tagStyle = lipgloss.NewStyle().Foreground(colorMuted)
-		} else {
-			prefix = "  "
-			nameStyle = lipgloss.NewStyle().Foreground(colorMuted)
-			tagStyle = lipgloss.NewStyle().Foreground(colorDim)
-		}
-
 		displayName := mod.DisplayName
 		if displayName == "" {
 			displayName = mod.Name
 		}
+		tag := mod.Tag()
 
-		var badges string
-		if isFav {
-			badges += lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("★ ")
+		if isSelected {
+			prefix := "› "
+			if isFav {
+				prefix += "★ "
+			}
+			if isCurrent {
+				prefix += "● "
+			}
+			label := prefix + displayName
+			if tag != "" {
+				label += "  " + tag
+			}
+			rows = append(rows, lipgloss.NewStyle().
+				Background(colorSelBg).
+				Foreground(colorText).
+				Bold(true).
+				Width(innerW).
+				Render(label))
+		} else {
+			prefix := "  "
+			nameStyle := lipgloss.NewStyle().Foreground(colorMuted)
+			tagStyle := lipgloss.NewStyle().Foreground(colorDim)
+			var badges string
+			if isFav {
+				badges += lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("★ ")
+			}
+			if isCurrent {
+				badges += lipgloss.NewStyle().Foreground(mc).Render("● ")
+			}
+			row := prefix + badges + nameStyle.Render(displayName)
+			if tag != "" {
+				row += "  " + tagStyle.Render(tag)
+			}
+			rows = append(rows, row)
 		}
-		if isCurrent {
-			badges += lipgloss.NewStyle().Foreground(mc).Render("● ")
-		}
-
-		tag := tagStyle.Render(mod.Tag())
-		row := prefix + badges + nameStyle.Render(displayName)
-		if tag != "" {
-			row += "  " + tag
-		}
-		rows = append(rows, row)
 	}
 	if len(m.selItems) == 0 {
 		rows = append(rows, styleMuted.Render("  no matches"))
 	}
 
 	hint := styleMuted.Render("↑↓ navigate  enter select  f favorite  c connect  esc close")
-	dialogWidth := 70
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
 
 	maxRows := m.height - 12
 	if maxRows < 4 {
@@ -1118,6 +1134,7 @@ func (m Model) viewConnect() string {
 	if dialogWidth < 30 {
 		dialogWidth = 30
 	}
+	innerW := dialogInnerWidth(dialogWidth)
 
 	if m.connectStep == 1 {
 		provName := m.connectProvider
@@ -1139,7 +1156,8 @@ func (m Model) viewConnect() string {
 			}
 		}
 
-		title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ connect " + provName)
+		titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ connect " + provName)
+		title := diagFillTitle(titleLabel, innerW)
 		inner := lipgloss.JoinVertical(lipgloss.Left,
 			title, "",
 			envHint,
@@ -1164,9 +1182,11 @@ func (m Model) viewConnect() string {
 		)
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ connect provider")
-	cursor := lipgloss.NewStyle().Foreground(mc).Render("_")
-	filterLine := styleMuted.Render("search  ") +
+	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ connect provider")
+	title := diagFillTitle(titleLabel, innerW)
+	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
+	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
+	filterLine := promptStyle.Render(">") + " " +
 		lipgloss.NewStyle().Foreground(colorText).Render(m.connectFilter) +
 		cursor
 
@@ -1198,22 +1218,25 @@ func (m Model) viewConnect() string {
 			name = pi.ID
 		}
 
-		var prefix string
-		var nameStyle lipgloss.Style
 		if isSelected {
-			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			nameStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			label := "› " + name
+			if isConnected {
+				label += "  ✓ connected"
+			}
+			rows = append(rows, lipgloss.NewStyle().
+				Background(colorSelBg).
+				Foreground(colorText).
+				Bold(true).
+				Width(innerW).
+				Render(label))
 		} else {
-			prefix = "  "
-			nameStyle = lipgloss.NewStyle().Foreground(colorMuted)
+			nameStyle := lipgloss.NewStyle().Foreground(colorMuted)
+			suffix := ""
+			if isConnected {
+				suffix = "  " + lipgloss.NewStyle().Foreground(colorSuccess).Render("✓ connected")
+			}
+			rows = append(rows, "  "+nameStyle.Render(name)+suffix)
 		}
-
-		suffix := ""
-		if isConnected {
-			suffix = "  " + lipgloss.NewStyle().Foreground(colorSuccess).Render("✓ connected")
-		}
-
-		rows = append(rows, prefix+nameStyle.Render(name)+suffix)
 	}
 	if len(m.connectItems) == 0 {
 		rows = append(rows, styleMuted.Render("  no matches"))
@@ -1263,6 +1286,7 @@ func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []st
 
 func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFiles []string, images []string, approved bool) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.agentStartAt = time.Now()
 	m.activeAgentID = spec.ID
 	m.publishRemoteState("agent_start")
 	m.refreshModifiedFiles()

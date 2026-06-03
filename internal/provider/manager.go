@@ -3,9 +3,13 @@ package provider
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"spettro/internal/budget"
 	"spettro/internal/models"
@@ -271,4 +275,84 @@ func finalizeResponse(resp Response, providerName, modelName string, allParts []
 		resp.EstimatedTokens = budget.EstimateTokens(allParts...)
 	}
 	return resp
+}
+
+// VerifyKey checks that apiKey is accepted by the provider using a lightweight
+// GET request against the provider's models (or equivalent) endpoint.
+// Ported from CRUSH's TestConnection logic.
+func (m *Manager) VerifyKey(ctx context.Context, providerID, apiKey string) error {
+	m.mu.RLock()
+	baseURL := m.providerAPIs[providerID]
+	m.mu.RUnlock()
+
+	if baseURL == "" {
+		if known, ok := knownBaseURLs[providerID]; ok {
+			baseURL = known
+		} else if strings.HasPrefix(providerID, "http://") || strings.HasPrefix(providerID, "https://") {
+			baseURL = strings.TrimRight(providerID, "/") + "/v1"
+		} else {
+			baseURL = "https://api.openai.com/v1"
+		}
+	}
+	base := strings.TrimRight(baseURL, "/")
+
+	var testURL string
+	headers := map[string]string{}
+	lenient := false // when true, only 401 counts as failure
+
+	switch providerID {
+	case "anthropic":
+		testURL = "https://api.anthropic.com/v1/models"
+		headers["x-api-key"] = apiKey
+		headers["anthropic-version"] = "2023-06-01"
+
+	case "google":
+		// Google's native endpoint uses a query-param key, not a Bearer header.
+		testURL = "https://generativelanguage.googleapis.com/v1beta/models?key=" + url.QueryEscape(apiKey)
+
+	case "openrouter":
+		// OpenRouter exposes /credits for validation instead of /models.
+		testURL = base + "/credits"
+		headers["Authorization"] = "Bearer " + apiKey
+
+	case "zai":
+		// ZAI returns non-200 for unauthenticated requests but not a clean 401,
+		// so only treat 401 as a hard failure.
+		testURL = base + "/models"
+		headers["Authorization"] = "Bearer " + apiKey
+		lenient = true
+
+	default:
+		testURL = base + "/models"
+		headers["Authorization"] = "Bearer " + apiKey
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(tctx, http.MethodGet, testURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if lenient {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("key rejected (401)")
+		}
+		return nil
+	}
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return fmt.Errorf("key rejected (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }

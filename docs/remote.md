@@ -6,7 +6,8 @@ session: submit prompts, stream live progress (tool calls, comments, agent
 output, banners, approval/ask-user prompts) and request an interrupt.
 
 The control plane is purely opt-in. It only starts when you run `/remote`
-inside the TUI, only ever binds to `127.0.0.1`, and is gated by a
+inside the TUI. By default it binds to `127.0.0.1`; use `/remote local` to
+bind to `0.0.0.0` so other devices on your LAN can reach it. It is gated by a
 per-session bearer token printed to the chat when it starts.
 
 ## Starting and stopping
@@ -15,12 +16,14 @@ per-session bearer token printed to the chat when it starts.
 | --- | --- |
 | `/remote` | Bind on `127.0.0.1:7878`. If that port is busy, scan upward (`7879`, `7880`, …) for ten attempts before letting the OS pick a free port. |
 | `/remote :PORT` | Try the requested port first. If it is busy, fall back to an OS-assigned free port and warn you in the banner. |
+| `/remote local` | Bind on `0.0.0.0:7878` (LAN-accessible). If that port is busy, scan upward (`7879`, `7880`, …) for ten attempts before letting the OS pick a free port. |
+| `/remote local :PORT` | Try the requested port first on `0.0.0.0`. If it is busy, fall back to an OS-assigned free port and warn you in the banner. |
 | `/remote stop` (or `off`, `shutdown`) | Stop the server, close all live SSE connections, and free the port. |
 | `/remote status` | Print the current URL and bearer token without restarting anything. |
 
 When the server is bound, the TUI prints a system message that contains:
 
-- the URL (`http://127.0.0.1:<port>`)
+- the URL (`http://127.0.0.1:<port>` or the LAN IP printed for `/remote local`)
 - the bearer token (a fresh random hex string per `/remote` invocation)
 - a quick reference for every endpoint
 
@@ -37,16 +40,21 @@ Every endpoint requires the bearer token. Either:
 
 Anything else returns `401 unauthorized`.
 
-The server only ever listens on the loopback interface so it cannot be
-reached from another machine; the token then prevents same-machine
-cross-origin attacks (browsers cannot set the `Authorization` header
-without an explicit CORS preflight, and the server never enables CORS).
+By default the server only listens on the loopback interface, so it cannot be
+reached from another machine. When you opt into `/remote local`, it binds to
+`0.0.0.0` and becomes reachable from other devices on the same network, so
+ensure your LAN is trusted and keep the bearer token private. The token
+still prevents same-machine cross-origin attacks (browsers cannot set the
+`Authorization` header without an explicit CORS preflight, and the server
+never enables CORS).
 
 ## Endpoints
 
 ### `POST /messages`
 
-Submit a prompt or slash command exactly as if the user typed it.
+Submit a prompt or slash command exactly as if the user typed it. If you used
+`/remote local`, replace `127.0.0.1` in the examples below with the LAN IP
+shown in the banner.
 
 ```http
 POST /messages
