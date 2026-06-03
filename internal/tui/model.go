@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -167,6 +168,12 @@ type queuedPrompt struct {
 	Images         []string
 }
 
+type attachmentItem struct {
+	Kind    string // "file"
+	Path    string // absolute path
+	RelPath string // relative to cwd (shown in chip)
+}
+
 type setupState struct {
 	step     int
 	provider string
@@ -288,6 +295,15 @@ type Model struct {
 	// New() when initial state requires background work (e.g. autostarting
 	// the Telegram relay) before the first tea event is processed.
 	startupCmds []tea.Cmd
+
+	// Attachments (ctrl+f to attach, ctrl+r to remove)
+	attachments      []attachmentItem
+	showAttachPrompt bool
+	attachDraft      string // textarea value saved while attach prompt is open
+
+	// Desktop notifications
+	agentStartAt    time.Time
+	terminalFocused bool
 
 	cwd       string
 	store     *storage.Store
@@ -466,6 +482,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.publishRemoteState("agent_done")
+		m.maybeNotify(msg.err)
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -520,6 +537,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.publishRemoteState("plan_done")
+		m.maybeNotify(msg.err)
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -697,6 +715,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshViewport()
 		}
+	case tea.FocusMsg:
+		m.terminalFocused = true
+	case tea.BlurMsg:
+		m.terminalFocused = false
 	case bannerClearMsg:
 		m.banner = ""
 		m.bannerKind = ""
@@ -927,7 +949,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(5*time.Second, func(time.Time) tea.Msg { return quitWarningMsg{} })
 	case "ctrl+q":
 		return m, tea.Quit
-	case "up", "ctrl+p":
+	case "up":
 		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
 			if m.cmdCursor > 0 {
 				m.cmdCursor--
@@ -941,6 +963,49 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.syncInputSuggestions()
 			return m, nil
 		}
+	case "ctrl+y":
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			if m.messages[i].Role == RoleAssistant {
+				if err := clipboard.WriteAll(m.messages[i].Content); err != nil {
+					m.showBanner("clipboard error: "+err.Error(), "error")
+				} else {
+					m.showBanner("last response copied to clipboard", "success")
+				}
+				return m, nil
+			}
+		}
+		m.showBanner("no response to copy yet", "info")
+		return m, nil
+	case "ctrl+f":
+		if m.showAttachPrompt {
+			m.ta.Reset()
+			m.ta.SetValue(m.attachDraft)
+			m.ta.Placeholder = "enter message…"
+			m.showAttachPrompt = false
+			return m, nil
+		}
+		m.attachDraft = m.ta.Value()
+		m.ta.Reset()
+		m.ta.Placeholder = "file path to attach…"
+		m.showAttachPrompt = true
+		m.showBanner("enter file path and press enter (esc cancels)", "info")
+		return m, nil
+	case "ctrl+r":
+		if m.showAttachPrompt {
+			m.ta.Reset()
+			m.ta.SetValue(m.attachDraft)
+			m.ta.Placeholder = "enter message…"
+			m.showAttachPrompt = false
+			return m, nil
+		}
+		if len(m.attachments) > 0 {
+			removed := m.attachments[len(m.attachments)-1]
+			m.attachments = m.attachments[:len(m.attachments)-1]
+			m.showBanner("removed attachment: "+removed.RelPath, "info")
+		} else {
+			m.showBanner("no attachments to remove", "info")
+		}
+		return m, nil
 	case "down", "ctrl+n":
 		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
 			if m.cmdCursor < len(m.cmdItems)-1 {
@@ -1029,6 +1094,17 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
+		if m.showAttachPrompt {
+			path := strings.TrimSpace(m.ta.Value())
+			m.ta.Reset()
+			m.ta.SetValue(m.attachDraft)
+			m.ta.Placeholder = "enter message…"
+			m.showAttachPrompt = false
+			if path != "" {
+				m.addAttachment(path)
+			}
+			return m, nil
+		}
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
 			current := strings.TrimSpace(m.ta.Value())
@@ -1078,6 +1154,13 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handlePrompt(input)
 	case "esc":
+		if m.showAttachPrompt {
+			m.ta.Reset()
+			m.ta.SetValue(m.attachDraft)
+			m.ta.Placeholder = "enter message…"
+			m.showAttachPrompt = false
+			return m, nil
+		}
 		if m.thinking {
 			m.interruptRun("Stopped by user.", true)
 			m.refreshViewport()
@@ -1291,9 +1374,15 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 	}
 	mentionedFiles := m.extractMentionedFiles(input)
 	prompt := injectMentionGuidance(input, mentionedFiles)
+	prompt = m.injectAttachments(prompt)
+	sentAttachments := append([]attachmentItem(nil), m.attachments...)
+	m.attachments = nil
 	if m.thinking {
 		m.queuePrompt(input, prompt, mentionedFiles, nil)
 		m.pushSystemMsg(fmt.Sprintf("queued request: %s", truncateLabel(input, 140)))
+		if len(sentAttachments) > 0 {
+			m.pushSystemMsg(fmt.Sprintf("(with %d attachment(s))", len(sentAttachments)))
+		}
 		m.showBanner("request queued for when the current run finishes", "info")
 		m.refreshViewport()
 		return m, nil

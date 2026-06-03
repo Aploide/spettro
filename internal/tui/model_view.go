@@ -35,34 +35,52 @@ func (m Model) View() string {
 
 	header := m.viewHeader()
 	paneW := m.paneWidth()
-	eyes := renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)
-	sep := m.viewSep(paneW)
-	content := m.vp.View()
 	inputArea := m.viewInput(paneW)
 	statusBar := m.viewStatusBar(paneW)
-
-	parts := []string{
-		eyes,
-		sep,
-		content,
-		sep,
-	}
 	sideW := m.sidePanelWidth()
-	if sideW <= 0 {
-		if pa := m.renderParallelAgents(); pa != "" {
-			parts = append(parts, pa)
+
+	var parts []string
+	if len(m.cmdItems) > 0 {
+		// Overlay spans the full inner area. Fixed costs: header(1)+input(6)+status(1)=8.
+		innerH := m.height - 8
+		if innerH < 4 {
+			innerH = 4
 		}
+		overlay := m.viewCmdOverlay(m.vp.Width, innerH)
+		parts = []string{overlay, inputArea, statusBar}
+	} else {
+		eyes := renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)
+		sep := m.viewSep(paneW)
+		content := m.vp.View()
+		parts = []string{eyes, sep, content, sep}
+		if sideW <= 0 {
+			if pa := m.renderParallelAgents(); pa != "" {
+				parts = append(parts, pa)
+			}
+		}
+		parts = append(parts, inputArea, statusBar)
 	}
-	parts = append(parts, inputArea, statusBar)
+
 	mainPane := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	if sideW <= 0 {
 		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
 	}
 	sidePane := m.viewSidePanel(sideW)
-	divider := lipgloss.NewStyle().Foreground(colorDim).Render("│")
+	divider := lipgloss.NewStyle().Foreground(colorBorder).Render("│")
 	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
+}
+
+// diagFillTitle builds a section header like "Title ╱╱╱╱╱╱╱╱╱╱╱" filling innerWidth.
+func diagFillTitle(label string, innerWidth int) string {
+	lw := lipgloss.Width(label)
+	remaining := innerWidth - lw - 1
+	if remaining <= 0 {
+		return label
+	}
+	fill := lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("╱", remaining))
+	return label + " " + fill
 }
 
 func (m Model) viewHeader() string {
@@ -110,8 +128,6 @@ func (m Model) viewHeader() string {
 		modelLabel = modelLabel[:12]
 	}
 	permText := string(m.cfg.Permission)
-	// Append a "thinking:<level>" marker when extended thinking is on so
-	// users always see at a glance which compute budget is active.
 	thinkingTag := ""
 	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" {
 		thinkingTag = "thinking:" + level
@@ -152,7 +168,7 @@ func (m Model) viewHeader() string {
 	return lipgloss.NewStyle().
 		Width(m.width).
 		MaxWidth(m.width).
-		Background(lipgloss.Color("#0D0D0D")).
+		Background(colorHeaderBg).
 		Render(row)
 }
 
@@ -162,54 +178,129 @@ func (m Model) viewSep(width int) string {
 		Render(strings.Repeat("─", width))
 }
 
-func (m Model) viewCommandPalette(width int) string {
-	if len(m.cmdItems) == 0 {
-		return ""
+// dialogInnerWidth returns the usable content width for a dialog of dialogWidth,
+// accounting for 2-char padding on each side.
+func dialogInnerWidth(dialogWidth int) int {
+	w := dialogWidth - 4
+	if w < 4 {
+		w = 4
 	}
+	return w
+}
+
+// viewCmdOverlay renders the /command suggestions as a centered overlay in the
+// content area so the layout (eyes, viewport, input, status) never shifts.
+func (m Model) viewCmdOverlay(width, height int) string {
 	mc := m.currentColor()
+
+	dialogWidth := width - 4
+	if dialogWidth > 68 {
+		dialogWidth = 68
+	}
+	if dialogWidth < 32 {
+		dialogWidth = 32
+	}
+	innerW := dialogInnerWidth(dialogWidth)
+
+	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ commands")
+	title := diagFillTitle(titleLabel, innerW)
+
+	// Descriptions must fit on one line to prevent the dialog from growing taller
+	// than the height passed to lipgloss.Place (which doesn't clip overflow).
+	maxDescW := innerW - 18
+	if maxDescW < 8 {
+		maxDescW = 8
+	}
+
 	var rows []string
 	for i, cmd := range m.cmdItems {
-		var nameStyle, descStyle lipgloss.Style
+		desc := truncateLabel(cmd.desc, maxDescW)
 		if i == m.cmdCursor {
-			nameStyle = lipgloss.NewStyle().Foreground(mc).Bold(true)
-			descStyle = lipgloss.NewStyle().Foreground(colorText)
+			label := fmt.Sprintf("%-16s  %s", cmd.name, desc)
+			rows = append(rows, lipgloss.NewStyle().
+				Background(colorSelBg).
+				Foreground(colorText).
+				Bold(true).
+				Width(innerW).
+				Render(label))
 		} else {
-			nameStyle = lipgloss.NewStyle().Foreground(colorText)
-			descStyle = lipgloss.NewStyle().Foreground(colorMuted)
+			nameStyle := lipgloss.NewStyle().Foreground(colorText)
+			descStyle := lipgloss.NewStyle().Foreground(colorMuted)
+			rows = append(rows, nameStyle.Render(fmt.Sprintf("%-16s", cmd.name))+"  "+descStyle.Render(desc))
 		}
-		rows = append(rows, nameStyle.Render(fmt.Sprintf("%-14s", cmd.name))+"  "+descStyle.Render(cmd.desc))
 	}
-	body := strings.Join(rows, "\n")
+	if len(m.cmdItems) == 0 {
+		rows = append(rows, styleMuted.Render("  no matches"))
+	}
+
 	hint := styleMuted.Render("enter inserts  enter again runs")
-	return lipgloss.NewStyle().
+
+	maxRows := len(rows)
+	if height > 0 && maxRows > height-8 {
+		maxRows = height - 8
+	}
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	start := 0
+	if len(rows) > maxRows {
+		start = m.cmdCursor - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		if start+maxRows > len(rows) {
+			start = len(rows) - maxRows
+		}
+		rows = rows[start : start+maxRows]
+	}
+
+	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
-		Width(width - 4).
-		PaddingLeft(2).PaddingRight(2).
-		Render(body + "\n\n" + hint)
+		BorderForeground(mc).
+		Width(dialogWidth).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			"",
+			strings.Join(rows, "\n"),
+			"",
+			hint,
+		))
+
+	return lipgloss.Place(width, height,
+		lipgloss.Center, lipgloss.Center,
+		dialog,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(colorDim),
+	)
 }
 
 func (m Model) viewMentionPalette(width int) string {
 	if len(m.mentionItems) == 0 {
 		return ""
 	}
-	mc := m.currentColor()
+	boxW := width - 4
+	innerW := dialogInnerWidth(boxW)
+	titleLabel := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("available files")
+	title := diagFillTitle(titleLabel, innerW)
 	var rows []string
 	for i, item := range m.mentionItems {
-		style := lipgloss.NewStyle().Foreground(colorMuted)
-		prefix := "  "
 		if i == m.mentionCursor {
-			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			style = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			rows = append(rows, lipgloss.NewStyle().
+				Background(colorSelBg).
+				Foreground(colorText).
+				Bold(true).
+				Width(innerW).
+				Render("› "+item))
+		} else {
+			rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+item))
 		}
-		rows = append(rows, prefix+style.Render(item))
 	}
-	title := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("available files")
 	hint := styleMuted.Render("↑↓ navigate  enter inserts mention")
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
-		Width(width - 4).
+		Width(boxW).
 		PaddingLeft(2).PaddingRight(2).
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
@@ -284,6 +375,12 @@ func (m Model) viewInput(width int) string {
 			))
 		}
 	} else {
+		if chips := m.renderAttachmentChips(mc); chips != "" {
+			lines = append(lines, chips)
+		}
+		if m.showAttachPrompt {
+			lines = append(lines, styleMuted.Render("  attach file: (esc cancels)"))
+		}
 		lines = append(lines, m.ta.View())
 	}
 	boxStyle := lipgloss.NewStyle().
@@ -295,20 +392,12 @@ func (m Model) viewInput(width int) string {
 	inner := strings.Join(lines, "\n")
 	inputBox := boxStyle.Render(inner)
 
-	palette := m.viewCommandPalette(width)
+	// cmd overlay is shown in content area; only @mention inline popup stays here
 	mentionPalette := m.viewMentionPalette(width)
-	if palette == "" && mentionPalette == "" {
+	if mentionPalette == "" {
 		return inputBox
 	}
-	var blocks []string
-	if palette != "" {
-		blocks = append(blocks, palette)
-	}
-	if mentionPalette != "" {
-		blocks = append(blocks, mentionPalette)
-	}
-	blocks = append(blocks, inputBox)
-	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
+	return lipgloss.JoinVertical(lipgloss.Left, mentionPalette, inputBox)
 }
 
 func (m Model) renderParallelAgents() string {
@@ -488,7 +577,7 @@ func (m Model) viewStatusBar(width int) string {
 	bar := leftPadded + right + " "
 	return lipgloss.NewStyle().
 		Width(width).
-		Background(lipgloss.Color("#0D0D0D")).
+		Background(colorHeaderBg).
 		PaddingLeft(1).
 		Render(bar)
 }
@@ -500,14 +589,19 @@ func (m Model) statusBarMessage() string {
 	hints := []string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("ctrl+b: panel"),
-		styleMuted.Render("ctrl+o: context"),
+		styleMuted.Render("ctrl+y: copy"),
 	}
 	if m.mouseCaptureOff {
 		hints = append(hints, styleWarn.Render("ctrl+t: mouse off"))
 	} else {
 		hints = append(hints, styleMuted.Render("ctrl+t: select"))
 	}
-	return strings.Join(hints, styleDim.Render("  ·  "))
+	// When the side panel is hidden, show git branch inline
+	if m.sidePanelWidth() == 0 && strings.TrimSpace(m.gitBranch) != "" {
+		branchHint := styleMuted.Render("⎇ " + truncateLabel(m.gitBranch, 20))
+		hints = append(hints, branchHint)
+	}
+	return strings.Join(hints, styleDim.Render(" • "))
 }
 
 func renderStatusBanner(text, kind string) string {
@@ -886,3 +980,4 @@ func (m Model) viewSidePanel(width int) string {
 		Padding(0, 1).
 		Render(content)
 }
+

@@ -147,7 +147,11 @@ keys:
   shift+tab      cycle mode (plan → coding → ask)
   f2             cycle to next favorite model
   shift+f2       cycle to previous favorite model
+  ctrl+y         copy last assistant response to clipboard
+  ctrl+f         attach a file to the next message
+  ctrl+r         remove last file attachment
   ctrl+b         toggle side activity panel
+  ctrl+o         toggle expanded tool context in side panel
   ctrl+t         toggle text-select mode (release mouse for terminal selection)
 
 in model selector:

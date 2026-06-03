@@ -16,6 +16,9 @@ var (
 	colorToolRun  = lipgloss.Color("#60A5FA")
 	colorToolOK   = lipgloss.Color("#10B981")
 	colorToolErr  = lipgloss.Color("#EF4444")
+
+	colorHeaderBg = lipgloss.Color("#0D0D0D")
+	colorSelBg    = lipgloss.Color("#1F2937") // selection highlight bg (new)
 )
 
 func modeColor(colorName string) lipgloss.Color {

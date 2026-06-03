@@ -924,9 +924,6 @@ func (m Model) recalcLayout() Model {
 	} else if m.pendingAuth != nil {
 		inputH += 2 + len(shellApprovalOptions)
 	}
-	if len(m.cmdItems) > 0 {
-		inputH += 4 + len(m.cmdItems)
-	}
 	if len(m.mentionItems) > 0 {
 		inputH += 5 + len(m.mentionItems)
 	}
@@ -1076,7 +1073,7 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.showResume = false
-	case "up", "ctrl+p", "shift+tab":
+	case "up", "shift+tab":
 		if m.resumeCursor > 0 {
 			m.resumeCursor--
 		}
@@ -1248,7 +1245,7 @@ func (m Model) viewResume() string {
 
 func (m Model) updateTrust(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "up", "ctrl+p", "shift+tab":
+	case "up", "shift+tab":
 		if m.trustCursor > 0 {
 			m.trustCursor--
 		}
