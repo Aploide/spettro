@@ -224,6 +224,9 @@ type Model struct {
 	showSetup bool
 	setup     setupState
 
+	showOnboarding bool
+	onboarding     onboardingState
+
 	favorites map[string]bool
 
 	pendingPlan string
@@ -368,6 +371,13 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	m.refreshModifiedFiles()
 	if cmd := m.autostartTelegram(); cmd != nil {
 		m.startupCmds = append(m.startupCmds, cmd)
+	}
+	if len(pm.ConnectedModels(cfg.APIKeys)) == 0 && len(cfg.LocalEndpoints) == 0 {
+		m.showOnboarding = true
+		m.onboarding = onboardingState{
+			step:  0,
+			items: m.allOnboardingModels(""),
+		}
 	}
 	return m
 }
@@ -715,6 +725,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshViewport()
 		}
+	case verifyKeyDoneMsg:
+		newModel, cmd := m.handleVerifyKeyDone(msg)
+		return newModel, cmd
 	case tea.FocusMsg:
 		m.terminalFocused = true
 	case tea.BlurMsg:
@@ -910,6 +923,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.showSetup {
 			return m.updateSetup(msg)
+		}
+		if m.showOnboarding {
+			return m.updateOnboarding(msg)
 		}
 		return m.updateMain(msg)
 	}
