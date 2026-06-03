@@ -61,6 +61,17 @@ var thinkCommands = []commandDef{
 	{"/think max", "maximum reasoning budget (~100k thinking tokens)"},
 }
 
+// requiresParam reports whether the slash command must be followed by a
+// sub-parameter before it can be executed. Selecting such a command from the
+// completion menu always opens the second-level selector instead of running.
+func requiresParam(cmd string) bool {
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "/think", "/thinking", "/permission", "/permissions":
+		return true
+	}
+	return false
+}
+
 func filterCommands(query string) []commandDef {
 	if query == "" {
 		return append([]commandDef(nil), allCommands...)

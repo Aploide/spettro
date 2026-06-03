@@ -1123,6 +1123,27 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
+			// Sub-commands (e.g. "/think high") execute immediately when selected.
+			if strings.Contains(chosen[1:], " ") {
+				m.ta.Reset()
+				m.cmdItems = nil
+				m.cmdCursor = 0
+				m.mentionItems = nil
+				if m.thinking && !isInstantCommand(chosen) {
+					m.showBanner("commands cannot be queued while an agent is running", "warn")
+					return m, nil
+				}
+				return m.handleCommand(chosen)
+			}
+			// Commands that require a parameter always open the second-level selector.
+			if requiresParam(chosen) {
+				m.ta.SetValue(chosen + " ")
+				m.cmdItems = nil
+				m.cmdCursor = 0
+				m.syncInputSuggestions()
+				return m, nil
+			}
+			// Other commands: execute if textarea already matches, else complete.
 			current := strings.TrimSpace(m.ta.Value())
 			if current == chosen {
 				m.ta.Reset()
