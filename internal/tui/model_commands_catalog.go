@@ -31,6 +31,7 @@ var allCommands = []commandDef{
 	{"/remote status", "print remote control URL and bearer token"},
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
+	{"/think", "set extended-thinking level (alias of /thinking)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/exit", "exit spettro"},
@@ -47,7 +48,17 @@ var thinkingCommands = []commandDef{
 	{"/thinking low", "short reasoning budget (~2k thinking tokens)"},
 	{"/thinking medium", "medium reasoning budget (~5k thinking tokens)"},
 	{"/thinking high", "long reasoning budget (~16k thinking tokens)"},
-	{"/thinking x-high", "maximum reasoning budget (~32k thinking tokens)"},
+	{"/thinking x-high", "extended reasoning budget (~32k thinking tokens)"},
+	{"/thinking max", "maximum reasoning budget (~100k thinking tokens)"},
+}
+
+var thinkCommands = []commandDef{
+	{"/think off", "no extended thinking (default)"},
+	{"/think low", "short reasoning budget (~2k thinking tokens)"},
+	{"/think medium", "medium reasoning budget (~5k thinking tokens)"},
+	{"/think high", "long reasoning budget (~16k thinking tokens)"},
+	{"/think x-high", "extended reasoning budget (~32k thinking tokens)"},
+	{"/think max", "maximum reasoning budget (~100k thinking tokens)"},
 }
 
 func filterCommands(query string) []commandDef {
@@ -84,7 +95,7 @@ func isInstantCommand(input string) bool {
 	case "/help",
 		"/permission", "/permissions",
 		"/budget",
-		"/thinking",
+		"/thinking", "/think",
 		"/connect",
 		"/models",
 		"/skill", "/skills",
@@ -121,7 +132,8 @@ const helpText = `commands:
   /permission    set permission: yolo | restricted | ask-first
   /permissions   show/set permission level, debug details
   /budget [n|0]  set token budget per request (0 = unlimited)
-  /thinking <l>  set extended-thinking level (off|low|medium|high|x-high)
+  /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
+  /thinking <l>  alias of /think
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /tasks         manage tasks (list/add/done/set/show)

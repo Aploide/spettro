@@ -593,6 +593,7 @@ func (m Model) statusBarMessage() string {
 	hints := []string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("ctrl+b: panel"),
+		styleMuted.Render("ctrl+o: context"),
 		styleMuted.Render("ctrl+y: copy"),
 	}
 	if m.mouseCaptureOff {

@@ -1284,8 +1284,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-	case "/thinking":
-		// /thinking [off|low|medium|high|x-high] toggles the extended-thinking
+	case "/thinking", "/think":
+		// /think [off|low|medium|high|x-high|max] toggles the extended-thinking
 		// budget passed to providers that support it (Anthropic Claude Opus
 		// and Sonnet). Without an argument we report the current setting.
 		current := strings.TrimSpace(m.cfg.ThinkingLevel)
@@ -1293,11 +1293,11 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			current = "off"
 		}
 		if len(fields) < 2 {
-			m.showBanner("thinking: "+current+"  usage: /thinking <off|low|medium|high|x-high>", "info")
+			m.showBanner("thinking: "+current+"  usage: /think <off|low|medium|high|x-high|max>", "info")
 		} else {
 			level := strings.ToLower(strings.TrimSpace(fields[1]))
 			if !provider.IsValidThinkingLevel(level) {
-				m.showBanner("usage: /thinking <off|low|medium|high|x-high>", "error")
+				m.showBanner("usage: /think <off|low|medium|high|x-high|max>", "error")
 			} else {
 				if level == "off" {
 					level = ""
