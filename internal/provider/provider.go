@@ -24,13 +24,14 @@ const (
 	ThinkingMedium ThinkingLevel = "medium"
 	ThinkingHigh   ThinkingLevel = "high"
 	ThinkingXHigh  ThinkingLevel = "x-high"
+	ThinkingMax    ThinkingLevel = "max"
 )
 
 // IsValidThinkingLevel reports whether s is one of the recognised ThinkingLevel
 // values. The empty string is treated as ThinkingOff and is also valid.
 func IsValidThinkingLevel(s string) bool {
 	switch ThinkingLevel(s) {
-	case "", ThinkingOff, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh:
+	case "", ThinkingOff, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh, ThinkingMax:
 		return true
 	}
 	return false
@@ -49,6 +50,8 @@ func ThinkingBudgetTokens(level ThinkingLevel) int {
 		return 16384
 	case ThinkingXHigh:
 		return 32768
+	case ThinkingMax:
+		return 100000
 	}
 	return 0
 }
