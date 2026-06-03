@@ -1,3 +1,4 @@
 package version
 
-const App = "v1.0"
+// App is set at build time via -ldflags "-X spettro/internal/version.App=vX.Y.Z".
+var App = "dev"

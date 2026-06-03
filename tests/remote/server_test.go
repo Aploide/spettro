@@ -16,6 +16,13 @@ import (
 	"spettro/internal/remote"
 )
 
+// newTestClient returns an HTTP client with keep-alives disabled. This prevents
+// the shared connection pool from reusing stale connections when parallel tests
+// happen to get the same port as a previously completed test.
+func newTestClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+}
+
 // startTestServer brings up a Server bound to an OS-assigned port and arranges
 // for it to be torn down at the end of the test. Returns the base URL and the
 // auth token that must be presented on every request.
@@ -63,7 +70,7 @@ func TestServer_AuthRequired(t *testing.T) {
 	t.Parallel()
 	_, base := startTestServer(t)
 
-	resp, err := http.Get(base + "/status")
+	resp, err := newTestClient().Get(base + "/status")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -86,7 +93,7 @@ func TestServer_StatusReflectsSetStatus(t *testing.T) {
 	})
 
 	req := authedRequest(t, http.MethodGet, base+"/status", "test-token", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newTestClient().Do(req)
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
@@ -118,7 +125,7 @@ func TestServer_MessagesEnqueuesAndAcceptsReply(t *testing.T) {
 	}()
 
 	httpReq := authedRequest(t, http.MethodPost, base+"/messages", "test-token", map[string]string{"message": "hello world"})
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := newTestClient().Do(httpReq)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -151,7 +158,7 @@ func TestServer_RejectsEmptyMessage(t *testing.T) {
 	_, base := startTestServer(t)
 
 	req := authedRequest(t, http.MethodPost, base+"/messages", "test-token", map[string]string{"message": "   "})
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newTestClient().Do(req)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -166,7 +173,7 @@ func TestServer_InterruptDelivers(t *testing.T) {
 	srv, base := startTestServer(t)
 
 	req := authedRequest(t, http.MethodPost, base+"/interrupt", "test-token", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newTestClient().Do(req)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -222,7 +229,7 @@ func TestServer_EventsStreamReceivesPublishedEvents(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer test-token")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newTestClient().Do(req)
 	if err != nil {
 		t.Fatalf("get events: %v", err)
 	}
@@ -323,7 +330,7 @@ func TestServer_PublishRaceWithDisconnect(t *testing.T) {
 			t.Fatalf("new req: %v", err)
 		}
 		req.Header.Set("Authorization", "Bearer test-token")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := newTestClient().Do(req)
 		if err != nil {
 			cancel()
 			t.Fatalf("connect /events: %v", err)

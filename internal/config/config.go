@@ -89,7 +89,7 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 		changed = true
 	}
 	switch cfg.ThinkingLevel {
-	case "", "off", "low", "medium", "high", "x-high":
+	case "", "off", "low", "medium", "high", "x-high", "max":
 		// valid
 	default:
 		cfg.ThinkingLevel = ""

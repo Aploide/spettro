@@ -1123,6 +1123,27 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
+			// Sub-commands (e.g. "/think high") execute immediately when selected.
+			if strings.Contains(chosen[1:], " ") {
+				m.ta.Reset()
+				m.cmdItems = nil
+				m.cmdCursor = 0
+				m.mentionItems = nil
+				if m.thinking && !isInstantCommand(chosen) {
+					m.showBanner("commands cannot be queued while an agent is running", "warn")
+					return m, nil
+				}
+				return m.handleCommand(chosen)
+			}
+			// Commands that require a parameter always open the second-level selector.
+			if requiresParam(chosen) {
+				m.ta.SetValue(chosen + " ")
+				m.cmdItems = nil
+				m.cmdCursor = 0
+				m.syncInputSuggestions()
+				return m, nil
+			}
+			// Other commands: execute if textarea already matches, else complete.
 			current := strings.TrimSpace(m.ta.Value())
 			if current == chosen {
 				m.ta.Reset()
@@ -1284,8 +1305,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-	case "/thinking":
-		// /thinking [off|low|medium|high|x-high] toggles the extended-thinking
+	case "/thinking", "/think":
+		// /think [off|low|medium|high|x-high|max] toggles the extended-thinking
 		// budget passed to providers that support it (Anthropic Claude Opus
 		// and Sonnet). Without an argument we report the current setting.
 		current := strings.TrimSpace(m.cfg.ThinkingLevel)
@@ -1293,11 +1314,11 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			current = "off"
 		}
 		if len(fields) < 2 {
-			m.showBanner("thinking: "+current+"  usage: /thinking <off|low|medium|high|x-high>", "info")
+			m.showBanner("thinking: "+current+"  usage: /think <off|low|medium|high|x-high|max>", "info")
 		} else {
 			level := strings.ToLower(strings.TrimSpace(fields[1]))
 			if !provider.IsValidThinkingLevel(level) {
-				m.showBanner("usage: /thinking <off|low|medium|high|x-high>", "error")
+				m.showBanner("usage: /think <off|low|medium|high|x-high|max>", "error")
 			} else {
 				if level == "off" {
 					level = ""

@@ -666,6 +666,23 @@ func (m *Model) syncInputSuggestions() {
 			m.mentionCursor = 0
 			return
 		}
+		if strings.HasPrefix(val, "/think") && !strings.HasPrefix(val, "/thinking") && len(val) > len("/think") {
+			filter := strings.TrimPrefix(val, "/think")
+			filter = strings.TrimPrefix(filter, " ")
+			var items []commandDef
+			for _, c := range thinkCommands {
+				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
+					items = append(items, c)
+				}
+			}
+			m.cmdItems = items
+			if m.cmdCursor >= len(m.cmdItems) {
+				m.cmdCursor = 0
+			}
+			m.mentionItems = nil
+			m.mentionCursor = 0
+			return
+		}
 		query := val[1:]
 		m.cmdItems = filterCommands(query)
 		if m.cmdCursor >= len(m.cmdItems) {

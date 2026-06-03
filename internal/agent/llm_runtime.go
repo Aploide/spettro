@@ -169,16 +169,16 @@ type toolRuntime struct {
 	runtimeRules  []config.PermissionRule
 	agentRules    []config.PermissionRule
 	// sub-agent support
-	manifest     *config.AgentManifest
-	providerMgr  *provider.Manager
-	providerName func() string
-	modelName    func() string
+	manifest      *config.AgentManifest
+	providerMgr   *provider.Manager
+	providerName  func() string
+	modelName     func() string
 	maxTokens     int
 	thinkingLevel provider.ThinkingLevel
-	toolCallback func(ToolTrace)
-	sessionDir   string
-	agentID      string
-	parentID     string
+	toolCallback  func(ToolTrace)
+	sessionDir    string
+	agentID       string
+	parentID      string
 
 	delegationDepth      int
 	maxParallelWorkers   int
@@ -853,8 +853,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if parentID == "" {
 			parentID = r.agentID
 		}
+		subSpec := *spec
+		// The parent's effective permission cascades to sub-agents so that a
+		// user-level setting (e.g. yolo) is honoured across the entire tree.
+		if r.permission != "" {
+			subSpec.Permission = r.permission
+		}
 		subAgent := LLMAgent{
-			Spec:            *spec,
+			Spec:            subSpec,
 			ProviderManager: r.providerMgr,
 			ProviderName:    r.providerName,
 			ModelName:       r.modelName,

@@ -196,12 +196,15 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		if isAlwaysAllowedCommand(seg) {
 			continue
 		}
-		switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
-		case config.RuleDeny:
-			r.emitApprovalTrace("denied", "policy", toolID, segNorm, "blocked by permission rules")
-			return fmt.Errorf("shell-exec denied by policy for command segment %q", segNorm)
-		case config.RuleAllow:
-			continue
+		// YOLO mode bypasses all permission rules — every command is allowed.
+		if r.permission != config.PermissionYOLO {
+			switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
+			case config.RuleDeny:
+				r.emitApprovalTrace("denied", "policy", toolID, segNorm, "blocked by permission rules")
+				return fmt.Errorf("shell-exec denied by policy for command segment %q", segNorm)
+			case config.RuleAllow:
+				continue
+			}
 		}
 		r.mu.Lock()
 		_, preapproved := r.allowedShell[segNorm]
