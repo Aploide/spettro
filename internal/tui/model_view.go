@@ -404,6 +404,45 @@ func (m Model) viewInput(width int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, mentionPalette, inputBox)
 }
 
+// renderGlare produces a shimmer that sweeps left-to-right across text.
+// frame drives the position; agentColor sets the gradient's base hue.
+func renderGlare(text string, frame int, agentColor lipgloss.Color) string {
+	runes := []rune(text)
+	n := len(runes)
+	if n == 0 {
+		return ""
+	}
+	// one position step every 3 frames (150 ms at 50 ms/frame)
+	padding := 6
+	cycleLen := n + padding
+	pos := (frame/3)%cycleLen - padding/2
+
+	grad := glareGradient(agentColor)
+
+	var sb strings.Builder
+	for i, r := range runes {
+		dist := i - pos
+		if dist < 0 {
+			dist = -dist
+		}
+		var fg lipgloss.Color
+		switch {
+		case dist == 0:
+			fg = grad[0]
+		case dist == 1:
+			fg = grad[1]
+		case dist == 2:
+			fg = grad[2]
+		case dist <= 4:
+			fg = grad[3]
+		default:
+			fg = grad[4]
+		}
+		sb.WriteString(lipgloss.NewStyle().Foreground(fg).Render(string(r)))
+	}
+	return sb.String()
+}
+
 func (m Model) renderParallelAgents() string {
 	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
 	for _, a := range m.parallelAgents {
@@ -414,32 +453,16 @@ func (m Model) renderParallelAgents() string {
 	if len(active) == 0 && len(m.todos) == 0 {
 		return ""
 	}
-	frame := spinnerFrames[m.tickCount%len(spinnerFrames)]
 	var lines []string
 	if len(active) > 0 {
 		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  agents"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.currentColor()).Render("  ● orchestrator: "+m.mode+" (running)"))
+		orchText := "orchestrator: " + m.mode
+		lines = append(lines, "  "+renderGlare(orchText, m.eyeFrame, m.currentColor()))
 	}
 	for _, a := range active {
-		var dot string
-		var style lipgloss.Style
 		agentColor := modeColor("")
 		if spec, ok := m.manifest.AgentByID(a.ID); ok {
 			agentColor = modeColor(spec.Color)
-		}
-		switch a.Status {
-		case "running":
-			dot = frame
-			style = lipgloss.NewStyle().Foreground(agentColor).Bold(true)
-		case "done":
-			dot = "●"
-			style = lipgloss.NewStyle().Foreground(agentColor)
-		case "error", "failed":
-			dot = "✗"
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
-		default:
-			dot = "○"
-			style = lipgloss.NewStyle().Foreground(colorMuted)
 		}
 		label := a.ID
 		if a.Instance > 1 {
@@ -449,8 +472,22 @@ func (m Model) renderParallelAgents() string {
 		if len(task) > 50 {
 			task = task[:47] + "..."
 		}
-		line := style.Render(fmt.Sprintf("  %s %-18s", dot, label)) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+
+		var line string
+		switch a.Status {
+		case "running":
+			combined := fmt.Sprintf("%-20s %s", label, task)
+			line = "  " + renderGlare(combined, m.eyeFrame, agentColor)
+		case "done":
+			line = lipgloss.NewStyle().Foreground(agentColor).Render(fmt.Sprintf("  ● %-18s", label)) +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+		case "error", "failed":
+			line = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("  ✗ %-18s", label)) +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+		default:
+			line = lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("  ○ %-18s", label)) +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+		}
 		lines = append(lines, line)
 	}
 	if len(m.todos) > 0 {
@@ -459,24 +496,34 @@ func (m Model) renderParallelAgents() string {
 		}
 		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  todos"))
 		for _, td := range m.todos {
-			icon := "○"
-			color := colorMuted
+			var line string
 			switch td.Status {
 			case "completed", "done":
-				icon = "✓"
-				color = lipgloss.Color("#10B981")
+				label := td.Content
+				if len(label) > 56 {
+					label = label[:53] + "..."
+				}
+				line = lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Render("  ✓ ") + styleMuted.Render(label)
 			case "in_progress", "running":
-				icon = frame
-				color = lipgloss.Color("#F59E0B")
+				label := td.Content
+				if len(label) > 56 {
+					label = label[:53] + "..."
+				}
+				line = "  " + renderGlare(label, m.eyeFrame, lipgloss.Color("#F59E0B"))
 			case "blocked", "failed", "cancelled":
-				icon = "!"
-				color = lipgloss.Color("#EF4444")
+				label := td.Content
+				if len(label) > 56 {
+					label = label[:53] + "..."
+				}
+				line = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  ! ") + styleMuted.Render(label)
+			default:
+				label := td.Content
+				if len(label) > 56 {
+					label = label[:53] + "..."
+				}
+				line = lipgloss.NewStyle().Foreground(colorMuted).Render("  ○ ") + styleMuted.Render(label)
 			}
-			label := td.Content
-			if len(label) > 56 {
-				label = label[:53] + "..."
-			}
-			lines = append(lines, lipgloss.NewStyle().Foreground(color).Render("  "+icon+" ")+styleMuted.Render(label))
+			lines = append(lines, line)
 		}
 	}
 	return strings.Join(lines, "\n")

@@ -1,6 +1,11 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Color palette
 var (
@@ -99,4 +104,34 @@ func dimBorderStyle() lipgloss.Style {
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
 		PaddingLeft(1).PaddingRight(1)
+}
+
+// glareGradient returns 5 color stops for the glare sweep, derived from base:
+// [0]=peak (near-white tint), [1..3]=fade toward base, [4]=base.
+func glareGradient(base lipgloss.Color) [5]lipgloss.Color {
+	hex := string(base)
+	if len(hex) != 7 || hex[0] != '#' {
+		return [5]lipgloss.Color{base, base, base, base, base}
+	}
+	r, g, b := parseHexColor(hex)
+	return [5]lipgloss.Color{
+		lerpToWhite(r, g, b, 0.88),
+		lerpToWhite(r, g, b, 0.60),
+		lerpToWhite(r, g, b, 0.30),
+		lerpToWhite(r, g, b, 0.12),
+		base,
+	}
+}
+
+func parseHexColor(hex string) (r, g, b uint8) {
+	val, err := strconv.ParseUint(hex[1:], 16, 32)
+	if err != nil {
+		return 0, 0, 0
+	}
+	return uint8(val >> 16), uint8((val >> 8) & 0xFF), uint8(val & 0xFF)
+}
+
+func lerpToWhite(r, g, b uint8, t float64) lipgloss.Color {
+	lerp := func(c uint8) uint8 { return uint8(float64(c) + t*(255-float64(c))) }
+	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", lerp(r), lerp(g), lerp(b)))
 }

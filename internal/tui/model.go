@@ -38,6 +38,7 @@ type ToolItem struct {
 	Status string
 	Args   string
 	Output string
+	Diff   string
 	Open   bool
 }
 
@@ -181,9 +182,10 @@ type setupState struct {
 }
 
 type Model struct {
-	width  int
-	height int
-	ready  bool
+	width     int
+	height    int
+	ready     bool
+	startedAt time.Time
 
 	vp   viewport.Model
 	ta   textarea.Model
@@ -360,6 +362,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		favorites:     favs,
 		repoFiles:     repoFiles,
 		showSidePanel: cfg.ShowSidePanel,
+		startedAt:     time.Now(),
 		committer: agent.LLMCommitter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
@@ -671,6 +674,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Status: t.Status,
 					Args:   t.Args,
 					Output: t.Output,
+					Diff:   computeFileDiff(m.cwd, t.Name, t.Args, t.Status),
 				}
 				// Cap m.liveTools to bound memory and the run summary built
 				// at interrupt time. When the LLM emits very large tool

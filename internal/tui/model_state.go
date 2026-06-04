@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -444,6 +445,66 @@ func readGitBranch(cwd string) string {
 		return "(unknown)"
 	}
 	return "detached@" + hash
+}
+
+func computeFileDiff(cwd, name, argsJSON, status string) string {
+	if status != "success" {
+		return ""
+	}
+	if name != "file-write" && name != "file-edit" {
+		return ""
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil || strings.TrimSpace(args.Path) == "" {
+		return ""
+	}
+	path := strings.TrimSpace(args.Path)
+
+	// Try working-tree diff vs HEAD (covers modified tracked files).
+	cmd := exec.Command("git", "diff", "HEAD", "--", path)
+	cmd.Dir = cwd
+	if out, err := cmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		return string(out)
+	}
+
+	// Try staged diff vs HEAD (file was git-added before we see the trace).
+	cmd2 := exec.Command("git", "diff", "--cached", "--", path)
+	cmd2.Dir = cwd
+	if out2, err2 := cmd2.Output(); err2 == nil && len(strings.TrimSpace(string(out2))) > 0 {
+		return string(out2)
+	}
+
+	// New / untracked file: format entire content as additions.
+	absPath := path
+	if !filepath.IsAbs(path) {
+		absPath = filepath.Join(cwd, path)
+	}
+	content, err := exec.Command("git", "ls-files", "--others", "--exclude-standard", "--", absPath).Output()
+	if err != nil || len(strings.TrimSpace(string(content))) == 0 {
+		return ""
+	}
+	data, readErr := os.ReadFile(absPath)
+	if readErr != nil {
+		return ""
+	}
+	return buildNewFileDiff(path, string(data))
+}
+
+func buildNewFileDiff(path, content string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%d @@\n", path, len(lines))
+	for _, l := range lines {
+		sb.WriteString("+")
+		sb.WriteString(l)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {

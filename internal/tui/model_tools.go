@@ -777,11 +777,15 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 					}
 					lines = append(lines, styleMuted.Render(line))
 				}
-				if item.Status != "running" {
-					if out := trimToolOutput(item.Output, 20); out != "" {
-						for _, ol := range strings.Split(out, "\n") {
-							lines = append(lines, outputStyle.Render("       "+ol))
-						}
+			}
+			if item.Diff != "" && item.Status != "running" {
+				if block := renderDiffBlock(item.Diff, showTools); block != "" {
+					lines = append(lines, block)
+				}
+			} else if showTools && item.Status != "running" {
+				if out := trimToolOutput(item.Output, 20); out != "" {
+					for _, ol := range strings.Split(out, "\n") {
+						lines = append(lines, outputStyle.Render("       "+ol))
 					}
 				}
 			}
@@ -1182,6 +1186,45 @@ func formatApprovalCommandLabel(command string) string {
 		}
 	}
 	return "$ " + command
+}
+
+func renderDiffBlock(diff string, expanded bool) string {
+	if strings.TrimSpace(diff) == "" {
+		return ""
+	}
+	const prefix = "       "
+	const collapsedMax = 20
+	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
+	maxLines := len(lines)
+	if !expanded && maxLines > collapsedMax {
+		maxLines = collapsedMax
+	}
+	shown := lines[:maxLines]
+	truncated := len(lines) - maxLines
+
+	var rendered []string
+	for _, line := range shown {
+		var s string
+		switch {
+		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+			s = styleMuted.Render(prefix + line)
+		case strings.HasPrefix(line, "@@"):
+			s = lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA")).Italic(true).Render(prefix + line)
+		case strings.HasPrefix(line, "+"):
+			s = lipgloss.NewStyle().Foreground(colorSuccess).Render(prefix + line)
+		case strings.HasPrefix(line, "-"):
+			s = lipgloss.NewStyle().Foreground(colorError).Render(prefix + line)
+		case strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "index "):
+			s = styleMuted.Render(prefix + line)
+		default:
+			s = styleDim.Render(prefix + line)
+		}
+		rendered = append(rendered, s)
+	}
+	if truncated > 0 {
+		rendered = append(rendered, styleMuted.Render(fmt.Sprintf("%s… %d more lines (ctrl+o to expand)", prefix, truncated)))
+	}
+	return strings.Join(rendered, "\n")
 }
 
 func trimToolOutput(output string, maxLines int) string {

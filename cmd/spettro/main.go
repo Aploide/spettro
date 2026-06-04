@@ -58,9 +58,11 @@ func main() {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		fatal("runtime error: %v", err)
 	}
+	tui.PrintGoodbye(final)
 }
 
 func fatal(format string, args ...any) {
