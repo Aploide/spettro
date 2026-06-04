@@ -38,6 +38,7 @@ type ToolItem struct {
 	Status string
 	Args   string
 	Output string
+	Diff   string
 	Open   bool
 }
 
@@ -673,6 +674,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Status: t.Status,
 					Args:   t.Args,
 					Output: t.Output,
+					Diff:   computeFileDiff(m.cwd, t.Name, t.Args, t.Status),
 				}
 				// Cap m.liveTools to bound memory and the run summary built
 				// at interrupt time. When the LLM emits very large tool
