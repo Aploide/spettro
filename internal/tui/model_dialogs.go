@@ -1495,15 +1495,30 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 }
 
 func (m Model) runInit() (tea.Model, tea.Cmd) {
-	spec, ok := m.manifest.AgentByID("docs")
+	// "docs" agent is read-only (no file-write); use "coding" so the file actually gets written.
+	spec, ok := m.manifest.AgentByID("coding")
 	if !ok {
-		spec, ok = m.manifest.AgentByID("coding")
+		spec, ok = m.manifest.AgentByID("code")
 		if !ok {
-			m.showBanner("docs/coding agent not found in manifest", "error")
+			m.showBanner("coding/code agent not found in manifest", "error")
 			return m, nil
 		}
 	}
-	task := "Analyze this codebase and create (or improve) a SPETTRO.md file in the repository root."
+	task := `Analyze this codebase and write a SPETTRO.md file to the repository root.
+
+Use glob, grep, file-read, and ls to explore the codebase first, then write the file.
+
+SPETTRO.md must contain these sections:
+- **Project overview**: what the project does in 2–3 sentences
+- **Architecture**: key packages/directories and their roles (list each with a one-line description)
+- **Entry points**: main binaries, primary types, and the startup flow
+- **Agent system**: how agents are defined (spettro.agents.toml), loaded, and executed (internal/agent/)
+- **TUI**: how the bubbletea TUI is structured (internal/tui/), key models and update paths
+- **Configuration**: how config is loaded and what settings are available
+- **Build & run**: how to build, run, and test the project (Makefile targets, go commands)
+- **Conventions**: code style, naming, and patterns used in this codebase
+
+CRITICAL: You MUST write the file to disk using file-write at path "SPETTRO.md" in the repository root. Do not just output the content — the file must exist after you finish.`
 	return m.runAgent(spec, task, nil, nil)
 }
 

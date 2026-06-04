@@ -60,6 +60,11 @@ func buildModels(cat models.Catalog) []Model {
 	var out []Model
 	for _, pid := range providerIDs {
 		prov := cat[pid]
+		if prov.API == "" {
+			if _, ok := knownBaseURLs[pid]; !ok && pid != "anthropic" && pid != "openai" {
+				continue
+			}
+		}
 		modelIDs := make([]string, 0, len(prov.Models))
 		for id, mod := range prov.Models {
 			if mod.Status != "deprecated" {
@@ -111,4 +116,5 @@ var knownBaseURLs = map[string]string{
 	"deepseek":     "https://api.deepseek.com/v1",
 	"perplexity":   "https://api.perplexity.ai",
 	"zai":          "https://api.zai.ai/v1",
+	"cerebras":     "https://api.cerebras.ai/v1",
 }

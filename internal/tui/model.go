@@ -181,9 +181,10 @@ type setupState struct {
 }
 
 type Model struct {
-	width  int
-	height int
-	ready  bool
+	width     int
+	height    int
+	ready     bool
+	startedAt time.Time
 
 	vp   viewport.Model
 	ta   textarea.Model
@@ -360,6 +361,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		favorites:     favs,
 		repoFiles:     repoFiles,
 		showSidePanel: cfg.ShowSidePanel,
+		startedAt:     time.Now(),
 		committer: agent.LLMCommitter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
