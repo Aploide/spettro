@@ -637,23 +637,7 @@ func (m Model) statusBarMessage() string {
 	if m.banner != "" {
 		return renderStatusBanner(m.banner, m.bannerKind)
 	}
-	hints := []string{
-		styleMuted.Render("shift+tab: mode"),
-		styleMuted.Render("ctrl+b: panel"),
-		styleMuted.Render("ctrl+o: context"),
-		styleMuted.Render("ctrl+y: copy"),
-	}
-	if m.mouseCaptureOff {
-		hints = append(hints, styleWarn.Render("ctrl+t: mouse off"))
-	} else {
-		hints = append(hints, styleMuted.Render("ctrl+t: select"))
-	}
-	// When the side panel is hidden, show git branch inline
-	if m.sidePanelWidth() == 0 && strings.TrimSpace(m.gitBranch) != "" {
-		branchHint := styleMuted.Render("⎇ " + truncateLabel(m.gitBranch, 20))
-		hints = append(hints, branchHint)
-	}
-	return strings.Join(hints, styleDim.Render(" • "))
+	return ""
 }
 
 func renderStatusBanner(text, kind string) string {
@@ -950,12 +934,33 @@ func (m Model) sidePanelBudgets(innerHeight, gitRows, detailMetaLines int) (list
 	return listLines, detailBodyRows
 }
 
+const sidePanelHintRows = 3
+
+func (m Model) sidePanelHintsView() string {
+	sep := styleDim.Render(" • ")
+	line1 := strings.Join([]string{
+		styleMuted.Render("shift+tab: mode"),
+		styleMuted.Render("ctrl+b: panel"),
+	}, sep)
+	line2 := strings.Join([]string{
+		styleMuted.Render("ctrl+o: context"),
+		styleMuted.Render("ctrl+y: copy"),
+	}, sep)
+	var line3 string
+	if m.mouseCaptureOff {
+		line3 = styleWarn.Render("ctrl+t: mouse off")
+	} else {
+		line3 = styleMuted.Render("ctrl+t: select")
+	}
+	return strings.Join([]string{line1, line2, line3}, "\n")
+}
+
 func (m Model) sidePanelDetailMaxScroll(width int) int {
 	items := m.sidePanelItems()
 	if len(items) == 0 {
 		return 0
 	}
-	innerHeight := m.sidePanelInnerHeight()
+	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
 	_, gitRows := m.sidePanelGitSummary(width)
 	cursor, _, _ := m.sidePanelWindow(items, innerHeight, gitRows)
 	selected := items[cursor]
@@ -967,9 +972,10 @@ func (m Model) sidePanelDetailMaxScroll(width int) int {
 }
 
 func (m Model) viewSidePanel(width int) string {
-	innerHeight := m.sidePanelInnerHeight()
+	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
 	gitSummary, gitRows := m.sidePanelGitSummary(width)
 	items := m.sidePanelItems()
+	hints := m.sidePanelHintsView()
 	if len(items) == 0 {
 		parts := []string{
 			lipgloss.NewStyle().Bold(true).Render("Activity"),
@@ -987,7 +993,7 @@ func (m Model) viewSidePanel(width int) string {
 			BorderForeground(colorBorder).
 			Padding(0, 1).
 			Render(clampLines(body, innerHeight))
-		return box
+		return lipgloss.JoinVertical(lipgloss.Left, box, hints)
 	}
 
 	cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
@@ -1024,12 +1030,13 @@ func (m Model) viewSidePanel(width int) string {
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 	content = clampLines(content, innerHeight)
 
-	return lipgloss.NewStyle().
+	box := lipgloss.NewStyle().
 		Width(width).
 		Height(innerHeight).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
 		Padding(0, 1).
 		Render(content)
+	return lipgloss.JoinVertical(lipgloss.Left, box, hints)
 }
 

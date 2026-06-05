@@ -94,6 +94,15 @@ func SaveAPIKey(provider, apiKey string) error {
 	return saveAPIKeys(keys)
 }
 
+func RemoveAPIKey(provider string) error {
+	keys, err := LoadAPIKeys()
+	if err != nil {
+		return err
+	}
+	delete(keys, provider)
+	return saveAPIKeys(keys)
+}
+
 func saveAPIKeys(keys map[string]string) error {
 	p, err := keysPath()
 	if err != nil {
