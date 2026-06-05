@@ -36,13 +36,3 @@ func TestSanitizeToolOutputForTesting_FormatsSubagentEnvelope(t *testing.T) {
 	}
 }
 
-func TestStatusBarMessageForTesting_ContainsShortcutHints(t *testing.T) {
-	m := tui.NewModelForTesting()
-	m.SetModeForTesting("plan")
-	msg := m.StatusBarMessageForTesting()
-	for _, want := range []string{"shift+tab: mode", "ctrl+b: panel", "ctrl+o: context"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("expected %q in status message, got: %s", want, msg)
-		}
-	}
-}

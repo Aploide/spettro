@@ -209,12 +209,14 @@ type Model struct {
 	selFilter    string
 	selCursor    int
 
-	showConnect     bool
-	connectItems    []provider.ProviderInfo
-	connectFilter   string
-	connectCursor   int
-	connectStep     int
-	connectProvider string
+	showConnect         bool
+	connectItems        []provider.ProviderInfo
+	connectFilter       string
+	connectCursor       int
+	connectStep         int
+	connectProvider     string
+	connectActionCursor int
+	connectEditMode     bool
 
 	cmdItems  []commandDef
 	cmdCursor int

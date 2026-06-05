@@ -405,6 +405,8 @@ func (m Model) openConnect() Model {
 	m.connectCursor = 0
 	m.connectStep = 0
 	m.connectProvider = ""
+	m.connectActionCursor = 0
+	m.connectEditMode = false
 	m.connectItems = m.filterProviders("")
 	return m
 }
@@ -475,6 +477,17 @@ func (m Model) hasLocalEndpoint(endpoint string) bool {
 	return false
 }
 
+var connectManageOptions = []string{
+	"Edit key",
+	"Remove provider",
+	"Cancel",
+}
+
+var connectConfirmOptions = []string{
+	"Yes, remove",
+	"Cancel",
+}
+
 func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.connectStep {
 	case 0:
@@ -493,9 +506,17 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(m.connectItems) > 0 {
 				m.connectProvider = m.connectItems[m.connectCursor].ID
-				m.connectStep = 1
-				m.ta.Reset()
-				m.ta.Focus()
+				isAPIConnected := m.connectProvider != localConnectProviderID &&
+					m.cfg.APIKeys[m.connectProvider] != ""
+				if isAPIConnected {
+					m.connectStep = 2
+					m.connectActionCursor = 0
+				} else {
+					m.connectStep = 1
+					m.connectEditMode = false
+					m.ta.Reset()
+					m.ta.Focus()
+				}
 			}
 		case "backspace":
 			if len(m.connectFilter) > 0 {
@@ -513,7 +534,12 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case 1:
 		switch msg.String() {
 		case "esc":
-			m.connectStep = 0
+			if m.connectEditMode {
+				m.connectStep = 2
+				m.connectEditMode = false
+			} else {
+				m.connectStep = 0
+			}
 			m.ta.Reset()
 		case "enter":
 			if m.connectProvider == localConnectProviderID {
@@ -560,6 +586,81 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.ta, cmd = m.ta.Update(msg)
 			return m, cmd
+		}
+	case 2:
+		switch msg.String() {
+		case "esc":
+			m.connectStep = 0
+			m.connectActionCursor = 0
+		case "up", "shift+tab":
+			if m.connectActionCursor > 0 {
+				m.connectActionCursor--
+			}
+		case "down", "ctrl+n", "tab":
+			if m.connectActionCursor < len(connectManageOptions)-1 {
+				m.connectActionCursor++
+			}
+		case "enter":
+			switch m.connectActionCursor {
+			case 0: // Edit key
+				m.connectStep = 1
+				m.connectEditMode = true
+				m.ta.Reset()
+				m.ta.Focus()
+			case 1: // Remove provider
+				m.connectStep = 3
+				m.connectActionCursor = 0
+			case 2: // Cancel
+				m.connectStep = 0
+				m.connectActionCursor = 0
+			}
+		}
+	case 3:
+		switch msg.String() {
+		case "esc":
+			m.connectStep = 2
+			m.connectActionCursor = 0
+		case "up", "shift+tab":
+			if m.connectActionCursor > 0 {
+				m.connectActionCursor--
+			}
+		case "down", "ctrl+n", "tab":
+			if m.connectActionCursor < len(connectConfirmOptions)-1 {
+				m.connectActionCursor++
+			}
+		case "enter":
+			switch m.connectActionCursor {
+			case 0: // Yes, remove
+				removedProvider := m.connectProvider
+				wasActive := m.cfg.ActiveProvider == removedProvider
+				_ = config.RemoveAPIKey(removedProvider)
+				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					if cfg.ActiveProvider == removedProvider {
+						connected := m.providers.ConnectedModels(cfg.APIKeys)
+						if len(connected) > 0 {
+							cfg.ActiveProvider = connected[0].Provider
+							cfg.ActiveModel = connected[0].Name
+						} else {
+							cfg.ActiveProvider = ""
+							cfg.ActiveModel = ""
+						}
+					}
+					return nil
+				})
+				m.showConnect = false
+				switch {
+				case wasActive && m.cfg.ActiveProvider != "":
+					m.showBanner(fmt.Sprintf("removed %s — switched to %s:%s", removedProvider, m.cfg.ActiveProvider, m.cfg.ActiveModel), "info")
+				case wasActive:
+					m.showBanner(fmt.Sprintf("removed %s — no providers connected", removedProvider), "warn")
+				default:
+					m.showBanner(fmt.Sprintf("removed %s", removedProvider), "info")
+				}
+				return m, nil
+			case 1: // Cancel
+				m.connectStep = 2
+				m.connectActionCursor = 0
+			}
 		}
 	}
 
@@ -1191,6 +1292,88 @@ func (m Model) viewConnect() string {
 			Padding(1, 2).
 			Render(inner)
 
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(colorDim),
+		)
+	}
+
+	if m.connectStep == 2 {
+		provName := m.connectProvider
+		for _, pi := range m.providers.AllProviderInfos() {
+			if pi.ID == m.connectProvider && pi.Name != "" {
+				provName = pi.Name
+				break
+			}
+		}
+		titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ manage " + provName)
+		title := diagFillTitle(titleLabel, innerW)
+		var rows []string
+		for i, opt := range connectManageOptions {
+			if i == m.connectActionCursor {
+				rows = append(rows, lipgloss.NewStyle().
+					Background(colorSelBg).Foreground(colorText).Bold(true).
+					Width(innerW).Render("› "+opt))
+			} else {
+				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+opt))
+			}
+		}
+		inner := lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			strings.Join(rows, "\n"),
+			"",
+			styleMuted.Render("↑↓ navigate  enter select  esc back"),
+		)
+		dialog := lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(mc).
+			Width(dialogWidth).
+			Padding(1, 2).
+			Render(inner)
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(colorDim),
+		)
+	}
+
+	if m.connectStep == 3 {
+		provName := m.connectProvider
+		for _, pi := range m.providers.AllProviderInfos() {
+			if pi.ID == m.connectProvider && pi.Name != "" {
+				provName = pi.Name
+				break
+			}
+		}
+		titleLabel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5555")).Render("◈ remove " + provName)
+		title := diagFillTitle(titleLabel, innerW)
+		warning := lipgloss.NewStyle().Foreground(colorText).Render("Remove this provider and delete its API key?")
+		var rows []string
+		for i, opt := range connectConfirmOptions {
+			if i == m.connectActionCursor {
+				rows = append(rows, lipgloss.NewStyle().
+					Background(colorSelBg).Foreground(colorText).Bold(true).
+					Width(innerW).Render("› "+opt))
+			} else {
+				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+opt))
+			}
+		}
+		inner := lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			warning, "",
+			strings.Join(rows, "\n"),
+			"",
+			styleMuted.Render("↑↓ navigate  enter confirm  esc back"),
+		)
+		dialog := lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#FF5555")).
+			Width(dialogWidth).
+			Padding(1, 2).
+			Render(inner)
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			dialog,
