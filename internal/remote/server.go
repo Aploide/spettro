@@ -69,6 +69,12 @@ type Status struct {
 	StartedAt     time.Time `json:"started_at"`
 }
 
+// ApprovalDecision is the client-provided answer to a shell-approval request.
+type ApprovalDecision struct {
+	Decision string `json:"decision"` // "allow-once" | "allow-always" | "deny"
+	Instead  string `json:"instead,omitempty"`
+}
+
 // Server is the local HTTP control plane.
 type Server struct {
 	token     string
@@ -91,6 +97,11 @@ type Server struct {
 
 	statusMu sync.RWMutex
 	status   Status
+
+	// pendingApprovals maps tool_id -> channel awaiting approval decision.
+	pendingApprovals sync.Map
+	// pendingAskUsers maps question_id -> channel awaiting user answer.
+	pendingAskUsers sync.Map
 }
 
 // Options controls server creation.
@@ -306,6 +317,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/interrupt", s.handleInterrupt)
+	mux.HandleFunc("/approval", s.handleApproval)
+	mux.HandleFunc("/ask-user", s.handleAskUser)
 	return s.applyAuth(mux)
 }
 
@@ -338,6 +351,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			"GET /events (text/event-stream)",
 			"GET /status",
 			"POST /interrupt",
+			"POST /approval",
+			"POST /ask-user",
 		},
 	})
 }
@@ -495,6 +510,107 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+// RequestApproval publishes an approval_request event and blocks until the
+// Android client responds via POST /approval. ctx cancellation returns deny.
+func (s *Server) RequestApproval(ctx context.Context, toolID, command, reason string) (ApprovalDecision, error) {
+	ch := make(chan ApprovalDecision, 1)
+	s.pendingApprovals.Store(toolID, ch)
+	defer s.pendingApprovals.Delete(toolID)
+
+	s.Publish("approval_request", map[string]interface{}{
+		"tool_id": toolID,
+		"command": command,
+		"reason":  reason,
+	})
+
+	select {
+	case dec := <-ch:
+		return dec, nil
+	case <-ctx.Done():
+		return ApprovalDecision{Decision: "deny"}, ctx.Err()
+	}
+}
+
+func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ToolID   string `json:"tool_id"`
+		Decision string `json:"decision"`
+		Instead  string `json:"instead,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	val, ok := s.pendingApprovals.Load(body.ToolID)
+	if !ok {
+		http.Error(w, "no pending approval for tool_id", http.StatusNotFound)
+		return
+	}
+	ch := val.(chan ApprovalDecision)
+	select {
+	case ch <- ApprovalDecision{Decision: body.Decision, Instead: body.Instead}:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		http.Error(w, "approval already answered", http.StatusConflict)
+	}
+}
+
+// RequestAskUser publishes an ask_user event and blocks until the Android
+// client responds via POST /ask-user. ctx cancellation returns empty string.
+func (s *Server) RequestAskUser(ctx context.Context, questionID, question string, options []string, allowFreeResponse bool) (string, error) {
+	ch := make(chan string, 1)
+	s.pendingAskUsers.Store(questionID, ch)
+	defer s.pendingAskUsers.Delete(questionID)
+
+	data := map[string]interface{}{
+		"question_id":         questionID,
+		"question":            question,
+		"options":             options,
+		"allow_free_response": allowFreeResponse,
+	}
+	s.Publish("ask_user", data)
+
+	select {
+	case answer := <-ch:
+		return answer, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (s *Server) handleAskUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		QuestionID string `json:"question_id"`
+		Answer     string `json:"answer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	val, ok := s.pendingAskUsers.Load(body.QuestionID)
+	if !ok {
+		http.Error(w, "no pending ask-user for question_id", http.StatusNotFound)
+		return
+	}
+	ch := val.(chan string)
+	select {
+	case ch <- body.Answer:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		http.Error(w, "question already answered", http.StatusConflict)
 	}
 }
 

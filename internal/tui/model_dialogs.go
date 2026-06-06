@@ -1136,6 +1136,7 @@ func (m Model) viewSelector() string {
 		cursor
 
 	var rows []string
+	selectedRow := 0
 	currentProvider := ""
 	for i, mod := range m.selItems {
 		if mod.Provider != currentProvider {
@@ -1163,6 +1164,7 @@ func (m Model) viewSelector() string {
 		tag := mod.Tag()
 
 		if isSelected {
+			selectedRow = len(rows)
 			prefix := "› "
 			if isFav {
 				prefix += "★ "
@@ -1210,7 +1212,7 @@ func (m Model) viewSelector() string {
 	}
 	start := 0
 	if len(rows) > maxRows {
-		start = m.selCursor - maxRows/2
+		start = selectedRow - maxRows/2
 		if start < 0 {
 			start = 0
 		}
@@ -1391,6 +1393,7 @@ func (m Model) viewConnect() string {
 		cursor
 
 	var rows []string
+	selectedRow := 0
 	inSuggested := true
 	for i, pi := range m.connectItems {
 		nowSugg := isSuggested(pi.ID)
@@ -1419,6 +1422,7 @@ func (m Model) viewConnect() string {
 		}
 
 		if isSelected {
+			selectedRow = len(rows)
 			label := "› " + name
 			if isConnected {
 				label += "  ✓ connected"
@@ -1449,7 +1453,7 @@ func (m Model) viewConnect() string {
 	}
 	start := 0
 	if len(rows) > maxRows {
-		start = m.connectCursor - maxRows/2
+		start = selectedRow - maxRows/2
 		if start < 0 {
 			start = 0
 		}

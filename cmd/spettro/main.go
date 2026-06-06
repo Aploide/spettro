@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 
@@ -15,6 +16,25 @@ import (
 )
 
 func main() {
+	headless := flag.Bool("headless", false, "run as headless HTTP/SSE server (for Android)")
+	cwdFlag := flag.String("cwd", "", "working directory (headless mode only)")
+	portFlag := flag.Int("port", 7878, "HTTP listen port (headless mode only)")
+	bindFlag := flag.String("bind", "127.0.0.1", "bind host (headless mode only; 0.0.0.0 for LAN)")
+	flag.Parse()
+
+	if *headless {
+		cwd := *cwdFlag
+		if cwd == "" {
+			var err error
+			cwd, err = os.Getwd()
+			if err != nil {
+				fatal("cwd error: %v", err)
+			}
+		}
+		runHeadless(cwd, *bindFlag, *portFlag)
+		return
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		fatal("cwd error: %v", err)

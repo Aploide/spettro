@@ -224,6 +224,7 @@ func (m Model) viewOnboardingPicker() string {
 		maxListH = 4
 	}
 	var rows []string
+	selectedRow := 0
 	currentProvider := ""
 	for i, mod := range m.onboarding.items {
 		if mod.Provider != currentProvider {
@@ -244,6 +245,7 @@ func (m Model) viewOnboardingPicker() string {
 		}
 		tag := mod.Tag()
 		if isSelected {
+			selectedRow = len(rows)
 			label := "› " + displayName
 			if tag != "" {
 				label += "  " + styleDim.Render(tag)
@@ -264,7 +266,7 @@ func (m Model) viewOnboardingPicker() string {
 	// Scroll window so selected item stays visible.
 	start := 0
 	if len(rows) > maxListH {
-		start = m.onboarding.cursor - maxListH/2
+		start = selectedRow - maxListH/2
 		if start < 0 {
 			start = 0
 		}
