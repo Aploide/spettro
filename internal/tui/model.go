@@ -876,6 +876,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			switch {
+			case m.showOnboarding && m.onboarding.step == 0:
+				if m.onboarding.cursor > 0 {
+					m.onboarding.cursor--
+				}
 			case m.showSelector:
 				if m.selCursor > 0 {
 					m.selCursor--
@@ -889,6 +893,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.MouseButtonWheelDown:
 			switch {
+			case m.showOnboarding && m.onboarding.step == 0:
+				if m.onboarding.cursor < len(m.onboarding.items)-1 {
+					m.onboarding.cursor++
+				}
 			case m.showSelector:
 				if m.selCursor < len(m.selItems)-1 {
 					m.selCursor++
