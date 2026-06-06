@@ -17,12 +17,12 @@ func (m Model) View() string {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("\n  loading…")
 	}
 
-	if m.showOnboarding {
-		return m.viewOnboarding()
-	}
-
 	if m.showTrust {
 		return m.viewTrust()
+	}
+
+	if m.showOnboarding {
+		return m.viewOnboarding()
 	}
 
 	if m.showResume {
