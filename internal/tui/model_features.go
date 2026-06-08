@@ -68,14 +68,16 @@ func (m *Model) addAttachment(rawPath string) {
 	m.showBanner(fmt.Sprintf("attached: %s (%d total)", rel, len(m.attachments)), "success")
 }
 
-// injectAttachments appends each attachment's content to the prompt.
+// injectAttachments appends each file attachment's content to the prompt.
+// Image attachments (Kind="image") are skipped here; they are sent via the
+// provider's image channel instead.
 func (m Model) injectAttachments(prompt string) string {
-	if len(m.attachments) == 0 {
-		return prompt
-	}
 	var sb strings.Builder
 	sb.WriteString(prompt)
 	for _, att := range m.attachments {
+		if att.Kind != "file" {
+			continue
+		}
 		content, err := os.ReadFile(att.Path)
 		if err != nil {
 			continue
@@ -86,19 +88,39 @@ func (m Model) injectAttachments(prompt string) string {
 	return sb.String()
 }
 
-// renderAttachmentChips returns a line of file chips for the input area.
-// Returns an empty string when there are no attachments.
+// ensureClipboardTempDir creates a temp directory for pasted images on first
+// use and stores its path in m.clipboardTempDir.
+func (m *Model) ensureClipboardTempDir() error {
+	if m.clipboardTempDir != "" {
+		return nil
+	}
+	dir, err := os.MkdirTemp("", "spettro-clipboard-*")
+	if err != nil {
+		return err
+	}
+	m.clipboardTempDir = dir
+	return nil
+}
+
+// renderAttachmentChips returns a line of chips for the input area showing
+// both file and image attachments. Returns an empty string when there are none.
 func (m Model) renderAttachmentChips(mc lipgloss.Color) string {
 	if len(m.attachments) == 0 {
 		return ""
 	}
 	var chips []string
 	for i, att := range m.attachments {
+		var label string
+		if att.Kind == "image" {
+			label = fmt.Sprintf("🖼 %s [%d]", att.RelPath, i+1)
+		} else {
+			label = fmt.Sprintf("📄 %s [%d]", filepath.Base(att.RelPath), i+1)
+		}
 		chip := lipgloss.NewStyle().
 			Foreground(mc).
 			Background(lipgloss.Color("#1F2937")).
 			PaddingLeft(1).PaddingRight(1).
-			Render(fmt.Sprintf("📄 %s [%d]", filepath.Base(att.RelPath), i+1))
+			Render(label)
 		chips = append(chips, chip)
 	}
 	hint := styleMuted.Render("  ctrl+r removes last")

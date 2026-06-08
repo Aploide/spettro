@@ -56,6 +56,7 @@ type ChatMessage struct {
 	Meta     string
 	Kind     string
 	Tools    []ToolItem
+	Images   []string
 	At       time.Time
 }
 
@@ -303,10 +304,12 @@ type Model struct {
 	// the Telegram relay) before the first tea event is processed.
 	startupCmds []tea.Cmd
 
-	// Attachments (ctrl+f to attach, ctrl+r to remove)
+	// Attachments (ctrl+f to attach, ctrl+r to remove; ctrl+v to paste image)
 	attachments      []attachmentItem
 	showAttachPrompt bool
 	attachDraft      string // textarea value saved while attach prompt is open
+	clipboardTempDir string // temp dir for pasted images, created on first paste
+	clipboardCounter int    // increments each paste for [Image #N] labelling
 
 	// Desktop notifications
 	agentStartAt    time.Time
@@ -731,6 +734,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshViewport()
 		}
+	case pasteImageMsg:
+		if msg.err != nil {
+			m.clipboardCounter-- // keep numbering gap-free on failure
+			m.showBanner("paste image: "+msg.err.Error(), "error")
+			return m, tea.Batch(cmds...)
+		}
+		m.attachments = append(m.attachments, attachmentItem{
+			Kind:    "image",
+			Path:    msg.path,
+			RelPath: fmt.Sprintf("Image #%d", msg.counter),
+		})
+		m.showBanner(fmt.Sprintf("pasted Image #%d", msg.counter), "success")
+		m.refreshViewport()
+		return m, tea.Batch(cmds...)
 	case verifyKeyDoneMsg:
 		newModel, cmd := m.handleVerifyKeyDone(msg)
 		return newModel, cmd
@@ -1006,6 +1023,20 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.showBanner("no response to copy yet", "info")
 		return m, nil
+	case "ctrl+v":
+		if m.showAttachPrompt {
+			break // let textarea handle text paste in attach mode
+		}
+		if !m.providers.SupportsVision(m.cfg.ActiveProvider, m.cfg.ActiveModel) {
+			m.showBanner("current model does not support vision", "error")
+			return m, nil
+		}
+		if err := m.ensureClipboardTempDir(); err != nil {
+			m.showBanner("clipboard temp dir: "+err.Error(), "error")
+			return m, nil
+		}
+		m.clipboardCounter++
+		return m, readClipboardImageCmd(m.clipboardTempDir, m.clipboardCounter)
 	case "ctrl+f":
 		if m.showAttachPrompt {
 			m.ta.Reset()
@@ -1426,10 +1457,17 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 	mentionedFiles := m.extractMentionedFiles(input)
 	prompt := injectMentionGuidance(input, mentionedFiles)
 	prompt = m.injectAttachments(prompt)
+	// Collect image paths (Kind="image") to send via the vision channel.
+	var imagePaths []string
+	for _, att := range m.attachments {
+		if att.Kind == "image" {
+			imagePaths = append(imagePaths, att.Path)
+		}
+	}
 	sentAttachments := append([]attachmentItem(nil), m.attachments...)
 	m.attachments = nil
 	if m.thinking {
-		m.queuePrompt(input, prompt, mentionedFiles, nil)
+		m.queuePrompt(input, prompt, mentionedFiles, imagePaths)
 		m.pushSystemMsg(fmt.Sprintf("queued request: %s", truncateLabel(input, 140)))
 		if len(sentAttachments) > 0 {
 			m.pushSystemMsg(fmt.Sprintf("(with %d attachment(s))", len(sentAttachments)))
@@ -1442,6 +1480,7 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 		Input:          input,
 		Prompt:         prompt,
 		MentionedFiles: mentionedFiles,
+		Images:         imagePaths,
 	})
 }
 
@@ -1451,6 +1490,7 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,
 		Content: req.Input,
+		Images:  req.Images,
 		At:      time.Now(),
 	})
 	m.awaitingInstead = false

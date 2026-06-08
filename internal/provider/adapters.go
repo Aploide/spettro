@@ -2,6 +2,9 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -9,6 +12,18 @@ import (
 	openai "github.com/openai/openai-go/v3"
 	openaiOption "github.com/openai/openai-go/v3/option"
 )
+
+// mediaTypeFromPath returns the MIME type for an image file based on extension.
+func mediaTypeFromPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/png"
+	}
+}
 
 type OpenAICompatibleAdapter struct {
 	APIKey  string
@@ -22,11 +37,33 @@ func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Req
 	}
 	client := openai.NewClient(opts...)
 
-	completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model: model,
-		Messages: []openai.ChatCompletionMessageParamUnion{
+	var messages []openai.ChatCompletionMessageParamUnion
+	if len(req.Images) > 0 {
+		var parts []openai.ChatCompletionContentPartUnionParam
+		for _, imgPath := range req.Images {
+			data, err := os.ReadFile(imgPath)
+			if err != nil {
+				continue
+			}
+			mt := mediaTypeFromPath(imgPath)
+			dataURL := "data:" + mt + ";base64," + base64.StdEncoding.EncodeToString(data)
+			parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+				URL: dataURL,
+			}))
+		}
+		parts = append(parts, openai.TextContentPart(req.Prompt))
+		messages = []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(parts),
+		}
+	} else {
+		messages = []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage(req.Prompt),
-		},
+		}
+	}
+
+	completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:    model,
+		Messages: messages,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "not a chat model") || strings.Contains(err.Error(), "v1/completions") {
@@ -71,11 +108,24 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 	client := anthropic.NewClient(anthropicOption.WithAPIKey(a.APIKey))
 
 	maxTokens := int64(8096)
+
+	// Build user message: images (base64) first, then the prompt text.
+	var userBlocks []anthropic.ContentBlockParamUnion
+	for _, imgPath := range req.Images {
+		data, err := os.ReadFile(imgPath)
+		if err != nil {
+			continue
+		}
+		mt := mediaTypeFromPath(imgPath)
+		userBlocks = append(userBlocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
+	}
+	userBlocks = append(userBlocks, anthropic.NewTextBlock(req.Prompt))
+
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
 		MaxTokens: maxTokens,
 		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)),
+			anthropic.NewUserMessage(userBlocks...),
 		},
 	}
 

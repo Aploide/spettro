@@ -938,7 +938,12 @@ func (m Model) renderMessages() string {
 		case RoleUser:
 			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
 			text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
-			parts = append(parts, renderUserTextBlock(text, m.paneWidth()-8, prefix))
+			entry := renderUserTextBlock(text, m.paneWidth()-8, prefix)
+			for i := range msg.Images {
+				imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
+				entry += "\n" + imgLabel
+			}
+			parts = append(parts, entry)
 		case RoleAssistant:
 			if msg.Kind == "plan" {
 				parts = append(parts, m.renderPlanMessage(msg, mc))
@@ -980,6 +985,9 @@ func (m Model) recalcLayout() Model {
 	statusH := 1
 
 	inputH := 6
+	if len(m.attachments) > 0 {
+		inputH++
+	}
 	if m.showPlanApproval {
 		inputH += 2 + len(planApprovalOptions)
 	} else if m.pendingAuth != nil {
