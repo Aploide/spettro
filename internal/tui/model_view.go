@@ -21,6 +21,10 @@ func (m Model) View() string {
 		return m.viewTrust()
 	}
 
+	if m.showLogin {
+		return m.viewLogin()
+	}
+
 	if m.showOnboarding {
 		return m.viewOnboarding()
 	}
@@ -90,6 +94,10 @@ func diagFillTitle(label string, innerWidth int) string {
 func (m Model) viewHeader() string {
 	mc := m.currentColor()
 	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro " + version.App)
+	if planName := m.spettroPlanName(); planName != "" {
+		sep := lipgloss.NewStyle().Bold(true).Foreground(mc).Render(" - ")
+		logo += sep + renderPlanLabel(planName, m.eyeFrame)
+	}
 
 	primaryIDs := primaryAgentIDs(m.manifest)
 	var tabs []string
@@ -150,7 +158,6 @@ func (m Model) viewHeader() string {
 	if thinkingTag != "" {
 		right = styleMuted.Render(thinkingTag) + "  " + right
 	}
-
 	rightW := lipgloss.Width(right)
 	availableCenter := m.width - logoW - rightW - 2
 	if availableCenter < 0 {
@@ -180,6 +187,32 @@ func (m Model) viewSep(width int) string {
 	return lipgloss.NewStyle().
 		Foreground(colorDim).
 		Render(strings.Repeat("─", width))
+}
+
+// renderPlanLabel renders a plan name with its tier color.
+// "max" animates through rainbow colors using the given frame counter.
+func renderPlanLabel(plan string, frame int) string {
+	label := strings.ToUpper(plan)
+	switch plan {
+	case "free":
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9CA3AF")).Render(label)
+	case "lite":
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F9FAFB")).Render(label)
+	case "plus":
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC")).Render(label)
+	case "pro":
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#C4B5FD")).Render(label)
+	case "max":
+		rainbow := []lipgloss.Color{"#FF6B6B", "#FF9E4F", "#FFD93D", "#6BCB77", "#4D96FF", "#C77DFF"}
+		var out string
+		for i, ch := range label {
+			c := rainbow[(i+frame)%len(rainbow)]
+			out += lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch))
+		}
+		return out
+	default:
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9CA3AF")).Render(label)
+	}
 }
 
 // dialogInnerWidth returns the usable content width for a dialog of dialogWidth,

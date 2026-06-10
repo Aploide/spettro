@@ -13,7 +13,12 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/spettro"
 )
+
+// spettroOnboardingMarker is the sentinel model name for the synthetic
+// "Sign in to Spettro" entry shown at the top of onboarding before login.
+const spettroOnboardingMarker = "__spettro_login__"
 
 type onboardingState struct {
 	step     int              // 0=pick model, 1=enter key, 2=verifying, 3=error
@@ -36,6 +41,23 @@ type verifyKeyDoneMsg struct {
 func (m Model) allOnboardingModels(filter string) []provider.Model {
 	q := strings.ToLower(strings.TrimSpace(filter))
 	var out []provider.Model
+
+	// Offer the Spettro Subscription as the first onboarding option. When the
+	// user is not yet signed in we show a synthetic "sign in" entry that opens
+	// the device-flow login instead of asking for an API key.
+	if strings.TrimSpace(m.cfg.APIKeys[spettro.ProviderID]) == "" {
+		entry := provider.Model{
+			Provider:     spettro.ProviderID,
+			ProviderName: spettro.ProviderName,
+			Name:         spettroOnboardingMarker,
+			DisplayName:  "Sign in to your Spettro subscription",
+		}
+		hay := strings.ToLower(entry.Provider + " " + entry.ProviderName + " " + entry.DisplayName + " subscription plan")
+		if q == "" || strings.Contains(hay, q) {
+			out = append(out, entry)
+		}
+	}
+
 	for _, mod := range m.providers.Models() {
 		if mod.Local {
 			continue
@@ -97,6 +119,11 @@ func (m Model) updateOnboardingPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		sel := m.onboarding.items[m.onboarding.cursor]
+		// The synthetic Spettro entry opens the device-flow login instead of
+		// the API-key entry step.
+		if sel.Provider == spettro.ProviderID && sel.Name == spettroOnboardingMarker {
+			return m.startLogin(true)
+		}
 		m.onboarding.provider = sel.Provider
 		m.onboarding.model = sel.Name
 		m.onboarding.provName = sel.ProviderName
