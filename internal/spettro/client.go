@@ -30,9 +30,9 @@ const (
 	// ProviderName is the human-facing label shown in the UI.
 	ProviderName = "Spettro"
 	// PricingURL is where users upgrade their plan.
-	PricingURL = "https://spettro.eyed.to/pricing"
+	PricingURL = "https://spettro.app/pricing"
 
-	defaultBaseURL = "http://localhost:42099"
+	defaultBaseURL = "https://api.spettro.app"
 )
 
 // BaseURL returns the backend's public base URL. Overridable with SPETTRO_API_URL.
