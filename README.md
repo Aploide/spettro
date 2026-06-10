@@ -11,6 +11,12 @@ CA: C3fawupKrXdn3X7KPTmmnkwzJQ9qycMNag55ZzQ8pump
 
 Spettro is a terminal-first multi-agent coding assistant written in Go.
 
+# Quick install
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/cesp99/spettro/main/install.sh | sh
+```
+
 It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via `TOOL_CALL` and an `agent` tool, plus specialized orchestrator/worker roles (plan, coding, ask, explore, code, git, test, review, docs).
 
 ## Highlights
