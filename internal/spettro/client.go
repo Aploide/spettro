@@ -28,9 +28,9 @@ const (
 	// ProviderID is the provider key used throughout the CLI (config, manager).
 	ProviderID = "spettro"
 	// ProviderName is the human-facing label shown in the UI.
-	ProviderName = "Spettro Subscription"
+	ProviderName = "Spettro"
 	// PricingURL is where users upgrade their plan.
-	PricingURL = "https://spettro.io/pricing"
+	PricingURL = "https://spettro.eyed.to/pricing"
 
 	defaultBaseURL = "http://localhost:42099"
 )
