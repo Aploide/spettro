@@ -21,6 +21,10 @@ func (m Model) View() string {
 		return m.viewTrust()
 	}
 
+	if m.showLogin {
+		return m.viewLogin()
+	}
+
 	if m.showOnboarding {
 		return m.viewOnboarding()
 	}
@@ -90,6 +94,10 @@ func diagFillTitle(label string, innerWidth int) string {
 func (m Model) viewHeader() string {
 	mc := m.currentColor()
 	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro " + version.App)
+	if planName := m.spettroPlanName(); planName != "" {
+		sep := lipgloss.NewStyle().Bold(true).Foreground(mc).Render(" - ")
+		logo += sep + renderPlanLabel(planName, m.eyeFrame)
+	}
 
 	primaryIDs := primaryAgentIDs(m.manifest)
 	var tabs []string
@@ -150,7 +158,6 @@ func (m Model) viewHeader() string {
 	if thinkingTag != "" {
 		right = styleMuted.Render(thinkingTag) + "  " + right
 	}
-
 	rightW := lipgloss.Width(right)
 	availableCenter := m.width - logoW - rightW - 2
 	if availableCenter < 0 {

@@ -9,6 +9,8 @@ type commandDef struct {
 
 var allCommands = []commandDef{
 	{"/help", "show help"},
+	{"/login", "sign in to your Spettro subscription"},
+	{"/logout", "sign out of your Spettro subscription"},
 	{"/models", "switch model"},
 	{"/connect", "connect a provider"},
 	{"/mode", "cycle mode"},
@@ -107,6 +109,8 @@ func isInstantCommand(input string) bool {
 		"/permission", "/permissions",
 		"/budget",
 		"/thinking", "/think",
+		"/login",
+		"/logout",
 		"/connect",
 		"/models",
 		"/skill", "/skills",
@@ -136,6 +140,8 @@ func isInstantCommand(input string) bool {
 const helpText = `commands:
   /help          this message
   /exit /quit    quit spettro  (or ctrl+c twice)
+  /login         sign in to your Spettro subscription (opens browser)
+  /logout        sign out of your Spettro subscription
   /mode          cycle to next mode  (or shift+tab)
   /models        open model selector (connected providers only)
   /models p:m    set model directly

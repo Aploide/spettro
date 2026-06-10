@@ -36,6 +36,13 @@ type UserConfig struct {
 	// /thinking command and honoured by the Anthropic adapter; other
 	// providers ignore it.
 	ThinkingLevel string `json:"thinking_level,omitempty"`
+
+	// Spettro Subscription state. The ep_ API key itself lives in the encrypted
+	// keys store under the "spettro" provider; these fields cache the last-known
+	// plan info so the top bar can render it before the network refresh lands.
+	SpettroEmail      string `json:"spettro_email,omitempty"`
+	SpettroPlan       string `json:"spettro_plan,omitempty"`
+	SpettroPlanStatus string `json:"spettro_plan_status,omitempty"`
 }
 
 func Default() UserConfig {

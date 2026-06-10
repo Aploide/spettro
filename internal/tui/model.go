@@ -19,6 +19,7 @@ import (
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/session"
+	"spettro/internal/spettro"
 	"spettro/internal/storage"
 	"spettro/internal/telegram"
 )
@@ -232,6 +233,9 @@ type Model struct {
 	showOnboarding bool
 	onboarding     onboardingState
 
+	showLogin bool
+	login     loginState
+
 	favorites map[string]bool
 
 	pendingPlan string
@@ -380,7 +384,15 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	if cmd := m.autostartTelegram(); cmd != nil {
 		m.startupCmds = append(m.startupCmds, cmd)
 	}
-	if len(pm.ConnectedModels(cfg.APIKeys)) == 0 && len(cfg.LocalEndpoints) == 0 {
+	// If a Spettro Subscription is connected, register its endpoint immediately
+	// (so inference resolves) and refresh the model list + plan in the background.
+	hasSpettro := strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != ""
+	if hasSpettro {
+		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
+		spettroKey := cfg.APIKeys[spettro.ProviderID]
+		m.startupCmds = append(m.startupCmds, loadSpettroCmd(spettroKey, false, false))
+	}
+	if len(pm.ConnectedModels(cfg.APIKeys)) == 0 && len(cfg.LocalEndpoints) == 0 && !hasSpettro {
 		m.showOnboarding = true
 		m.onboarding = onboardingState{
 			step:  0,
@@ -751,6 +763,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifyKeyDoneMsg:
 		newModel, cmd := m.handleVerifyKeyDone(msg)
 		return newModel, cmd
+	case loginInitiatedMsg:
+		return m.handleLoginInitiated(msg)
+	case loginPolledMsg:
+		return m.handleLoginPolled(msg)
+	case spettroLoadedMsg:
+		return m.handleSpettroLoaded(msg)
 	case tea.FocusMsg:
 		m.terminalFocused = true
 	case tea.BlurMsg:
@@ -940,6 +958,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(append(cmds, mouseCmd)...)
 		}
+		if m.showLogin {
+			return m.updateLogin(msg)
+		}
 		if m.showTrust {
 			return m.updateTrust(msg)
 		}
@@ -961,7 +982,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateMain(msg)
 	}
 
-	if !m.showTrust && !m.showResume && !m.showSelector && !m.showSetup && !m.showConnect {
+	if !m.showLogin && !m.showTrust && !m.showResume && !m.showSelector && !m.showSetup && !m.showConnect {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
@@ -1286,6 +1307,10 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.persistUIState()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 		m.publishRemoteState("mode_change")
+	case "/login":
+		return m.startLogin(false)
+	case "/logout":
+		return m.handleLogout()
 	case "/connect":
 		m = m.openConnect()
 	case "/models":

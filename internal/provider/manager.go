@@ -15,12 +15,18 @@ import (
 	"spettro/internal/models"
 )
 
+// spettroProviderID is the provider key for the Spettro Subscription. Models
+// under this provider are routed to the Spettro backend's OpenAI-compatible
+// inference proxy rather than to a third-party LLM provider.
+const spettroProviderID = "spettro"
+
 type Manager struct {
-	mu           sync.RWMutex
-	catalog      []Model
-	localModels  []Model
-	apiKeys      map[string]string
-	providerAPIs map[string]string
+	mu            sync.RWMutex
+	catalog       []Model
+	localModels   []Model
+	spettroModels []Model
+	apiKeys       map[string]string
+	providerAPIs  map[string]string
 }
 
 func NewManager() *Manager {
@@ -54,7 +60,31 @@ func (m *Manager) SetCatalog(cat models.Catalog) {
 			apis[k] = v
 		}
 	}
+	// Preserve the Spettro Subscription endpoint across catalog refreshes.
+	if v, ok := m.providerAPIs[spettroProviderID]; ok {
+		apis[spettroProviderID] = v
+	}
 	m.providerAPIs = apis
+	m.mu.Unlock()
+}
+
+// SetSpettro registers the Spettro Subscription models and inference endpoint.
+// Passing an empty model list clears the models but keeps the endpoint so that
+// in-flight inference still resolves while a fresh list is being fetched.
+func (m *Manager) SetSpettro(inferenceBaseURL string, models []Model) {
+	m.mu.Lock()
+	m.spettroModels = models
+	if inferenceBaseURL != "" {
+		m.providerAPIs[spettroProviderID] = inferenceBaseURL
+	}
+	m.mu.Unlock()
+}
+
+// ClearSpettro removes the Spettro Subscription models and endpoint (logout).
+func (m *Manager) ClearSpettro() {
+	m.mu.Lock()
+	m.spettroModels = nil
+	delete(m.providerAPIs, spettroProviderID)
 	m.mu.Unlock()
 }
 
@@ -93,14 +123,16 @@ func (m *Manager) Models() []Model {
 	m.mu.RLock()
 	cat := m.catalog
 	local := m.localModels
+	spettro := m.spettroModels
 	m.mu.RUnlock()
 	base := cat
 	if len(base) == 0 {
 		base = fallbackModels
 	}
-	out := make([]Model, len(base)+len(local))
-	copy(out, base)
-	copy(out[len(base):], local)
+	out := make([]Model, 0, len(spettro)+len(base)+len(local))
+	out = append(out, spettro...)
+	out = append(out, base...)
+	out = append(out, local...)
 	return out
 }
 

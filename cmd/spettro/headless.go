@@ -15,8 +15,25 @@ import (
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/session"
+	"spettro/internal/spettro"
 	"spettro/internal/storage"
 )
+
+// spettroInfosToModels converts Spettro backend model entries into provider
+// models tagged with the "spettro" provider.
+func spettroInfosToModels(infos []spettro.ModelInfo) []provider.Model {
+	out := make([]provider.Model, 0, len(infos))
+	for _, mi := range infos {
+		out = append(out, provider.Model{
+			Provider:     spettro.ProviderID,
+			ProviderName: spettro.ProviderName,
+			Name:         mi.ID,
+			DisplayName:  mi.ID,
+			ToolCall:     true,
+		})
+	}
+	return out
+}
 
 func runHeadless(cwd, bindHost string, port int) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -41,6 +58,13 @@ func runHeadless(cwd, bindHost string, port int) {
 	for _, endpoint := range cfg.LocalEndpoints {
 		if localModels, err := provider.ProbeLocalServer(context.Background(), endpoint); err == nil {
 			pm.AddLocalModels(localModels)
+		}
+	}
+	// Register the Spettro Subscription endpoint + models when signed in.
+	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
+		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
+		if infos, err := spettro.ListModels(context.Background(), cfg.APIKeys[spettro.ProviderID]); err == nil {
+			pm.SetSpettro(spettro.InferenceBaseURL(), spettroInfosToModels(infos))
 		}
 	}
 	models.RefreshBackground(pm.SetCatalog)
