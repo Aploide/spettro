@@ -291,6 +291,11 @@ type Model struct {
 	autoCompactInFlight bool
 	sessionID           string
 
+	// lastAutoSaveAt throttles debounced session writes (see
+	// autoSaveDebounced). Zero value means "never saved", so the first save
+	// always fires.
+	lastAutoSaveAt time.Time
+
 	showResume   bool
 	resumeItems  []session.Summary
 	resumeCursor int
@@ -523,6 +528,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.publishRemoteState("agent_done")
 		m.maybeNotify(msg.err)
+		// Force a save at run completion: the debounced in-run saves may have
+		// skipped the final assistant message if it landed inside the window.
+		m.autoSave()
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -563,6 +571,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.publishRemoteState("plan_done")
 		m.maybeNotify(msg.err)
+		m.autoSave()
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -586,6 +595,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.publishRemote("commit", map[string]interface{}{"message": msg.commitMsg})
 		}
 		m.publishRemoteState("commit_done")
+		m.autoSave()
 		m.refreshViewport()
 	case searchDoneMsg:
 		if !m.thinking {
@@ -605,6 +615,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.publishRemote("search", map[string]interface{}{"result": msg.result})
 		}
 		m.publishRemoteState("search_done")
+		m.autoSave()
 		m.refreshViewport()
 	case compactDoneMsg:
 		if !m.thinking {
@@ -1525,6 +1536,8 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 		"mentioned_files": req.MentionedFiles,
 	})
 	m.publishRemoteState("user_message")
+	// Persist the user turn immediately so a crash mid-run never loses it.
+	m.autoSave()
 	m.refreshViewport()
 
 	spec, ok := m.manifest.AgentByID(m.mode)

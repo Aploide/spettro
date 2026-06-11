@@ -59,6 +59,7 @@ func (m *Model) pushSystemMsg(content string) {
 		Content: content,
 		At:      time.Now(),
 	})
+	m.autoSaveDebounced()
 	m.publishRemote("system_message", map[string]interface{}{"content": content})
 }
 
@@ -101,6 +102,7 @@ func (m *Model) setProgressNote(text string) {
 		Content: text,
 		At:      time.Now(),
 	})
+	m.autoSaveDebounced()
 	m.publishRemote("comment", map[string]interface{}{"message": text})
 }
 
@@ -111,6 +113,7 @@ func (m *Model) appendToolStreamMessage(item ToolItem) {
 		Tools: []ToolItem{item},
 		At:    time.Now(),
 	})
+	m.autoSaveDebounced()
 }
 
 func (m *Model) updateToolStreamMessage(item ToolItem) {
@@ -124,6 +127,7 @@ func (m *Model) updateToolStreamMessage(item ToolItem) {
 			msg.Tools[0] = item
 			msg.At = time.Now()
 			m.mergeAdjacentToolStreamMessage(i)
+			m.autoSaveDebounced()
 			return
 		}
 	}
@@ -222,6 +226,8 @@ func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
 			At:      time.Now(),
 		})
 	}
+	// An interrupt ends the run; persist the kept-progress note immediately.
+	m.autoSave()
 	m.finishAgentActivity(agentID, "cancelled", content, "")
 	m.stopAgent()
 	m.awaitingInstead = askInstead
@@ -830,6 +836,33 @@ func (m *Model) recordCommandEvent(command string) {
 	})
 }
 
+// autoSaveMinInterval is the minimum wall-clock gap between debounced session
+// saves. refreshViewport used to call autoSave() on every render — including
+// scroll, tick, and banner-only updates — so a long run with frequent tool
+// traces re-serialized and rewrote the whole session file dozens of times a
+// second. autoSaveDebounced() collapses those into at most one write per
+// interval; flushSave()/autoSave() still force an immediate write at the
+// critical persistence points (/clear, /compact, resume, quit).
+const autoSaveMinInterval = 2 * time.Second
+
+// autoSaveDebounced persists the session at most once per autoSaveMinInterval.
+// Use it on high-frequency mutation paths (tool-stream updates, progress
+// comments). Critical, low-frequency persistence points should call autoSave()
+// directly so nothing is lost.
+func (m *Model) autoSaveDebounced() {
+	if !m.lastAutoSaveAt.IsZero() && time.Since(m.lastAutoSaveAt) < autoSaveMinInterval {
+		return
+	}
+	m.autoSave()
+}
+
+// flushSave forces an unconditional save, ignoring the debounce window. It is
+// the persistence safety-net invoked on exit so the final turn — which may
+// have landed inside the debounce window — is never lost.
+func (m *Model) flushSave() {
+	m.autoSave()
+}
+
 func (m *Model) autoSave() {
 	hasContent := false
 	for _, msg := range m.messages {
@@ -841,6 +874,7 @@ func (m *Model) autoSave() {
 	if !hasContent {
 		return
 	}
+	m.lastAutoSaveAt = time.Now()
 	m.ensureSession()
 	msgs := make([]session.Message, len(m.messages))
 	for i, msg := range m.messages {
@@ -864,8 +898,11 @@ func (m *Model) autoSave() {
 	})
 }
 
+// refreshViewport re-renders the chat transcript into the viewport. It no
+// longer persists the session: saving is decoupled (see autoSaveDebounced /
+// autoSave) so that scroll, tick, and banner-only refreshes do not trigger a
+// full session rewrite.
 func (m *Model) refreshViewport() {
-	m.autoSave()
 	m.vp.SetContent(m.renderMessages())
 	m.vp.GotoBottom()
 }
