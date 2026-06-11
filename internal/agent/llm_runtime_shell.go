@@ -486,6 +486,7 @@ func isDangerousRM(command string) bool {
 	hasR := false
 	hasF := false
 	targetsRoot := false
+	noPreserveRoot := false
 	for ; idx < len(tokens); idx++ {
 		t := tokens[idx]
 		if t == "" {
@@ -498,6 +499,10 @@ func isDangerousRM(command string) bool {
 				hasR = true
 			case "--force":
 				hasF = true
+			case "--no-preserve-root":
+				// This flag exists only to bypass GNU rm's refusal to delete
+				// "/"; there is no legitimate reason for an agent to pass it.
+				noPreserveRoot = true
 			}
 			if strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "--") {
 				for i := 1; i < len(l); i++ {
@@ -516,7 +521,7 @@ func isDangerousRM(command string) bool {
 			targetsRoot = true
 		}
 	}
-	return hasR && hasF && targetsRoot
+	return noPreserveRoot || (hasR && hasF && targetsRoot)
 }
 
 func allowedCommandsPath(cwd string) string {

@@ -130,3 +130,23 @@ func TestIsBlockedCommand(t *testing.T) {
 		t.Fatal("expected rm -rf /tmp to be allowed by blocklist")
 	}
 }
+
+func TestIsBlockedCommand_NoPreserveRoot(t *testing.T) {
+	blocked := []string{
+		"rm -rf / --no-preserve-root",
+		"rm --no-preserve-root -rf /home/user",
+		"sudo rm -rf --no-preserve-root .",
+	}
+	for _, cmd := range blocked {
+		if !agent.IsBlockedCommandForTesting(cmd) {
+			t.Errorf("expected %q to be blocked (--no-preserve-root)", cmd)
+		}
+	}
+	// A normal recursive delete of a subdirectory is NOT hard-blocked — it
+	// still goes through the approval prompt rather than being refused outright.
+	for _, cmd := range []string{"rm -rf ./build", "rm -rf dist", "rm -rf node_modules"} {
+		if agent.IsBlockedCommandForTesting(cmd) {
+			t.Errorf("expected %q to be allowed by the blocklist (approval-gated, not hard-blocked)", cmd)
+		}
+	}
+}
