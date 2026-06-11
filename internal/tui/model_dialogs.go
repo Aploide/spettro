@@ -1560,7 +1560,16 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		Manifest:        &manifest,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
 		DelegationDepth: 0,
-		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
+		ToolCallback: func(t agent.ToolTrace) {
+			// Guard the send against a cancelled run: after stopAgent() the TUI
+			// stops draining toolCh, so an unguarded send from an in-flight
+			// step could block the agent goroutine forever once the 64-slot
+			// buffer fills.
+			select {
+			case toolCh <- t:
+			case <-ctx.Done():
+			}
+		},
 		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			respCh := make(chan shellApprovalResponse, 1)
 			select {
