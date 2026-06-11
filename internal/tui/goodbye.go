@@ -17,6 +17,10 @@ func PrintGoodbye(final tea.Model) {
 		return
 	}
 
+	// Persistence safety-net: in-session saves are debounced, so the last
+	// turn before quit may not have been flushed yet. Force a final save.
+	m.flushSave()
+
 	duration := time.Since(m.startedAt)
 	tokens := m.totalTokensUsed
 	hasMessages := false

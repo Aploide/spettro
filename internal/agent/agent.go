@@ -46,7 +46,12 @@ type ToolTrace struct {
 type RunResult struct {
 	Content    string
 	Tools      []ToolTrace
-	TokensUsed int // total tokens consumed across all LLM calls in the run
+	TokensUsed int // total tokens consumed across all LLM calls in the run (session COST)
+	// ContextTokens approximates how full the context window is after the
+	// run: the largest single LLM request (prompt+completion). It is NOT a
+	// sum across steps — each step's prompt re-embeds the rolling history, so
+	// summing would double-count the same context and inflate the gauge.
+	ContextTokens int
 }
 
 // Legacy stub types — kept so existing tests compile.
@@ -112,6 +117,11 @@ type LLMAgent struct {
 	Thinking        provider.ThinkingLevel
 	RequiredReads   []string
 	Images          []string // only used on first LLM call (chat use case)
+	// History is an optional bounded transcript of prior conversation turns,
+	// surfaced to the model as a "Conversation so far" section so follow-up
+	// turns have memory. Empty == first turn (no behavior change). The caller
+	// is responsible for bounding it (see maxHistoryBytes).
+	History         string
 	ToolCallback    func(ToolTrace)
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
@@ -151,9 +161,10 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	}
 	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
 	catalog = filterDisabledSkills(catalog)
-	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
+		History:         a.History,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
 		MaxSteps:        maxSteps,
@@ -188,9 +199,10 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	out = stripLeakedToolCalls(out)
 	main, _ := stripThinkTags(out)
 	return RunResult{
-		Content:    strings.TrimSpace(main),
-		Tools:      traces,
-		TokensUsed: tokens,
+		Content:       strings.TrimSpace(main),
+		Tools:         traces,
+		TokensUsed:    tokens,
+		ContextTokens: contextTokens,
 	}, nil
 }
 

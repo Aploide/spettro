@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
-	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
@@ -25,6 +24,17 @@ import (
 )
 
 const coAuthorInfo = "Co-Authored-By: Spettro <spettro@eyed.to>"
+
+// compactSummaryPrefix marks the system message that replaces the transcript
+// after a /compact. The cross-turn history builder treats such a message as a
+// conversation summary worth carrying forward (see buildConversationHistory).
+const compactSummaryPrefix = "── conversation compacted ──"
+
+// maxConversationHistoryBytes bounds the cross-turn transcript fed back to the
+// model on each turn so token cost stays controlled. It mirrors the agent
+// package's maxHistoryBytes (32 KB) for the in-run tool log; most-recent turns
+// win when the cap is hit.
+const maxConversationHistoryBytes = 32 * 1024
 
 type Role string
 
@@ -41,6 +51,11 @@ type ToolItem struct {
 	Output string
 	Diff   string
 	Open   bool
+	// Seq is a monotonically increasing identity assigned when a completed
+	// tool entry is created. It lets an asynchronously-computed file diff
+	// (toolDiffMsg) be attached to exactly the right entry even after the
+	// tool-stream messages are merged. Zero means "no async diff pending".
+	Seq int
 }
 
 // maxLiveTools bounds how many completed ToolItem entries we retain in
@@ -66,18 +81,20 @@ const localConnectProviderID = "__local_endpoint__"
 type tickMsg time.Time
 
 type agentDoneMsg struct {
-	content    string
-	meta       string
-	tools      []agent.ToolTrace
-	tokensUsed int
-	err        error
+	content       string
+	meta          string
+	tools         []agent.ToolTrace
+	tokensUsed    int // cumulative session cost contributed by this run
+	contextTokens int // approximate context occupancy after this run
+	err           error
 }
 
 type planDoneMsg struct {
-	plan       string
-	tools      []agent.ToolTrace
-	tokensUsed int
-	err        error
+	plan          string
+	tools         []agent.ToolTrace
+	tokensUsed    int
+	contextTokens int
+	err           error
 }
 
 type commitDoneMsg struct {
@@ -100,6 +117,20 @@ type compactDoneMsg struct {
 
 type toolProgressMsg struct {
 	trace agent.ToolTrace
+}
+
+// modifiedFilesMsg delivers the result of an asynchronous git query for the
+// side-panel branch + modified-file list (see refreshModifiedFilesCmd).
+type modifiedFilesMsg struct {
+	branch string
+	files  []modifiedFileEntry
+}
+
+// toolDiffMsg delivers an asynchronously-computed file diff to attach to the
+// completed tool entry identified by seq (see computeFileDiffCmd).
+type toolDiffMsg struct {
+	seq  int
+	diff string
 }
 
 type parallelAgentEntry struct {
@@ -193,6 +224,12 @@ type Model struct {
 	ta   textarea.Model
 	spin spinner.Model
 
+	// renderCache memoizes per-message rendered blocks so the chat transcript
+	// is not re-rendered (markdown regex and all) on every frame. See
+	// renderMessages / renderCacheState. Pointer so the cache survives the
+	// value-copy semantics of the Bubble Tea Model.
+	renderCache *renderCacheState
+
 	mode string
 	cfg  config.UserConfig
 
@@ -279,17 +316,36 @@ type Model struct {
 	sideDetailScroll int
 	modifiedFiles    []modifiedFileEntry
 	gitBranch        string
-	showSidePanel    bool
-	sessionEdits     map[string]struct{}
-	activityFeed     []activityItem
-	currentRunKey    string
-	recentApprovals  []session.AgentEvent
+	// lastModifiedRefreshAt throttles the async git modified-files query
+	// (see scheduleModifiedRefresh).
+	lastModifiedRefreshAt time.Time
+	// toolSeq is the monotonic counter handed to completed ToolItems so an
+	// async file diff can be matched back to its entry.
+	toolSeq         int
+	showSidePanel   bool
+	sessionEdits    map[string]struct{}
+	activityFeed    []activityItem
+	currentRunKey   string
+	recentApprovals []session.AgentEvent
 
-	totalTokensUsed     int
+	// totalTokensUsed is the cumulative session token COST (sum of every
+	// run's prompt+completion). It drives the goodbye stats and remote status
+	// — NOT the context gauge.
+	totalTokensUsed int
+	// contextTokens is the approximate current context-window OCCUPANCY: the
+	// largest single LLM request of the most recent run. The compaction gauge
+	// and auto-compaction read this so a multi-step run no longer inflates the
+	// reading by summing each step's re-embedded history (EFF-3).
+	contextTokens       int
 	autoCompactFailures int
 	compactWarningLevel int
 	autoCompactInFlight bool
 	sessionID           string
+
+	// lastAutoSaveAt throttles debounced session writes (see
+	// autoSaveDebounced). Zero value means "never saved", so the first save
+	// always fires.
+	lastAutoSaveAt time.Time
 
 	showResume   bool
 	resumeItems  []session.Summary
@@ -463,6 +519,47 @@ func (m *Model) resetRunState() {
 	m.refreshModifiedFiles()
 }
 
+// modal identifies the full-screen overlay that owns the UI. There must be a
+// single source of truth for which overlay is active so the three consumers —
+// key routing (update), the non-key passthrough guard (update), and rendering
+// (View) — can never drift in order or membership.
+type modal int
+
+const (
+	modalNone modal = iota
+	modalTrust
+	modalLogin
+	modalOnboarding
+	modalResume
+	modalConnect
+	modalSelector
+	modalSetup
+)
+
+// activeModal returns the highest-precedence active overlay. The precedence is
+// the canonical dispatch order consulted by both update() and View(). Trust is
+// the startup gate so it wins; setup is last (legacy, currently never set).
+func (m Model) activeModal() modal {
+	switch {
+	case m.showTrust:
+		return modalTrust
+	case m.showLogin:
+		return modalLogin
+	case m.showOnboarding:
+		return modalOnboarding
+	case m.showResume:
+		return modalResume
+	case m.showConnect:
+		return modalConnect
+	case m.showSelector:
+		return modalSelector
+	case m.showSetup:
+		return modalSetup
+	default:
+		return modalNone
+	}
+}
+
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -495,6 +592,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetRunState()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+		}
+		if msg.contextTokens > 0 {
+			m.contextTokens = msg.contextTokens
+		}
+		if msg.tokensUsed > 0 || msg.contextTokens > 0 {
 			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
@@ -523,6 +625,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.publishRemoteState("agent_done")
 		m.maybeNotify(msg.err)
+		// Force a save at run completion: the debounced in-run saves may have
+		// skipped the final assistant message if it landed inside the window.
+		m.autoSave()
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -536,6 +641,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetRunState()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+		}
+		if msg.contextTokens > 0 {
+			m.contextTokens = msg.contextTokens
+		}
+		if msg.tokensUsed > 0 || msg.contextTokens > 0 {
 			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
@@ -563,6 +673,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.publishRemoteState("plan_done")
 		m.maybeNotify(msg.err)
+		m.autoSave()
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -586,6 +697,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.publishRemote("commit", map[string]interface{}{"message": msg.commitMsg})
 		}
 		m.publishRemoteState("commit_done")
+		m.autoSave()
 		m.refreshViewport()
 	case searchDoneMsg:
 		if !m.thinking {
@@ -605,6 +717,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.publishRemote("search", map[string]interface{}{"result": msg.result})
 		}
 		m.publishRemoteState("search_done")
+		m.autoSave()
 		m.refreshViewport()
 	case compactDoneMsg:
 		if !m.thinking {
@@ -625,10 +738,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionID = ""
 			m.todos = nil
 			m.totalTokensUsed = 0
+			m.contextTokens = 0
 			m.compactWarningLevel = 0
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
-				Content: "── conversation compacted ──\n\n" + msg.summary,
+				Content: compactSummaryPrefix + "\n\n" + msg.summary,
 				At:      time.Now(),
 			}}
 		}
@@ -673,7 +787,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t.Status != "running" {
 				switch t.Name {
 				case "file-write", "shell-exec", "bash", "agent":
-					m.refreshModifiedFiles()
+					// Refresh the side-panel file list off the Update
+					// goroutine, throttled so a burst of traces does not
+					// spawn git serially on the hot path.
+					if cmd := m.scheduleModifiedRefresh(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 			if t.Status == "running" {
@@ -681,13 +800,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentTool = &item
 				m.appendToolStreamMessage(item)
 			} else {
+				m.toolSeq++
 				completed := ToolItem{
 					Name:   t.Name,
 					Status: t.Status,
 					Args:   t.Args,
 					Output: t.Output,
-					Diff:   computeFileDiff(m.cwd, t.Name, t.Args, t.Status),
+					Seq:    m.toolSeq,
 				}
+				// Compute the diff off the Update goroutine: computeFileDiff
+				// shells out to git, which used to block Update per edit. The
+				// result is attached later via toolDiffMsg keyed on Seq.
+				cmds = append(cmds, computeFileDiffCmd(completed.Seq, m.cwd, t.Name, t.Args, t.Status))
 				// Cap m.liveTools to bound memory and the run summary built
 				// at interrupt time. When the LLM emits very large tool
 				// batches we keep the most recent maxLiveTools entries so
@@ -704,6 +828,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.vp.SetContent(m.renderMessages())
 			m.vp.GotoBottom()
+		}
+	case modifiedFilesMsg:
+		m.gitBranch = msg.branch
+		m.modifiedFiles = msg.files
+	case toolDiffMsg:
+		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
+			m.attachToolDiff(msg.seq, msg.diff)
+			m.vp.SetContent(m.renderMessages())
 		}
 	case shellApprovalRequestMsg:
 		if m.thinking {
@@ -758,6 +890,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifyKeyDoneMsg:
 		newModel, cmd := m.handleVerifyKeyDone(msg)
 		return newModel, cmd
+	case localProbeDoneMsg:
+		newModel, cmd := m.handleLocalProbeDone(msg)
+		return newModel, cmd
 	case loginInitiatedMsg:
 		return m.handleLoginInitiated(msg)
 	case loginPolledMsg:
@@ -795,6 +930,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.remoteServer != nil {
 			cmds = append(cmds, waitForRemoteInterrupt(m.remoteServer))
 		}
+	case telegramAutostartDoneMsg:
+		return m.handleTelegramAutostartDone(msg)
 	case telegramSubmitMsg:
 		newModel, cmd := m.handleTelegramSubmission(msg.req)
 		nm, _ := newModel.(Model)
@@ -956,31 +1093,29 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(append(cmds, mouseCmd)...)
 		}
-		if m.showLogin {
+		switch m.activeModal() {
+		case modalLogin:
 			return m.updateLogin(msg)
-		}
-		if m.showTrust {
+		case modalTrust:
 			return m.updateTrust(msg)
-		}
-		if m.showResume {
+		case modalResume:
 			return m.updateResume(msg)
-		}
-		if m.showConnect {
+		case modalConnect:
 			return m.updateConnect(msg)
-		}
-		if m.showSelector {
+		case modalSelector:
 			return m.updateSelector(msg)
-		}
-		if m.showSetup {
+		case modalSetup:
 			return m.updateSetup(msg)
-		}
-		if m.showOnboarding {
+		case modalOnboarding:
 			return m.updateOnboarding(msg)
 		}
 		return m.updateMain(msg)
 	}
 
-	if !m.showLogin && !m.showTrust && !m.showResume && !m.showSelector && !m.showSetup && !m.showConnect {
+	// Only forward passthrough (non-key) messages to the textarea/viewport
+	// when no overlay owns the UI. Consulting activeModal() keeps this guard
+	// in lockstep with the routing above (it previously omitted onboarding).
+	if m.activeModal() == modalNone {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
@@ -1427,6 +1562,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.messages = nil
 		m.sessionID = ""
 		m.todos = nil
+		// Occupancy resets with the conversation; keep the gauge honest.
+		m.contextTokens = 0
+		m.compactWarningLevel = 0
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
 	case "/tasks":
@@ -1464,18 +1602,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
-	window := m.contextWindow()
-	if window == 0 {
-		window = contextWindowDefault(m.cfg.ActiveProvider)
-	}
-	eval := compact.Evaluate(window, compact.Config{
-		AutoEnabled:      m.cfg.AutoCompactEnabled,
-		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-		MaxFailures:      m.cfg.AutoCompactMaxFailures,
-	}, compact.State{
-		TokensUsed:          m.totalTokensUsed,
-		ConsecutiveFailures: m.autoCompactFailures,
-	})
+	eval := m.evaluateCompact()
 	if eval.IsBlocking {
 		m.showBanner("context limit reached; run /compact before sending new prompts", "error")
 		return m, nil
@@ -1525,6 +1652,8 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 		"mentioned_files": req.MentionedFiles,
 	})
 	m.publishRemoteState("user_message")
+	// Persist the user turn immediately so a crash mid-run never loses it.
+	m.autoSave()
 	m.refreshViewport()
 
 	spec, ok := m.manifest.AgentByID(m.mode)

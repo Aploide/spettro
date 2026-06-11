@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +18,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
-	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/session"
 )
@@ -59,6 +61,7 @@ func (m *Model) pushSystemMsg(content string) {
 		Content: content,
 		At:      time.Now(),
 	})
+	m.autoSaveDebounced()
 	m.publishRemote("system_message", map[string]interface{}{"content": content})
 }
 
@@ -101,6 +104,7 @@ func (m *Model) setProgressNote(text string) {
 		Content: text,
 		At:      time.Now(),
 	})
+	m.autoSaveDebounced()
 	m.publishRemote("comment", map[string]interface{}{"message": text})
 }
 
@@ -111,6 +115,7 @@ func (m *Model) appendToolStreamMessage(item ToolItem) {
 		Tools: []ToolItem{item},
 		At:    time.Now(),
 	})
+	m.autoSaveDebounced()
 }
 
 func (m *Model) updateToolStreamMessage(item ToolItem) {
@@ -124,6 +129,7 @@ func (m *Model) updateToolStreamMessage(item ToolItem) {
 			msg.Tools[0] = item
 			msg.At = time.Now()
 			m.mergeAdjacentToolStreamMessage(i)
+			m.autoSaveDebounced()
 			return
 		}
 	}
@@ -148,6 +154,27 @@ func (m *Model) mergeAdjacentToolStreamMessage(idx int) {
 	}
 	prev.Tools = append(prev.Tools, curr.Tools[0])
 	m.messages = append(m.messages[:idx], m.messages[idx+1:]...)
+}
+
+// attachToolDiff sets the asynchronously-computed diff on the tool entry whose
+// Seq matches, both in the rendered tool-stream messages and in m.liveTools so
+// an interrupt summary and the side-panel detail stay consistent.
+func (m *Model) attachToolDiff(seq int, diff string) {
+	for i := range m.messages {
+		if m.messages[i].Kind != "tool-stream" {
+			continue
+		}
+		for j := range m.messages[i].Tools {
+			if m.messages[i].Tools[j].Seq == seq {
+				m.messages[i].Tools[j].Diff = diff
+			}
+		}
+	}
+	for i := range m.liveTools {
+		if m.liveTools[i].Seq == seq {
+			m.liveTools[i].Diff = diff
+		}
+	}
 }
 
 func (m *Model) queuePrompt(input, prompt string, mentionedFiles, images []string) {
@@ -222,6 +249,8 @@ func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
 			At:      time.Now(),
 		})
 	}
+	// An interrupt ends the run; persist the kept-progress note immediately.
+	m.autoSave()
 	m.finishAgentActivity(agentID, "cancelled", content, "")
 	m.stopAgent()
 	m.awaitingInstead = askInstead
@@ -255,18 +284,7 @@ func (m *Model) syncTodosFromSession() {
 }
 
 func (m *Model) updateCompactWarningState() {
-	window := m.contextWindow()
-	if window == 0 {
-		window = contextWindowDefault(m.cfg.ActiveProvider)
-	}
-	eval := compact.Evaluate(window, compact.Config{
-		AutoEnabled:      m.cfg.AutoCompactEnabled,
-		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-		MaxFailures:      m.cfg.AutoCompactMaxFailures,
-	}, compact.State{
-		TokensUsed:          m.totalTokensUsed,
-		ConsecutiveFailures: m.autoCompactFailures,
-	})
+	eval := m.evaluateCompact()
 	level := 0
 	if eval.IsError {
 		level = 2
@@ -354,24 +372,31 @@ func (m *Model) trackSessionEditFromTrace(t agent.ToolTrace) {
 	m.markSessionEdit(args.Path)
 }
 
-func (m *Model) refreshModifiedFiles() {
+// minModifiedRefreshInterval throttles how often the modified-files git query
+// runs from the Update hot path. A tool-heavy run emits many traces; without
+// this guard each one would spawn up to four git subprocesses synchronously on
+// the Bubble Tea Update goroutine, serializing the whole UI.
+const minModifiedRefreshInterval = time.Second
+
+// queryModifiedFiles runs the git commands needed to compute the side-panel
+// branch + modified-file list. It is a pure function (no Model state) so it can
+// run inside a tea.Cmd off the Update goroutine. An empty branch with nil files
+// means "not a git work tree".
+func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
 	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = m.cwd
+	cmd.Dir = cwd
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != "true" {
-		m.gitBranch = ""
-		m.modifiedFiles = nil
-		return
+		return "", nil
 	}
 
-	m.gitBranch = readGitBranch(m.cwd)
+	branch = readGitBranch(cwd)
 
 	cmd = exec.Command("git", "status", "--porcelain")
-	cmd.Dir = m.cwd
+	cmd.Dir = cwd
 	out, err = cmd.Output()
 	if err != nil {
-		m.modifiedFiles = nil
-		return
+		return branch, nil
 	}
 
 	stat := make(map[string]modifiedFileEntry)
@@ -389,7 +414,7 @@ func (m *Model) refreshModifiedFiles() {
 		if path == "" {
 			continue
 		}
-		normPath := normalizeWorkspacePath(m.cwd, path)
+		normPath := normalizeWorkspacePath(cwd, path)
 		if normPath == "" {
 			continue
 		}
@@ -404,23 +429,51 @@ func (m *Model) refreshModifiedFiles() {
 	numTotals := make(map[string][2]int)
 	for _, args := range [][]string{{"diff", "--numstat"}, {"diff", "--cached", "--numstat"}} {
 		d := exec.Command("git", args...)
-		d.Dir = m.cwd
+		d.Dir = cwd
 		data, derr := d.Output()
 		if derr == nil {
 			parseNumstat(string(data), numTotals)
 		}
 	}
 
-	m.modifiedFiles = m.modifiedFiles[:0]
 	for path, entry := range stat {
 		if v, ok := numTotals[path]; ok {
 			entry.Added, entry.Deleted = v[0], v[1]
 		}
-		m.modifiedFiles = append(m.modifiedFiles, entry)
+		files = append(files, entry)
 	}
-	sort.Slice(m.modifiedFiles, func(i, j int) bool {
-		return m.modifiedFiles[i].Path < m.modifiedFiles[j].Path
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
 	})
+	return branch, files
+}
+
+// refreshModifiedFiles synchronously updates the side-panel git state. It is
+// used for the one-time startup query in New() and as the message applier for
+// modifiedFilesMsg. Hot-path callers should prefer scheduleModifiedRefresh.
+func (m *Model) refreshModifiedFiles() {
+	m.gitBranch, m.modifiedFiles = queryModifiedFiles(m.cwd)
+	m.lastModifiedRefreshAt = time.Now()
+}
+
+// scheduleModifiedRefresh returns a tea.Cmd that recomputes the modified-files
+// list off the Update goroutine, throttled to minModifiedRefreshInterval.
+// Returns nil when a refresh ran too recently (the side panel is eventually
+// consistent, so dropping a redundant refresh is safe).
+func (m *Model) scheduleModifiedRefresh() tea.Cmd {
+	if !m.lastModifiedRefreshAt.IsZero() && time.Since(m.lastModifiedRefreshAt) < minModifiedRefreshInterval {
+		return nil
+	}
+	m.lastModifiedRefreshAt = time.Now()
+	return refreshModifiedFilesCmd(m.cwd)
+}
+
+// refreshModifiedFilesCmd runs queryModifiedFiles in the background.
+func refreshModifiedFilesCmd(cwd string) tea.Cmd {
+	return func() tea.Msg {
+		branch, files := queryModifiedFiles(cwd)
+		return modifiedFilesMsg{branch: branch, files: files}
+	}
 }
 
 func readGitBranch(cwd string) string {
@@ -490,6 +543,17 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 		return ""
 	}
 	return buildNewFileDiff(path, string(data))
+}
+
+// computeFileDiffCmd runs computeFileDiff off the Update goroutine and returns
+// a toolDiffMsg carrying the diff plus the seq of the tool entry it belongs to.
+// computeFileDiff itself early-returns "" for non file-write/file-edit tools,
+// so the cmd is cheap to spawn for every completed tool. When the diff is empty
+// the cmd still resolves (the handler simply finds nothing to attach).
+func computeFileDiffCmd(seq int, cwd, name, argsJSON, status string) tea.Cmd {
+	return func() tea.Msg {
+		return toolDiffMsg{seq: seq, diff: computeFileDiff(cwd, name, argsJSON, status)}
+	}
 }
 
 func buildNewFileDiff(path, content string) string {
@@ -830,6 +894,33 @@ func (m *Model) recordCommandEvent(command string) {
 	})
 }
 
+// autoSaveMinInterval is the minimum wall-clock gap between debounced session
+// saves. refreshViewport used to call autoSave() on every render — including
+// scroll, tick, and banner-only updates — so a long run with frequent tool
+// traces re-serialized and rewrote the whole session file dozens of times a
+// second. autoSaveDebounced() collapses those into at most one write per
+// interval; flushSave()/autoSave() still force an immediate write at the
+// critical persistence points (/clear, /compact, resume, quit).
+const autoSaveMinInterval = 2 * time.Second
+
+// autoSaveDebounced persists the session at most once per autoSaveMinInterval.
+// Use it on high-frequency mutation paths (tool-stream updates, progress
+// comments). Critical, low-frequency persistence points should call autoSave()
+// directly so nothing is lost.
+func (m *Model) autoSaveDebounced() {
+	if !m.lastAutoSaveAt.IsZero() && time.Since(m.lastAutoSaveAt) < autoSaveMinInterval {
+		return
+	}
+	m.autoSave()
+}
+
+// flushSave forces an unconditional save, ignoring the debounce window. It is
+// the persistence safety-net invoked on exit so the final turn — which may
+// have landed inside the debounce window — is never lost.
+func (m *Model) flushSave() {
+	m.autoSave()
+}
+
 func (m *Model) autoSave() {
 	hasContent := false
 	for _, msg := range m.messages {
@@ -841,6 +932,7 @@ func (m *Model) autoSave() {
 	if !hasContent {
 		return
 	}
+	m.lastAutoSaveAt = time.Now()
 	m.ensureSession()
 	msgs := make([]session.Message, len(m.messages))
 	for i, msg := range m.messages {
@@ -864,8 +956,11 @@ func (m *Model) autoSave() {
 	})
 }
 
+// refreshViewport re-renders the chat transcript into the viewport. It no
+// longer persists the session: saving is decoupled (see autoSaveDebounced /
+// autoSave) so that scroll, tick, and banner-only refreshes do not trigger a
+// full session rewrite.
 func (m *Model) refreshViewport() {
-	m.autoSave()
 	m.vp.SetContent(m.renderMessages())
 	m.vp.GotoBottom()
 }
@@ -925,54 +1020,135 @@ func renderUserTextBlock(body string, width int, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderMessages() string {
+// renderCacheState memoizes per-message rendered blocks so renderMessages does
+// not re-run the markdown regex over the whole transcript on every frame. The
+// cache is keyed by a content hash of each message's render-relevant fields and
+// scoped to the layout params (width / showTools / color); any change to those
+// params invalidates the whole cache. Entries for messages no longer present
+// are evicted by rebuilding the map on each call, bounding its size to the
+// current transcript.
+//
+// Access is single-threaded: renderMessages is only ever called from the Bubble
+// Tea Update goroutine, never from a background tea.Cmd.
+type renderCacheState struct {
+	width     int
+	showTools bool
+	color     string
+	blocks    map[uint64]string
+}
+
+// renderMessageBlock renders a single chat message to its display string. It is
+// the pure, cacheable unit of renderMessages.
+func (m Model) renderMessageBlock(msg ChatMessage, mc lipgloss.Color) string {
+	switch msg.Role {
+	case RoleUser:
+		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
+		text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
+		entry := renderUserTextBlock(text, m.paneWidth()-8, prefix)
+		for i := range msg.Images {
+			imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
+			entry += "\n" + imgLabel
+		}
+		return entry
+	case RoleAssistant:
+		if msg.Kind == "plan" {
+			return m.renderPlanMessage(msg, mc)
+		}
+		body := renderMarkdown(msg.Content, m.paneWidth()-8)
+		var entryLines []string
+		if len(msg.Tools) > 0 {
+			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
+		}
+		if strings.TrimSpace(msg.Content) != "" {
+			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
+		}
+		if m.showTools && msg.Thinking != "" {
+			thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
+			entryLines = append(entryLines, thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘"))
+		}
+		if msg.Meta != "" {
+			entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
+		}
+		return strings.Join(entryLines, "\n")
+	case RoleSystem:
+		return lipgloss.NewStyle().
+			Foreground(colorMuted).
+			PaddingLeft(4).
+			Width(m.paneWidth() - 4).
+			Render(msg.Content)
+	}
+	return ""
+}
+
+// messageRenderKey hashes every field that influences how a message renders.
+// Length prefixes guard against boundary collisions (e.g. "ab"+"c" vs
+// "a"+"bc"). The layout params (width/showTools/color) are NOT folded in here —
+// they scope the whole cache and invalidate it wholesale on change.
+func messageRenderKey(msg ChatMessage) uint64 {
+	h := fnv.New64a()
+	writeHashField := func(s string) {
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], uint64(len(s)))
+		_, _ = h.Write(buf[:])
+		_, _ = io.WriteString(h, s)
+	}
+	writeHashField(string(msg.Role))
+	writeHashField(msg.Kind)
+	writeHashField(msg.Content)
+	writeHashField(msg.Thinking)
+	writeHashField(msg.Meta)
+	for _, t := range msg.Tools {
+		writeHashField(t.Name)
+		writeHashField(t.Status)
+		writeHashField(t.Args)
+		writeHashField(t.Output)
+		writeHashField(t.Diff)
+		if t.Open {
+			writeHashField("open")
+		}
+	}
+	for _, img := range msg.Images {
+		writeHashField(img)
+	}
+	return h.Sum64()
+}
+
+func (m *Model) renderMessages() string {
 	if len(m.messages) == 0 {
 		return styleMuted.Render("  no messages yet — type a prompt or /help")
 	}
 
 	mc := m.currentColor()
-	var parts []string
+	width := m.paneWidth()
+	color := string(mc)
 
+	// Reuse the prior cache only when the layout params match; otherwise start
+	// fresh so width/showTools/color changes fully re-render.
+	var prev map[uint64]string
+	if m.renderCache != nil && m.renderCache.width == width &&
+		m.renderCache.showTools == m.showTools && m.renderCache.color == color {
+		prev = m.renderCache.blocks
+	}
+	next := make(map[uint64]string, len(m.messages))
+
+	parts := make([]string, 0, len(m.messages))
 	for _, msg := range m.messages {
-		switch msg.Role {
-		case RoleUser:
-			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-			text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
-			entry := renderUserTextBlock(text, m.paneWidth()-8, prefix)
-			for i := range msg.Images {
-				imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
-				entry += "\n" + imgLabel
+		key := messageRenderKey(msg)
+		block, ok := next[key]
+		if !ok {
+			if block, ok = prev[key]; !ok {
+				block = m.renderMessageBlock(msg, mc)
 			}
-			parts = append(parts, entry)
-		case RoleAssistant:
-			if msg.Kind == "plan" {
-				parts = append(parts, m.renderPlanMessage(msg, mc))
-				continue
-			}
-			body := renderMarkdown(msg.Content, m.paneWidth()-8)
-			var entryLines []string
-			if len(msg.Tools) > 0 {
-				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
-			}
-			if strings.TrimSpace(msg.Content) != "" {
-				entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
-			}
-			if m.showTools && msg.Thinking != "" {
-				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
-				entryLines = append(entryLines, thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘"))
-			}
-			if msg.Meta != "" {
-				entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
-			}
-			parts = append(parts, strings.Join(entryLines, "\n"))
-		case RoleSystem:
-			s := lipgloss.NewStyle().
-				Foreground(colorMuted).
-				PaddingLeft(4).
-				Width(m.paneWidth() - 4).
-				Render(msg.Content)
-			parts = append(parts, s)
+			next[key] = block
 		}
+		parts = append(parts, block)
+	}
+
+	m.renderCache = &renderCacheState{
+		width:     width,
+		showTools: m.showTools,
+		color:     color,
+		blocks:    next,
 	}
 
 	return strings.Join(parts, "\n\n")

@@ -477,6 +477,56 @@ func (m Model) hasLocalEndpoint(endpoint string) bool {
 	return false
 }
 
+// localProbeDoneMsg delivers the result of an asynchronous ProbeLocalServer
+// round-trip (see probeLocalServerCmd) back to the Update loop.
+type localProbeDoneMsg struct {
+	endpoint string
+	models   []provider.Model
+	err      error
+}
+
+// probeLocalServerCmd probes a local OpenAI-compatible endpoint off the UI
+// thread. The 10s timeout bounds the blocking HTTP call so the TUI never hangs.
+func probeLocalServerCmd(endpoint string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		models, err := provider.ProbeLocalServer(ctx, endpoint)
+		return localProbeDoneMsg{endpoint: endpoint, models: models, err: err}
+	}
+}
+
+// handleLocalProbeDone finishes the local-endpoint connect once the async probe
+// resolves: it registers the discovered models, persists the endpoint, and
+// closes the connect dialog. A failure leaves the dialog open with an error
+// banner so the user can correct the URL.
+func (m Model) handleLocalProbeDone(msg localProbeDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.showBanner("local endpoint error: "+msg.err.Error(), "error")
+		return m, nil
+	}
+	if len(msg.models) == 0 {
+		m.showBanner("local endpoint returned no models", "error")
+		return m, nil
+	}
+	m.providers.AddLocalModels(msg.models)
+	normalized := msg.models[0].Provider
+	_ = m.updateConfig(func(cfg *config.UserConfig) error {
+		for _, endpoint := range cfg.LocalEndpoints {
+			if endpoint == normalized {
+				return nil
+			}
+		}
+		cfg.LocalEndpoints = append(cfg.LocalEndpoints, normalized)
+		return nil
+	})
+	m.showConnect = false
+	m.ta.Reset()
+	m.ta.Focus()
+	m.showBanner(fmt.Sprintf("connected %s ✓", provider.LocalProviderName(normalized)), "success")
+	return m, nil
+}
+
 var connectManageOptions = []string{
 	"Edit key",
 	"Remove provider",
@@ -548,27 +598,12 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.showBanner("endpoint cannot be empty", "error")
 					return m, nil
 				}
-				localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
-				if err != nil {
-					m.showBanner("local endpoint error: "+err.Error(), "error")
-					return m, nil
-				}
-				m.providers.AddLocalModels(localModels)
-				normalized := localModels[0].Provider
-				_ = m.updateConfig(func(cfg *config.UserConfig) error {
-					for _, endpoint := range cfg.LocalEndpoints {
-						if endpoint == normalized {
-							return nil
-						}
-					}
-					cfg.LocalEndpoints = append(cfg.LocalEndpoints, normalized)
-					return nil
-				})
-				m.showConnect = false
-				m.ta.Reset()
-				m.ta.Focus()
-				m.showBanner(fmt.Sprintf("connected %s ✓", provider.LocalProviderName(normalized)), "success")
-				return m, nil
+				// Probe the endpoint off the UI thread: ProbeLocalServer does a
+				// blocking HTTP round-trip that previously froze the TUI for up
+				// to 5s inside this key handler. Keep the dialog open and show a
+				// progress banner; localProbeDoneMsg finishes the connect.
+				m.showBanner("probing local endpoint…", "info")
+				return m, probeLocalServerCmd(endpoint)
 			}
 			key := strings.TrimSpace(m.ta.Value())
 			if key == "" {
@@ -1508,6 +1543,77 @@ func (m Model) viewConnect() string {
 	)
 }
 
+// buildConversationHistory renders a bounded, oldest-first transcript of prior
+// turns for the model (EFF-2). It includes user and assistant turns plus any
+// /compact summary, and excludes the trailing user message when present (that
+// is the current request, sent separately as the task — including it here would
+// duplicate it). The result is capped at maxConversationHistoryBytes with
+// most-recent turns winning, so token cost stays bounded. Returns "" when there
+// is no prior context (first turn), preserving the pre-EFF-2 behavior exactly.
+func (m Model) buildConversationHistory() string {
+	msgs := m.messages
+	// Drop the trailing user turn: it is the request being sent as the task.
+	if n := len(msgs); n > 0 && msgs[n-1].Role == RoleUser {
+		msgs = msgs[:n-1]
+	}
+
+	// Collect eligible turns as formatted lines, oldest-first.
+	var lines []string
+	for _, msg := range msgs {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		switch msg.Role {
+		case RoleUser:
+			lines = append(lines, "user: "+singleLineHistory(content))
+		case RoleAssistant:
+			// Skip transient progress comments; keep substantive replies/plans.
+			if msg.Kind == "comment" {
+				continue
+			}
+			lines = append(lines, "assistant: "+singleLineHistory(content))
+		case RoleSystem:
+			// Only carry forward a compaction summary, not routine notices.
+			if strings.HasPrefix(content, compactSummaryPrefix) {
+				lines = append(lines, "summary: "+singleLineHistory(content))
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+
+	// Keep the most recent turns within the byte cap (oldest dropped first).
+	kept := make([]string, 0, len(lines))
+	total := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		size := len(lines[i]) + 1 // +1 for the joining newline
+		if total+size > maxConversationHistoryBytes && len(kept) > 0 {
+			break
+		}
+		kept = append(kept, lines[i])
+		total += size
+	}
+	// kept is most-recent-first; reverse to oldest-first for the prompt.
+	for l, r := 0, len(kept)-1; l < r; l, r = l+1, r-1 {
+		kept[l], kept[r] = kept[r], kept[l]
+	}
+	return strings.Join(kept, "\n")
+}
+
+// singleLineHistory collapses a turn to a single line so the transcript stays
+// compact and unambiguous in the prompt. Very long turns are truncated to keep
+// any single entry from dominating the budget.
+func singleLineHistory(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	const maxPerTurn = 4000
+	if len(s) > maxPerTurn {
+		s = s[:maxPerTurn] + " …(truncated)"
+	}
+	return s
+}
+
 func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []string, images []string) (tea.Model, tea.Cmd) {
 	return m.runAgentApproved(spec, input, mentionedFiles, images, false)
 }
@@ -1547,6 +1653,9 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	agentID := spec.ID
 
 	manifest := m.manifest
+	// Bounded cross-turn history so follow-up turns (and /compact) have memory.
+	// Built before the goroutine closure to capture the current m.messages.
+	history := m.buildConversationHistory()
 	a := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: pm,
@@ -1557,6 +1666,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		Thinking:        provider.ThinkingLevel(m.cfg.ThinkingLevel),
 		RequiredReads:   mentionedFiles,
 		Images:          images,
+		History:         history,
 		Manifest:        &manifest,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
 		DelegationDepth: 0,
@@ -1625,9 +1735,9 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			}
 			if agentID == "plan" || spec.Mode == "planning" {
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
-				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed}
+				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens}
 			}
-			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, meta: ""}
+			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: ""}
 		},
 	)
 }

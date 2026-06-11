@@ -145,6 +145,12 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 			requiredReadsSection = "\nRequired first reads (must be done with file-read before anything else):\n- " + strings.Join(paths, "\n- ")
 		}
 	}
+	// Cross-turn conversation history (EFF-2). Empty on a first turn so the
+	// rendered prompt is byte-for-byte identical to the pre-history behavior.
+	conversationSection := ""
+	if h := strings.TrimSpace(cfg.History); h != "" {
+		conversationSection = "\nConversation so far (earlier turns, oldest first):\n" + h + "\n"
+	}
 	return fmt.Sprintf(`%s
 
 You can use tools iteratively.
@@ -168,7 +174,7 @@ Rules:
 - Keep tool args minimal and valid JSON.
 - If a tool fails, adapt and continue.
 %s
-
+%s
 Task:
 %s
 %s
@@ -179,7 +185,7 @@ Working directory:
 Current step: %d/%d
 
 Previous tool interaction log:
-%s`, base, toolList, schemaSection, commentGuidance, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
+%s`, base, toolList, schemaSection, commentGuidance, conversationSection, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
 }
 
 // builtinToolSchemas describes the JSON arguments object accepted by every
@@ -191,43 +197,43 @@ Previous tool interaction log:
 // be omitted from the rendered schema section; the agent prompt should mention
 // their schema separately if needed.
 var builtinToolSchemas = map[string]string{
-	"comment":           `{"message": string}`,
-	"ls":                `{"path"?: string}`,
-	"file-read":         `{"path": string, "start_line"?: int, "end_line"?: int}`,
-	"file-write":        `{"path": string, "content": string, "append"?: bool}`,
-	"file-edit":         `{"path": string, "old_string"?: string, "new_string"?: string, "replace_all"?: bool, "start_line"?: int, "end_line"?: int, "expected_replacements"?: int, "edits"?: [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
-	"glob":              `{"pattern": string, "path"?: string}`,
-	"grep":              `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
-	"repo-search":       `{"query": string}`,
-	"shell-exec":        `{"command": string}`,
-	"bash":              `{"command": string}`,
-	"bash-output":       `{"command": string}`,
-	"web-fetch":         `{"url": string}`,
-	"web-search":        `{"query": string, "max_results"?: int}`,
-	"grok-image":        `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
-	"grok-video":        `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
-	"ask-user":          `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
-	"agent":             `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
-	"todo-write":        `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
-	"task-create":       `{"id"?: string, "content": string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
-	"task-get":          `{"id": string}`,
-	"task-update":       `{"id": string, "content"?: string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
-	"task-list":         `{"status"?: string}`,
-	"task-stop":         `{"reason"?: string}`,
-	"tool-search":       `{"query": string}`,
-	"skill-list":        `{"query"?: string}`,
-	"skill-read":        `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"activate-skill":    `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"skill-activate":    `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"config":            `{"action": "get"|"set", "key"?: string, "value"?: string, "force"?: bool}`,
+	"comment":            `{"message": string}`,
+	"ls":                 `{"path"?: string}`,
+	"file-read":          `{"path": string, "start_line"?: int, "end_line"?: int}`,
+	"file-write":         `{"path": string, "content": string, "append"?: bool}`,
+	"file-edit":          `{"path": string, "old_string"?: string, "new_string"?: string, "replace_all"?: bool, "start_line"?: int, "end_line"?: int, "expected_replacements"?: int, "edits"?: [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
+	"glob":               `{"pattern": string, "path"?: string}`,
+	"grep":               `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
+	"repo-search":        `{"query": string}`,
+	"shell-exec":         `{"command": string}`,
+	"bash":               `{"command": string}`,
+	"bash-output":        `{"command": string}`,
+	"web-fetch":          `{"url": string}`,
+	"web-search":         `{"query": string, "max_results"?: int}`,
+	"grok-image":         `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
+	"grok-video":         `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
+	"ask-user":           `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
+	"agent":              `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
+	"todo-write":         `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
+	"task-create":        `{"id"?: string, "content": string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
+	"task-get":           `{"id": string}`,
+	"task-update":        `{"id": string, "content"?: string, "status"?: string, "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
+	"task-list":          `{"status"?: string}`,
+	"task-stop":          `{"reason"?: string}`,
+	"tool-search":        `{"query": string}`,
+	"skill-list":         `{"query"?: string}`,
+	"skill-read":         `{"name"?: string, "skill"?: string, "location"?: string}`,
+	"activate-skill":     `{"name"?: string, "skill"?: string, "location"?: string}`,
+	"skill-activate":     `{"name"?: string, "skill"?: string, "location"?: string}`,
+	"config":             `{"action": "get"|"set", "key"?: string, "value"?: string, "force"?: bool}`,
 	"mcp-list-resources": `{"server_id": string}`,
 	"mcp-read-resource":  `{"server_id": string, "resource_id": string}`,
 	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
-	"enter-plan-mode":   `{"reason"?: string}`,
-	"exit-plan-mode":    `{"reason"?: string}`,
-	"enter-worktree":    `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
-	"exit-worktree":     `{"path": string, "force"?: bool}`,
-	"send-message":      `{"target"?: string, "message": string}`,
+	"enter-plan-mode":    `{"reason"?: string}`,
+	"exit-plan-mode":     `{"reason"?: string}`,
+	"enter-worktree":     `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
+	"exit-worktree":      `{"path": string, "force"?: bool}`,
+	"send-message":       `{"target"?: string, "message": string}`,
 }
 
 // buildToolSchemaSection renders a per-tool argument schema section to inject
