@@ -29,6 +29,11 @@ func Save(globalDir string, state State) error {
 		state.Metadata.StartedAt = time.Now()
 	}
 	state.Metadata.UpdatedAt = time.Now()
+	// Persist the preview so List can render the resume picker from metadata
+	// alone, without loading every session's messages.
+	if p := firstUserPreview(state.Messages); p != "" {
+		state.Metadata.Preview = p
+	}
 	if err := writeJSON(filepath.Join(dir, metadataFilename), state.Metadata); err != nil {
 		return err
 	}
@@ -45,7 +50,23 @@ func Save(globalDir string, state State) error {
 	if err := writeJSON(filepath.Join(dir, todosFilename), tasks); err != nil {
 		return err
 	}
-	return rewriteEvents(filepath.Join(dir, agentsFilename), state.Events)
+	// The agents event log is append-only and owned by AppendEvent. Only rewrite
+	// it when the caller actually supplies events; otherwise a routine Save
+	// (which carries no events) would truncate the log written during the run.
+	if len(state.Events) > 0 {
+		return rewriteEvents(filepath.Join(dir, agentsFilename), state.Events)
+	}
+	return nil
+}
+
+// LoadMetadata reads only a session's metadata file. It is much cheaper than
+// Load for listing sessions, which only needs the summary fields.
+func LoadMetadata(globalDir, sessionID string) (Metadata, error) {
+	var meta Metadata
+	if err := readJSON(filepath.Join(SessionDir(globalDir, sessionID), metadataFilename), &meta); err != nil {
+		return Metadata{}, err
+	}
+	return meta, nil
 }
 
 func AppendEvent(globalDir, sessionID string, event AgentEvent) error {

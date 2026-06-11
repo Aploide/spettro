@@ -16,19 +16,29 @@ func List(globalDir, cwd string) ([]Summary, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		state, err := Load(globalDir, entry.Name())
+		// Read metadata only — the heavy message/event files are not needed to
+		// list sessions.
+		meta, err := LoadMetadata(globalDir, entry.Name())
 		if err != nil {
 			continue
 		}
-		if state.Metadata.ProjectHash != projectHash && state.Metadata.ProjectPath != cwd {
+		if meta.ProjectHash != projectHash && meta.ProjectPath != cwd {
 			continue
 		}
+		preview := meta.Preview
+		if preview == "" {
+			// Sessions written before previews were persisted: fall back to
+			// reading their messages so they still show a snippet.
+			if state, err := Load(globalDir, entry.Name()); err == nil {
+				preview = firstUserPreview(state.Messages)
+			}
+		}
 		out = append(out, Summary{
-			ID:        state.Metadata.ID,
-			StartedAt: state.Metadata.StartedAt,
-			UpdatedAt: state.Metadata.UpdatedAt,
-			Path:      SessionDir(globalDir, state.Metadata.ID),
-			Preview:   firstUserPreview(state.Messages),
+			ID:        meta.ID,
+			StartedAt: meta.StartedAt,
+			UpdatedAt: meta.UpdatedAt,
+			Path:      SessionDir(globalDir, meta.ID),
+			Preview:   preview,
 		})
 	}
 

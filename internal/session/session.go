@@ -61,6 +61,9 @@ type Metadata struct {
 	ProjectHash string    `json:"project_hash"`
 	StartedAt   time.Time `json:"started_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// Preview is the first user message snippet, persisted so the resume
+	// picker can list sessions without loading every message file.
+	Preview string `json:"preview,omitempty"`
 }
 
 type State struct {
