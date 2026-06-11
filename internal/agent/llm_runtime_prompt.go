@@ -21,14 +21,33 @@ func summarizeLoopToolResult(name, args, status, output string) string {
 	}
 	output = strings.TrimSpace(output)
 	if output != "" {
-		output = strings.Join(strings.Fields(output), " ")
-		limit := 240
-		if name == "agent" {
-			limit = 4000
-		}
-		parts = append(parts, "output="+truncate(output, limit))
+		// Preserve newlines so the model sees the structure of files and search
+		// results — it needs them to build correct multi-line edits. Only the
+		// length is bounded, per tool (the overall rolling history is still
+		// capped by maxHistoryBytes).
+		parts = append(parts, "output="+truncate(output, toolOutputHistoryLimit(name)))
 	}
 	return strings.Join(parts, " | ")
+}
+
+// toolOutputHistoryLimit returns how many characters of a tool's output are fed
+// back to the model in the next-step history. Read/search tools get a generous
+// budget because the model acts on their contents; chatty/again-fetchable tools
+// get less. Previously every tool was flattened to 240 chars, which made
+// informed multi-line edits essentially impossible.
+func toolOutputHistoryLimit(name string) int {
+	switch name {
+	case "file-read":
+		return 8000
+	case "repo-search", "grep", "glob", "ls":
+		return 4000
+	case "shell-exec", "bash", "bash-output":
+		return 4000
+	case "agent":
+		return 4000
+	default:
+		return 1000
+	}
 }
 
 func summarizeLoopToolArgs(name, args string) string {
