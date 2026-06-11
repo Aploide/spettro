@@ -439,6 +439,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return newModel, cmd
 }
 
+// resetRunState clears every per-run field when an agent or plan run ends, so
+// no channel, cursor, live-tool, or progress state leaks into the next run.
+// Both the agentDoneMsg and planDoneMsg handlers begin with this identical
+// teardown; keeping it in one place means a new per-run field only has to be
+// reset once.
+func (m *Model) resetRunState() {
+	m.thinking = false
+	m.cancelAgent = nil
+	m.toolCh = nil
+	m.approvalCh = nil
+	m.askUserCh = nil
+	m.liveTools = nil
+	m.currentTool = nil
+	m.pendingAuth = nil
+	m.pendingQuestion = nil
+	m.questionCursor = 0
+	m.questionFreeform = false
+	m.parallelAgents = nil
+	m.progressNote = ""
+	m.activePrompt = nil
+	m.activeAgentID = ""
+	m.refreshModifiedFiles()
+}
+
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -468,22 +492,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.thinking {
 			break
 		}
-		m.thinking = false
-		m.cancelAgent = nil
-		m.toolCh = nil
-		m.approvalCh = nil
-		m.askUserCh = nil
-		m.liveTools = nil
-		m.currentTool = nil
-		m.pendingAuth = nil
-		m.pendingQuestion = nil
-		m.questionCursor = 0
-		m.questionFreeform = false
-		m.parallelAgents = nil
-		m.progressNote = ""
-		m.activePrompt = nil
-		m.activeAgentID = ""
-		m.refreshModifiedFiles()
+		m.resetRunState()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
 			m.updateCompactWarningState()
@@ -524,22 +533,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.thinking {
 			break
 		}
-		m.thinking = false
-		m.cancelAgent = nil
-		m.toolCh = nil
-		m.approvalCh = nil
-		m.askUserCh = nil
-		m.liveTools = nil
-		m.currentTool = nil
-		m.pendingAuth = nil
-		m.pendingQuestion = nil
-		m.questionCursor = 0
-		m.questionFreeform = false
-		m.parallelAgents = nil
-		m.progressNote = ""
-		m.activePrompt = nil
-		m.activeAgentID = ""
-		m.refreshModifiedFiles()
+		m.resetRunState()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
 			m.updateCompactWarningState()
@@ -1325,7 +1319,10 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 					m.showBanner("unknown model: "+fields[1], "error")
 				} else {
 					if len(fields) >= 3 {
-						_ = config.SaveAPIKey(parts[0], fields[2])
+						if err := config.SaveAPIKey(parts[0], fields[2]); err != nil {
+							m.showBanner("failed to save API key: "+err.Error(), "error")
+							return m, nil
+						}
 					}
 					_ = m.updateConfig(func(cfg *config.UserConfig) error {
 						cfg.ActiveProvider = parts[0]
