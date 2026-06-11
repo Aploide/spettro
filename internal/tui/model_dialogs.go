@@ -477,6 +477,56 @@ func (m Model) hasLocalEndpoint(endpoint string) bool {
 	return false
 }
 
+// localProbeDoneMsg delivers the result of an asynchronous ProbeLocalServer
+// round-trip (see probeLocalServerCmd) back to the Update loop.
+type localProbeDoneMsg struct {
+	endpoint string
+	models   []provider.Model
+	err      error
+}
+
+// probeLocalServerCmd probes a local OpenAI-compatible endpoint off the UI
+// thread. The 10s timeout bounds the blocking HTTP call so the TUI never hangs.
+func probeLocalServerCmd(endpoint string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		models, err := provider.ProbeLocalServer(ctx, endpoint)
+		return localProbeDoneMsg{endpoint: endpoint, models: models, err: err}
+	}
+}
+
+// handleLocalProbeDone finishes the local-endpoint connect once the async probe
+// resolves: it registers the discovered models, persists the endpoint, and
+// closes the connect dialog. A failure leaves the dialog open with an error
+// banner so the user can correct the URL.
+func (m Model) handleLocalProbeDone(msg localProbeDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.showBanner("local endpoint error: "+msg.err.Error(), "error")
+		return m, nil
+	}
+	if len(msg.models) == 0 {
+		m.showBanner("local endpoint returned no models", "error")
+		return m, nil
+	}
+	m.providers.AddLocalModels(msg.models)
+	normalized := msg.models[0].Provider
+	_ = m.updateConfig(func(cfg *config.UserConfig) error {
+		for _, endpoint := range cfg.LocalEndpoints {
+			if endpoint == normalized {
+				return nil
+			}
+		}
+		cfg.LocalEndpoints = append(cfg.LocalEndpoints, normalized)
+		return nil
+	})
+	m.showConnect = false
+	m.ta.Reset()
+	m.ta.Focus()
+	m.showBanner(fmt.Sprintf("connected %s ✓", provider.LocalProviderName(normalized)), "success")
+	return m, nil
+}
+
 var connectManageOptions = []string{
 	"Edit key",
 	"Remove provider",
@@ -548,27 +598,12 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.showBanner("endpoint cannot be empty", "error")
 					return m, nil
 				}
-				localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
-				if err != nil {
-					m.showBanner("local endpoint error: "+err.Error(), "error")
-					return m, nil
-				}
-				m.providers.AddLocalModels(localModels)
-				normalized := localModels[0].Provider
-				_ = m.updateConfig(func(cfg *config.UserConfig) error {
-					for _, endpoint := range cfg.LocalEndpoints {
-						if endpoint == normalized {
-							return nil
-						}
-					}
-					cfg.LocalEndpoints = append(cfg.LocalEndpoints, normalized)
-					return nil
-				})
-				m.showConnect = false
-				m.ta.Reset()
-				m.ta.Focus()
-				m.showBanner(fmt.Sprintf("connected %s ✓", provider.LocalProviderName(normalized)), "success")
-				return m, nil
+				// Probe the endpoint off the UI thread: ProbeLocalServer does a
+				// blocking HTTP round-trip that previously froze the TUI for up
+				// to 5s inside this key handler. Keep the dialog open and show a
+				// progress banner; localProbeDoneMsg finishes the connect.
+				m.showBanner("probing local endpoint…", "info")
+				return m, probeLocalServerCmd(endpoint)
 			}
 			key := strings.TrimSpace(m.ta.Value())
 			if key == "" {

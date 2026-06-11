@@ -812,6 +812,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifyKeyDoneMsg:
 		newModel, cmd := m.handleVerifyKeyDone(msg)
 		return newModel, cmd
+	case localProbeDoneMsg:
+		newModel, cmd := m.handleLocalProbeDone(msg)
+		return newModel, cmd
 	case loginInitiatedMsg:
 		return m.handleLoginInitiated(msg)
 	case loginPolledMsg:
@@ -849,6 +852,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.remoteServer != nil {
 			cmds = append(cmds, waitForRemoteInterrupt(m.remoteServer))
 		}
+	case telegramAutostartDoneMsg:
+		return m.handleTelegramAutostartDone(msg)
 	case telegramSubmitMsg:
 		newModel, cmd := m.handleTelegramSubmission(msg.req)
 		nm, _ := newModel.(Model)

@@ -785,9 +785,19 @@ func (m *Model) telegramClearAnswerExpectations() {
 	}
 }
 
-// autostartTelegram is called once during Init when the user has previously
-// enabled the relay. Returns a tea.Cmd that pumps the relay's channels
-// into the program loop when a relay was successfully started.
+// telegramAutostartDoneMsg delivers the result of the asynchronous relay
+// startup (relay.Start performs a blocking getMe round-trip).
+type telegramAutostartDoneMsg struct {
+	relay *telegram.Relay
+	err   error
+}
+
+// autostartTelegram is called once during New() when the user has previously
+// enabled the relay. It constructs the relay (cheap, no network) and returns a
+// tea.Cmd that performs the blocking relay.Start off the UI thread, delivering
+// a telegramAutostartDoneMsg. Returns nil when autostart is disabled or no
+// token is configured. Previously this ran relay.Start synchronously, freezing
+// the very first paint for up to 15s on a slow getMe.
 func (m *Model) autostartTelegram() tea.Cmd {
 	cfg, err := telegram.LoadConfig()
 	if err != nil {
@@ -808,16 +818,27 @@ func (m *Model) autostartTelegram() tea.Cmd {
 	if err != nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := relay.Start(ctx); err != nil {
-		// Surface the failure quietly: autostart should not block the TUI.
-		// The user can still run /telegram start manually.
-		m.pushSystemMsg("telegram autostart failed: " + err.Error())
-		return nil
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := relay.Start(ctx); err != nil {
+			return telegramAutostartDoneMsg{err: err}
+		}
+		return telegramAutostartDoneMsg{relay: relay}
 	}
-	m.telegramRelay = relay
-	m.pushSystemMsg("telegram relay resumed — bot @" + relay.BotUsername())
-	cmds := telegramListenCmds(relay)
-	return tea.Batch(cmds...)
+}
+
+// handleTelegramAutostartDone applies the async relay startup result: on
+// success it adopts the relay and pumps its channels into the loop; on failure
+// it surfaces a quiet system message (the user can still run /telegram start).
+func (m Model) handleTelegramAutostartDone(msg telegramAutostartDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.pushSystemMsg("telegram autostart failed: " + msg.err.Error())
+		m.refreshViewport()
+		return m, nil
+	}
+	m.telegramRelay = msg.relay
+	m.pushSystemMsg("telegram relay resumed — bot @" + msg.relay.BotUsername())
+	m.refreshViewport()
+	return m, tea.Batch(telegramListenCmds(msg.relay)...)
 }
