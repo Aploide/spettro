@@ -15,6 +15,10 @@ func available() bool {
 	return err == nil
 }
 
+// runChildIfRequested is a no-op on macOS: sandbox-exec confines the child
+// directly, so there is no re-exec child to intercept.
+func runChildIfRequested() {}
+
 func wrap(ctx context.Context, workspaceDir, name string, args ...string) *exec.Cmd {
 	profile := seatbeltProfile(workspaceDir)
 	full := append([]string{"-p", profile, name}, args...)
