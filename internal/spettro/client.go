@@ -116,8 +116,9 @@ func Poll(ctx context.Context, sessionID string) (PollResult, error) {
 
 // ModelInfo is one entry from GET /v1/models.
 type ModelInfo struct {
-	ID      string `json:"id"`
-	OwnedBy string `json:"owned_by"`
+	ID            string `json:"id"`
+	OwnedBy       string `json:"owned_by"`
+	ContextWindow int    `json:"context_window"`
 }
 
 // ListModels returns the models available on the authenticated user's plan.
