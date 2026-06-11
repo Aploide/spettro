@@ -347,7 +347,6 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		favs[f] = true
 	}
 
-	repoFiles, _ := scanRepoFiles(cwd)
 	manifest, _ := config.LoadAgentManifestForProject(cwd)
 	defaultMode := manifest.DefaultAgent
 	if defaultMode == "" {
@@ -369,7 +368,6 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		ta:            ta,
 		spin:          sp,
 		favorites:     favs,
-		repoFiles:     repoFiles,
 		showSidePanel: cfg.ShowSidePanel,
 		startedAt:     time.Now(),
 		committer: agent.LLMCommitter{
@@ -381,6 +379,9 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		historyIndex: -1,
 	}
 	m.refreshModifiedFiles()
+	// Scan the working directory in the background: walking a large tree
+	// synchronously here would block the first paint (seen: ~56s from $HOME).
+	m.startupCmds = append(m.startupCmds, scanRepoFilesCmd(cwd))
 	if cmd := m.autostartTelegram(); cmd != nil {
 		m.startupCmds = append(m.startupCmds, cmd)
 	}
@@ -769,6 +770,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleLoginPolled(msg)
 	case spettroLoadedMsg:
 		return m.handleSpettroLoaded(msg)
+	case repoFilesScannedMsg:
+		m.repoFiles = msg.files
+		m.syncInputSuggestions()
 	case tea.FocusMsg:
 		m.terminalFocused = true
 	case tea.BlurMsg:
