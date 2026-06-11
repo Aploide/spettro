@@ -493,6 +493,47 @@ func (m *Model) resetRunState() {
 	m.refreshModifiedFiles()
 }
 
+// modal identifies the full-screen overlay that owns the UI. There must be a
+// single source of truth for which overlay is active so the three consumers —
+// key routing (update), the non-key passthrough guard (update), and rendering
+// (View) — can never drift in order or membership.
+type modal int
+
+const (
+	modalNone modal = iota
+	modalTrust
+	modalLogin
+	modalOnboarding
+	modalResume
+	modalConnect
+	modalSelector
+	modalSetup
+)
+
+// activeModal returns the highest-precedence active overlay. The precedence is
+// the canonical dispatch order consulted by both update() and View(). Trust is
+// the startup gate so it wins; setup is last (legacy, currently never set).
+func (m Model) activeModal() modal {
+	switch {
+	case m.showTrust:
+		return modalTrust
+	case m.showLogin:
+		return modalLogin
+	case m.showOnboarding:
+		return modalOnboarding
+	case m.showResume:
+		return modalResume
+	case m.showConnect:
+		return modalConnect
+	case m.showSelector:
+		return modalSelector
+	case m.showSetup:
+		return modalSetup
+	default:
+		return modalNone
+	}
+}
+
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -1015,31 +1056,29 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(append(cmds, mouseCmd)...)
 		}
-		if m.showLogin {
+		switch m.activeModal() {
+		case modalLogin:
 			return m.updateLogin(msg)
-		}
-		if m.showTrust {
+		case modalTrust:
 			return m.updateTrust(msg)
-		}
-		if m.showResume {
+		case modalResume:
 			return m.updateResume(msg)
-		}
-		if m.showConnect {
+		case modalConnect:
 			return m.updateConnect(msg)
-		}
-		if m.showSelector {
+		case modalSelector:
 			return m.updateSelector(msg)
-		}
-		if m.showSetup {
+		case modalSetup:
 			return m.updateSetup(msg)
-		}
-		if m.showOnboarding {
+		case modalOnboarding:
 			return m.updateOnboarding(msg)
 		}
 		return m.updateMain(msg)
 	}
 
-	if !m.showLogin && !m.showTrust && !m.showResume && !m.showSelector && !m.showSetup && !m.showConnect {
+	// Only forward passthrough (non-key) messages to the textarea/viewport
+	// when no overlay owns the UI. Consulting activeModal() keeps this guard
+	// in lockstep with the routing above (it previously omitted onboarding).
+	if m.activeModal() == modalNone {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)

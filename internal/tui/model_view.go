@@ -17,27 +17,21 @@ func (m Model) View() string {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("\n  loading…")
 	}
 
-	if m.showTrust {
+	// Render the overlay chosen by the single source of truth so View can
+	// never disagree with update()'s key routing. modalSetup has no dedicated
+	// view (legacy, never set), so it falls through to the main pane.
+	switch m.activeModal() {
+	case modalTrust:
 		return m.viewTrust()
-	}
-
-	if m.showLogin {
+	case modalLogin:
 		return m.viewLogin()
-	}
-
-	if m.showOnboarding {
+	case modalOnboarding:
 		return m.viewOnboarding()
-	}
-
-	if m.showResume {
+	case modalResume:
 		return m.viewResume()
-	}
-
-	if m.showConnect {
+	case modalConnect:
 		return m.viewConnect()
-	}
-
-	if m.showSelector {
+	case modalSelector:
 		return m.viewSelector()
 	}
 
