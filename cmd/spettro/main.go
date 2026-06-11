@@ -11,11 +11,17 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/models"
 	"spettro/internal/provider"
+	"spettro/internal/sandbox"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
 )
 
 func main() {
+	// On Linux, this re-execs as a Landlock-confined sandbox child when asked
+	// (see internal/sandbox); it must run before any flag parsing. No-op
+	// otherwise.
+	sandbox.RunChildIfRequested()
+
 	headless := flag.Bool("headless", false, "run as headless HTTP/SSE server (for Android)")
 	cwdFlag := flag.String("cwd", "", "working directory (headless mode only)")
 	portFlag := flag.Int("port", 7878, "HTTP listen port (headless mode only)")

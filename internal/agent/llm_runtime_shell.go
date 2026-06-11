@@ -7,13 +7,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"spettro/internal/config"
+	"spettro/internal/sandbox"
 )
 
 func isBlockedCommand(cmd string) bool {
@@ -48,7 +48,11 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// Auto-inject the `--trailer` flag whenever an LLM agent runs `git commit`
 	// through shell/bash so the policy holds even if the model forgets it.
 	cmdText = EnforceCommitCoAuthor(cmdText)
-	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdText)
+	// Experimental, opt-in OS-native confinement (SPETTRO_SANDBOX=1). When
+	// enabled and supported (macOS today), filesystem writes are bounded to the
+	// workspace at the kernel level as defense-in-depth; otherwise the command
+	// runs normally.
+	cmd := sandbox.Command(ctx, os.Getenv("SPETTRO_SANDBOX") == "1", r.cwd, "bash", "-lc", cmdText)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
 	text := truncate(string(out), 12000)
