@@ -583,6 +583,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
 		}
+		if err := r.authorizeWriteAccess(ctx, "file-write", rel); err != nil {
+			return "", err
+		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return "", err
 		}
@@ -760,7 +763,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":
-		return r.runFileEdit(call.Args)
+		return r.runFileEdit(ctx, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":

@@ -69,11 +69,14 @@ func (r *toolRuntime) runWebFetch(ctx context.Context, rawArgs []byte) (string, 
 	if urlText == "" {
 		return "", fmt.Errorf("web-fetch: url required")
 	}
+	if err := validatePublicURL(urlText); err != nil {
+		return "", fmt.Errorf("web-fetch: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlText, nil)
 	if err != nil {
 		return "", fmt.Errorf("web-fetch: %w", err)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := newSafeHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("web-fetch: %w", err)
@@ -557,11 +560,14 @@ func saveAllowedCommandSet(cwd string, set map[string]struct{}) error {
 	}
 
 	path := allowedCommandsPath(cwd)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// This file records which shell commands the user pre-approved for the
+	// project, so it is owner-only (0o600) like the other ~/.spettro secrets
+	// stores rather than world-readable.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create .spettro dir: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write allowed commands temp: %w", err)
 	}
 	return os.Rename(tmp, path)

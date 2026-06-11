@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -62,6 +63,23 @@ func TestAllowedCommandSetRoundTrip(t *testing.T) {
 	path := agent.AllowedCommandsPathForTesting(cwd)
 	if filepath.Base(path) != "allowed_commands.json" {
 		t.Fatalf("unexpected file path: %q", path)
+	}
+
+	// The approved-command list is owner-only, consistent with the other
+	// ~/.spettro stores; it must not be world-readable.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat allowed commands: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("allowed_commands.json perm = %o, want 600", perm)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat .spettro dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+		t.Fatalf(".spettro dir perm = %o, want 700", perm)
 	}
 }
 
