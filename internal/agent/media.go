@@ -152,14 +152,14 @@ func (r *toolRuntime) runGrokImage(ctx context.Context, rawArgs []byte) (string,
 // --- video generation -------------------------------------------------------
 
 type grokVideoArgs struct {
-	Prompt              string   `json:"prompt"`
-	Path                string   `json:"path"`
-	Model               string   `json:"model"`
-	Duration            int      `json:"duration"`
-	AspectRatio         string   `json:"aspect_ratio"`
-	Resolution          string   `json:"resolution"`
-	ImageURL            string   `json:"image_url"`
-	ReferenceImageURLs  []string `json:"reference_image_urls"`
+	Prompt             string   `json:"prompt"`
+	Path               string   `json:"path"`
+	Model              string   `json:"model"`
+	Duration           int      `json:"duration"`
+	AspectRatio        string   `json:"aspect_ratio"`
+	Resolution         string   `json:"resolution"`
+	ImageURL           string   `json:"image_url"`
+	ReferenceImageURLs []string `json:"reference_image_urls"`
 }
 
 type grokVideoRequest struct {
@@ -471,6 +471,15 @@ func slugifyPrompt(prompt string) string {
 // base64 payloads inline or downloading a presigned URL otherwise. Returns
 // the workspace-relative path it wrote.
 func (r *toolRuntime) writeMediaFile(ctx context.Context, absPath string, item grokImageData) (string, error) {
+	// Contain media writes to the workspace: a caller-supplied path (absolute
+	// or with ".." segments) must not escape cwd, mirroring resolvePath used by
+	// file-write/file-edit.
+	if r != nil && r.cwd != "" {
+		rel, err := filepath.Rel(r.cwd, absPath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("refusing to write media outside the workspace: %s", absPath)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 		return "", fmt.Errorf("create media dir: %w", err)
 	}
@@ -487,7 +496,7 @@ func (r *toolRuntime) writeMediaFile(ctx context.Context, absPath string, item g
 		if err != nil {
 			return "", err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := newSafeHTTPClient(5 * time.Minute).Do(req)
 		if err != nil {
 			return "", err
 		}

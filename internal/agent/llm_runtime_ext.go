@@ -308,7 +308,7 @@ func (r *toolRuntime) runWebSearch(ctx context.Context, rawArgs []byte) (string,
 		return "", err
 	}
 	req.Header.Set("User-Agent", "spettro-web-search/1.0")
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := newSafeHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -475,7 +475,7 @@ func (r *toolRuntime) runMCPAuth(ctx context.Context, rawArgs []byte) (string, e
 	return fmt.Sprintf("mcp auth updated for %s", state.ServerID), nil
 }
 
-func (r *toolRuntime) runFileEdit(rawArgs []byte) (string, error) {
+func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, error) {
 	var args struct {
 		Path       string `json:"path"`
 		OldString  string `json:"old_string"`
@@ -495,6 +495,9 @@ func (r *toolRuntime) runFileEdit(rawArgs []byte) (string, error) {
 	}
 	abs, rel, err := r.resolvePath(args.Path)
 	if err != nil {
+		return "", err
+	}
+	if err := r.authorizeWriteAccess(ctx, "file-edit", rel); err != nil {
 		return "", err
 	}
 	hasSingle := strings.TrimSpace(args.OldString) != ""
@@ -613,6 +616,9 @@ func (r *toolRuntime) runEnterWorktree(ctx context.Context, rawArgs []byte) (str
 		return "", err
 	}
 	branch := strings.TrimSpace(args.Branch)
+	if strings.HasPrefix(branch, "-") {
+		return "", fmt.Errorf("enter-worktree: invalid branch name %q (must not start with '-')", branch)
+	}
 	if !args.AllowDirty {
 		if dirty, err := isGitDirty(ctx, r.cwd); err == nil && dirty {
 			return "", fmt.Errorf("enter-worktree: repository has uncommitted changes (set allow_dirty=true to bypass)")
@@ -627,10 +633,13 @@ func (r *toolRuntime) runEnterWorktree(ctx context.Context, rawArgs []byte) (str
 			return "", fmt.Errorf("enter-worktree: branch %q already exists", branch)
 		}
 	}
-	cmdArgs := []string{"worktree", "add", abs}
+	cmdArgs := []string{"worktree", "add"}
 	if branch != "" {
 		cmdArgs = append(cmdArgs, "-b", branch)
 	}
+	// "--" terminates option parsing so the resolved path can never be treated
+	// as a git flag.
+	cmdArgs = append(cmdArgs, "--", abs)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
@@ -950,6 +959,35 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// authorizeWriteAccess gates file-write/file-edit on the tool's approval
+// policy. Writes were previously ungated regardless of policy; this makes a
+// manifest's `requires_approval = true` on the write tools actually take
+// effect. When the policy does not require approval (the default) or we are in
+// YOLO mode, writes proceed unchanged.
+func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath string) error {
+	spec, ok := r.toolPolicies[toolID]
+	if !ok || !spec.RequiresApproval || r.permission == config.PermissionYOLO {
+		return nil
+	}
+	if r.shellApproval == nil {
+		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
+	}
+	decision, err := r.shellApproval(ctx, ShellApprovalRequest{
+		ToolID:  toolID,
+		Command: toolID + " " + relPath,
+		Reason:  "file modification requires approval",
+	})
+	if err != nil {
+		return fmt.Errorf("write approval failed: %w", err)
+	}
+	switch decision {
+	case ShellApprovalAllowOnce, ShellApprovalAllowAlways:
+		return nil
+	default:
+		return fmt.Errorf("%s denied by user", toolID)
+	}
 }
 
 func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target string) error {
