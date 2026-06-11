@@ -189,8 +189,34 @@ func (m *Model) AddMessageForTesting(msg ChatMessage) {
 	m.messages = append(m.messages, msg)
 }
 
-func (m Model) RenderMessagesForTesting() string {
+// MutateMessageContentForTesting edits a message's content in place so tests
+// can verify the render cache re-renders a mutated message rather than serving
+// a stale block.
+func (m *Model) MutateMessageContentForTesting(idx int, content string) {
+	if idx >= 0 && idx < len(m.messages) {
+		m.messages[idx].Content = content
+	}
+}
+
+func (m *Model) RenderMessagesForTesting() string {
 	return m.renderMessages()
+}
+
+// RenderCacheSizeForTesting returns the number of cached message blocks, or -1
+// when no cache exists. Used to assert PERF-1 caching behavior.
+func (m Model) RenderCacheSizeForTesting() int {
+	if m.renderCache == nil {
+		return -1
+	}
+	return len(m.renderCache.blocks)
+}
+
+// RenderCacheWidthForTesting returns the layout width the cache was built for.
+func (m Model) RenderCacheWidthForTesting() int {
+	if m.renderCache == nil {
+		return -1
+	}
+	return m.renderCache.width
 }
 
 func (m Model) ActivityCountForTesting() int {

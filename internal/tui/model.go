@@ -224,6 +224,12 @@ type Model struct {
 	ta   textarea.Model
 	spin spinner.Model
 
+	// renderCache memoizes per-message rendered blocks so the chat transcript
+	// is not re-rendered (markdown regex and all) on every frame. See
+	// renderMessages / renderCacheState. Pointer so the cache survives the
+	// value-copy semantics of the Bubble Tea Model.
+	renderCache *renderCacheState
+
 	mode string
 	cfg  config.UserConfig
 

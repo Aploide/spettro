@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1017,54 +1020,135 @@ func renderUserTextBlock(body string, width int, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderMessages() string {
+// renderCacheState memoizes per-message rendered blocks so renderMessages does
+// not re-run the markdown regex over the whole transcript on every frame. The
+// cache is keyed by a content hash of each message's render-relevant fields and
+// scoped to the layout params (width / showTools / color); any change to those
+// params invalidates the whole cache. Entries for messages no longer present
+// are evicted by rebuilding the map on each call, bounding its size to the
+// current transcript.
+//
+// Access is single-threaded: renderMessages is only ever called from the Bubble
+// Tea Update goroutine, never from a background tea.Cmd.
+type renderCacheState struct {
+	width     int
+	showTools bool
+	color     string
+	blocks    map[uint64]string
+}
+
+// renderMessageBlock renders a single chat message to its display string. It is
+// the pure, cacheable unit of renderMessages.
+func (m Model) renderMessageBlock(msg ChatMessage, mc lipgloss.Color) string {
+	switch msg.Role {
+	case RoleUser:
+		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
+		text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
+		entry := renderUserTextBlock(text, m.paneWidth()-8, prefix)
+		for i := range msg.Images {
+			imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
+			entry += "\n" + imgLabel
+		}
+		return entry
+	case RoleAssistant:
+		if msg.Kind == "plan" {
+			return m.renderPlanMessage(msg, mc)
+		}
+		body := renderMarkdown(msg.Content, m.paneWidth()-8)
+		var entryLines []string
+		if len(msg.Tools) > 0 {
+			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
+		}
+		if strings.TrimSpace(msg.Content) != "" {
+			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
+		}
+		if m.showTools && msg.Thinking != "" {
+			thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
+			entryLines = append(entryLines, thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘"))
+		}
+		if msg.Meta != "" {
+			entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
+		}
+		return strings.Join(entryLines, "\n")
+	case RoleSystem:
+		return lipgloss.NewStyle().
+			Foreground(colorMuted).
+			PaddingLeft(4).
+			Width(m.paneWidth() - 4).
+			Render(msg.Content)
+	}
+	return ""
+}
+
+// messageRenderKey hashes every field that influences how a message renders.
+// Length prefixes guard against boundary collisions (e.g. "ab"+"c" vs
+// "a"+"bc"). The layout params (width/showTools/color) are NOT folded in here —
+// they scope the whole cache and invalidate it wholesale on change.
+func messageRenderKey(msg ChatMessage) uint64 {
+	h := fnv.New64a()
+	writeHashField := func(s string) {
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], uint64(len(s)))
+		_, _ = h.Write(buf[:])
+		_, _ = io.WriteString(h, s)
+	}
+	writeHashField(string(msg.Role))
+	writeHashField(msg.Kind)
+	writeHashField(msg.Content)
+	writeHashField(msg.Thinking)
+	writeHashField(msg.Meta)
+	for _, t := range msg.Tools {
+		writeHashField(t.Name)
+		writeHashField(t.Status)
+		writeHashField(t.Args)
+		writeHashField(t.Output)
+		writeHashField(t.Diff)
+		if t.Open {
+			writeHashField("open")
+		}
+	}
+	for _, img := range msg.Images {
+		writeHashField(img)
+	}
+	return h.Sum64()
+}
+
+func (m *Model) renderMessages() string {
 	if len(m.messages) == 0 {
 		return styleMuted.Render("  no messages yet — type a prompt or /help")
 	}
 
 	mc := m.currentColor()
-	var parts []string
+	width := m.paneWidth()
+	color := string(mc)
 
+	// Reuse the prior cache only when the layout params match; otherwise start
+	// fresh so width/showTools/color changes fully re-render.
+	var prev map[uint64]string
+	if m.renderCache != nil && m.renderCache.width == width &&
+		m.renderCache.showTools == m.showTools && m.renderCache.color == color {
+		prev = m.renderCache.blocks
+	}
+	next := make(map[uint64]string, len(m.messages))
+
+	parts := make([]string, 0, len(m.messages))
 	for _, msg := range m.messages {
-		switch msg.Role {
-		case RoleUser:
-			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-			text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
-			entry := renderUserTextBlock(text, m.paneWidth()-8, prefix)
-			for i := range msg.Images {
-				imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
-				entry += "\n" + imgLabel
+		key := messageRenderKey(msg)
+		block, ok := next[key]
+		if !ok {
+			if block, ok = prev[key]; !ok {
+				block = m.renderMessageBlock(msg, mc)
 			}
-			parts = append(parts, entry)
-		case RoleAssistant:
-			if msg.Kind == "plan" {
-				parts = append(parts, m.renderPlanMessage(msg, mc))
-				continue
-			}
-			body := renderMarkdown(msg.Content, m.paneWidth()-8)
-			var entryLines []string
-			if len(msg.Tools) > 0 {
-				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
-			}
-			if strings.TrimSpace(msg.Content) != "" {
-				entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
-			}
-			if m.showTools && msg.Thinking != "" {
-				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
-				entryLines = append(entryLines, thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘"))
-			}
-			if msg.Meta != "" {
-				entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
-			}
-			parts = append(parts, strings.Join(entryLines, "\n"))
-		case RoleSystem:
-			s := lipgloss.NewStyle().
-				Foreground(colorMuted).
-				PaddingLeft(4).
-				Width(m.paneWidth() - 4).
-				Render(msg.Content)
-			parts = append(parts, s)
+			next[key] = block
 		}
+		parts = append(parts, block)
+	}
+
+	m.renderCache = &renderCacheState{
+		width:     width,
+		showTools: m.showTools,
+		color:     color,
+		blocks:    next,
 	}
 
 	return strings.Join(parts, "\n\n")
