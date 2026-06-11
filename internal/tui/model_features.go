@@ -126,4 +126,3 @@ func (m Model) renderAttachmentChips(mc lipgloss.Color) string {
 	hint := styleMuted.Render("  ctrl+r removes last")
 	return strings.Join(chips, " ") + hint
 }
-
