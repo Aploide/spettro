@@ -1072,4 +1072,3 @@ func (m Model) viewSidePanel(width int) string {
 		Render(content)
 	return lipgloss.JoinVertical(lipgloss.Left, box, hints)
 }
-

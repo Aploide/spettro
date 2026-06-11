@@ -35,4 +35,3 @@ func TestSanitizeToolOutputForTesting_FormatsSubagentEnvelope(t *testing.T) {
 		}
 	}
 }
-

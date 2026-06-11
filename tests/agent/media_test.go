@@ -11,10 +11,10 @@ import (
 
 func TestSlugifyPrompt(t *testing.T) {
 	cases := map[string]string{
-		"A simple logo!":                    "a-simple-logo",
-		"  Lots   of   spaces  ":            "lots-of-spaces",
-		"!!!@@@###":                         "",
-		strings.Repeat("a", 200):            strings.Repeat("a", 60),
+		"A simple logo!":                   "a-simple-logo",
+		"  Lots   of   spaces  ":           "lots-of-spaces",
+		"!!!@@@###":                        "",
+		strings.Repeat("a", 200):           strings.Repeat("a", 60),
 		"Mix of UPPER, lower & 123 digits": "mix-of-upper-lower-123-digits",
 	}
 	for in, want := range cases {

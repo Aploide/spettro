@@ -58,19 +58,19 @@ type Skill struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	AllowedTools  string            `json:"allowed_tools,omitempty"`
 	Disabled      bool              `json:"disabled,omitempty"`
-	Location      string            `json:"location"`           // absolute path to SKILL.md
-	Directory     string            `json:"directory"`          // absolute path to the skill folder
-	Source        Source            `json:"source"`             // discovery family
-	Scope         Scope              `json:"scope"`              // project or user
+	Location      string            `json:"location"`            // absolute path to SKILL.md
+	Directory     string            `json:"directory"`           // absolute path to the skill folder
+	Source        Source            `json:"source"`              // discovery family
+	Scope         Scope             `json:"scope"`               // project or user
 	Resources     []string          `json:"resources,omitempty"` // bundled scripts/references/assets, relative to Directory
-	Issues        []string          `json:"issues,omitempty"`   // non-fatal validation warnings
+	Issues        []string          `json:"issues,omitempty"`    // non-fatal validation warnings
 }
 
 // Catalog is the complete set of skills discovered for a session.
 type Catalog struct {
-	Skills    []Skill
-	Shadowed  []Skill // skills hidden by name collision
-	Issues    []string
+	Skills   []Skill
+	Shadowed []Skill // skills hidden by name collision
+	Issues   []string
 }
 
 // LookupOptions controls how Discover walks the well-known directories.

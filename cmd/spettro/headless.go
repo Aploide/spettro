@@ -101,10 +101,10 @@ func runHeadless(cwd, bindHost string, port int) {
 	sessionDir := session.SessionDir(store.GlobalDir, sessionID)
 
 	var (
-		mu          sync.Mutex
-		cancelRun   context.CancelFunc
-		tokensUsed  int
-		msgCount    int
+		mu         sync.Mutex
+		cancelRun  context.CancelFunc
+		tokensUsed int
+		msgCount   int
 	)
 
 	// Interrupt handler goroutine.

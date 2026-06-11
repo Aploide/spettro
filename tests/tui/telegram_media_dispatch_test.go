@@ -29,10 +29,10 @@ func TestParseMediaTraceOutput_HandlesEmptyOrInvalid(t *testing.T) {
 		"",
 		"  ",
 		"not json",
-		`{"tool":"grok-image"}`,                       // no files
-		`{"tool":"grok-image","files":[]}`,            // empty files
-		`{"tool":"grok-image","files":["","   "]}`,    // all blank entries
-		`{"files":["x"`,                                // truncated JSON
+		`{"tool":"grok-image"}`,            // no files
+		`{"tool":"grok-image","files":[]}`, // empty files
+		`{"tool":"grok-image","files":["","   "]}`, // all blank entries
+		`{"files":["x"`, // truncated JSON
 	}
 	for _, c := range cases {
 		files, prompt := tui.ParseMediaTraceOutputForTesting(c)
