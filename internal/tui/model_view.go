@@ -565,6 +565,25 @@ func (m Model) contextWindow() int {
 	return 0
 }
 
+// evaluateCompact is the single source of truth for context-pressure
+// evaluation. Every gauge / warning / auto-compaction / blocking decision goes
+// through here so they all read the same occupancy estimate (contextTokens,
+// NOT the cumulative cost) against the same window and config.
+func (m Model) evaluateCompact() compact.Evaluation {
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
+	}
+	return compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.contextTokens,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
+}
+
 func contextWindowDefault(providerName string) int {
 	switch providerName {
 	case "anthropic":
@@ -579,21 +598,10 @@ func contextWindowDefault(providerName string) int {
 }
 
 func (m Model) autoCompactIfNeeded() tea.Cmd {
-	if m.thinking || m.totalTokensUsed == 0 {
+	if m.thinking || m.contextTokens == 0 {
 		return nil
 	}
-	window := m.contextWindow()
-	if window == 0 {
-		window = contextWindowDefault(m.cfg.ActiveProvider)
-	}
-	eval := compact.Evaluate(window, compact.Config{
-		AutoEnabled:      m.cfg.AutoCompactEnabled,
-		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-		MaxFailures:      m.cfg.AutoCompactMaxFailures,
-	}, compact.State{
-		TokensUsed:          m.totalTokensUsed,
-		ConsecutiveFailures: m.autoCompactFailures,
-	})
+	eval := m.evaluateCompact()
 	if !eval.ShouldAutoCompact {
 		return nil
 	}
@@ -618,19 +626,9 @@ func formatTokenCount(n int) string {
 func (m Model) viewStatusBar(width int) string {
 	left := m.statusBarMessage()
 
-	window := m.contextWindow()
-	if window == 0 {
-		window = contextWindowDefault(m.cfg.ActiveProvider)
-	}
-	eval := compact.Evaluate(window, compact.Config{
-		AutoEnabled:      m.cfg.AutoCompactEnabled,
-		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-		MaxFailures:      m.cfg.AutoCompactMaxFailures,
-	}, compact.State{
-		TokensUsed:          m.totalTokensUsed,
-		ConsecutiveFailures: m.autoCompactFailures,
-	})
-	used := m.totalTokensUsed
+	eval := m.evaluateCompact()
+	// The gauge shows occupancy (how full the window is), not cumulative cost.
+	used := m.contextTokens
 	var ctxColor lipgloss.Color
 	switch {
 	case eval.IsError:

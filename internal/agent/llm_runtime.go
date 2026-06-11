@@ -87,7 +87,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	}
 
 	systemPrompt := loadPromptOrFallback(c.CWD, "agents/coding.md", codingSystemPromptFallback)
-	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
@@ -110,9 +110,10 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	}
 	main, _ := stripThinkTags(out)
 	return RunResult{
-		Content:    strings.TrimSpace(main),
-		Tools:      traces,
-		TokensUsed: tokens,
+		Content:       strings.TrimSpace(main),
+		Tools:         traces,
+		TokensUsed:    tokens,
+		ContextTokens: contextTokens,
 	}, nil
 }
 
@@ -200,21 +201,32 @@ type parallelResult struct {
 	status  string
 }
 
-func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, error) {
+// runToolLoop returns the final output, the tool traces, the cumulative token
+// count (sum of every step's prompt+completion — the session COST), the
+// approximate context occupancy (the largest single-step prompt+completion,
+// which best estimates how full the window is — see EFF-3), and an error.
+//
+// Cost and occupancy are deliberately distinct: each step's prompt re-embeds
+// the rolling history, so summing every step double-counts the same context.
+// The gauge must use occupancy, not the cumulative sum.
+func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, int, error) {
 	if cfg.ProviderManager == nil {
-		return "", nil, 0, fmt.Errorf("missing provider manager")
+		return "", nil, 0, 0, fmt.Errorf("missing provider manager")
 	}
 	if cfg.ProviderName == nil || cfg.ModelName == nil {
-		return "", nil, 0, fmt.Errorf("missing provider/model selectors")
+		return "", nil, 0, 0, fmt.Errorf("missing provider/model selectors")
 	}
 	if strings.TrimSpace(cfg.UserTask) == "" {
-		return "", nil, 0, fmt.Errorf("empty task")
+		return "", nil, 0, 0, fmt.Errorf("empty task")
 	}
 	if cfg.MaxSteps <= 0 {
 		cfg.MaxSteps = 8
 	}
 
 	var totalTokens int
+	// contextTokens tracks the largest single-step request size, used as the
+	// approximate current context occupancy for the compaction gauge.
+	var contextTokens int
 	allowed := make(map[string]struct{}, len(cfg.AllowedTools))
 	for _, t := range cfg.AllowedTools {
 		allowed[t] = struct{}{}
@@ -285,16 +297,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	runtime.maxToolCallsPerStep = cfg.MaxToolCalls
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, err
+		return "", nil, 0, 0, err
 	}
 	runtime.allowedShell = allowedShell
 	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, err
+		return "", nil, 0, 0, err
 	}
 	runtime.hooksConfig = hooksCfg
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
-		return "", nil, 0, err
+		return "", nil, 0, 0, err
 	}
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
@@ -310,7 +322,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	for step := 1; step <= cfg.MaxSteps; step++ {
 		prompt := buildLoopPrompt(cfg, tailTrimHistory(history.String(), maxHistoryBytes), step)
 		if err := budget.Validate(cfg.MaxTokens, prompt); err != nil {
-			return "", traces, totalTokens, err
+			return "", traces, totalTokens, contextTokens, err
 		}
 		req := provider.Request{
 			Prompt:    prompt,
@@ -322,9 +334,15 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		}
 		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), req)
 		if err != nil {
-			return "", traces, totalTokens, fmt.Errorf("agent call failed: %w", err)
+			return "", traces, totalTokens, contextTokens, fmt.Errorf("agent call failed: %w", err)
 		}
 		totalTokens += resp.EstimatedTokens
+		// Occupancy ~= the largest single request (prompt+completion). The
+		// last step usually has the most accumulated history, but using the
+		// max is robust even if the final completion is short.
+		if resp.EstimatedTokens > contextTokens {
+			contextTokens = resp.EstimatedTokens
+		}
 
 		content := strings.TrimSpace(resp.Content)
 		main, _ := stripThinkTags(content)
@@ -349,7 +367,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
 			}
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, nil
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
 			}
 			for _, perr := range parseErrs {
 				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
@@ -370,7 +388,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				history.WriteString(fmt.Sprintf("system: you must use at least one tool before writing FINAL.\n\n"))
 				continue
 			}
-			return strings.TrimSpace(final), traces, totalTokens, nil
+			return strings.TrimSpace(final), traces, totalTokens, contextTokens, nil
 		}
 
 		// Plain text without FINAL prefix and without a tool call.
@@ -383,14 +401,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			}
 			continue
 		}
-		return main, traces, totalTokens, nil
+		return main, traces, totalTokens, contextTokens, nil
 	}
 
 	// Max steps exhausted: return whatever content we accumulated rather than discarding it.
 	if lastContent != "" {
-		return lastContent, traces, totalTokens, nil
+		return lastContent, traces, totalTokens, contextTokens, nil
 	}
-	return "", traces, totalTokens, fmt.Errorf("max tool steps reached without final answer")
+	return "", traces, totalTokens, contextTokens, fmt.Errorf("max tool steps reached without final answer")
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.

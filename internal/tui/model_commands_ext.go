@@ -11,7 +11,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/hooks"
 	"spettro/internal/mcp"
@@ -659,14 +658,7 @@ func (m Model) handleCompactCommand(input string) (tea.Model, tea.Cmd) {
 		if window == 0 {
 			window = contextWindowDefault(m.cfg.ActiveProvider)
 		}
-		eval := compact.Evaluate(window, compact.Config{
-			AutoEnabled:      m.cfg.AutoCompactEnabled,
-			AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-			MaxFailures:      m.cfg.AutoCompactMaxFailures,
-		}, compact.State{
-			TokensUsed:          m.totalTokensUsed,
-			ConsecutiveFailures: m.autoCompactFailures,
-		})
+		eval := m.evaluateCompact()
 		reason := strings.TrimSpace(eval.AutoDisabledReason)
 		if reason == "" {
 			reason = "none"

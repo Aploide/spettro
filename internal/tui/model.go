@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
-	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
@@ -71,18 +70,20 @@ const localConnectProviderID = "__local_endpoint__"
 type tickMsg time.Time
 
 type agentDoneMsg struct {
-	content    string
-	meta       string
-	tools      []agent.ToolTrace
-	tokensUsed int
-	err        error
+	content       string
+	meta          string
+	tools         []agent.ToolTrace
+	tokensUsed    int // cumulative session cost contributed by this run
+	contextTokens int // approximate context occupancy after this run
+	err           error
 }
 
 type planDoneMsg struct {
-	plan       string
-	tools      []agent.ToolTrace
-	tokensUsed int
-	err        error
+	plan          string
+	tools         []agent.ToolTrace
+	tokensUsed    int
+	contextTokens int
+	err           error
 }
 
 type commitDoneMsg struct {
@@ -310,7 +311,15 @@ type Model struct {
 	currentRunKey   string
 	recentApprovals []session.AgentEvent
 
-	totalTokensUsed     int
+	// totalTokensUsed is the cumulative session token COST (sum of every
+	// run's prompt+completion). It drives the goodbye stats and remote status
+	// — NOT the context gauge.
+	totalTokensUsed int
+	// contextTokens is the approximate current context-window OCCUPANCY: the
+	// largest single LLM request of the most recent run. The compaction gauge
+	// and auto-compaction read this so a multi-step run no longer inflates the
+	// reading by summing each step's re-embedded history (EFF-3).
+	contextTokens       int
 	autoCompactFailures int
 	compactWarningLevel int
 	autoCompactInFlight bool
@@ -566,6 +575,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetRunState()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+		}
+		if msg.contextTokens > 0 {
+			m.contextTokens = msg.contextTokens
+		}
+		if msg.tokensUsed > 0 || msg.contextTokens > 0 {
 			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
@@ -610,6 +624,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetRunState()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+		}
+		if msg.contextTokens > 0 {
+			m.contextTokens = msg.contextTokens
+		}
+		if msg.tokensUsed > 0 || msg.contextTokens > 0 {
 			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
@@ -702,6 +721,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionID = ""
 			m.todos = nil
 			m.totalTokensUsed = 0
+			m.contextTokens = 0
 			m.compactWarningLevel = 0
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
@@ -1525,6 +1545,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.messages = nil
 		m.sessionID = ""
 		m.todos = nil
+		// Occupancy resets with the conversation; keep the gauge honest.
+		m.contextTokens = 0
+		m.compactWarningLevel = 0
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
 	case "/tasks":
@@ -1562,18 +1585,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
-	window := m.contextWindow()
-	if window == 0 {
-		window = contextWindowDefault(m.cfg.ActiveProvider)
-	}
-	eval := compact.Evaluate(window, compact.Config{
-		AutoEnabled:      m.cfg.AutoCompactEnabled,
-		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-		MaxFailures:      m.cfg.AutoCompactMaxFailures,
-	}, compact.State{
-		TokensUsed:          m.totalTokensUsed,
-		ConsecutiveFailures: m.autoCompactFailures,
-	})
+	eval := m.evaluateCompact()
 	if eval.IsBlocking {
 		m.showBanner("context limit reached; run /compact before sending new prompts", "error")
 		return m, nil

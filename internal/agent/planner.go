@@ -67,7 +67,7 @@ func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (RunResult, err
 	}
 
 	systemPrompt := loadPromptOrFallback(p.CWD, "agents/planning.md", planSystemPrompt)
-	plan, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
+	plan, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        prompt,
 		CWD:             p.CWD,
@@ -99,7 +99,8 @@ func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (RunResult, err
 	return RunResult{
 		Content: fmt.Sprintf("# Plan\n\n%s\n\n---\n*planned by %s / %s*\n",
 			strings.TrimSpace(main), p.ProviderName(), p.ModelName()),
-		Tools:      traces,
-		TokensUsed: tokens,
+		Tools:         traces,
+		TokensUsed:    tokens,
+		ContextTokens: contextTokens,
 	}, nil
 }

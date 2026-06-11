@@ -15,7 +15,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
-	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/session"
 )
@@ -282,18 +281,7 @@ func (m *Model) syncTodosFromSession() {
 }
 
 func (m *Model) updateCompactWarningState() {
-	window := m.contextWindow()
-	if window == 0 {
-		window = contextWindowDefault(m.cfg.ActiveProvider)
-	}
-	eval := compact.Evaluate(window, compact.Config{
-		AutoEnabled:      m.cfg.AutoCompactEnabled,
-		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
-		MaxFailures:      m.cfg.AutoCompactMaxFailures,
-	}, compact.State{
-		TokensUsed:          m.totalTokensUsed,
-		ConsecutiveFailures: m.autoCompactFailures,
-	})
+	eval := m.evaluateCompact()
 	level := 0
 	if eval.IsError {
 		level = 2

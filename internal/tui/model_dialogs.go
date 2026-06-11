@@ -1660,9 +1660,9 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			}
 			if agentID == "plan" || spec.Mode == "planning" {
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
-				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed}
+				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens}
 			}
-			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, meta: ""}
+			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: ""}
 		},
 	)
 }
