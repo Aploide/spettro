@@ -115,6 +115,6 @@ var knownBaseURLs = map[string]string{
 	"cohere":       "https://api.cohere.com/compatibility/v1",
 	"deepseek":     "https://api.deepseek.com/v1",
 	"perplexity":   "https://api.perplexity.ai",
-	"zai":          "https://api.zai.ai/v1",
+	"zai":          "https://api.z.ai/v1",
 	"cerebras":     "https://api.cerebras.ai/v1",
 }
