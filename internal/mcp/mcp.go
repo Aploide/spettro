@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// maxFileResourceBytes bounds how much a single file-type MCP resource read may
+// return, matching the HTTP read cap. It prevents a huge file — or a symlink to
+// an unbounded source such as /dev/zero — from exhausting memory.
+const maxFileResourceBytes = 2 * 1024 * 1024
 
 type Server struct {
 	ID          string `json:"id"`
@@ -92,7 +98,9 @@ func SaveAuth(cwd string, state AuthState) error {
 	}
 
 	path := authPath(cwd)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// The auth file holds bearer tokens, so keep its directory owner-only
+	// (0o700) like the other ~/.spettro secret stores.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 
@@ -228,18 +236,51 @@ func readFileResource(cwd string, srv Server, id string) (string, error) {
 		base = filepath.Clean(filepath.Join(cwd, base))
 	}
 	abs := filepath.Clean(filepath.Join(base, filepath.FromSlash(id)))
-	rel, err := filepath.Rel(base, abs)
-	if err != nil {
+	if err := ensureWithinRoot(base, abs); err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("resource path outside MCP server root")
-	}
-	raw, err := os.ReadFile(abs)
+	f, err := os.Open(abs)
 	if err != nil {
 		return "", fmt.Errorf("read file resource: %w", err)
 	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxFileResourceBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read file resource: %w", err)
+	}
+	if len(raw) > maxFileResourceBytes {
+		return "", fmt.Errorf("resource %q exceeds the %d byte limit", id, maxFileResourceBytes)
+	}
 	return string(raw), nil
+}
+
+// ensureWithinRoot verifies target stays inside root both lexically and after
+// resolving symlinks, so a symlink planted inside an MCP file root cannot be
+// followed to read files outside it.
+func ensureWithinRoot(root, target string) error {
+	if !withinRoot(root, target) {
+		return fmt.Errorf("resource path outside MCP server root")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil // root not resolvable; lexical check already passed
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return nil // target missing/dangling; os.Open will report it
+	}
+	if !withinRoot(resolvedRoot, resolvedTarget) {
+		return fmt.Errorf("resource path escapes MCP server root via symlink")
+	}
+	return nil
+}
+
+func withinRoot(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func listHTTPResources(cwd string, srv Server) ([]Resource, error) {
@@ -273,8 +314,17 @@ func listHTTPResources(cwd string, srv Server) ([]Resource, error) {
 }
 
 func readHTTPResource(cwd string, srv Server, id string) (string, error) {
-	url := strings.TrimRight(srv.EntryPoint, "/") + "/resource/" + id
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	base, err := url.Parse(strings.TrimRight(srv.EntryPoint, "/"))
+	if err != nil {
+		return "", fmt.Errorf("mcp: invalid entry point: %w", err)
+	}
+	if base.Scheme != "http" && base.Scheme != "https" {
+		return "", fmt.Errorf("mcp: unsupported entry-point scheme %q", base.Scheme)
+	}
+	// JoinPath escapes each element and collapses ./ and ../, so a resource id
+	// cannot inject a new host, scheme, query, or path-traversal into the URL.
+	target := base.JoinPath("resource", id)
+	req, err := http.NewRequest(http.MethodGet, target.String(), nil)
 	if err != nil {
 		return "", err
 	}
