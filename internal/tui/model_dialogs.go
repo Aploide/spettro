@@ -900,16 +900,28 @@ func (m *Model) recallNextInput() bool {
 	return true
 }
 
+// Caps for scanRepoFiles so that launching spettro in a huge directory (e.g.
+// $HOME) cannot walk millions of entries. Vars so tests can shrink them.
+var (
+	scanMaxEntries = 20_000  // collected entries
+	scanMaxVisited = 100_000 // visited paths, including ignored ones
+)
+
 func scanRepoFiles(root string) ([]string, error) {
 	gi := newGitignoreMatcher(root)
 	var entries []string
+	visited := 0
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		visited++
+		if visited > scanMaxVisited || len(entries) >= scanMaxEntries {
+			return filepath.SkipAll
+		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", ".spettro":
+			case ".git", ".spettro", "node_modules":
 				return filepath.SkipDir
 			}
 		}
@@ -939,6 +951,18 @@ func scanRepoFiles(root string) ([]string, error) {
 	}
 	sort.Strings(entries)
 	return entries, nil
+}
+
+// repoFilesScannedMsg delivers the result of the background repo file scan.
+type repoFilesScannedMsg struct{ files []string }
+
+// scanRepoFilesCmd runs scanRepoFiles off the UI thread so startup never
+// blocks on the size of the working directory.
+func scanRepoFilesCmd(root string) tea.Cmd {
+	return func() tea.Msg {
+		files, _ := scanRepoFiles(root)
+		return repoFilesScannedMsg{files: files}
+	}
 }
 
 func (m Model) extractMentionedFiles(input string) []string {
