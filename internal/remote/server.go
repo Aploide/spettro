@@ -33,6 +33,10 @@ const portScanLimit = 10
 // connect.
 const recentEventsLimit = 64
 
+// maxRequestBytes caps the size of any request body the control server reads,
+// so a client cannot exhaust memory with an unbounded POST.
+const maxRequestBytes = 1 << 20 // 1 MiB
+
 // SubmitRequest is delivered to the TUI when an HTTP client posts a prompt.
 // The TUI must send exactly one response on Reply.
 type SubmitRequest struct {
@@ -324,19 +328,64 @@ func (s *Server) routes() http.Handler {
 
 func (s *Server) applyAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// DNS-rebinding defense: when bound to loopback, only serve requests
+		// addressed to a loopback Host. A browser page that rebinds a hostname
+		// to 127.0.0.1 carries its own Host header and is rejected here.
+		if !s.hostAllowed(r.Host) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
 		got := strings.TrimSpace(r.Header.Get("Authorization"))
-		if got == "" {
+		if got != "" {
+			got = strings.TrimSpace(strings.TrimPrefix(got, "Bearer "))
+		} else if r.URL.Path == "/events" {
+			// EventSource clients cannot set headers, so the token may ride in
+			// a query parameter — but only on the read-only SSE stream, never
+			// on the state-changing POST endpoints (where it would leak into
+			// logs/history/Referer).
 			got = strings.TrimSpace(r.URL.Query().Get("token"))
-		} else {
-			got = strings.TrimPrefix(got, "Bearer ")
-			got = strings.TrimSpace(got)
 		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// hostAllowed implements DNS-rebinding protection. When the server is bound to
+// a loopback address the request Host must also be loopback. When the operator
+// has explicitly opted into LAN exposure (0.0.0.0 or a specific interface) we
+// do not constrain Host — the bearer token remains the gate.
+func (s *Server) hostAllowed(host string) bool {
+	if !isLoopbackBind(s.bindHost) {
+		return true
+	}
+	h := host
+	if hostname, _, err := net.SplitHostPort(host); err == nil {
+		h = hostname
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	switch strings.ToLower(h) {
+	case "", "localhost":
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+func isLoopbackBind(bind string) bool {
+	switch bind {
+	case "", "localhost":
+		return true
+	}
+	if ip := net.ParseIP(bind); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {

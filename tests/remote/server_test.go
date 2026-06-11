@@ -351,3 +351,81 @@ func TestServer_PublishRaceWithDisconnect(t *testing.T) {
 		}
 	}
 }
+
+func TestServer_RejectsNonLoopbackHost(t *testing.T) {
+	t.Parallel()
+	_, base := startTestServer(t)
+
+	// A DNS-rebinding attempt: valid token, but the Host header points at an
+	// attacker-controlled name that resolved to 127.0.0.1.
+	req := authedRequest(t, http.MethodGet, base+"/status", "test-token", nil)
+	req.Host = "evil.example.com"
+	resp, err := newTestClient().Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-loopback Host, got %d", resp.StatusCode)
+	}
+}
+
+func TestServer_QueryTokenOnlyAllowedOnEvents(t *testing.T) {
+	t.Parallel()
+	srv, base := startTestServer(t)
+
+	// A POST endpoint must NOT accept the token via query parameter.
+	req, err := http.NewRequest(http.MethodPost, base+"/interrupt?token=test-token", nil)
+	if err != nil {
+		t.Fatalf("new req: %v", err)
+	}
+	resp, err := newTestClient().Do(req)
+	if err != nil {
+		t.Fatalf("post interrupt: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for query token on POST, got %d", resp.StatusCode)
+	}
+
+	// The SSE stream may still authenticate via query parameter.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	evReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/events?token=test-token", nil)
+	if err != nil {
+		t.Fatalf("new events req: %v", err)
+	}
+	evResp, err := newTestClient().Do(evReq)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	defer evResp.Body.Close()
+	if evResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for query token on /events, got %d", evResp.StatusCode)
+	}
+	_ = srv
+}
+
+func TestServer_RejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+	_, base := startTestServer(t)
+
+	huge := bytes.NewReader(make([]byte, (1<<20)+1024)) // > 1 MiB cap
+	req, err := http.NewRequest(http.MethodPost, base+"/messages", huge)
+	if err != nil {
+		t.Fatalf("new req: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := newTestClient().Do(req)
+	if err != nil {
+		// The server stops reading and tears down the connection once the
+		// body exceeds the cap — the client sees a write/EOF error. That is a
+		// valid rejection.
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("expected oversized body to be rejected, got 200")
+	}
+}
