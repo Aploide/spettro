@@ -154,6 +154,27 @@ func (m *Model) mergeAdjacentToolStreamMessage(idx int) {
 	m.messages = append(m.messages[:idx], m.messages[idx+1:]...)
 }
 
+// attachToolDiff sets the asynchronously-computed diff on the tool entry whose
+// Seq matches, both in the rendered tool-stream messages and in m.liveTools so
+// an interrupt summary and the side-panel detail stay consistent.
+func (m *Model) attachToolDiff(seq int, diff string) {
+	for i := range m.messages {
+		if m.messages[i].Kind != "tool-stream" {
+			continue
+		}
+		for j := range m.messages[i].Tools {
+			if m.messages[i].Tools[j].Seq == seq {
+				m.messages[i].Tools[j].Diff = diff
+			}
+		}
+	}
+	for i := range m.liveTools {
+		if m.liveTools[i].Seq == seq {
+			m.liveTools[i].Diff = diff
+		}
+	}
+}
+
 func (m *Model) queuePrompt(input, prompt string, mentionedFiles, images []string) {
 	m.pendingPrompts = append(m.pendingPrompts, queuedPrompt{
 		Input:          input,
@@ -360,24 +381,31 @@ func (m *Model) trackSessionEditFromTrace(t agent.ToolTrace) {
 	m.markSessionEdit(args.Path)
 }
 
-func (m *Model) refreshModifiedFiles() {
+// minModifiedRefreshInterval throttles how often the modified-files git query
+// runs from the Update hot path. A tool-heavy run emits many traces; without
+// this guard each one would spawn up to four git subprocesses synchronously on
+// the Bubble Tea Update goroutine, serializing the whole UI.
+const minModifiedRefreshInterval = time.Second
+
+// queryModifiedFiles runs the git commands needed to compute the side-panel
+// branch + modified-file list. It is a pure function (no Model state) so it can
+// run inside a tea.Cmd off the Update goroutine. An empty branch with nil files
+// means "not a git work tree".
+func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
 	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = m.cwd
+	cmd.Dir = cwd
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != "true" {
-		m.gitBranch = ""
-		m.modifiedFiles = nil
-		return
+		return "", nil
 	}
 
-	m.gitBranch = readGitBranch(m.cwd)
+	branch = readGitBranch(cwd)
 
 	cmd = exec.Command("git", "status", "--porcelain")
-	cmd.Dir = m.cwd
+	cmd.Dir = cwd
 	out, err = cmd.Output()
 	if err != nil {
-		m.modifiedFiles = nil
-		return
+		return branch, nil
 	}
 
 	stat := make(map[string]modifiedFileEntry)
@@ -395,7 +423,7 @@ func (m *Model) refreshModifiedFiles() {
 		if path == "" {
 			continue
 		}
-		normPath := normalizeWorkspacePath(m.cwd, path)
+		normPath := normalizeWorkspacePath(cwd, path)
 		if normPath == "" {
 			continue
 		}
@@ -410,23 +438,51 @@ func (m *Model) refreshModifiedFiles() {
 	numTotals := make(map[string][2]int)
 	for _, args := range [][]string{{"diff", "--numstat"}, {"diff", "--cached", "--numstat"}} {
 		d := exec.Command("git", args...)
-		d.Dir = m.cwd
+		d.Dir = cwd
 		data, derr := d.Output()
 		if derr == nil {
 			parseNumstat(string(data), numTotals)
 		}
 	}
 
-	m.modifiedFiles = m.modifiedFiles[:0]
 	for path, entry := range stat {
 		if v, ok := numTotals[path]; ok {
 			entry.Added, entry.Deleted = v[0], v[1]
 		}
-		m.modifiedFiles = append(m.modifiedFiles, entry)
+		files = append(files, entry)
 	}
-	sort.Slice(m.modifiedFiles, func(i, j int) bool {
-		return m.modifiedFiles[i].Path < m.modifiedFiles[j].Path
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
 	})
+	return branch, files
+}
+
+// refreshModifiedFiles synchronously updates the side-panel git state. It is
+// used for the one-time startup query in New() and as the message applier for
+// modifiedFilesMsg. Hot-path callers should prefer scheduleModifiedRefresh.
+func (m *Model) refreshModifiedFiles() {
+	m.gitBranch, m.modifiedFiles = queryModifiedFiles(m.cwd)
+	m.lastModifiedRefreshAt = time.Now()
+}
+
+// scheduleModifiedRefresh returns a tea.Cmd that recomputes the modified-files
+// list off the Update goroutine, throttled to minModifiedRefreshInterval.
+// Returns nil when a refresh ran too recently (the side panel is eventually
+// consistent, so dropping a redundant refresh is safe).
+func (m *Model) scheduleModifiedRefresh() tea.Cmd {
+	if !m.lastModifiedRefreshAt.IsZero() && time.Since(m.lastModifiedRefreshAt) < minModifiedRefreshInterval {
+		return nil
+	}
+	m.lastModifiedRefreshAt = time.Now()
+	return refreshModifiedFilesCmd(m.cwd)
+}
+
+// refreshModifiedFilesCmd runs queryModifiedFiles in the background.
+func refreshModifiedFilesCmd(cwd string) tea.Cmd {
+	return func() tea.Msg {
+		branch, files := queryModifiedFiles(cwd)
+		return modifiedFilesMsg{branch: branch, files: files}
+	}
 }
 
 func readGitBranch(cwd string) string {
@@ -496,6 +552,17 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 		return ""
 	}
 	return buildNewFileDiff(path, string(data))
+}
+
+// computeFileDiffCmd runs computeFileDiff off the Update goroutine and returns
+// a toolDiffMsg carrying the diff plus the seq of the tool entry it belongs to.
+// computeFileDiff itself early-returns "" for non file-write/file-edit tools,
+// so the cmd is cheap to spawn for every completed tool. When the diff is empty
+// the cmd still resolves (the handler simply finds nothing to attach).
+func computeFileDiffCmd(seq int, cwd, name, argsJSON, status string) tea.Cmd {
+	return func() tea.Msg {
+		return toolDiffMsg{seq: seq, diff: computeFileDiff(cwd, name, argsJSON, status)}
+	}
 }
 
 func buildNewFileDiff(path, content string) string {

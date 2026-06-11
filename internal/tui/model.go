@@ -41,6 +41,11 @@ type ToolItem struct {
 	Output string
 	Diff   string
 	Open   bool
+	// Seq is a monotonically increasing identity assigned when a completed
+	// tool entry is created. It lets an asynchronously-computed file diff
+	// (toolDiffMsg) be attached to exactly the right entry even after the
+	// tool-stream messages are merged. Zero means "no async diff pending".
+	Seq int
 }
 
 // maxLiveTools bounds how many completed ToolItem entries we retain in
@@ -100,6 +105,20 @@ type compactDoneMsg struct {
 
 type toolProgressMsg struct {
 	trace agent.ToolTrace
+}
+
+// modifiedFilesMsg delivers the result of an asynchronous git query for the
+// side-panel branch + modified-file list (see refreshModifiedFilesCmd).
+type modifiedFilesMsg struct {
+	branch string
+	files  []modifiedFileEntry
+}
+
+// toolDiffMsg delivers an asynchronously-computed file diff to attach to the
+// completed tool entry identified by seq (see computeFileDiffCmd).
+type toolDiffMsg struct {
+	seq  int
+	diff string
 }
 
 type parallelAgentEntry struct {
@@ -279,11 +298,17 @@ type Model struct {
 	sideDetailScroll int
 	modifiedFiles    []modifiedFileEntry
 	gitBranch        string
-	showSidePanel    bool
-	sessionEdits     map[string]struct{}
-	activityFeed     []activityItem
-	currentRunKey    string
-	recentApprovals  []session.AgentEvent
+	// lastModifiedRefreshAt throttles the async git modified-files query
+	// (see scheduleModifiedRefresh).
+	lastModifiedRefreshAt time.Time
+	// toolSeq is the monotonic counter handed to completed ToolItems so an
+	// async file diff can be matched back to its entry.
+	toolSeq         int
+	showSidePanel   bool
+	sessionEdits    map[string]struct{}
+	activityFeed    []activityItem
+	currentRunKey   string
+	recentApprovals []session.AgentEvent
 
 	totalTokensUsed     int
 	autoCompactFailures int
@@ -684,7 +709,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t.Status != "running" {
 				switch t.Name {
 				case "file-write", "shell-exec", "bash", "agent":
-					m.refreshModifiedFiles()
+					// Refresh the side-panel file list off the Update
+					// goroutine, throttled so a burst of traces does not
+					// spawn git serially on the hot path.
+					if cmd := m.scheduleModifiedRefresh(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 			if t.Status == "running" {
@@ -692,13 +722,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentTool = &item
 				m.appendToolStreamMessage(item)
 			} else {
+				m.toolSeq++
 				completed := ToolItem{
 					Name:   t.Name,
 					Status: t.Status,
 					Args:   t.Args,
 					Output: t.Output,
-					Diff:   computeFileDiff(m.cwd, t.Name, t.Args, t.Status),
+					Seq:    m.toolSeq,
 				}
+				// Compute the diff off the Update goroutine: computeFileDiff
+				// shells out to git, which used to block Update per edit. The
+				// result is attached later via toolDiffMsg keyed on Seq.
+				cmds = append(cmds, computeFileDiffCmd(completed.Seq, m.cwd, t.Name, t.Args, t.Status))
 				// Cap m.liveTools to bound memory and the run summary built
 				// at interrupt time. When the LLM emits very large tool
 				// batches we keep the most recent maxLiveTools entries so
@@ -715,6 +750,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.vp.SetContent(m.renderMessages())
 			m.vp.GotoBottom()
+		}
+	case modifiedFilesMsg:
+		m.gitBranch = msg.branch
+		m.modifiedFiles = msg.files
+	case toolDiffMsg:
+		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
+			m.attachToolDiff(msg.seq, msg.diff)
+			m.vp.SetContent(m.renderMessages())
 		}
 	case shellApprovalRequestMsg:
 		if m.thinking {
