@@ -8,13 +8,15 @@
 | `/exit`, `/quit` | Quit Spettro. |
 | `/mode`, `/next` | Cycle active manifest agent/mode. |
 | `/connect` | Open provider/local-endpoint connect dialog. |
+| `/login` | Sign in to a Spettro subscription (device flow). |
+| `/logout` | Sign out and remove the saved Spettro subscription key. |
 | `/models` | Open model selector dialog (connected providers). |
 | `/models <provider:model> [api_key]` | Set model directly; optional API key saves for provider. |
 | `/permission <ask-first\|restricted\|yolo>` | Set execution policy. |
 | `/permissions [ask-first\|restricted\|yolo]` | Show or set policy alias. |
 | `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
 | `/budget <n\|0>` | Set request token budget (`0` = unlimited). |
-| `/thinking <off\|low\|medium\|high\|x-high>` | Set extended-thinking compute budget for the active model. Honoured by Anthropic Claude Opus / Sonnet; ignored by providers that don't expose a thinking parameter. |
+| `/thinking <off\|low\|medium\|high\|x-high\|max>` | Set extended-thinking compute budget for the active model. Honoured by Anthropic Claude Opus / Sonnet; ignored by providers that don't expose a thinking parameter. |
 | `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
 | `/approve` | Execute pending plan through `coding` agent. |
 | `/tasks [list\|add\|done\|set\|show]` | Manage session tasks. |

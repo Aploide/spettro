@@ -15,7 +15,8 @@ thinking control simply ignore it.
 | `low` | ~2 048 | Short reasoning budget. |
 | `medium` | ~5 120 | Medium reasoning budget. |
 | `high` | ~16 384 | Long reasoning budget. |
-| `x-high` | ~32 768 | Maximum reasoning budget. |
+| `x-high` | ~32 768 | Very long reasoning budget. |
+| `max` | ~100 000 | Maximum reasoning budget. |
 
 The exact mapping lives in `internal/provider/provider.go` as
 `ThinkingBudgetTokens` so it stays consistent across adapters and is easy
