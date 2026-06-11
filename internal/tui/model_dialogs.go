@@ -1543,6 +1543,77 @@ func (m Model) viewConnect() string {
 	)
 }
 
+// buildConversationHistory renders a bounded, oldest-first transcript of prior
+// turns for the model (EFF-2). It includes user and assistant turns plus any
+// /compact summary, and excludes the trailing user message when present (that
+// is the current request, sent separately as the task — including it here would
+// duplicate it). The result is capped at maxConversationHistoryBytes with
+// most-recent turns winning, so token cost stays bounded. Returns "" when there
+// is no prior context (first turn), preserving the pre-EFF-2 behavior exactly.
+func (m Model) buildConversationHistory() string {
+	msgs := m.messages
+	// Drop the trailing user turn: it is the request being sent as the task.
+	if n := len(msgs); n > 0 && msgs[n-1].Role == RoleUser {
+		msgs = msgs[:n-1]
+	}
+
+	// Collect eligible turns as formatted lines, oldest-first.
+	var lines []string
+	for _, msg := range msgs {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		switch msg.Role {
+		case RoleUser:
+			lines = append(lines, "user: "+singleLineHistory(content))
+		case RoleAssistant:
+			// Skip transient progress comments; keep substantive replies/plans.
+			if msg.Kind == "comment" {
+				continue
+			}
+			lines = append(lines, "assistant: "+singleLineHistory(content))
+		case RoleSystem:
+			// Only carry forward a compaction summary, not routine notices.
+			if strings.HasPrefix(content, compactSummaryPrefix) {
+				lines = append(lines, "summary: "+singleLineHistory(content))
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+
+	// Keep the most recent turns within the byte cap (oldest dropped first).
+	kept := make([]string, 0, len(lines))
+	total := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		size := len(lines[i]) + 1 // +1 for the joining newline
+		if total+size > maxConversationHistoryBytes && len(kept) > 0 {
+			break
+		}
+		kept = append(kept, lines[i])
+		total += size
+	}
+	// kept is most-recent-first; reverse to oldest-first for the prompt.
+	for l, r := 0, len(kept)-1; l < r; l, r = l+1, r-1 {
+		kept[l], kept[r] = kept[r], kept[l]
+	}
+	return strings.Join(kept, "\n")
+}
+
+// singleLineHistory collapses a turn to a single line so the transcript stays
+// compact and unambiguous in the prompt. Very long turns are truncated to keep
+// any single entry from dominating the budget.
+func singleLineHistory(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	const maxPerTurn = 4000
+	if len(s) > maxPerTurn {
+		s = s[:maxPerTurn] + " …(truncated)"
+	}
+	return s
+}
+
 func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []string, images []string) (tea.Model, tea.Cmd) {
 	return m.runAgentApproved(spec, input, mentionedFiles, images, false)
 }
@@ -1582,6 +1653,9 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	agentID := spec.ID
 
 	manifest := m.manifest
+	// Bounded cross-turn history so follow-up turns (and /compact) have memory.
+	// Built before the goroutine closure to capture the current m.messages.
+	history := m.buildConversationHistory()
 	a := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: pm,
@@ -1592,6 +1666,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		Thinking:        provider.ThinkingLevel(m.cfg.ThinkingLevel),
 		RequiredReads:   mentionedFiles,
 		Images:          images,
+		History:         history,
 		Manifest:        &manifest,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
 		DelegationDepth: 0,

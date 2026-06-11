@@ -25,6 +25,17 @@ import (
 
 const coAuthorInfo = "Co-Authored-By: Spettro <spettro@eyed.to>"
 
+// compactSummaryPrefix marks the system message that replaces the transcript
+// after a /compact. The cross-turn history builder treats such a message as a
+// conversation summary worth carrying forward (see buildConversationHistory).
+const compactSummaryPrefix = "── conversation compacted ──"
+
+// maxConversationHistoryBytes bounds the cross-turn transcript fed back to the
+// model on each turn so token cost stays controlled. It mirrors the agent
+// package's maxHistoryBytes (32 KB) for the in-run tool log; most-recent turns
+// win when the cap is hit.
+const maxConversationHistoryBytes = 32 * 1024
+
 type Role string
 
 const (
@@ -725,7 +736,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.compactWarningLevel = 0
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
-				Content: "── conversation compacted ──\n\n" + msg.summary,
+				Content: compactSummaryPrefix + "\n\n" + msg.summary,
 				At:      time.Now(),
 			}}
 		}

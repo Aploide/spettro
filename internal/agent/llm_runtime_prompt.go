@@ -145,6 +145,12 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 			requiredReadsSection = "\nRequired first reads (must be done with file-read before anything else):\n- " + strings.Join(paths, "\n- ")
 		}
 	}
+	// Cross-turn conversation history (EFF-2). Empty on a first turn so the
+	// rendered prompt is byte-for-byte identical to the pre-history behavior.
+	conversationSection := ""
+	if h := strings.TrimSpace(cfg.History); h != "" {
+		conversationSection = "\nConversation so far (earlier turns, oldest first):\n" + h + "\n"
+	}
 	return fmt.Sprintf(`%s
 
 You can use tools iteratively.
@@ -168,7 +174,7 @@ Rules:
 - Keep tool args minimal and valid JSON.
 - If a tool fails, adapt and continue.
 %s
-
+%s
 Task:
 %s
 %s
@@ -179,7 +185,7 @@ Working directory:
 Current step: %d/%d
 
 Previous tool interaction log:
-%s`, base, toolList, schemaSection, commentGuidance, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
+%s`, base, toolList, schemaSection, commentGuidance, conversationSection, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
 }
 
 // builtinToolSchemas describes the JSON arguments object accepted by every

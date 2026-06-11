@@ -118,8 +118,12 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 }
 
 type toolLoopConfig struct {
-	SystemPrompt    string
-	UserTask        string
+	SystemPrompt string
+	UserTask     string
+	// History is an optional bounded transcript of prior conversation turns
+	// (user/assistant), rendered into the prompt as a "Conversation so far"
+	// section before the current Task. Empty means a fresh, first-turn run.
+	History         string
 	CWD             string
 	AgentID         string
 	MaxSteps        int

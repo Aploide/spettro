@@ -117,6 +117,11 @@ type LLMAgent struct {
 	Thinking        provider.ThinkingLevel
 	RequiredReads   []string
 	Images          []string // only used on first LLM call (chat use case)
+	// History is an optional bounded transcript of prior conversation turns,
+	// surfaced to the model as a "Conversation so far" section so follow-up
+	// turns have memory. Empty == first turn (no behavior change). The caller
+	// is responsible for bounding it (see maxHistoryBytes).
+	History         string
 	ToolCallback    func(ToolTrace)
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
@@ -159,6 +164,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
+		History:         a.History,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
 		MaxSteps:        maxSteps,

@@ -54,6 +54,19 @@ func BuildToolSchemaSectionForTesting(allowedTools []string) string {
 	return buildToolSchemaSection(allowedTools)
 }
 
+// BuildLoopPromptForTesting renders the loop prompt for a minimal config so
+// tests can assert how the cross-turn conversation History is surfaced. The
+// toolLog argument is the per-step rolling tool log (distinct from History).
+func BuildLoopPromptForTesting(systemPrompt, userTask, history, toolLog string, step int) string {
+	return buildLoopPrompt(toolLoopConfig{
+		SystemPrompt: systemPrompt,
+		UserTask:     userTask,
+		History:      history,
+		CWD:          "/tmp/x",
+		MaxSteps:     8,
+	}, toolLog, step)
+}
+
 func TailTrimHistoryForTesting(history string, maxBytes int) string {
 	return tailTrimHistory(history, maxBytes)
 }
