@@ -1261,8 +1261,47 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("path outside workspace is not allowed")
 	}
+	// Under an active sandbox, also reject paths whose *real* target escapes the
+	// workspace through a symlink. Without this, an agent could `ln -s` a secret
+	// (e.g. ~/.ssh/id_rsa) into the workspace and read it via the in-process
+	// file tools, which run in the parent (reads open) and would otherwise
+	// follow the link past the shell-layer read confinement.
+	if r.sandboxPolicy().FSEnforced() && realPathEscapes(r.cwd, abs) {
+		return "", "", fmt.Errorf("path outside workspace is not allowed")
+	}
 	rel = filepath.ToSlash(rel)
 	return abs, rel, nil
+}
+
+// realPathEscapes reports whether abs — after resolving symlinks on its
+// longest existing prefix — points outside dir. The target itself need not
+// exist (file-write creates new files), so only the existing ancestry is
+// resolved and the missing tail is re-appended.
+func realPathEscapes(dir, abs string) bool {
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		realDir = filepath.Clean(dir)
+	}
+	real, rem := abs, ""
+	for {
+		if resolved, rerr := filepath.EvalSymlinks(real); rerr == nil {
+			real = resolved
+			break
+		}
+		parent := filepath.Dir(real)
+		if parent == real {
+			real = filepath.Clean(abs)
+			break
+		}
+		rem = filepath.Join(filepath.Base(real), rem)
+		real = parent
+	}
+	full := filepath.Clean(filepath.Join(real, rem))
+	rel, err := filepath.Rel(realDir, full)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // searchLineNumberRE matches ":<digits>" segments in repo-search output, used

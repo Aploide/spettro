@@ -72,6 +72,40 @@ func TestFileWriteHonorsReadOnlySandbox(t *testing.T) {
 	}
 }
 
+// TestResolvePathBlocksSymlinkEscapeUnderSandbox proves an agent cannot read a
+// secret outside the workspace by symlinking it in and reading via the
+// in-process file tools (which run in the read-open parent).
+func TestResolvePathBlocksSymlinkEscapeUnderSandbox(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "id_rsa")
+	if err := os.WriteFile(secret, []byte("PRIVATE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(ws, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	// With the sandbox active, resolving the symlinked path is rejected.
+	confined := &toolRuntime{cwd: ws, sandboxState: NewSandboxState(sandbox.Policy{FS: sandbox.FSWorkspaceWrite})}
+	if _, _, err := confined.resolvePath("link"); err == nil {
+		t.Fatal("sandbox must reject a workspace symlink pointing outside the workspace")
+	}
+	// A real file inside the workspace still resolves.
+	if err := os.WriteFile(filepath.Join(ws, "real.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := confined.resolvePath("real.txt"); err != nil {
+		t.Fatalf("in-workspace file must resolve under sandbox: %v", err)
+	}
+
+	// Without a sandbox, behavior is unchanged (symlink followed as before).
+	open := &toolRuntime{cwd: ws}
+	if _, _, err := open.resolvePath("link"); err != nil {
+		t.Fatalf("no sandbox must not change symlink behavior: %v", err)
+	}
+}
+
 // TestRunShellToolEnforcesSandboxEndToEnd drives the real chain
 // runShellTool -> sandbox.Command -> kernel and checks the denial. The failure
 // is opaque to the model: a generic command error, no sandbox hint.
