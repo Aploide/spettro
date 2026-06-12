@@ -967,6 +967,18 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 // effect. When the policy does not require approval (the default) or we are in
 // YOLO mode, writes proceed unchanged.
 func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath string) error {
+	// The OS sandbox policy is non-negotiable and independent of the approval
+	// flow (it is an operator setting, not a per-command permission). The
+	// in-process file tools must honor the same FS scope the kernel enforces on
+	// shell children, or read-only confinement would be trivially bypassable by
+	// writing through file-write instead of a shell redirect. The error is
+	// deliberately generic so it reads as an ordinary filesystem denial.
+	if pol := r.sandboxPolicy(); pol.FSEnforced() {
+		abs := filepath.Join(r.cwd, filepath.FromSlash(relPath))
+		if !pol.WritablePath(abs, r.cwd, []string{os.TempDir()}) {
+			return fmt.Errorf("%s: %s is not writable", toolID, relPath)
+		}
+	}
 	spec, ok := r.toolPolicies[toolID]
 	if !ok || !spec.RequiresApproval || r.permission == config.PermissionYOLO {
 		return nil

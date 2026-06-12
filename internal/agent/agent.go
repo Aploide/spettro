@@ -121,11 +121,14 @@ type LLMAgent struct {
 	// surfaced to the model as a "Conversation so far" section so follow-up
 	// turns have memory. Empty == first turn (no behavior change). The caller
 	// is responsible for bounding it (see maxHistoryBytes).
-	History         string
-	ToolCallback    func(ToolTrace)
-	ShellApproval   ShellApprovalCallback
-	AskUser         AskUserCallback
-	Manifest        *config.AgentManifest // for sub-agent spawning via agent tool
+	History       string
+	ToolCallback  func(ToolTrace)
+	ShellApproval ShellApprovalCallback
+	AskUser       AskUserCallback
+	Manifest      *config.AgentManifest // for sub-agent spawning via agent tool
+	// SandboxState is the session-scoped OS sandbox policy shared across the
+	// whole agent tree. nil means the sandbox feature is disabled.
+	SandboxState    *SandboxState
 	SessionDir      string
 	DelegationDepth int
 	ParentAgentID   string
@@ -184,6 +187,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ShellApproval:   a.ShellApproval,
 		AskUser:         a.AskUser,
 		Manifest:        a.Manifest,
+		SandboxState:    a.SandboxState,
 		SessionDir:      a.SessionDir,
 		DelegationDepth: a.DelegationDepth,
 		ParentAgentID:   a.ParentAgentID,

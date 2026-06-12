@@ -143,6 +143,7 @@ type toolLoopConfig struct {
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
 	Manifest        *config.AgentManifest
+	SandboxState    *SandboxState // session-scoped OS sandbox policy; nil = disabled
 	SessionDir      string
 	DelegationDepth int
 	ParentAgentID   string
@@ -173,6 +174,7 @@ type toolRuntime struct {
 	logToolCalls  bool
 	runtimeRules  []config.PermissionRule
 	agentRules    []config.PermissionRule
+	sandboxState  *SandboxState
 	// sub-agent support
 	manifest      *config.AgentManifest
 	providerMgr   *provider.Manager
@@ -253,6 +255,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		allowedShell:    map[string]struct{}{},
 		toolPolicies:    map[string]config.ToolSpec{},
 		logToolCalls:    cfg.LogToolCalls,
+		sandboxState:    cfg.SandboxState,
 		manifest:        cfg.Manifest,
 		providerMgr:     cfg.ProviderManager,
 		providerName:    cfg.ProviderName,
@@ -896,6 +899,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,
 			Manifest:        r.manifest,
+			SandboxState:    r.sandboxState,
 			SessionDir:      r.sessionDir,
 			DelegationDepth: r.delegationDepth + 1,
 			ParentAgentID:   parentID,
