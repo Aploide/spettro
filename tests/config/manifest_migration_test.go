@@ -50,15 +50,15 @@ enabled = true
 	if err != nil {
 		t.Fatalf("LoadAgentManifestForProject: %v", err)
 	}
-	if m.Version != 2 {
-		t.Fatalf("expected migrated version 2, got %d", m.Version)
+	if m.Version != 3 {
+		t.Fatalf("expected migrated version 3, got %d", m.Version)
 	}
 	rewritten, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read rewritten manifest: %v", err)
 	}
-	if !strings.Contains(string(rewritten), "version = 2") {
-		t.Fatalf("expected rewritten manifest version=2, got:\n%s", string(rewritten))
+	if !strings.Contains(string(rewritten), "version = 3") {
+		t.Fatalf("expected rewritten manifest version=3, got:\n%s", string(rewritten))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

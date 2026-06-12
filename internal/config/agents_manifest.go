@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"spettro/internal/sandbox"
 )
 
 const AgentManifestFilename = "spettro.agents.toml"
@@ -22,6 +24,10 @@ const (
 	SandboxWorkspaceWrite SandboxMode = "workspace-write"
 	SandboxReadOnly       SandboxMode = "read-only"
 	SandboxFullAccess     SandboxMode = "full-access"
+	// SandboxOff is an accepted input alias of SandboxFullAccess. The
+	// canonical persisted disabled value stays "full-access" so manifests keep
+	// loading under pre-v3 binaries, whose validation rejects "off".
+	SandboxOff SandboxMode = "off"
 )
 
 type AgentRole string
@@ -68,13 +74,22 @@ type AgentMetadata struct {
 }
 
 type RuntimePolicy struct {
-	DefaultPermission PermissionLevel  `toml:"default_permission"`
-	DefaultTimeoutSec int              `toml:"default_timeout_sec"`
-	LogToolCalls      bool             `toml:"log_tool_calls"`
-	SandboxMode       SandboxMode      `toml:"sandbox_mode"`
-	Delegation        DelegationPolicy `toml:"delegation"`
-	PermissionRules   []PermissionRule `toml:"permission_rules"`
-	AllowNetworkTools bool             `toml:"allow_network_tools"` // legacy field; ignored
+	DefaultPermission PermissionLevel `toml:"default_permission"`
+	DefaultTimeoutSec int             `toml:"default_timeout_sec"`
+	LogToolCalls      bool            `toml:"log_tool_calls"`
+	SandboxMode       SandboxMode     `toml:"sandbox_mode"`
+	// SandboxNet, SandboxAllowDirs and SandboxAllowReadDirs extend the OS
+	// sandbox policy: network scope ("all", "localhost", "none",
+	// "ports:443,8080"), extra writable roots, and extra readable-only roots
+	// (e.g. a toolchain cache outside the workspace when reads are confined).
+	// omitempty keeps migrated manifests loadable by older binaries, whose
+	// strict decoder rejects unknown fields.
+	SandboxNet           string           `toml:"sandbox_net,omitempty"`
+	SandboxAllowDirs     []string         `toml:"sandbox_allow_dirs,omitempty"`
+	SandboxAllowReadDirs []string         `toml:"sandbox_allow_read_dirs,omitempty"`
+	Delegation           DelegationPolicy `toml:"delegation"`
+	PermissionRules      []PermissionRule `toml:"permission_rules"`
+	AllowNetworkTools    bool             `toml:"allow_network_tools"` // legacy field; ignored
 }
 
 type ToolSpec struct {
@@ -119,7 +134,7 @@ type AgentSpec struct {
 
 func DefaultAgentManifest() AgentManifest {
 	m := AgentManifest{
-		Version:      2,
+		Version:      3,
 		DefaultAgent: "plan",
 		Metadata: AgentMetadata{
 			Name:        "Spettro default agents",
@@ -129,8 +144,11 @@ func DefaultAgentManifest() AgentManifest {
 			DefaultPermission: PermissionAskFirst,
 			DefaultTimeoutSec: 120,
 			LogToolCalls:      true,
-			SandboxMode:       SandboxWorkspaceWrite,
-			Delegation:        DelegationPolicy{MaxParallelWorkers: 4, MaxDepth: 2},
+			// The OS sandbox is opt-in: full-access here means "not configured";
+			// activation comes from the --sandbox flag or an explicit manifest
+			// setting.
+			SandboxMode: SandboxFullAccess,
+			Delegation:  DelegationPolicy{MaxParallelWorkers: 4, MaxDepth: 2},
 		},
 		Tools: []ToolSpec{
 			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
@@ -293,7 +311,7 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		changed = true
 	}
 	if m.Runtime.SandboxMode == "" {
-		m.Runtime.SandboxMode = SandboxWorkspaceWrite
+		m.Runtime.SandboxMode = SandboxFullAccess
 		changed = true
 	}
 	if m.Runtime.Delegation.MaxParallelWorkers <= 0 {
@@ -338,6 +356,18 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 2
 		changed = true
 	}
+	if m.Version < 3 {
+		// Before v3 the sandbox_mode field was persisted by the tool (never
+		// user-chosen) and never enforced. Now that workspace-write activates
+		// the OS sandbox, rewrite the inert default so existing projects keep
+		// their current (unconfined) behavior; users who want the sandbox
+		// re-enable it explicitly.
+		if m.Runtime.SandboxMode == SandboxWorkspaceWrite {
+			m.Runtime.SandboxMode = SandboxFullAccess
+		}
+		m.Version = 3
+		changed = true
+	}
 	return changed
 }
 
@@ -363,6 +393,11 @@ func (m AgentManifest) Validate() error {
 	}
 	if err := validateSandboxMode(m.Runtime.SandboxMode); err != nil {
 		return fmt.Errorf("agent manifest: invalid runtime.sandbox_mode: %w", err)
+	}
+	if strings.TrimSpace(m.Runtime.SandboxNet) != "" {
+		if _, _, err := sandbox.ParseNetSpec(m.Runtime.SandboxNet); err != nil {
+			return fmt.Errorf("agent manifest: invalid runtime.sandbox_net: %w", err)
+		}
 	}
 	if m.Runtime.Delegation.MaxParallelWorkers <= 0 {
 		return fmt.Errorf("agent manifest: runtime.delegation.max_parallel_workers must be > 0")
@@ -483,7 +518,7 @@ func validatePermissionLevel(level PermissionLevel) error {
 
 func validateSandboxMode(mode SandboxMode) error {
 	switch mode {
-	case SandboxWorkspaceWrite, SandboxReadOnly, SandboxFullAccess:
+	case SandboxWorkspaceWrite, SandboxReadOnly, SandboxFullAccess, SandboxOff:
 		return nil
 	default:
 		return fmt.Errorf("unsupported sandbox mode %q", mode)
