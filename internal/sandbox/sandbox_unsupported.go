@@ -11,9 +11,16 @@ import (
 // runs the program unconfined.
 func available() bool { return false }
 
-func wrap(ctx context.Context, _ string, name string, args ...string) *exec.Cmd {
+func capabilities() Capabilities {
+	return Capabilities{Mechanism: "none", Detail: "unsupported platform"}
+}
+
+func wrap(ctx context.Context, _ Policy, _ string, name string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
 // runChildIfRequested is a no-op: only the Linux backend re-execs a child.
 func runChildIfRequested() {}
+
+// confineParent is a no-op on platforms without a sandbox backend.
+func confineParent(_ []string) error { return nil }
