@@ -82,12 +82,67 @@ Spettro loads `spettro.agents.toml` from the project root if present; otherwise 
 See [`AGENTS.md`](../AGENTS.md) for full schema and validation.
 
 ```toml
-version = 2
+version = 3
 default_agent = "plan"
 
 [runtime]
 default_permission = "ask-first"
 default_timeout_sec = 120
-sandbox_mode = "workspace-write"
+sandbox_mode = "full-access"      # off | read-only | workspace-write | full-access
 log_tool_calls = true
+# sandbox_net = "none"                    # all | localhost | none | ports:443,8080
+# sandbox_allow_dirs = ["/data"]          # extra writable roots inside the sandbox
+# sandbox_allow_read_dirs = ["/opt/sdk"]  # extra readable roots (e.g. toolchain caches)
 ```
+
+## OS sandbox
+
+Spettro can confine the agent at the kernel level — Seatbelt (`sandbox-exec`) on
+macOS, Landlock on Linux. It is **opt-in** and off by default; it complements
+(never replaces) the approval gates. The boundary is **invisible to the model**:
+there is no sandbox tool and no prompt advertisement, blocked operations look
+like ordinary failures, and the policy is set only by the operator (CLI flag or
+`spettro.agents.toml`) — the model cannot inspect it or request its way out.
+
+Activation precedence: CLI flags > `spettro.agents.toml` > off.
+
+```sh
+spettro --sandbox workspace-write                  # writes -> workspace + temp; reads confined
+spettro --sandbox read-only --sandbox-net none     # no project/user writes, no network
+spettro --sandbox-net ports:443                    # TCP confined to port 443 (any host)
+spettro --sandbox workspace-write --sandbox-allow-dir /data        # extra writable root (repeatable)
+spettro --sandbox read-only --sandbox-allow-read-dir ~/go/pkg/mod  # extra readable root (repeatable)
+```
+
+What is guarded:
+
+- **Writes** — confined identically for shell commands (kernel) and the
+  `file-write`/`file-edit` tools (in-process check), so `read-only` is truly
+  read-only and cannot be bypassed by writing through a file tool. Writable set:
+  temp dirs, any `--sandbox-allow-dir` roots, and — in `workspace-write` only —
+  the workspace.
+- **Reads** — system paths stay readable so programs run, but the **home tree**
+  (other projects, `~/.ssh`, credentials, `~/.spettro` keys) is blocked except
+  the workspace and any allowed roots. Toolchain caches that live in `$HOME`
+  (e.g. `~/go/pkg/mod`, `~/.cache`) are blocked too, so add them with
+  `--sandbox-allow-read-dir` when building under the sandbox.
+- **Network** — `none` denies it, `localhost` allows loopback only,
+  `ports:443,8080` allows those TCP ports (any host). The spettro process keeps
+  network access for the LLM API, so the agent always reaches its model even
+  under `net=none`.
+- **The spettro process itself** — write-confined as defense-in-depth (Landlock
+  in-process on Linux; a one-time `sandbox-exec` re-exec on macOS). Its reads
+  stay open so the in-process git committer and skill discovery keep working;
+  the model's own read surface is confined at the shell and file-tool layers.
+
+Platform caveats:
+
+- Linux network confinement needs Landlock ABI v4 (kernel 6.7+) and governs TCP
+  only (UDP/unix sockets pass); `localhost` degrades to deny-all TCP because
+  Landlock cannot scope rules to loopback. If the kernel cannot enforce a
+  requested policy, sandboxed commands fail closed (exit 126).
+- macOS network filters are ip/port based (no hostname allowlists). Under
+  `none`, DNS and unix sockets are blocked too.
+- macOS parent confinement uses a `sandbox-exec` re-exec rather than the
+  deprecated in-process `sandbox_init`, to keep the `CGO_ENABLED=0` cross-
+  compiled release builds working.

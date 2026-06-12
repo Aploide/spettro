@@ -21,7 +21,11 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `2`.
+- `version` (int, required): schema version, currently `3`. Pre-v3 manifests
+  are migrated on load (with a `.bak` backup): the previously inert
+  `sandbox_mode = "workspace-write"` default is rewritten to `full-access`
+  because the field is now enforced — re-set it explicitly if you want the
+  OS sandbox.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
@@ -32,7 +36,20 @@ This file lets you define, in one place:
 
 - `default_permission`: one of `ask-first`, `restricted`, `yolo`.
 - `default_timeout_sec`: positive integer.
-- `sandbox_mode`: `workspace-write`, `read-only`, or `full-access`.
+- `sandbox_mode`: `off`/`full-access` (no OS sandbox, default), `workspace-write`
+  (writes confined to workspace + temp, reads confined to system + workspace),
+  or `read-only` (also blocks workspace writes). Enforced via Seatbelt (macOS) /
+  Landlock (Linux) for shell commands AND in-process for the `file-write`/
+  `file-edit` tools, and the spettro process is write-confined as a backstop.
+  The boundary is invisible to the model (no tool, no prompt hint); overridable
+  with the `--sandbox` CLI flag. See `docs/configuration.md`.
+- `sandbox_net`: optional network policy for sandboxed commands: `all`
+  (default), `localhost`, `none`, or `ports:443,8080`. CLI: `--sandbox-net`.
+- `sandbox_allow_dirs`: optional extra writable roots inside the sandbox.
+  CLI: `--sandbox-allow-dir` (repeatable).
+- `sandbox_allow_read_dirs`: optional extra readable-only roots (e.g. a
+  toolchain cache outside the workspace when reads are confined).
+  CLI: `--sandbox-allow-read-dir` (repeatable).
 - `log_tool_calls`: boolean.
 - `permission_rules`: optional layered policy rules (`permission`, `pattern`, `action`).
 - `[runtime.delegation]`: defaults for `max_parallel_workers` and `max_depth`.
