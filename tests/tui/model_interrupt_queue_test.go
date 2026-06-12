@@ -159,7 +159,7 @@ func TestNew_RestoresLastAgentAndPanelState(t *testing.T) {
 	cfg.LastAgentID = "coding"
 	cfg.ShowSidePanel = true
 
-	m := tui.New(cwd, cfg, store, pm)
+	m := tui.New(cwd, cfg, store, pm, nil)
 	if m.ModeForTesting() != "coding" {
 		t.Fatalf("expected restored mode coding, got %s", m.ModeForTesting())
 	}

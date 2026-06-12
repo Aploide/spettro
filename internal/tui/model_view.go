@@ -138,6 +138,12 @@ func (m Model) viewHeader() string {
 	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" {
 		thinkingTag = "thinking:" + level
 	}
+	sandboxTag := ""
+	if m.sandboxState != nil {
+		if p := m.sandboxState.Policy(); p.Enabled() {
+			sandboxTag = "sandbox:" + p.Short()
+		}
+	}
 	logoW := lipgloss.Width(logo)
 	permW := lipgloss.Width(permText)
 	maxMetaWidth := m.width - logoW - permW - 8
@@ -151,6 +157,9 @@ func (m Model) viewHeader() string {
 	}
 	if thinkingTag != "" {
 		right = styleMuted.Render(thinkingTag) + "  " + right
+	}
+	if sandboxTag != "" {
+		right = styleMuted.Render(sandboxTag) + "  " + right
 	}
 	rightW := lipgloss.Width(right)
 	availableCenter := m.width - logoW - rightW - 2

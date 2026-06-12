@@ -1668,6 +1668,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		Images:          images,
 		History:         history,
 		Manifest:        &manifest,
+		SandboxState:    m.sandboxState,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
 		DelegationDepth: 0,
 		ToolCallback: func(t agent.ToolTrace) {

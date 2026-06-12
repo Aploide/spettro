@@ -136,6 +136,10 @@ func (m *Model) SetThinkingForTesting(v bool) {
 	m.thinking = v
 }
 
+func (m Model) ThinkingForTesting() bool {
+	return m.thinking
+}
+
 func (m *Model) SetActiveAgentForTesting(id string) {
 	m.activeAgentID = id
 }
