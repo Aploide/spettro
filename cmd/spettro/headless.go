@@ -14,6 +14,7 @@ import (
 	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
+	"spettro/internal/sandbox"
 	"spettro/internal/session"
 	"spettro/internal/spettro"
 	"spettro/internal/storage"
@@ -36,7 +37,7 @@ func spettroInfosToModels(infos []spettro.ModelInfo) []provider.Model {
 	return out
 }
 
-func runHeadless(cwd, bindHost string, port int) {
+func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -74,6 +75,22 @@ func runHeadless(cwd, bindHost string, port int) {
 	mode := manifest.DefaultAgent
 	if mode == "" {
 		mode = "plan"
+	}
+
+	// One SandboxState for the server lifetime, shared across submissions.
+	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
+	if err != nil {
+		fatal("sandbox error: %v", err)
+	}
+	sb := agent.NewSandboxState(sandboxPolicy)
+
+	// Write-confine the server process itself as defense-in-depth (best-effort;
+	// the model surface is confined at the shell and file-tool layers).
+	if sandboxPolicy.Enabled() {
+		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
+		if err := sandbox.ConfineParent(writable); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
+		}
 	}
 
 	server, err := remote.NewServer(remote.Options{BindHost: bindHost})
@@ -209,6 +226,7 @@ func runHeadless(cwd, bindHost string, port int) {
 					ModelName:       func() string { return cfg.ActiveModel },
 					CWD:             cwd,
 					Manifest:        &manifest,
+					SandboxState:    sb,
 					SessionDir:      sessionDir,
 					ToolCallback: func(tr agent.ToolTrace) {
 						data := map[string]interface{}{

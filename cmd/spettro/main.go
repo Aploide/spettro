@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/models"
 	"spettro/internal/provider"
@@ -26,7 +28,20 @@ func main() {
 	cwdFlag := flag.String("cwd", "", "working directory (headless mode only)")
 	portFlag := flag.Int("port", 7878, "HTTP listen port (headless mode only)")
 	bindFlag := flag.String("bind", "127.0.0.1", "bind host (headless mode only; 0.0.0.0 for LAN)")
+	sandboxMode := flag.String("sandbox", "", "OS sandbox for agent shell commands: off|read-only|workspace-write (default: manifest setting, else off)")
+	sandboxNet := flag.String("sandbox-net", "", "sandbox network policy: all|localhost|none|ports:443,8080 (localhost degrades to none on Linux)")
+	var sandboxAllowDirs stringListFlag
+	flag.Var(&sandboxAllowDirs, "sandbox-allow-dir", "extra writable directory inside the sandbox (repeatable)")
+	var sandboxReadDirs stringListFlag
+	flag.Var(&sandboxReadDirs, "sandbox-allow-read-dir", "extra readable directory inside the sandbox, e.g. a toolchain cache (repeatable)")
 	flag.Parse()
+
+	sandboxOverrides := sandbox.Overrides{
+		Mode:      *sandboxMode,
+		Net:       *sandboxNet,
+		AllowDirs: sandboxAllowDirs,
+		ReadDirs:  sandboxReadDirs,
+	}
 
 	if *headless {
 		cwd := *cwdFlag
@@ -37,7 +52,7 @@ func main() {
 				fatal("cwd error: %v", err)
 			}
 		}
-		runHeadless(cwd, *bindFlag, *portFlag)
+		runHeadless(cwd, *bindFlag, *portFlag, sandboxOverrides)
 		return
 	}
 
@@ -59,8 +74,27 @@ func main() {
 	pm := provider.NewManager()
 	pm.SetAPIKeys(cfg.APIKeys)
 
-	if _, err := config.LoadAgentManifestForProject(cwd); err != nil {
+	manifest, err := config.LoadAgentManifestForProject(cwd)
+	if err != nil {
 		fatal("agent manifest error: %v", err)
+	}
+	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
+	if err != nil {
+		fatal("sandbox error: %v", err)
+	}
+	sb := agent.NewSandboxState(sandboxPolicy)
+
+	// Write-confine the spettro process itself (and its in-process file tools)
+	// as defense-in-depth. On macOS this re-execs under sandbox-exec and does
+	// not return; on Linux it applies Landlock in place. Done before the
+	// catalog/network setup to avoid redoing that work after the macOS re-exec.
+	// Best-effort: the model's surface is already confined at the shell and
+	// file-tool layers, so a failure here is only a warning.
+	if sandboxPolicy.Enabled() {
+		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
+		if err := sandbox.ConfineParent(writable); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
+		}
 	}
 
 	// Load cached catalog immediately (fast disk read) so the model selector
@@ -78,7 +112,7 @@ func main() {
 	}
 	models.RefreshBackground(pm.SetCatalog)
 
-	m := tui.New(cwd, cfg, store, pm)
+	m := tui.New(cwd, cfg, store, pm, sb)
 
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
@@ -94,4 +128,25 @@ func main() {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// resolveSandboxPolicy merges CLI overrides and the project manifest into the
+// session's effective sandbox policy.
+func resolveSandboxPolicy(o sandbox.Overrides, manifest config.AgentManifest) (sandbox.Policy, error) {
+	return sandbox.ResolvePolicy(o, sandbox.ManifestPolicy{
+		Mode:      string(manifest.Runtime.SandboxMode),
+		Net:       manifest.Runtime.SandboxNet,
+		AllowDirs: manifest.Runtime.SandboxAllowDirs,
+		ReadDirs:  manifest.Runtime.SandboxAllowReadDirs,
+	})
+}
+
+// stringListFlag is a repeatable string flag (e.g. --sandbox-allow-dir).
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringListFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }

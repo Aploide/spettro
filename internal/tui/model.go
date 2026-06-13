@@ -381,9 +381,13 @@ type Model struct {
 	manifest  config.AgentManifest
 	committer agent.CommitAgent
 	searcher  agent.SearchAgent
+	// sandboxState is the session-scoped OS sandbox policy shared with every
+	// agent run; nil when the binary was started without sandbox plumbing
+	// (tests).
+	sandboxState *agent.SandboxState
 }
 
-func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager) Model {
+func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState) Model {
 	ta := textarea.New()
 	ta.Placeholder = "enter message…"
 	ta.ShowLineNumbers = false
@@ -432,6 +436,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 			ModelName:       func() string { return cfg.ActiveModel },
 		},
 		searcher:     agent.RepoSearcher{},
+		sandboxState: sb,
 		historyIndex: -1,
 	}
 	m.refreshModifiedFiles()

@@ -205,6 +205,7 @@ var builtinToolSchemas = map[string]string{
 	"glob":               `{"pattern": string, "path"?: string}`,
 	"grep":               `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
 	"repo-search":        `{"query": string}`,
+	"sandbox":            `{"action": "status"|"request", "add_writable_dir"?: string, "net"?: "all"|"localhost"|"none"|"ports", "ports"?: [int], "reason"?: string}`,
 	"shell-exec":         `{"command": string}`,
 	"bash":               `{"command": string}`,
 	"bash-output":        `{"command": string}`,

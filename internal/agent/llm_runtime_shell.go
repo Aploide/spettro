@@ -48,11 +48,11 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// Auto-inject the `--trailer` flag whenever an LLM agent runs `git commit`
 	// through shell/bash so the policy holds even if the model forgets it.
 	cmdText = EnforceCommitCoAuthor(cmdText)
-	// Experimental, opt-in OS-native confinement (SPETTRO_SANDBOX=1). When
-	// enabled and supported (macOS today), filesystem writes are bounded to the
-	// workspace at the kernel level as defense-in-depth; otherwise the command
-	// runs normally.
-	cmd := sandbox.Command(ctx, os.Getenv("SPETTRO_SANDBOX") == "1", r.cwd, "bash", "-lc", cmdText)
+	// OS-native confinement enforces the active sandbox policy at the kernel
+	// level. The policy is set once at startup (CLI flags / manifest) and is
+	// not visible to the model: blocked operations surface as ordinary command
+	// failures, with no hint that a sandbox exists.
+	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
 	text := truncate(string(out), 12000)
