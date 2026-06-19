@@ -29,7 +29,7 @@ const (
 
 const codingSystemPromptFallback = `You are a coding agent that can use tools.
 Implement the task using minimal safe edits and verify your changes.
-Never include chain-of-thought or <think> blocks in output.`
+Do not include <think> blocks in your FINAL answer; put reasoning in the thinking channel if the model supports it.`
 
 type LLMCoder struct {
 	ProviderManager *provider.Manager
@@ -79,6 +79,10 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	}
 
 	systemPrompt := loadPromptOrFallback(c.CWD, "agents/coding.md", codingSystemPromptFallback)
+	thinking := provider.ThinkingLevel("")
+	if c.ProviderManager.SupportsReasoning(c.ProviderName(), c.ModelName()) {
+		thinking = provider.ThinkingMedium
+	}
 	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
@@ -91,6 +95,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		ProviderName:    c.ProviderName,
 		ModelName:       c.ModelName,
 		MaxTokens:       c.MaxTokens,
+		Thinking:        thinking,
 		RequiredReads:   c.RequiredReads,
 		ToolCallback:    c.ToolCallback,
 		Permission:      level,
