@@ -224,6 +224,33 @@ func (m *Manager) SupportsVision(providerName, modelName string) bool {
 	return false
 }
 
+func (m *Manager) SupportsToolCalls(providerName, modelName string) bool {
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return item.ToolCall
+		}
+	}
+	return false
+}
+
+func (m *Manager) ModelContext(providerName, modelName string) int {
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return item.Context
+		}
+	}
+	return 0
+}
+
+func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return item.Reasoning
+		}
+	}
+	return false
+}
+
 func (m *Manager) HasModel(providerName, modelName string) bool {
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
@@ -243,19 +270,46 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		return Response{}, fmt.Errorf("model does not support vision: %s/%s", providerName, modelName)
 	}
 
-	allParts := []string{req.Prompt}
+	var allParts []string
+	if len(req.Messages) > 0 {
+		allParts = append(allParts, req.System)
+		for _, m := range req.Messages {
+			allParts = append(allParts, m.Content)
+		}
+	} else {
+		allParts = append(allParts, req.Prompt)
+	}
 	allParts = append(allParts, req.Images...)
 	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
 		return Response{}, err
 	}
 
 	if len(req.Images) == 0 {
-		resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
-		if err == nil {
-			return finalizeResponse(resp, providerName, modelName, allParts), nil
-		}
-		if !shouldFallbackToLegacy(err) {
-			return Response{}, err
+		if req.OnStream != nil {
+			resp, err := sendWithFantasyStream(ctx, providerName, modelName, apiKey, baseURL, req)
+			if err == nil {
+				return finalizeResponse(resp, providerName, modelName, allParts), nil
+			}
+			if !shouldFallbackToLegacy(err) {
+				// Streaming failed for a non-fallback reason (e.g. the provider
+				// does not support the stream endpoint). Retry once without
+				// streaming before surfacing the error so a run never dies just
+				// because live tokens were unavailable.
+				noStream := req
+				noStream.OnStream = nil
+				if resp, rerr := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, noStream); rerr == nil {
+					return finalizeResponse(resp, providerName, modelName, allParts), nil
+				}
+				return Response{}, err
+			}
+		} else {
+			resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
+			if err == nil {
+				return finalizeResponse(resp, providerName, modelName, allParts), nil
+			}
+			if !shouldFallbackToLegacy(err) {
+				return Response{}, err
+			}
 		}
 	}
 

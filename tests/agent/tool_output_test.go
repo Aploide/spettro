@@ -60,23 +60,45 @@ func newCaptureServer(t *testing.T, responses []string) *captureServer {
 	return cs
 }
 
-// promptAt returns the decoded "messages[0].content" (the full user prompt) for request i.
+// promptAt returns all message content from request i concatenated, so tests
+// can search for content regardless of which turn it appears in.
 func (cs *captureServer) promptAt(i int) string {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	if i >= len(cs.requests) {
 		return ""
 	}
+	// Content can be a plain string or a JSON array of content parts.
 	var body struct {
 		Messages []struct {
-			Content string `json:"content"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
 	json.Unmarshal([]byte(cs.requests[i]), &body) //nolint:errcheck
-	if len(body.Messages) == 0 {
-		return ""
+	var sb strings.Builder
+	for _, m := range body.Messages {
+		if len(m.Content) == 0 {
+			continue
+		}
+		// Try plain string first.
+		var s string
+		if json.Unmarshal(m.Content, &s) == nil {
+			sb.WriteString(s)
+			sb.WriteByte('\n')
+			continue
+		}
+		// Fallback: array of content parts, each with a "text" field.
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(m.Content, &parts) == nil {
+			for _, p := range parts {
+				sb.WriteString(p.Text)
+			}
+			sb.WriteByte('\n')
+		}
 	}
-	return body.Messages[0].Content
+	return sb.String()
 }
 
 func capturedCoder(cs *captureServer, dir string) agent.LLMCoder {

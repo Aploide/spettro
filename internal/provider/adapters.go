@@ -38,7 +38,36 @@ func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Req
 	client := openai.NewClient(opts...)
 
 	var messages []openai.ChatCompletionMessageParamUnion
-	if len(req.Images) > 0 {
+	if len(req.Messages) > 0 {
+		if req.System != "" {
+			messages = append(messages, openai.SystemMessage(req.System))
+		}
+		firstUser := true
+		for _, m := range req.Messages {
+			switch m.Role {
+			case RoleUser:
+				if firstUser && len(req.Images) > 0 {
+					var parts []openai.ChatCompletionContentPartUnionParam
+					for _, imgPath := range req.Images {
+						data, err := os.ReadFile(imgPath)
+						if err != nil {
+							continue
+						}
+						mt := mediaTypeFromPath(imgPath)
+						dataURL := "data:" + mt + ";base64," + base64.StdEncoding.EncodeToString(data)
+						parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: dataURL}))
+					}
+					parts = append(parts, openai.TextContentPart(m.Content))
+					messages = append(messages, openai.UserMessage(parts))
+					firstUser = false
+				} else {
+					messages = append(messages, openai.UserMessage(m.Content))
+				}
+			case RoleAssistant:
+				messages = append(messages, openai.AssistantMessage(m.Content))
+			}
+		}
+	} else if len(req.Images) > 0 {
 		var parts []openai.ChatCompletionContentPartUnionParam
 		for _, imgPath := range req.Images {
 			data, err := os.ReadFile(imgPath)
@@ -107,26 +136,71 @@ type AnthropicAdapter struct {
 func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
 	client := anthropic.NewClient(anthropicOption.WithAPIKey(a.APIKey))
 
-	maxTokens := int64(8096)
-
-	// Build user message: images (base64) first, then the prompt text.
-	var userBlocks []anthropic.ContentBlockParamUnion
-	for _, imgPath := range req.Images {
-		data, err := os.ReadFile(imgPath)
-		if err != nil {
-			continue
-		}
-		mt := mediaTypeFromPath(imgPath)
-		userBlocks = append(userBlocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
+	const defaultMaxTokens = int64(16384)
+	maxTokens := defaultMaxTokens
+	if req.MaxTokens > 0 {
+		maxTokens = int64(req.MaxTokens)
 	}
-	userBlocks = append(userBlocks, anthropic.NewTextBlock(req.Prompt))
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
 		MaxTokens: maxTokens,
-		Messages: []anthropic.MessageParam{
+	}
+
+	if len(req.Messages) > 0 {
+		if req.System != "" {
+			sysBlock := anthropic.TextBlockParam{Text: req.System}
+			sysBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			params.System = []anthropic.TextBlockParam{sysBlock}
+		}
+		firstUser := true
+		var msgs []anthropic.MessageParam
+		for _, m := range req.Messages {
+			switch m.Role {
+			case RoleUser:
+				var blocks []anthropic.ContentBlockParamUnion
+				if firstUser && len(req.Images) > 0 {
+					for _, imgPath := range req.Images {
+						data, err := os.ReadFile(imgPath)
+						if err != nil {
+							continue
+						}
+						mt := mediaTypeFromPath(imgPath)
+						blocks = append(blocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
+					}
+					firstUser = false
+				}
+				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+				msgs = append(msgs, anthropic.NewUserMessage(blocks...))
+			case RoleAssistant:
+				msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
+			}
+		}
+		if len(msgs) >= 2 {
+			penultimate := &msgs[len(msgs)-2]
+			if n := len(penultimate.Content); n > 0 {
+				last := &penultimate.Content[n-1]
+				if last.OfText != nil {
+					last.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+				}
+			}
+		}
+		params.Messages = msgs
+	} else {
+		// Legacy path: single user message built from Prompt.
+		var userBlocks []anthropic.ContentBlockParamUnion
+		for _, imgPath := range req.Images {
+			data, err := os.ReadFile(imgPath)
+			if err != nil {
+				continue
+			}
+			mt := mediaTypeFromPath(imgPath)
+			userBlocks = append(userBlocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
+		}
+		userBlocks = append(userBlocks, anthropic.NewTextBlock(req.Prompt))
+		params.Messages = []anthropic.MessageParam{
 			anthropic.NewUserMessage(userBlocks...),
-		},
+		}
 	}
 
 	// Honour the runtime "thinking level" when the model supports extended

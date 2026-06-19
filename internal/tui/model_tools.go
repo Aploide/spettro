@@ -44,6 +44,16 @@ func waitForTool(ch chan agent.ToolTrace) tea.Cmd {
 	}
 }
 
+func waitForStream(ch chan agent.StreamChunk) tea.Cmd {
+	return func() tea.Msg {
+		c, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return streamChunkMsg{chunk: c}
+	}
+}
+
 func waitForShellApproval(ch chan shellApprovalRequestMsg) tea.Cmd {
 	return func() tea.Msg {
 		req, ok := <-ch

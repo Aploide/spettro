@@ -819,6 +819,23 @@ func (m *Model) syncInputSuggestions() {
 			m.mentionCursor = 0
 			return
 		}
+		if strings.HasPrefix(val, "/skill") && !strings.HasPrefix(val, "/skills") && len(val) > len("/skill") {
+			filter := strings.TrimPrefix(val, "/skill")
+			filter = strings.TrimPrefix(filter, " ")
+			var items []commandDef
+			for _, c := range skillCommands {
+				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
+					items = append(items, c)
+				}
+			}
+			m.cmdItems = items
+			if m.cmdCursor >= len(m.cmdItems) {
+				m.cmdCursor = 0
+			}
+			m.mentionItems = nil
+			m.mentionCursor = 0
+			return
+		}
 		query := val[1:]
 		m.cmdItems = filterCommands(query)
 		if m.cmdCursor >= len(m.cmdItems) {
@@ -1637,6 +1654,8 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.startAgentActivity(spec.ID, input)
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh
+	streamCh := make(chan agent.StreamChunk, 256)
+	m.streamCh = streamCh
 	approvalCh := make(chan shellApprovalRequestMsg, 8)
 	m.approvalCh = approvalCh
 	askUserCh := make(chan askUserRequestMsg, 4)
@@ -1681,6 +1700,14 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			case <-ctx.Done():
 			}
 		},
+		StreamCallback: func(c agent.StreamChunk) {
+			// Same cancellation guard as ToolCallback: never block the agent
+			// goroutine on a stream send once the TUI stops draining.
+			select {
+			case streamCh <- c:
+			case <-ctx.Done():
+			}
+		},
 		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			respCh := make(chan shellApprovalResponse, 1)
 			select {
@@ -1717,6 +1744,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	return m, tea.Batch(
 		m.spin.Tick,
 		waitForTool(toolCh),
+		waitForStream(streamCh),
 		waitForShellApproval(approvalCh),
 		waitForAskUser(askUserCh),
 		func() tea.Msg {
@@ -1729,6 +1757,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			a.Spec = runSpec
 			result, err := a.Run(ctx, input)
 			close(toolCh)
+			close(streamCh)
 			close(approvalCh)
 			close(askUserCh)
 			if err != nil {

@@ -123,8 +123,11 @@ type LLMAgent struct {
 	// is responsible for bounding it (see maxHistoryBytes).
 	History       string
 	ToolCallback  func(ToolTrace)
-	ShellApproval ShellApprovalCallback
-	AskUser       AskUserCallback
+	// StreamCallback, when set, receives live thinking/answer chunks as the
+	// model streams. Set only on the top-level run (chat/coding/plan/ask).
+	StreamCallback StreamCallback
+	ShellApproval  ShellApprovalCallback
+	AskUser        AskUserCallback
 	Manifest      *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
 	// whole agent tree. nil means the sandbox feature is disabled.
@@ -183,6 +186,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		RequiredReads:   a.RequiredReads,
 		Images:          a.Images,
 		ToolCallback:    a.ToolCallback,
+		StreamCallback:  a.StreamCallback,
 		Permission:      a.Spec.Permission,
 		ShellApproval:   a.ShellApproval,
 		AskUser:         a.AskUser,

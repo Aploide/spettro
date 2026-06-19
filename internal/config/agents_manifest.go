@@ -90,6 +90,20 @@ type RuntimePolicy struct {
 	Delegation           DelegationPolicy `toml:"delegation"`
 	PermissionRules      []PermissionRule `toml:"permission_rules"`
 	AllowNetworkTools    bool             `toml:"allow_network_tools"` // legacy field; ignored
+	// Limits overrides the default character caps for tool output retained in
+	// model context. Zero values fall back to the built-in defaults.
+	Limits ContextLimits `toml:"limits,omitempty"`
+}
+
+// ContextLimits caps how many characters of tool output are retained in model
+// context. Zero for any field means use the built-in default.
+type ContextLimits struct {
+	// FileReadChars is the max chars returned by file-read and kept in history.
+	FileReadChars int `toml:"file_read_chars"`
+	// SearchChars is the max chars returned by repo-search/grep/glob/ls and kept in history.
+	SearchChars int `toml:"search_chars"`
+	// ToolOutputChars is the max chars for other tools (shell, agent, etc.).
+	ToolOutputChars int `toml:"tool_output_chars"`
 }
 
 type ToolSpec struct {
@@ -148,7 +162,7 @@ func DefaultAgentManifest() AgentManifest {
 			// activation comes from the --sandbox flag or an explicit manifest
 			// setting.
 			SandboxMode: SandboxFullAccess,
-			Delegation:  DelegationPolicy{MaxParallelWorkers: 4, MaxDepth: 2},
+			Delegation:  DelegationPolicy{MaxParallelWorkers: 2, MaxDepth: 2},
 		},
 		Tools: []ToolSpec{
 			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},

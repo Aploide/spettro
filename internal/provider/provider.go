@@ -1,6 +1,9 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ThinkingLevel selects how much "extended thinking" / reasoning compute the
 // model should spend before answering. Levels are normalized across providers:
@@ -57,17 +60,18 @@ func ThinkingBudgetTokens(level ThinkingLevel) int {
 }
 
 type Model struct {
-	Provider     string
-	ProviderName string
-	Name         string
-	DisplayName  string
-	Vision       bool
-	Reasoning    bool
-	ToolCall     bool
-	Context      int
-	Status       string
-	EnvKey       string
-	Local        bool
+	Provider      string
+	ProviderName  string
+	Name          string
+	DisplayName   string
+	Vision        bool
+	Reasoning     bool
+	ToolCall      bool
+	PromptCaching bool
+	Context       int
+	Status        string
+	EnvKey        string
+	Local         bool
 }
 
 type ProviderInfo struct {
@@ -76,13 +80,84 @@ type ProviderInfo struct {
 	Env  string
 }
 
+// StreamEventKind classifies an incremental streaming chunk.
+type StreamEventKind string
+
+const (
+	// StreamText is a delta of the model's visible answer text.
+	StreamText StreamEventKind = "text"
+	// StreamReasoning is a delta of the model's extended-thinking / reasoning.
+	StreamReasoning StreamEventKind = "reasoning"
+)
+
+// StreamEvent is one incremental delta emitted while a response is generated.
+type StreamEvent struct {
+	Kind  StreamEventKind
+	Delta string
+}
+
+// Role is the speaker role in a conversation turn.
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+)
+
+// ToolSpec is the definition of one tool sent via the native tool-calling API.
+type ToolSpec struct {
+	Name        string
+	Description string
+	Schema      json.RawMessage // JSON Schema object for the arguments
+}
+
+// NativeTool is a structured tool invocation returned by a capable model.
+type NativeTool struct {
+	ID   string          // provider-assigned call ID
+	Name string
+	Args json.RawMessage
+}
+
+// ToolResult is the executed output of a NativeTool, fed back in the next turn.
+type ToolResult struct {
+	ID     string
+	Name   string
+	Output string
+	IsErr  bool
+}
+
+// Message is one turn in a structured conversation.
+type Message struct {
+	Role    Role
+	Content string
+	// ToolCalls is set on assistant turns that issued native tool calls.
+	ToolCalls []NativeTool
+	// ToolResults is set on user turns that return native tool results.
+	ToolResults []ToolResult
+}
+
 type Request struct {
+	// System is sent in the provider's dedicated system/developer field. Empty
+	// means no system prompt.
+	System string
+	// Messages holds the ordered conversation turns. When non-empty the adapter
+	// uses the provider's native multi-turn format and Prompt is ignored.
+	Messages []Message
+	// Prompt is the legacy single-blob fallback used when Messages is empty.
 	Prompt      string
 	Images      []string
 	RequireFast bool
 	MaxTokens   int
 	// Thinking selects extended-thinking compute. Empty == ThinkingOff.
 	Thinking ThinkingLevel
+	// Tools, when non-empty, enables native tool calling for capable backends.
+	// On the text-protocol path this field is left nil.
+	Tools []ToolSpec
+	// OnStream, when non-nil, requests incremental token streaming. The
+	// provider invokes it (synchronously, on the calling goroutine) as text and
+	// reasoning deltas arrive. Streaming is best-effort: paths that cannot
+	// stream still return the full Response and simply never call OnStream.
+	OnStream func(StreamEvent)
 }
 
 type Response struct {
@@ -90,6 +165,8 @@ type Response struct {
 	EstimatedTokens int
 	Provider        string
 	Model           string
+	// ToolCalls is populated on the native tool-calling path.
+	ToolCalls []NativeTool
 }
 
 type Adapter interface {

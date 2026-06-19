@@ -25,19 +25,11 @@ import (
 const (
 	toolCallPrefix = "TOOL_CALL"
 	finalPrefix    = "FINAL"
-
-	// maxHistoryBytes caps the size of the rolling tool-loop history that
-	// gets embedded into every prompt. Without this, a long run with many
-	// tool calls (or a single misbehaving step that emits hundreds of
-	// calls) would balloon the prompt indefinitely. The cap is generous —
-	// the most recent ~32 KB of conversation are kept, older entries are
-	// dropped FIFO with a "(history truncated)" marker.
-	maxHistoryBytes = 32 * 1024
 )
 
 const codingSystemPromptFallback = `You are a coding agent that can use tools.
 Implement the task using minimal safe edits and verify your changes.
-Never include chain-of-thought or <think> blocks in output.`
+Do not include <think> blocks in your FINAL answer; put reasoning in the thinking channel if the model supports it.`
 
 type LLMCoder struct {
 	ProviderManager *provider.Manager
@@ -87,6 +79,10 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	}
 
 	systemPrompt := loadPromptOrFallback(c.CWD, "agents/coding.md", codingSystemPromptFallback)
+	thinking := provider.ThinkingLevel("")
+	if c.ProviderManager.SupportsReasoning(c.ProviderName(), c.ModelName()) {
+		thinking = provider.ThinkingMedium
+	}
 	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
@@ -99,6 +95,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		ProviderName:    c.ProviderName,
 		ModelName:       c.ModelName,
 		MaxTokens:       c.MaxTokens,
+		Thinking:        thinking,
 		RequiredReads:   c.RequiredReads,
 		ToolCallback:    c.ToolCallback,
 		Permission:      level,
@@ -139,7 +136,10 @@ type toolLoopConfig struct {
 	RequiredReads   []string
 	Images          []string        // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
-	Permission      config.PermissionLevel
+	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
+	// the model streams. Only the top-level run sets it; sub-agents stay silent.
+	StreamCallback StreamCallback
+	Permission     config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
 	Manifest        *config.AgentManifest
@@ -287,7 +287,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		}
 	}
 	if cfg.MaxWorkers <= 0 {
-		cfg.MaxWorkers = 4
+		cfg.MaxWorkers = 2
 	}
 	if cfg.MaxMicroagents <= 0 {
 		cfg.MaxMicroagents = 2
@@ -325,21 +325,63 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	var traces []ToolTrace
 	var lastContent string // last non-empty response, used as fallback if max steps hit
 
-	var history strings.Builder
+	// Detect whether the selected model supports native tool calling and build
+	// the ToolSpec list once (it doesn't change between steps).
+	useNativeTools := cfg.ProviderManager.SupportsToolCalls(cfg.ProviderName(), cfg.ModelName())
+	var nativeToolSpecs []provider.ToolSpec
+	if useNativeTools {
+		nativeToolSpecs = buildToolSpecs(cfg.AllowedTools)
+		if len(nativeToolSpecs) == 0 {
+			useNativeTools = false // no schemas registered for any allowed tool
+		}
+	}
+
+	// Seed the message array with the first user turn (task + working dir + history).
+	convMsgs := []provider.Message{
+		{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
+	}
+
 	for step := 1; step <= cfg.MaxSteps; step++ {
-		prompt := buildLoopPrompt(cfg, tailTrimHistory(history.String(), maxHistoryBytes), step)
-		if err := budget.Validate(cfg.MaxTokens, prompt); err != nil {
+		system := buildSystemString(cfg, step, useNativeTools)
+		// Budget validation: sum system + all messages.
+		allContent := make([]string, 0, 1+len(convMsgs))
+		allContent = append(allContent, system)
+		for _, m := range convMsgs {
+			allContent = append(allContent, m.Content)
+		}
+		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
 			return "", traces, totalTokens, contextTokens, err
 		}
 		req := provider.Request{
-			Prompt:    prompt,
+			System:    system,
+			Messages:  convMsgs,
 			MaxTokens: cfg.MaxTokens,
 			Thinking:  cfg.Thinking,
+		}
+		if useNativeTools {
+			req.Tools = nativeToolSpecs
 		}
 		if step == 1 && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
 		}
+		var demux *streamDemux
+		if cfg.StreamCallback != nil {
+			// Clear any draft left by a previous step before this one streams.
+			cfg.StreamCallback(StreamChunk{Kind: StreamKindAnswer, Reset: true})
+			demux = newStreamDemux(cfg.StreamCallback)
+			req.OnStream = func(ev provider.StreamEvent) {
+				switch ev.Kind {
+				case provider.StreamReasoning:
+					demux.reasoning(ev.Delta)
+				case provider.StreamText:
+					demux.text(ev.Delta)
+				}
+			}
+		}
 		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), req)
+		if demux != nil {
+			demux.flush()
+		}
 		if err != nil {
 			return "", traces, totalTokens, contextTokens, fmt.Errorf("agent call failed: %w", err)
 		}
@@ -354,45 +396,94 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		content := strings.TrimSpace(resp.Content)
 		main, _ := stripThinkTags(content)
 		main = strings.TrimSpace(main)
-		if main == "" {
+		if main == "" && len(resp.ToolCalls) == 0 {
 			continue
 		}
-		lastContent = main
+		if main != "" {
+			lastContent = main
+		}
 
+		// Native tool-calling path: model returned structured tool calls.
+		if len(resp.ToolCalls) > 0 {
+			usedTool = true
+			internalCalls := make([]toolCall, len(resp.ToolCalls))
+			for i, tc := range resp.ToolCalls {
+				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
+			}
+			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			convMsgs = append(convMsgs, provider.Message{
+				Role:      provider.RoleAssistant,
+				Content:   main,
+				ToolCalls: resp.ToolCalls,
+			})
+			toolResults := make([]provider.ToolResult, len(results))
+			for i, res := range results {
+				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)})
+				toolResults[i] = provider.ToolResult{
+					ID:     resp.ToolCalls[i].ID,
+					Name:   res.name,
+					Output: res.output,
+					IsErr:  res.status == "error",
+				}
+			}
+			if runtime.shouldStop() {
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
+			continue
+		}
+
+		// Native-tool path final answer: model returned text with no tool calls.
+		if useNativeTools {
+			if next, ok := runtime.nextRequiredRead(); ok {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
+				continue
+			}
+			if cfg.RequireToolCall && !usedTool {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
+				continue
+			}
+			return strings.TrimSpace(main), traces, totalTokens, contextTokens, nil
+		}
+
+		// Text protocol path (fallback for models without native tool support).
 		calls, parseErrs := parseAllToolCalls(main)
 		if len(calls) > 0 || len(parseErrs) > 0 {
 			if len(calls) > 0 {
 				usedTool = true
 			}
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
-			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+			var toolFeedback strings.Builder
 			for _, res := range results {
 				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
 				traces = append(traces, trace)
 				// The LLM must always receive tool outcomes in the next step, even when
 				// human-facing tool logging is disabled in the manifest.
-				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
+				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
 			}
 			if runtime.shouldStop() {
 				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
 			}
 			for _, perr := range parseErrs {
-				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
+				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
 			}
-			history.WriteString("\n")
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n")})
 			continue
 		}
 
 		if final, ok := parseFinal(main); ok {
 			if next, ok := runtime.nextRequiredRead(); ok {
-				history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
-				history.WriteString(fmt.Sprintf("system: you must read %q with file-read before FINAL.\n\n", next))
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before FINAL.", next)})
 				continue
 			}
 			if cfg.RequireToolCall && !usedTool {
 				// LLM tried to finalize without using any tools: nudge it and retry.
-				history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
-				history.WriteString(fmt.Sprintf("system: you must use at least one tool before writing FINAL.\n\n"))
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
 				continue
 			}
 			return strings.TrimSpace(final), traces, totalTokens, contextTokens, nil
@@ -400,11 +491,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 
 		// Plain text without FINAL prefix and without a tool call.
 		if cfg.RequireToolCall {
-			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 			if !usedTool {
-				history.WriteString("system: use TOOL_CALL before providing the final answer.\n\n")
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: use TOOL_CALL before providing the final answer."})
 			} else {
-				history.WriteString("system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text.\n\n")
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."})
 			}
 			continue
 		}
@@ -501,6 +592,29 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	return results
 }
 
+// historyLimit returns the character cap for a tool's output in model history,
+// applying any manifest override before falling back to the package default.
+func (r *toolRuntime) historyLimit(toolName string) int {
+	if r.manifest != nil {
+		lim := r.manifest.Runtime.Limits
+		switch toolName {
+		case "file-read":
+			if lim.FileReadChars > 0 {
+				return lim.FileReadChars
+			}
+		case "repo-search", "grep", "glob", "ls":
+			if lim.SearchChars > 0 {
+				return lim.SearchChars
+			}
+		default:
+			if lim.ToolOutputChars > 0 {
+				return lim.ToolOutputChars
+			}
+		}
+	}
+	return toolOutputHistoryLimit(toolName)
+}
+
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
@@ -555,7 +669,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", err
 		}
 		r.markReadFromSearch(out)
-		return truncate(out, 8000), nil
+		return truncate(out, r.historyLimit("repo-search")), nil
 	case "file-read":
 		var args struct {
 			Path      string `json:"path"`
@@ -581,7 +695,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if args.StartLine > 0 {
 			content = sliceLines(content, args.StartLine, args.EndLine)
 		}
-		return truncate(content, 12000), nil
+		return truncate(content, r.historyLimit("file-read")), nil
 	case "file-write":
 		var args struct {
 			Path    string `json:"path"`

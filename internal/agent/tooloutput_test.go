@@ -6,11 +6,11 @@ import (
 )
 
 func TestToolOutputHistoryLimit(t *testing.T) {
-	if got := toolOutputHistoryLimit("file-read"); got != 8000 {
-		t.Errorf("file-read limit = %d, want 8000", got)
+	if got := toolOutputHistoryLimit("file-read"); got != 40000 {
+		t.Errorf("file-read limit = %d, want 40000", got)
 	}
-	if got := toolOutputHistoryLimit("comment"); got != 1000 {
-		t.Errorf("default limit = %d, want 1000", got)
+	if got := toolOutputHistoryLimit("comment"); got != 2000 {
+		t.Errorf("default limit = %d, want 2000", got)
 	}
 	if toolOutputHistoryLimit("file-read") <= toolOutputHistoryLimit("comment") {
 		t.Error("read tools should get a larger budget than the default")
@@ -19,7 +19,7 @@ func TestToolOutputHistoryLimit(t *testing.T) {
 
 func TestSummarizeLoopToolResultPreservesNewlines(t *testing.T) {
 	out := "package main\n\nfunc main() {\n\tprintln(\"hi\")\n}"
-	got := summarizeLoopToolResult("file-read", `{"path":"main.go"}`, "ok", out)
+	got := summarizeLoopToolResult("file-read", `{"path":"main.go"}`, "ok", out, toolOutputHistoryLimit("file-read"))
 	if !strings.Contains(got, "\n") {
 		t.Fatalf("expected newlines preserved in file-read output, got %q", got)
 	}
@@ -29,14 +29,14 @@ func TestSummarizeLoopToolResultPreservesNewlines(t *testing.T) {
 }
 
 func TestSummarizeLoopToolResultBoundsLength(t *testing.T) {
-	huge := strings.Repeat("x", 20000)
-	got := summarizeLoopToolResult("file-read", "", "ok", huge)
-	// 8000 cap for file-read, plus the short "status=ok | output=" prefix and a
-	// truncation marker — comfortably under the previous 240 limit it replaces.
-	if len(got) > 8200 {
+	huge := strings.Repeat("x", 50000)
+	got := summarizeLoopToolResult("file-read", "", "ok", huge, toolOutputHistoryLimit("file-read"))
+	// 40000 cap for file-read, plus the short "status=ok | output=" prefix and a
+	// truncation marker.
+	if len(got) > 40200 {
 		t.Fatalf("file-read output not bounded: len=%d", len(got))
 	}
-	if len(got) < 4000 {
+	if len(got) < 20000 {
 		t.Fatalf("file-read output truncated too aggressively: len=%d", len(got))
 	}
 }
