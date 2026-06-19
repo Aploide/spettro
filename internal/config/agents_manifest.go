@@ -162,7 +162,7 @@ func DefaultAgentManifest() AgentManifest {
 			// activation comes from the --sandbox flag or an explicit manifest
 			// setting.
 			SandboxMode: SandboxFullAccess,
-			Delegation:  DelegationPolicy{MaxParallelWorkers: 4, MaxDepth: 2},
+			Delegation:  DelegationPolicy{MaxParallelWorkers: 2, MaxDepth: 2},
 		},
 		Tools: []ToolSpec{
 			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},

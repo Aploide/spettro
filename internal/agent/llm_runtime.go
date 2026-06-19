@@ -287,7 +287,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		}
 	}
 	if cfg.MaxWorkers <= 0 {
-		cfg.MaxWorkers = 4
+		cfg.MaxWorkers = 2
 	}
 	if cfg.MaxMicroagents <= 0 {
 		cfg.MaxMicroagents = 2
