@@ -136,7 +136,11 @@ type AnthropicAdapter struct {
 func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
 	client := anthropic.NewClient(anthropicOption.WithAPIKey(a.APIKey))
 
-	maxTokens := int64(8096)
+	const defaultMaxTokens = int64(16384)
+	maxTokens := defaultMaxTokens
+	if req.MaxTokens > 0 {
+		maxTokens = int64(req.MaxTokens)
+	}
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
