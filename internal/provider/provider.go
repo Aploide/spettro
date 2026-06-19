@@ -57,17 +57,18 @@ func ThinkingBudgetTokens(level ThinkingLevel) int {
 }
 
 type Model struct {
-	Provider     string
-	ProviderName string
-	Name         string
-	DisplayName  string
-	Vision       bool
-	Reasoning    bool
-	ToolCall     bool
-	Context      int
-	Status       string
-	EnvKey       string
-	Local        bool
+	Provider      string
+	ProviderName  string
+	Name          string
+	DisplayName   string
+	Vision        bool
+	Reasoning     bool
+	ToolCall      bool
+	PromptCaching bool
+	Context       int
+	Status        string
+	EnvKey        string
+	Local         bool
 }
 
 type ProviderInfo struct {

@@ -117,6 +117,13 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 				})
 			}
 		}
+		if providerName == "anthropic" {
+			cc := anthropicEphemeralOpts()
+			prompt[0].ProviderOptions = cc
+			if len(prompt) >= 2 {
+				prompt[len(prompt)-2].ProviderOptions = cc
+			}
+		}
 	} else {
 		prompt = fantasy.Prompt{fantasy.NewUserMessage(req.Prompt)}
 	}
@@ -223,4 +230,10 @@ func fantasyText(resp *fantasy.Response) string {
 
 func fantasyUserAgent() string {
 	return "Spettro/" + version.App + " via fantasy"
+}
+
+func anthropicEphemeralOpts() fantasy.ProviderOptions {
+	return fantasyanthropic.NewProviderCacheControlOptions(&fantasyanthropic.ProviderCacheControlOptions{
+		CacheControl: fantasyanthropic.CacheControl{Type: "ephemeral"},
+	})
 }

@@ -33,8 +33,8 @@ func (m Model) Tag() string {
 }
 
 var fallbackModels = []Model{
-	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-opus-4", DisplayName: "Claude Opus 4", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
-	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
+	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-opus-4", DisplayName: "Claude Opus 4", Vision: true, Reasoning: true, ToolCall: true, PromptCaching: true, EnvKey: "ANTHROPIC_API_KEY"},
+	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Vision: true, Reasoning: true, ToolCall: true, PromptCaching: true, EnvKey: "ANTHROPIC_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "gpt-4.1", DisplayName: "GPT-4.1", Vision: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "o3", DisplayName: "o3", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
 	{Provider: "google", ProviderName: "Google", Name: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
@@ -85,16 +85,17 @@ func buildModels(cat models.Catalog) []Model {
 				ctx = mod.Limit.Context
 			}
 			out = append(out, Model{
-				Provider:     pid,
-				ProviderName: prov.Name,
-				Name:         mid,
-				DisplayName:  mod.Name,
-				Vision:       mod.SupportsImage(),
-				Reasoning:    mod.Reasoning,
-				ToolCall:     mod.ToolCall,
-				Context:      ctx,
-				Status:       mod.Status,
-				EnvKey:       envKey,
+				Provider:      pid,
+				ProviderName:  prov.Name,
+				Name:          mid,
+				DisplayName:   mod.Name,
+				Vision:        mod.SupportsImage(),
+				Reasoning:     mod.Reasoning,
+				ToolCall:      mod.ToolCall,
+				PromptCaching: pid == "anthropic",
+				Context:       ctx,
+				Status:        mod.Status,
+				EnvKey:        envKey,
 			})
 		}
 	}

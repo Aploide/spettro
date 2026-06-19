@@ -149,7 +149,9 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 
 	if len(req.Messages) > 0 {
 		if req.System != "" {
-			params.System = []anthropic.TextBlockParam{{Text: req.System}}
+			sysBlock := anthropic.TextBlockParam{Text: req.System}
+			sysBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			params.System = []anthropic.TextBlockParam{sysBlock}
 		}
 		firstUser := true
 		var msgs []anthropic.MessageParam
@@ -172,6 +174,15 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 				msgs = append(msgs, anthropic.NewUserMessage(blocks...))
 			case RoleAssistant:
 				msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
+			}
+		}
+		if len(msgs) >= 2 {
+			penultimate := &msgs[len(msgs)-2]
+			if n := len(penultimate.Content); n > 0 {
+				last := &penultimate.Content[n-1]
+				if last.OfText != nil {
+					last.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+				}
 			}
 		}
 		params.Messages = msgs
