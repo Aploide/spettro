@@ -27,11 +27,24 @@ func renderMarkdown(content string, width int) string {
 	out := make([]string, 0, len(lines))
 	inCode := false
 	var codeLines []string
+	inTable := false
+	var tableLines []string
+
+	flushTable := func() {
+		if len(tableLines) > 0 {
+			out = append(out, renderTable(tableLines, width))
+			tableLines = nil
+		}
+		inTable = false
+	}
 
 	for _, line := range lines {
 		trim := strings.TrimSpace(line)
 
 		if strings.HasPrefix(trim, "```") {
+			if inTable {
+				flushTable()
+			}
 			if inCode {
 				out = append(out, renderCodeBlock(strings.Join(codeLines, "\n"), width))
 				codeLines = nil
@@ -46,6 +59,16 @@ func renderMarkdown(content string, width int) string {
 		if inCode {
 			codeLines = append(codeLines, line)
 			continue
+		}
+
+		if isTableRow(line) {
+			inTable = true
+			tableLines = append(tableLines, line)
+			continue
+		}
+
+		if inTable {
+			flushTable()
 		}
 
 		if trim == "" {
@@ -83,6 +106,10 @@ func renderMarkdown(content string, width int) string {
 		}
 
 		out = append(out, styleText.Render(renderInlineMarkdown(trim)))
+	}
+
+	if inTable {
+		flushTable()
 	}
 
 	if inCode {
@@ -230,6 +257,132 @@ func isHorizontalRule(line string) bool {
 		}
 	}
 	return true
+}
+
+func isTableRow(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "|")
+}
+
+func isTableSeparator(line string) bool {
+	trim := strings.TrimSpace(line)
+	if !strings.HasPrefix(trim, "|") {
+		return false
+	}
+	inner := strings.TrimPrefix(strings.TrimSuffix(trim, "|"), "|")
+	for _, cell := range strings.Split(inner, "|") {
+		clean := strings.TrimSpace(cell)
+		if clean == "" {
+			continue
+		}
+		for _, ch := range clean {
+			if ch != '-' && ch != ':' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func parseTableCells(line string) []string {
+	trim := strings.TrimSpace(line)
+	trim = strings.TrimPrefix(trim, "|")
+	trim = strings.TrimSuffix(trim, "|")
+	parts := strings.Split(trim, "|")
+	cells := make([]string, len(parts))
+	for i, p := range parts {
+		cells[i] = strings.TrimSpace(p)
+	}
+	return cells
+}
+
+func renderTable(tableLines []string, width int) string {
+	type tableRow struct {
+		cells    []string
+		isHeader bool
+	}
+
+	var rows []tableRow
+	for _, line := range tableLines {
+		if isTableSeparator(line) {
+			if len(rows) > 0 {
+				rows[len(rows)-1].isHeader = true
+			}
+			continue
+		}
+		rows = append(rows, tableRow{cells: parseTableCells(line)})
+	}
+
+	if len(rows) == 0 {
+		return ""
+	}
+
+	ncols := 0
+	for _, r := range rows {
+		if len(r.cells) > ncols {
+			ncols = len(r.cells)
+		}
+	}
+	if ncols == 0 {
+		return ""
+	}
+
+	colWidths := make([]int, ncols)
+	for _, r := range rows {
+		for j := 0; j < ncols; j++ {
+			if j < len(r.cells) && len(r.cells[j]) > colWidths[j] {
+				colWidths[j] = len(r.cells[j])
+			}
+		}
+	}
+
+	border := styleMuted
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
+
+	sepLine := func(l, m, r, f string) string {
+		var b strings.Builder
+		b.WriteString(border.Render(l))
+		for j, w := range colWidths {
+			b.WriteString(border.Render(strings.Repeat(f, w+2)))
+			if j < ncols-1 {
+				b.WriteString(border.Render(m))
+			}
+		}
+		b.WriteString(border.Render(r))
+		return b.String()
+	}
+
+	buildRow := func(r tableRow) string {
+		var b strings.Builder
+		b.WriteString(border.Render("│"))
+		for j := 0; j < ncols; j++ {
+			cell := ""
+			if j < len(r.cells) {
+				cell = r.cells[j]
+			}
+			rendered := renderInlineMarkdown(cell)
+			if r.isHeader {
+				rendered = headerStyle.Render(rendered)
+			} else {
+				rendered = styleText.Render(rendered)
+			}
+			padding := strings.Repeat(" ", colWidths[j]-len(cell))
+			b.WriteString(" " + rendered + padding + " ")
+			b.WriteString(border.Render("│"))
+		}
+		return b.String()
+	}
+
+	var out []string
+	out = append(out, sepLine("┌", "┬", "┐", "─"))
+	for _, r := range rows {
+		out = append(out, buildRow(r))
+		if r.isHeader {
+			out = append(out, sepLine("├", "┼", "┤", "─"))
+		}
+	}
+	out = append(out, sepLine("└", "┴", "┘", "─"))
+
+	return strings.Join(out, "\n")
 }
 
 func prefixBlockWithBullet(bullet, block string) string {
