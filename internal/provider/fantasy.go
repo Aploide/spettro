@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"charm.land/fantasy"
@@ -33,8 +34,17 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 		totalTokens = int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
 	}
 
+	var toolCalls []NativeTool
+	for _, tc := range resp.Content.ToolCalls() {
+		args := json.RawMessage(tc.Input)
+		if !json.Valid(args) {
+			args = json.RawMessage(`{}`)
+		}
+		toolCalls = append(toolCalls, NativeTool{ID: tc.ToolCallID, Name: tc.ToolName, Args: args})
+	}
 	return Response{
 		Content:         fantasyText(resp),
+		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 	}, nil
 }
@@ -63,6 +73,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey,
 		textSB    strings.Builder
 		usage     fantasy.Usage
 		streamErr error
+		toolCalls []NativeTool
 	)
 	for part := range stream {
 		switch part.Type {
@@ -75,6 +86,12 @@ func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey,
 			if req.OnStream != nil && part.Delta != "" {
 				req.OnStream(StreamEvent{Kind: StreamReasoning, Delta: part.Delta})
 			}
+		case fantasy.StreamPartTypeToolCall:
+			args := json.RawMessage(part.ToolCallInput)
+			if !json.Valid(args) {
+				args = json.RawMessage(`{}`)
+			}
+			toolCalls = append(toolCalls, NativeTool{ID: part.ID, Name: part.ToolCallName, Args: args})
 		case fantasy.StreamPartTypeFinish:
 			usage = part.Usage
 		case fantasy.StreamPartTypeError:
@@ -94,6 +111,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey,
 
 	return Response{
 		Content:         textSB.String(),
+		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 	}, nil
 }
@@ -109,12 +127,44 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 		for _, m := range req.Messages {
 			switch m.Role {
 			case RoleUser:
-				prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+				if len(m.ToolResults) > 0 {
+					// Tool results must use MessageRoleTool so the Anthropic provider
+					// routes them through the tool_result content block path.
+					parts := make([]fantasy.MessagePart, 0, len(m.ToolResults))
+					for _, tr := range m.ToolResults {
+						parts = append(parts, fantasy.ToolResultPart{
+							ToolCallID: tr.ID,
+							Output:     fantasy.ToolResultOutputContentText{Text: tr.Output},
+						})
+					}
+					prompt = append(prompt, fantasy.Message{Role: fantasy.MessageRoleTool, Content: parts})
+					// If there is accompanying text, append it as a separate user turn.
+					if m.Content != "" {
+						prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+					}
+				} else {
+					prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+				}
 			case RoleAssistant:
-				prompt = append(prompt, fantasy.Message{
-					Role:    fantasy.MessageRoleAssistant,
-					Content: []fantasy.MessagePart{fantasy.TextPart{Text: m.Content}},
-				})
+				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls))
+				if m.Content != "" {
+					parts = append(parts, fantasy.TextPart{Text: m.Content})
+				}
+				for _, tc := range m.ToolCalls {
+					args := string(tc.Args)
+					if args == "" {
+						args = "{}"
+					}
+					parts = append(parts, fantasy.ToolCallPart{
+						ToolCallID: tc.ID,
+						ToolName:   tc.Name,
+						Input:      args,
+					})
+				}
+				if len(parts) == 0 {
+					parts = append(parts, fantasy.TextPart{Text: ""})
+				}
+				prompt = append(prompt, fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: parts})
 			}
 		}
 		if providerName == "anthropic" {
@@ -130,6 +180,22 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 	call := fantasy.Call{
 		Prompt:    prompt,
 		UserAgent: fantasyUserAgent(),
+	}
+	if len(req.Tools) > 0 {
+		call.Tools = make([]fantasy.Tool, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			var schema map[string]any
+			if err := json.Unmarshal(t.Schema, &schema); err != nil || schema == nil {
+				schema = map[string]any{"type": "object", "additionalProperties": true}
+			}
+			call.Tools = append(call.Tools, fantasy.FunctionTool{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: schema,
+			})
+		}
+		auto := fantasy.ToolChoiceAuto
+		call.ToolChoice = &auto
 	}
 	if req.MaxTokens > 0 {
 		maxTokens := int64(req.MaxTokens)

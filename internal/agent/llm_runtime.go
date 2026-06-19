@@ -320,13 +320,24 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	var traces []ToolTrace
 	var lastContent string // last non-empty response, used as fallback if max steps hit
 
+	// Detect whether the selected model supports native tool calling and build
+	// the ToolSpec list once (it doesn't change between steps).
+	useNativeTools := cfg.ProviderManager.SupportsToolCalls(cfg.ProviderName(), cfg.ModelName())
+	var nativeToolSpecs []provider.ToolSpec
+	if useNativeTools {
+		nativeToolSpecs = buildToolSpecs(cfg.AllowedTools)
+		if len(nativeToolSpecs) == 0 {
+			useNativeTools = false // no schemas registered for any allowed tool
+		}
+	}
+
 	// Seed the message array with the first user turn (task + working dir + history).
 	convMsgs := []provider.Message{
 		{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
 	}
 
 	for step := 1; step <= cfg.MaxSteps; step++ {
-		system := buildSystemString(cfg, step)
+		system := buildSystemString(cfg, step, useNativeTools)
 		// Budget validation: sum system + all messages.
 		allContent := make([]string, 0, 1+len(convMsgs))
 		allContent = append(allContent, system)
@@ -341,6 +352,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			Messages:  convMsgs,
 			MaxTokens: cfg.MaxTokens,
 			Thinking:  cfg.Thinking,
+		}
+		if useNativeTools {
+			req.Tools = nativeToolSpecs
 		}
 		if step == 1 && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
@@ -377,11 +391,59 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		content := strings.TrimSpace(resp.Content)
 		main, _ := stripThinkTags(content)
 		main = strings.TrimSpace(main)
-		if main == "" {
+		if main == "" && len(resp.ToolCalls) == 0 {
 			continue
 		}
-		lastContent = main
+		if main != "" {
+			lastContent = main
+		}
 
+		// Native tool-calling path: model returned structured tool calls.
+		if len(resp.ToolCalls) > 0 {
+			usedTool = true
+			internalCalls := make([]toolCall, len(resp.ToolCalls))
+			for i, tc := range resp.ToolCalls {
+				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
+			}
+			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			convMsgs = append(convMsgs, provider.Message{
+				Role:      provider.RoleAssistant,
+				Content:   main,
+				ToolCalls: resp.ToolCalls,
+			})
+			toolResults := make([]provider.ToolResult, len(results))
+			for i, res := range results {
+				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)})
+				toolResults[i] = provider.ToolResult{
+					ID:     resp.ToolCalls[i].ID,
+					Name:   res.name,
+					Output: res.output,
+					IsErr:  res.status == "error",
+				}
+			}
+			if runtime.shouldStop() {
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
+			continue
+		}
+
+		// Native-tool path final answer: model returned text with no tool calls.
+		if useNativeTools {
+			if next, ok := runtime.nextRequiredRead(); ok {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
+				continue
+			}
+			if cfg.RequireToolCall && !usedTool {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
+				continue
+			}
+			return strings.TrimSpace(main), traces, totalTokens, contextTokens, nil
+		}
+
+		// Text protocol path (fallback for models without native tool support).
 		calls, parseErrs := parseAllToolCalls(main)
 		if len(calls) > 0 || len(parseErrs) > 0 {
 			if len(calls) > 0 {

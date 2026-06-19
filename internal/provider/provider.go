@@ -1,6 +1,9 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ThinkingLevel selects how much "extended thinking" / reasoning compute the
 // model should spend before answering. Levels are normalized across providers:
@@ -101,10 +104,36 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+// ToolSpec is the definition of one tool sent via the native tool-calling API.
+type ToolSpec struct {
+	Name        string
+	Description string
+	Schema      json.RawMessage // JSON Schema object for the arguments
+}
+
+// NativeTool is a structured tool invocation returned by a capable model.
+type NativeTool struct {
+	ID   string          // provider-assigned call ID
+	Name string
+	Args json.RawMessage
+}
+
+// ToolResult is the executed output of a NativeTool, fed back in the next turn.
+type ToolResult struct {
+	ID     string
+	Name   string
+	Output string
+	IsErr  bool
+}
+
 // Message is one turn in a structured conversation.
 type Message struct {
 	Role    Role
 	Content string
+	// ToolCalls is set on assistant turns that issued native tool calls.
+	ToolCalls []NativeTool
+	// ToolResults is set on user turns that return native tool results.
+	ToolResults []ToolResult
 }
 
 type Request struct {
@@ -121,6 +150,9 @@ type Request struct {
 	MaxTokens   int
 	// Thinking selects extended-thinking compute. Empty == ThinkingOff.
 	Thinking ThinkingLevel
+	// Tools, when non-empty, enables native tool calling for capable backends.
+	// On the text-protocol path this field is left nil.
+	Tools []ToolSpec
 	// OnStream, when non-nil, requests incremental token streaming. The
 	// provider invokes it (synchronously, on the calling goroutine) as text and
 	// reasoning deltas arrive. Streaming is best-effort: paths that cannot
@@ -133,6 +165,8 @@ type Response struct {
 	EstimatedTokens int
 	Provider        string
 	Model           string
+	// ToolCalls is populated on the native tool-calling path.
+	ToolCalls []NativeTool
 }
 
 type Adapter interface {

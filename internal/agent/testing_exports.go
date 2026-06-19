@@ -66,7 +66,7 @@ func BuildLoopPromptForTesting(systemPrompt, userTask, history, _ string, step i
 		CWD:          "/tmp/x",
 		MaxSteps:     8,
 	}
-	return buildSystemString(cfg, step) + "\n\n" + buildInitialUserMessage(cfg)
+	return buildSystemString(cfg, step, false) + "\n\n" + buildInitialUserMessage(cfg)
 }
 
 func TailTrimHistoryForTesting(history string, maxBytes int) string {

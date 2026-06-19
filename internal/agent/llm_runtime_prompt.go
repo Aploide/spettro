@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"spettro/internal/provider"
 	"spettro/internal/skills"
 )
 
@@ -114,11 +115,10 @@ func summarizeLoopToolArgs(name, args string) string {
 	return truncate(strings.TrimSpace(args), 120)
 }
 
-// buildSystemString returns the system-role content for the request: base
-// instructions, skills catalog, tool schemas, output protocol, and step counter.
-// It is rebuilt each step only because the step counter changes.
-func buildSystemString(cfg toolLoopConfig, step int) string {
-	toolList := strings.Join(cfg.AllowedTools, ", ")
+// buildSystemString returns the system-role content for the request.
+// When nativeTools is true the TOOL_CALL/FINAL text protocol is omitted because
+// the model receives tool schemas via the API and uses structured tool calls.
+func buildSystemString(cfg toolLoopConfig, step int, nativeTools bool) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
 		base = "You are an assistant."
@@ -126,14 +126,22 @@ func buildSystemString(cfg toolLoopConfig, step int) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	schemaSection := buildToolSchemaSection(cfg.AllowedTools)
 	commentGuidance := ""
 	for _, tool := range cfg.AllowedTools {
 		if tool == "comment" {
-			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
+			if nativeTools {
+				commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
+			} else {
+				commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
+			}
 			break
 		}
 	}
+	if nativeTools {
+		return fmt.Sprintf("%s%s\n\nCurrent step: %d/%d", base, commentGuidance, step, cfg.MaxSteps)
+	}
+	toolList := strings.Join(cfg.AllowedTools, ", ")
+	schemaSection := buildToolSchemaSection(cfg.AllowedTools)
 	return fmt.Sprintf(`%s
 
 You can use tools iteratively.
@@ -238,6 +246,116 @@ var builtinToolSchemas = map[string]string{
 	"enter-worktree":     `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
 	"exit-worktree":      `{"path": string, "force"?: bool}`,
 	"send-message":       `{"target"?: string, "message": string}`,
+}
+
+// builtinNativeToolDescs and builtinNativeToolSchemas define the description and
+// real JSON Schema for each built-in tool on the native tool-calling path.
+var builtinNativeToolDescs = map[string]string{
+	"comment":          "Emit a progress message visible to the user.",
+	"ls":               "List directory entries.",
+	"file-read":        "Read a file, optionally bounded to a line range.",
+	"file-write":       "Create or overwrite a file, optionally appending.",
+	"file-edit":        "Apply targeted string replacements or line-range edits to a file.",
+	"glob":             "Find files matching a glob pattern (** for recursive search).",
+	"grep":             "Search files with a regular expression.",
+	"repo-search":      "Semantic full-text search across the repository.",
+	"shell-exec":       "Execute a shell command.",
+	"bash":             "Execute a shell command.",
+	"bash-output":      "Execute a shell command.",
+	"web-fetch":        "Fetch the content of a URL.",
+	"web-search":       "Search the web.",
+	"ask-user":         "Ask the user a question and wait for their answer.",
+	"agent":            "Delegate a task to a named sub-agent.",
+	"todo-write":       "Persist the session todo list.",
+	"task-create":      "Create a task.",
+	"task-get":         "Get a task by ID.",
+	"task-update":      "Update a task.",
+	"task-list":        "List tasks, optionally filtered by status.",
+	"task-stop":        "Stop the current task.",
+	"tool-search":      "Search available tool definitions.",
+	"skill-list":       "List available skills.",
+	"skill-read":       "Read a skill definition.",
+	"activate-skill":   "Activate a skill.",
+	"skill-activate":   "Activate a skill.",
+	"config":           "Get or set configuration values.",
+	"enter-plan-mode":  "Enter plan mode.",
+	"exit-plan-mode":   "Exit plan mode.",
+	"enter-worktree":   "Enter an isolated git worktree.",
+	"exit-worktree":    "Exit the current worktree.",
+	"send-message":     "Send a message to another agent.",
+	"sandbox":          "Query or configure OS-level sandbox permissions.",
+	"mcp-list-resources": "List resources exposed by an MCP server.",
+	"mcp-read-resource":  "Read an MCP resource.",
+	"mcp-auth":           "Authenticate with an MCP server.",
+	"grok-image":         "Generate an image.",
+	"grok-video":         "Generate a video.",
+}
+
+var builtinNativeToolSchemas = map[string]json.RawMessage{
+	"comment":     json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`),
+	"ls":          json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	"file-read":   json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}},"required":["path"]}`),
+	"file-write":  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"append":{"type":"boolean"}},"required":["path","content"]}`),
+	"file-edit":   json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"expected_replacements":{"type":"integer"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old_string","new_string"]}}},"required":["path"]}`),
+	"glob":        json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
+	"grep":        json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"glob":{"type":"string"},"type":{"type":"string"},"case_insensitive":{"type":"boolean"},"context":{"type":"integer"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"max_results":{"type":"integer"}},"required":["pattern"]}`),
+	"repo-search": json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+	"shell-exec":  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	"bash":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	"bash-output": json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	"web-fetch":   json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}`),
+	"web-search":  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`),
+	"ask-user":    json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"context":{"type":"string"},"default_option":{"type":"string"},"allow_free_response":{"type":"boolean"}},"required":["question"]}`),
+	"agent":       json.RawMessage(`{"type":"object","properties":{"agent":{"type":"string"},"task":{"type":"string"},"constraints":{"type":"string"},"expected_output":{"type":"string"},"parent_agent_id":{"type":"string"}},"required":["agent","task"]}`),
+	"todo-write":  json.RawMessage(`{"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["content"]}}},"required":["todos"]}`),
+	"task-create": json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["content"]}`),
+	"task-get":    json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
+	"task-update": json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["id"]}`),
+	"task-list":   json.RawMessage(`{"type":"object","properties":{"status":{"type":"string"}}}`),
+	"task-stop":   json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
+	"tool-search": json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+	"skill-list":  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+	"skill-read":  json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
+	"activate-skill": json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
+	"skill-activate": json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
+	"config":       json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
+	"enter-plan-mode": json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
+	"exit-plan-mode":  json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
+	"enter-worktree":  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"branch":{"type":"string"},"allow_dirty":{"type":"boolean"}}}`),
+	"exit-worktree":   json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"force":{"type":"boolean"}},"required":["path"]}`),
+	"send-message":    json.RawMessage(`{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"}},"required":["message"]}`),
+	"sandbox":         json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["status","request"]},"add_writable_dir":{"type":"string"},"net":{"type":"string","enum":["all","localhost","none","ports"]},"ports":{"type":"array","items":{"type":"integer"}},"reason":{"type":"string"}},"required":["action"]}`),
+	"mcp-list-resources": json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"}},"required":["server_id"]}`),
+	"mcp-read-resource":  json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"},"resource_id":{"type":"string"}},"required":["server_id","resource_id"]}`),
+	"mcp-auth":           json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"},"token":{"type":"string"},"scope":{"type":"string"},"expires_at":{"type":"string"},"description":{"type":"string"}},"required":["server_id"]}`),
+	"grok-image":         json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"},"path":{"type":"string"},"model":{"type":"string"},"n":{"type":"integer"},"aspect_ratio":{"type":"string"},"resolution":{"type":"string","enum":["1k","2k"]},"response_format":{"type":"string","enum":["url","b64_json"]}},"required":["prompt"]}`),
+	"grok-video":         json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"},"path":{"type":"string"},"model":{"type":"string"},"duration":{"type":"integer"},"aspect_ratio":{"type":"string"},"resolution":{"type":"string"},"image_url":{"type":"string"},"reference_image_urls":{"type":"array","items":{"type":"string"}}},"required":["prompt"]}`),
+}
+
+// buildToolSpecs returns provider.ToolSpec entries for each allowed tool that has
+// a registered native schema. Tools without a schema entry (e.g. manifest/MCP
+// tools) are omitted; the caller decides whether to fall back to text protocol
+// when the resulting slice is empty.
+func buildToolSpecs(allowedTools []string) []provider.ToolSpec {
+	seen := map[string]struct{}{}
+	var out []provider.ToolSpec
+	for _, name := range allowedTools {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		desc, hasDesc := builtinNativeToolDescs[name]
+		schema, hasSchema := builtinNativeToolSchemas[name]
+		if !hasDesc || !hasSchema {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, provider.ToolSpec{Name: name, Description: desc, Schema: schema})
+	}
+	return out
 }
 
 // buildToolSchemaSection renders a per-tool argument schema section to inject

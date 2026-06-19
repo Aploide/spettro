@@ -224,6 +224,15 @@ func (m *Manager) SupportsVision(providerName, modelName string) bool {
 	return false
 }
 
+func (m *Manager) SupportsToolCalls(providerName, modelName string) bool {
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return item.ToolCall
+		}
+	}
+	return false
+}
+
 func (m *Manager) HasModel(providerName, modelName string) bool {
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
