@@ -21,9 +21,8 @@ var allCommands = []commandDef{
 	{"/compact", "summarize conversation (optionally focused)"},
 	{"/tasks", "manage session tasks"},
 	{"/mcp", "list/read/auth MCP resources"},
-	{"/skill", "manage Agent Skills (install/list/info/uninstall)"},
-	{"/skill install", "install a skill from path, git URL, or owner/repo"},
-	{"/skills", "alias of /skill"},
+	{"/skill", "manage Agent Skills (list/install/info/enable/disable/uninstall/where/reload)"},
+	{"/skills", "alias of /skill list"},
 	{"/hooks", "list effective runtime hooks"},
 	{"/plan", "switch plan mode or run plan task"},
 	{"/permissions", "show/set permission level"},
@@ -37,6 +36,17 @@ var allCommands = []commandDef{
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/exit", "exit spettro"},
+}
+
+var skillCommands = []commandDef{
+	{"/skill list", "list discovered skills and their scope/source"},
+	{"/skill install", "install from local path, https git URL, or owner/repo"},
+	{"/skill info", "show metadata, resources, and body excerpt for a skill"},
+	{"/skill enable", "enable a skill in this project"},
+	{"/skill disable", "disable a skill without uninstalling it"},
+	{"/skill uninstall", "remove an installed skill"},
+	{"/skill where", "list every discovery root and whether it exists"},
+	{"/skill reload", "re-scan skill directories"},
 }
 
 var permissionCommands = []commandDef{
