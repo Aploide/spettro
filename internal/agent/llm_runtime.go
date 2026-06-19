@@ -139,7 +139,10 @@ type toolLoopConfig struct {
 	RequiredReads   []string
 	Images          []string        // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
-	Permission      config.PermissionLevel
+	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
+	// the model streams. Only the top-level run sets it; sub-agents stay silent.
+	StreamCallback StreamCallback
+	Permission     config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
 	Manifest        *config.AgentManifest
@@ -339,7 +342,24 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		if step == 1 && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
 		}
+		var demux *streamDemux
+		if cfg.StreamCallback != nil {
+			// Clear any draft left by a previous step before this one streams.
+			cfg.StreamCallback(StreamChunk{Kind: StreamKindAnswer, Reset: true})
+			demux = newStreamDemux(cfg.StreamCallback)
+			req.OnStream = func(ev provider.StreamEvent) {
+				switch ev.Kind {
+				case provider.StreamReasoning:
+					demux.reasoning(ev.Delta)
+				case provider.StreamText:
+					demux.text(ev.Delta)
+				}
+			}
+		}
 		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), req)
+		if demux != nil {
+			demux.flush()
+		}
 		if err != nil {
 			return "", traces, totalTokens, contextTokens, fmt.Errorf("agent call failed: %w", err)
 		}

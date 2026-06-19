@@ -252,6 +252,20 @@ func ToolProgressMsgForTesting(name, status, args, output string) tea.Msg {
 	}}
 }
 
+func StreamChunkMsgForTesting(kind, delta string, reset bool) tea.Msg {
+	return streamChunkMsg{chunk: agent.StreamChunk{Kind: kind, Delta: delta, Reset: reset}}
+}
+
+// SetStreamChForTesting installs a non-nil stream channel so the streamChunkMsg
+// handler re-arms its wait command (matching a live run).
+func (m *Model) SetStreamChForTesting() {
+	m.streamCh = make(chan agent.StreamChunk, 8)
+}
+
+func AgentDoneMsgForTesting(content string) tea.Msg {
+	return agentDoneMsg{content: content}
+}
+
 func (m Model) UpdateShellApprovalForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.updateShellApproval(msg)
 }

@@ -76,6 +76,22 @@ type ProviderInfo struct {
 	Env  string
 }
 
+// StreamEventKind classifies an incremental streaming chunk.
+type StreamEventKind string
+
+const (
+	// StreamText is a delta of the model's visible answer text.
+	StreamText StreamEventKind = "text"
+	// StreamReasoning is a delta of the model's extended-thinking / reasoning.
+	StreamReasoning StreamEventKind = "reasoning"
+)
+
+// StreamEvent is one incremental delta emitted while a response is generated.
+type StreamEvent struct {
+	Kind  StreamEventKind
+	Delta string
+}
+
 type Request struct {
 	Prompt      string
 	Images      []string
@@ -83,6 +99,11 @@ type Request struct {
 	MaxTokens   int
 	// Thinking selects extended-thinking compute. Empty == ThinkingOff.
 	Thinking ThinkingLevel
+	// OnStream, when non-nil, requests incremental token streaming. The
+	// provider invokes it (synchronously, on the calling goroutine) as text and
+	// reasoning deltas arrive. Streaming is best-effort: paths that cannot
+	// stream still return the full Response and simply never call OnStream.
+	OnStream func(StreamEvent)
 }
 
 type Response struct {

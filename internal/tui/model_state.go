@@ -41,6 +41,7 @@ func (m *Model) stopAgent() {
 	}
 	m.thinking = false
 	m.toolCh = nil
+	m.streamCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
 	m.liveTools = nil
@@ -106,6 +107,93 @@ func (m *Model) setProgressNote(text string) {
 	})
 	m.autoSaveDebounced()
 	m.publishRemote("comment", map[string]interface{}{"message": text})
+}
+
+// streamKinds are the transient, in-place message kinds used to render live
+// thinking and answer tokens during a run. They are never persisted (see
+// autoSave) and are collapsed into the authoritative final message at run end.
+const (
+	kindThinkingStream = "thinking-stream"
+	kindAnswerStream   = "answer-stream"
+)
+
+// applyStreamChunk routes a demultiplexed stream chunk to the matching live
+// message, creating or extending it in place.
+func (m *Model) applyStreamChunk(c agent.StreamChunk) {
+	switch c.Kind {
+	case agent.StreamKindThinking:
+		m.appendOrUpdateStream(kindThinkingStream, c.Delta)
+	case agent.StreamKindAnswer:
+		if c.Reset {
+			m.clearStreamKind(kindAnswerStream)
+		}
+		m.appendOrUpdateStream(kindAnswerStream, c.Delta)
+	}
+}
+
+// appendOrUpdateStream extends the trailing live message of the given kind, or
+// starts a new block when the last message is something else (e.g. a tool
+// trace). Appending a fresh block after an interrupting message keeps thinking
+// and answer text chronologically ordered with tool activity.
+func (m *Model) appendOrUpdateStream(kind, delta string) {
+	if delta == "" {
+		return
+	}
+	if n := len(m.messages); n > 0 {
+		last := &m.messages[n-1]
+		if last.Role == RoleAssistant && last.Kind == kind {
+			last.Content += delta
+			last.At = time.Now()
+			return
+		}
+	}
+	m.messages = append(m.messages, ChatMessage{
+		Role:    RoleAssistant,
+		Kind:    kind,
+		Content: delta,
+		At:      time.Now(),
+	})
+}
+
+// clearStreamKind drops all live messages of the given kind (used to discard an
+// answer draft on reset).
+func (m *Model) clearStreamKind(kind string) {
+	out := m.messages[:0]
+	for _, msg := range m.messages {
+		if msg.Role == RoleAssistant && msg.Kind == kind {
+			continue
+		}
+		out = append(out, msg)
+	}
+	m.messages = out
+}
+
+// collectStreamThinking concatenates the streamed thinking blocks so the run's
+// reasoning can be preserved on the final assistant message.
+func (m *Model) collectStreamThinking() string {
+	var sb strings.Builder
+	for _, msg := range m.messages {
+		if msg.Role == RoleAssistant && msg.Kind == kindThinkingStream {
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(msg.Content)
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// clearStreamMessages removes every transient live-stream message. Called at run
+// completion before the authoritative final message is appended.
+func (m *Model) clearStreamMessages() {
+	out := m.messages[:0]
+	for _, msg := range m.messages {
+		if msg.Role == RoleAssistant && (msg.Kind == kindThinkingStream || msg.Kind == kindAnswerStream) {
+			continue
+		}
+		out = append(out, msg)
+	}
+	m.messages = out
 }
 
 func (m *Model) appendToolStreamMessage(item ToolItem) {
@@ -234,6 +322,9 @@ func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
 	if agentID == "" {
 		agentID = m.mode
 	}
+	// Drop transient live-stream drafts; the kept-progress note below is the
+	// canonical record of an interrupted run.
+	m.clearStreamMessages()
 	runSummary := compactRunSummary(m.liveTools, m.currentTool)
 	content := strings.TrimSpace(summaryPrefix)
 	if runSummary != "" {
@@ -934,15 +1025,24 @@ func (m *Model) autoSave() {
 	}
 	m.lastAutoSaveAt = time.Now()
 	m.ensureSession()
-	msgs := make([]session.Message, len(m.messages))
-	for i, msg := range m.messages {
-		msgs[i] = session.Message{
+	msgs := make([]session.Message, 0, len(m.messages))
+	for _, msg := range m.messages {
+		// Transient live-stream drafts are never persisted: their Kind is not
+		// serialized, so they would otherwise leak into a mid-run save as a
+		// plain assistant message.
+		if msg.Role == RoleAssistant && (msg.Kind == kindThinkingStream || msg.Kind == kindAnswerStream) {
+			continue
+		}
+		msgs = append(msgs, session.Message{
 			Role:     string(msg.Role),
 			Content:  msg.Content,
 			Thinking: msg.Thinking,
 			Meta:     msg.Meta,
 			At:       msg.At,
-		}
+		})
+	}
+	if len(msgs) == 0 {
+		return
 	}
 	_ = session.Save(m.store.GlobalDir, session.State{
 		Metadata: session.Metadata{
@@ -1002,6 +1102,25 @@ func renderAssistantTextBlock(body string, width int) string {
 	return indent(wrapped, "  ")
 }
 
+// renderThinkingBlock renders the model's reasoning as a dim, italic block. When
+// live is true a small "streaming" cue marks the in-progress thinking.
+func renderThinkingBlock(text string, width int, live bool) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if width < 10 {
+		width = 10
+	}
+	thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
+	header := "  thinking"
+	if live {
+		header += " …"
+	}
+	wrapped := lipgloss.NewStyle().Width(width).Render(text)
+	return thinkStyle.Render(header + "\n" + indent(wrapped, "  │ "))
+}
+
 func renderUserTextBlock(body string, width int, prefix string) string {
 	if strings.TrimSpace(body) == "" {
 		return ""
@@ -1054,6 +1173,9 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc lipgloss.Color) string {
 		if msg.Kind == "plan" {
 			return m.renderPlanMessage(msg, mc)
 		}
+		if msg.Kind == kindThinkingStream {
+			return renderThinkingBlock(msg.Content, m.paneWidth()-8, true)
+		}
 		body := renderMarkdown(msg.Content, m.paneWidth()-8)
 		var entryLines []string
 		if len(msg.Tools) > 0 {
@@ -1061,10 +1183,6 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc lipgloss.Color) string {
 		}
 		if strings.TrimSpace(msg.Content) != "" {
 			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
-		}
-		if m.showTools && msg.Thinking != "" {
-			thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
-			entryLines = append(entryLines, thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘"))
 		}
 		if msg.Meta != "" {
 			entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))

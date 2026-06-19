@@ -119,6 +119,12 @@ type toolProgressMsg struct {
 	trace agent.ToolTrace
 }
 
+// streamChunkMsg delivers one demultiplexed thinking/answer chunk from the
+// running agent so the transcript can stream tokens live.
+type streamChunkMsg struct {
+	chunk agent.StreamChunk
+}
+
 // modifiedFilesMsg delivers the result of an asynchronous git query for the
 // side-panel branch + modified-file list (see refreshModifiedFilesCmd).
 type modifiedFilesMsg struct {
@@ -292,6 +298,7 @@ type Model struct {
 	liveTools        []ToolItem
 	currentTool      *ToolItem
 	toolCh           chan agent.ToolTrace
+	streamCh         chan agent.StreamChunk
 	approvalCh       chan shellApprovalRequestMsg
 	askUserCh        chan askUserRequestMsg
 	cancelAgent      context.CancelFunc
@@ -605,12 +612,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
+			m.clearStreamMessages()
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("error: "+msg.err.Error(), "error")
 			m.publishRemote("assistant_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
+			// Fold the live-streamed reasoning into the final message and drop
+			// the transient draft blocks before appending the authoritative
+			// result (which always supersedes whatever was streamed live).
+			streamedThinking := m.collectStreamThinking()
+			m.clearStreamMessages()
 			main, thinking := stripThinking(msg.content)
+			if thinking == "" {
+				thinking = streamedThinking
+			}
 			m.messages = append(m.messages, ChatMessage{
 				Role:     RoleAssistant,
 				Content:  main,
@@ -644,6 +660,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.resetRunState()
+		// Plans run through the same streaming path; drop any live draft blocks
+		// before rendering the plan card.
+		m.clearStreamMessages()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
 		}
@@ -830,6 +849,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.toolCh != nil {
 				cmds = append(cmds, waitForTool(m.toolCh))
+			}
+			m.vp.SetContent(m.renderMessages())
+			m.vp.GotoBottom()
+		}
+	case streamChunkMsg:
+		if m.thinking {
+			m.applyStreamChunk(msg.chunk)
+			if m.streamCh != nil {
+				cmds = append(cmds, waitForStream(m.streamCh))
 			}
 			m.vp.SetContent(m.renderMessages())
 			m.vp.GotoBottom()

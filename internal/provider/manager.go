@@ -250,12 +250,31 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	}
 
 	if len(req.Images) == 0 {
-		resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
-		if err == nil {
-			return finalizeResponse(resp, providerName, modelName, allParts), nil
-		}
-		if !shouldFallbackToLegacy(err) {
-			return Response{}, err
+		if req.OnStream != nil {
+			resp, err := sendWithFantasyStream(ctx, providerName, modelName, apiKey, baseURL, req)
+			if err == nil {
+				return finalizeResponse(resp, providerName, modelName, allParts), nil
+			}
+			if !shouldFallbackToLegacy(err) {
+				// Streaming failed for a non-fallback reason (e.g. the provider
+				// does not support the stream endpoint). Retry once without
+				// streaming before surfacing the error so a run never dies just
+				// because live tokens were unavailable.
+				noStream := req
+				noStream.OnStream = nil
+				if resp, rerr := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, noStream); rerr == nil {
+					return finalizeResponse(resp, providerName, modelName, allParts), nil
+				}
+				return Response{}, err
+			}
+		} else {
+			resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
+			if err == nil {
+				return finalizeResponse(resp, providerName, modelName, allParts), nil
+			}
+			if !shouldFallbackToLegacy(err) {
+				return Response{}, err
+			}
 		}
 	}
 

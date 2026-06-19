@@ -23,6 +23,84 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 		return Response{}, err
 	}
 
+	resp, err := model.Generate(ctx, buildFantasyCall(providerName, req))
+	if err != nil {
+		return Response{}, err
+	}
+
+	totalTokens := int(resp.Usage.TotalTokens)
+	if totalTokens == 0 {
+		totalTokens = int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
+	}
+
+	return Response{
+		Content:         fantasyText(resp),
+		EstimatedTokens: totalTokens,
+	}, nil
+}
+
+// sendWithFantasyStream is the streaming counterpart of sendWithFantasy. It
+// forwards text and reasoning deltas to req.OnStream as they arrive while still
+// accumulating the full answer text (reasoning is delivered live but not folded
+// into Response.Content, matching the non-streaming path).
+func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey, baseURL string, req Request) (Response, error) {
+	prov, err := newFantasyProvider(providerName, apiKey, baseURL)
+	if err != nil {
+		return Response{}, err
+	}
+
+	model, err := prov.LanguageModel(ctx, modelName)
+	if err != nil {
+		return Response{}, err
+	}
+
+	stream, err := model.Stream(ctx, buildFantasyCall(providerName, req))
+	if err != nil {
+		return Response{}, err
+	}
+
+	var (
+		textSB    strings.Builder
+		usage     fantasy.Usage
+		streamErr error
+	)
+	for part := range stream {
+		switch part.Type {
+		case fantasy.StreamPartTypeTextDelta:
+			textSB.WriteString(part.Delta)
+			if req.OnStream != nil && part.Delta != "" {
+				req.OnStream(StreamEvent{Kind: StreamText, Delta: part.Delta})
+			}
+		case fantasy.StreamPartTypeReasoningDelta:
+			if req.OnStream != nil && part.Delta != "" {
+				req.OnStream(StreamEvent{Kind: StreamReasoning, Delta: part.Delta})
+			}
+		case fantasy.StreamPartTypeFinish:
+			usage = part.Usage
+		case fantasy.StreamPartTypeError:
+			if part.Error != nil {
+				streamErr = part.Error
+			}
+		}
+	}
+	if streamErr != nil {
+		return Response{}, streamErr
+	}
+
+	totalTokens := int(usage.TotalTokens)
+	if totalTokens == 0 {
+		totalTokens = int(usage.InputTokens + usage.OutputTokens)
+	}
+
+	return Response{
+		Content:         textSB.String(),
+		EstimatedTokens: totalTokens,
+	}, nil
+}
+
+// buildFantasyCall assembles the shared fantasy.Call used by both the streaming
+// and non-streaming paths.
+func buildFantasyCall(providerName string, req Request) fantasy.Call {
 	call := fantasy.Call{
 		Prompt:    fantasy.Prompt{fantasy.NewUserMessage(req.Prompt)},
 		UserAgent: fantasyUserAgent(),
@@ -51,21 +129,7 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 			}
 		}
 	}
-
-	resp, err := model.Generate(ctx, call)
-	if err != nil {
-		return Response{}, err
-	}
-
-	totalTokens := int(resp.Usage.TotalTokens)
-	if totalTokens == 0 {
-		totalTokens = int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
-	}
-
-	return Response{
-		Content:         fantasyText(resp),
-		EstimatedTokens: totalTokens,
-	}, nil
+	return call
 }
 
 func newFantasyProvider(providerName, apiKey, baseURL string) (fantasy.Provider, error) {
