@@ -11,7 +11,10 @@ import (
 	"spettro/internal/skills"
 )
 
-func summarizeLoopToolResult(name, args, status, output string) string {
+// summarizeLoopToolResult formats a tool result for the text-protocol history
+// message. outputLimit caps the output chars fed to the model; callers should
+// pass runtime.historyLimit(name) so manifest overrides apply.
+func summarizeLoopToolResult(name, args, status, output string, outputLimit int) string {
 	var parts []string
 	status = strings.TrimSpace(status)
 	if status != "" {
@@ -22,32 +25,26 @@ func summarizeLoopToolResult(name, args, status, output string) string {
 	}
 	output = strings.TrimSpace(output)
 	if output != "" {
-		// Preserve newlines so the model sees the structure of files and search
-		// results — it needs them to build correct multi-line edits. Only the
-		// length is bounded, per tool (the overall rolling history is still
-		// capped by maxHistoryBytes).
-		parts = append(parts, "output="+truncate(output, toolOutputHistoryLimit(name)))
+		parts = append(parts, "output="+truncate(output, outputLimit))
 	}
 	return strings.Join(parts, " | ")
 }
 
-// toolOutputHistoryLimit returns how many characters of a tool's output are fed
-// back to the model in the next-step history. Read/search tools get a generous
-// budget because the model acts on their contents; chatty/again-fetchable tools
-// get less. Previously every tool was flattened to 240 chars, which made
-// informed multi-line edits essentially impossible.
+// toolOutputHistoryLimit returns the default character cap for a tool's output
+// in model history. These defaults intentionally match the source caps in
+// execute() so the model always sees what it just read.
 func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
-		return 8000
+		return 40000
 	case "repo-search", "grep", "glob", "ls":
-		return 4000
+		return 16000
 	case "shell-exec", "bash", "bash-output":
-		return 4000
+		return 8000
 	case "agent":
-		return 4000
+		return 8000
 	default:
-		return 1000
+		return 2000
 	}
 }
 

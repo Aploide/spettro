@@ -462,7 +462,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				traces = append(traces, trace)
 				// The LLM must always receive tool outcomes in the next step, even when
 				// human-facing tool logging is disabled in the manifest.
-				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
+				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
 			}
 			if runtime.shouldStop() {
 				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
@@ -592,6 +592,29 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	return results
 }
 
+// historyLimit returns the character cap for a tool's output in model history,
+// applying any manifest override before falling back to the package default.
+func (r *toolRuntime) historyLimit(toolName string) int {
+	if r.manifest != nil {
+		lim := r.manifest.Runtime.Limits
+		switch toolName {
+		case "file-read":
+			if lim.FileReadChars > 0 {
+				return lim.FileReadChars
+			}
+		case "repo-search", "grep", "glob", "ls":
+			if lim.SearchChars > 0 {
+				return lim.SearchChars
+			}
+		default:
+			if lim.ToolOutputChars > 0 {
+				return lim.ToolOutputChars
+			}
+		}
+	}
+	return toolOutputHistoryLimit(toolName)
+}
+
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
@@ -646,7 +669,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", err
 		}
 		r.markReadFromSearch(out)
-		return truncate(out, 8000), nil
+		return truncate(out, r.historyLimit("repo-search")), nil
 	case "file-read":
 		var args struct {
 			Path      string `json:"path"`
@@ -672,7 +695,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if args.StartLine > 0 {
 			content = sliceLines(content, args.StartLine, args.EndLine)
 		}
-		return truncate(content, 12000), nil
+		return truncate(content, r.historyLimit("file-read")), nil
 	case "file-write":
 		var args struct {
 			Path    string `json:"path"`

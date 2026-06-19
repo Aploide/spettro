@@ -233,6 +233,15 @@ func (m *Manager) SupportsToolCalls(providerName, modelName string) bool {
 	return false
 }
 
+func (m *Manager) ModelContext(providerName, modelName string) int {
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return item.Context
+		}
+	}
+	return 0
+}
+
 func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
