@@ -114,7 +114,10 @@ func summarizeLoopToolArgs(name, args string) string {
 	return truncate(strings.TrimSpace(args), 120)
 }
 
-func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
+// buildSystemString returns the system-role content for the request: base
+// instructions, skills catalog, tool schemas, output protocol, and step counter.
+// It is rebuilt each step only because the step counter changes.
+func buildSystemString(cfg toolLoopConfig, step int) string {
 	toolList := strings.Join(cfg.AllowedTools, ", ")
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
@@ -130,26 +133,6 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
 			break
 		}
-	}
-	requiredReadsSection := ""
-	if len(cfg.RequiredReads) > 0 {
-		paths := make([]string, 0, len(cfg.RequiredReads))
-		for _, p := range cfg.RequiredReads {
-			p = filepath.ToSlash(strings.TrimSpace(p))
-			if p != "" {
-				paths = append(paths, p)
-			}
-		}
-		sort.Strings(paths)
-		if len(paths) > 0 {
-			requiredReadsSection = "\nRequired first reads (must be done with file-read before anything else):\n- " + strings.Join(paths, "\n- ")
-		}
-	}
-	// Cross-turn conversation history (EFF-2). Empty on a first turn so the
-	// rendered prompt is byte-for-byte identical to the pre-history behavior.
-	conversationSection := ""
-	if h := strings.TrimSpace(cfg.History); h != "" {
-		conversationSection = "\nConversation so far (earlier turns, oldest first):\n" + h + "\n"
 	}
 	return fmt.Sprintf(`%s
 
@@ -174,18 +157,38 @@ Rules:
 - Keep tool args minimal and valid JSON.
 - If a tool fails, adapt and continue.
 %s
-%s
-Task:
-%s
-%s
 
-Working directory:
-%s
+Current step: %d/%d`, base, toolList, schemaSection, commentGuidance, step, cfg.MaxSteps)
+}
 
-Current step: %d/%d
-
-Previous tool interaction log:
-%s`, base, toolList, schemaSection, commentGuidance, conversationSection, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
+// buildInitialUserMessage returns the first user turn: optional prior-conversation
+// history, the task, required reads, and the working directory.
+func buildInitialUserMessage(cfg toolLoopConfig) string {
+	var sb strings.Builder
+	if h := strings.TrimSpace(cfg.History); h != "" {
+		sb.WriteString("Conversation so far (earlier turns, oldest first):\n")
+		sb.WriteString(h)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("Task:\n")
+	sb.WriteString(cfg.UserTask)
+	if len(cfg.RequiredReads) > 0 {
+		paths := make([]string, 0, len(cfg.RequiredReads))
+		for _, p := range cfg.RequiredReads {
+			p = filepath.ToSlash(strings.TrimSpace(p))
+			if p != "" {
+				paths = append(paths, p)
+			}
+		}
+		sort.Strings(paths)
+		if len(paths) > 0 {
+			sb.WriteString("\n\nRequired first reads (must be done with file-read before anything else):\n- ")
+			sb.WriteString(strings.Join(paths, "\n- "))
+		}
+	}
+	sb.WriteString("\n\nWorking directory:\n")
+	sb.WriteString(cfg.CWD)
+	return sb.String()
 }
 
 // builtinToolSchemas describes the JSON arguments object accepted by every

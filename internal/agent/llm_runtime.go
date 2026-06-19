@@ -25,14 +25,6 @@ import (
 const (
 	toolCallPrefix = "TOOL_CALL"
 	finalPrefix    = "FINAL"
-
-	// maxHistoryBytes caps the size of the rolling tool-loop history that
-	// gets embedded into every prompt. Without this, a long run with many
-	// tool calls (or a single misbehaving step that emits hundreds of
-	// calls) would balloon the prompt indefinitely. The cap is generous —
-	// the most recent ~32 KB of conversation are kept, older entries are
-	// dropped FIFO with a "(history truncated)" marker.
-	maxHistoryBytes = 32 * 1024
 )
 
 const codingSystemPromptFallback = `You are a coding agent that can use tools.
@@ -328,14 +320,25 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	var traces []ToolTrace
 	var lastContent string // last non-empty response, used as fallback if max steps hit
 
-	var history strings.Builder
+	// Seed the message array with the first user turn (task + working dir + history).
+	convMsgs := []provider.Message{
+		{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
+	}
+
 	for step := 1; step <= cfg.MaxSteps; step++ {
-		prompt := buildLoopPrompt(cfg, tailTrimHistory(history.String(), maxHistoryBytes), step)
-		if err := budget.Validate(cfg.MaxTokens, prompt); err != nil {
+		system := buildSystemString(cfg, step)
+		// Budget validation: sum system + all messages.
+		allContent := make([]string, 0, 1+len(convMsgs))
+		allContent = append(allContent, system)
+		for _, m := range convMsgs {
+			allContent = append(allContent, m.Content)
+		}
+		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
 			return "", traces, totalTokens, contextTokens, err
 		}
 		req := provider.Request{
-			Prompt:    prompt,
+			System:    system,
+			Messages:  convMsgs,
 			MaxTokens: cfg.MaxTokens,
 			Thinking:  cfg.Thinking,
 		}
@@ -385,34 +388,35 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				usedTool = true
 			}
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
-			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+			var toolFeedback strings.Builder
 			for _, res := range results {
 				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
 				traces = append(traces, trace)
 				// The LLM must always receive tool outcomes in the next step, even when
 				// human-facing tool logging is disabled in the manifest.
-				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
+				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
 			}
 			if runtime.shouldStop() {
 				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
 			}
 			for _, perr := range parseErrs {
-				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
+				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
 			}
-			history.WriteString("\n")
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n")})
 			continue
 		}
 
 		if final, ok := parseFinal(main); ok {
 			if next, ok := runtime.nextRequiredRead(); ok {
-				history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
-				history.WriteString(fmt.Sprintf("system: you must read %q with file-read before FINAL.\n\n", next))
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before FINAL.", next)})
 				continue
 			}
 			if cfg.RequireToolCall && !usedTool {
 				// LLM tried to finalize without using any tools: nudge it and retry.
-				history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
-				history.WriteString(fmt.Sprintf("system: you must use at least one tool before writing FINAL.\n\n"))
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
 				continue
 			}
 			return strings.TrimSpace(final), traces, totalTokens, contextTokens, nil
@@ -420,11 +424,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 
 		// Plain text without FINAL prefix and without a tool call.
 		if cfg.RequireToolCall {
-			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 			if !usedTool {
-				history.WriteString("system: use TOOL_CALL before providing the final answer.\n\n")
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: use TOOL_CALL before providing the final answer."})
 			} else {
-				history.WriteString("system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text.\n\n")
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."})
 			}
 			continue
 		}

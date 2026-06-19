@@ -92,7 +92,28 @@ type StreamEvent struct {
 	Delta string
 }
 
+// Role is the speaker role in a conversation turn.
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+)
+
+// Message is one turn in a structured conversation.
+type Message struct {
+	Role    Role
+	Content string
+}
+
 type Request struct {
+	// System is sent in the provider's dedicated system/developer field. Empty
+	// means no system prompt.
+	System string
+	// Messages holds the ordered conversation turns. When non-empty the adapter
+	// uses the provider's native multi-turn format and Prompt is ignored.
+	Messages []Message
+	// Prompt is the legacy single-blob fallback used when Messages is empty.
 	Prompt      string
 	Images      []string
 	RequireFast bool

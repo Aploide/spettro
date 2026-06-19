@@ -101,8 +101,27 @@ func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey,
 // buildFantasyCall assembles the shared fantasy.Call used by both the streaming
 // and non-streaming paths.
 func buildFantasyCall(providerName string, req Request) fantasy.Call {
+	var prompt fantasy.Prompt
+	if len(req.Messages) > 0 {
+		if req.System != "" {
+			prompt = append(prompt, fantasy.NewSystemMessage(req.System))
+		}
+		for _, m := range req.Messages {
+			switch m.Role {
+			case RoleUser:
+				prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+			case RoleAssistant:
+				prompt = append(prompt, fantasy.Message{
+					Role:    fantasy.MessageRoleAssistant,
+					Content: []fantasy.MessagePart{fantasy.TextPart{Text: m.Content}},
+				})
+			}
+		}
+	} else {
+		prompt = fantasy.Prompt{fantasy.NewUserMessage(req.Prompt)}
+	}
 	call := fantasy.Call{
-		Prompt:    fantasy.Prompt{fantasy.NewUserMessage(req.Prompt)},
+		Prompt:    prompt,
 		UserAgent: fantasyUserAgent(),
 	}
 	if req.MaxTokens > 0 {

@@ -243,7 +243,15 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		return Response{}, fmt.Errorf("model does not support vision: %s/%s", providerName, modelName)
 	}
 
-	allParts := []string{req.Prompt}
+	var allParts []string
+	if len(req.Messages) > 0 {
+		allParts = append(allParts, req.System)
+		for _, m := range req.Messages {
+			allParts = append(allParts, m.Content)
+		}
+	} else {
+		allParts = append(allParts, req.Prompt)
+	}
 	allParts = append(allParts, req.Images...)
 	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
 		return Response{}, err
