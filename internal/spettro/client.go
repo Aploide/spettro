@@ -119,6 +119,7 @@ type ModelInfo struct {
 	ID            string `json:"id"`
 	OwnedBy       string `json:"owned_by"`
 	ContextWindow int    `json:"context_window"`
+	Vision        bool   `json:"vision"`
 }
 
 // ListModels returns the models available on the authenticated user's plan.
