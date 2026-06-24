@@ -100,6 +100,11 @@ func (m Model) dispatchGoalIteration() (tea.Model, tea.Cmd) {
 	// Inject the goal-complete tool ONLY for this run.
 	spec.AllowedTools = appendUnique(spec.AllowedTools, "goal-complete")
 
+	// Iteration-boundary system message: one terse line per iteration so the
+	// transcript records the autonomous continuation.
+	m.pushSystemMsg(fmt.Sprintf("↻ goal iteration %d — continuing autonomously toward: %s",
+		g.Iteration, truncateLabel(g.Objective, 80)))
+
 	var task string
 	if g.Iteration == 1 {
 		task = agent.GoalModePreamble + g.Objective
@@ -109,7 +114,15 @@ func (m Model) dispatchGoalIteration() (tea.Model, tea.Cmd) {
 			agent.GoalModePreamble, g.Objective, g.Iteration)
 	}
 	g.LastSignature = m.workspaceSignature() // snapshot before the run (progress detection)
-	return m.runAgent(spec, task, nil, nil)
+	model, cmd := m.runAgent(spec, task, nil, nil)
+	// Override the generic progressNote set by runAgentApproved with a
+	// goal-specific message so the activity line reflects the goal.
+	if tm, ok := model.(Model); ok {
+		tm.progressNote = fmt.Sprintf("Pursuing goal (iteration %d): %s",
+			g.Iteration, truncateLabel(g.Objective, 60))
+		return tm, cmd
+	}
+	return model, cmd
 }
 
 // advanceGoal decides whether the goal is done, stalled, or should continue,
