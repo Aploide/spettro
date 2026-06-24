@@ -55,6 +55,23 @@ func (m Model) handleGoalCommand(input string) (tea.Model, tea.Cmd) {
 			return m.stopGoal("goal stopped by user")
 		case "status":
 			return m.showGoalStatus()
+		case "resume":
+			if m.pendingGoalResume == nil {
+				m.showBanner("no unfinished goal to resume", "info")
+				return m, nil
+			}
+			gr := m.pendingGoalResume
+			m.pendingGoalResume = nil
+			m.activeGoal = &goalState{
+				Objective:       gr.Objective,
+				Iteration:       gr.Iteration,
+				NoProgress:      gr.NoProgress,
+				StartedAt:       gr.StartedAt,
+				MaxIterations:   gr.MaxIterations,
+				NoProgressLimit: gr.NoProgressLimit,
+			}
+			m.pushSystemMsg("resuming goal: " + gr.Objective)
+			return m.dispatchGoalIteration()
 		}
 	}
 	objective := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))

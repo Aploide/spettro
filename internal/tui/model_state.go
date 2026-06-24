@@ -1049,13 +1049,25 @@ func (m *Model) autoSave() {
 	if len(msgs) == 0 {
 		return
 	}
+	metadata := session.Metadata{
+		ID:          m.sessionID,
+		ProjectPath: m.cwd,
+		ProjectHash: session.ProjectHash(m.cwd),
+		StartedAt:   msgs[0].At,
+	}
+	if m.activeGoal != nil {
+		metadata.Goal = &session.GoalRecord{
+			Objective:       m.activeGoal.Objective,
+			Iteration:       m.activeGoal.Iteration,
+			NoProgress:      m.activeGoal.NoProgress,
+			StartedAt:       m.activeGoal.StartedAt,
+			MaxIterations:   m.activeGoal.MaxIterations,
+			NoProgressLimit: m.activeGoal.NoProgressLimit,
+			Active:          true,
+		}
+	}
 	_ = session.Save(m.store.GlobalDir, session.State{
-		Metadata: session.Metadata{
-			ID:          m.sessionID,
-			ProjectPath: m.cwd,
-			ProjectHash: session.ProjectHash(m.cwd),
-			StartedAt:   msgs[0].At,
-		},
+		Metadata: metadata,
 		Messages: msgs,
 		Todos:    m.todos,
 	})
@@ -1491,9 +1503,20 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				})
 			}
 			m.rebuildActivitiesFromEvents(state.Events)
+			// Restore unfinished goal (step 05): surface it but do NOT auto-start.
+			m.pendingGoalResume = nil
+			if state.Metadata.Goal != nil && state.Metadata.Goal.Active {
+				m.pendingGoalResume = state.Metadata.Goal
+			}
 			m.showResume = false
 			m.refreshViewport()
 			m.showBanner(fmt.Sprintf("resumed conversation from %s", state.Metadata.StartedAt.Format("2006-01-02 15:04")), "success")
+			if m.pendingGoalResume != nil {
+				gr := m.pendingGoalResume
+				m.pushSystemMsg(fmt.Sprintf(
+					"Unfinished goal found: %q (iteration %d). Type /goal resume to continue, or /goal stop to discard.",
+					gr.Objective, gr.Iteration))
+			}
 		}
 	}
 	return m, nil

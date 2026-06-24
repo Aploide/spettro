@@ -418,6 +418,10 @@ type Model struct {
 	// orchestration loop (step 04) on completion / stall / interrupt.
 	activeGoal *goalState
 
+	// pendingGoalResume is set when a session is loaded and contains an
+	// unfinished goal record. The user is offered to resume via /goal resume.
+	pendingGoalResume *session.GoalRecord
+
 	// goalResumeAfterCompact is set when an inter-iteration compaction is in
 	// flight during a goal run. The compactDoneMsg handler checks it to resume
 	// the goal loop after a successful compaction.
@@ -697,6 +701,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		} else if _, nextCmd := m.maybeRunNextQueuedPrompt(); nextCmd != nil {
 			cmds = append(cmds, nextCmd)
+		}
+		// If goal advancement cleared the active goal (completion/stall/error),
+		// persist the cleared state so resume doesn't offer the finished goal.
+		if m.activeGoal == nil {
+			m.autoSave()
 		}
 	case planDoneMsg:
 		if !m.thinking {
