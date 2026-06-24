@@ -13,7 +13,20 @@ import (
 // DisallowUnknownFields(), as the field is kept for backward compatibility.
 func TestManifestParsing_MaxStepsDeprecated(t *testing.T) {
 	manifestContent := `
-version = "1.0"
+version = 1
+default_agent = "test-agent"
+
+[runtime]
+default_permission = "ask-first"
+default_timeout_sec = 60
+
+[[tools]]
+id = "shell-exec"
+name = "Shell"
+kind = "builtin"
+enabled = true
+timeout_sec = 120
+permitted_actions = ["execute"]
 
 [[agents]]
 id = "test-agent"
@@ -21,6 +34,8 @@ name = "Test Agent"
 mode = "worker"
 max_steps = 32
 enabled = true
+allowed_tools = ["shell-exec"]
+permission = "ask-first"
 `
 	tmpDir := t.TempDir()
 	manifestPath := filepath.Join(tmpDir, "spettro.agents.toml")
@@ -28,7 +43,7 @@ enabled = true
 		t.Fatalf("failed to write manifest: %v", err)
 	}
 
-	manifest, err := config.LoadManifest(tmpDir)
+	manifest, err := config.LoadAgentManifestForProject(tmpDir)
 	if err != nil {
 		t.Fatalf("manifest with deprecated max_steps should parse: %v", err)
 	}
@@ -51,13 +66,28 @@ enabled = true
 // parse successfully and MaxSteps defaults to 0.
 func TestManifestParsing_NoMaxSteps(t *testing.T) {
 	manifestContent := `
-version = "1.0"
+version = 1
+default_agent = "test-agent"
+
+[runtime]
+default_permission = "ask-first"
+default_timeout_sec = 60
+
+[[tools]]
+id = "shell-exec"
+name = "Shell"
+kind = "builtin"
+enabled = true
+timeout_sec = 120
+permitted_actions = ["execute"]
 
 [[agents]]
 id = "test-agent"
 name = "Test Agent"
 mode = "worker"
 enabled = true
+allowed_tools = ["shell-exec"]
+permission = "ask-first"
 `
 	tmpDir := t.TempDir()
 	manifestPath := filepath.Join(tmpDir, "spettro.agents.toml")
@@ -65,7 +95,7 @@ enabled = true
 		t.Fatalf("failed to write manifest: %v", err)
 	}
 
-	manifest, err := config.LoadManifest(tmpDir)
+	manifest, err := config.LoadAgentManifestForProject(tmpDir)
 	if err != nil {
 		t.Fatalf("manifest without max_steps should parse: %v", err)
 	}
