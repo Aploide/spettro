@@ -3,8 +3,8 @@ package provider
 import (
 	"testing"
 
-	anthropic "github.com/anthropics/anthropic-sdk-go"
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
+	anthropic "github.com/anthropics/anthropic-sdk-go"
 )
 
 func TestAnthropicPromptCachingSystem(t *testing.T) {

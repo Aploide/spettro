@@ -211,9 +211,9 @@ type queuedPrompt struct {
 // goalState tracks an in-flight /goal run across the outer orchestration loop.
 // nil means no goal is active. See TODO/04 for the loop that drives it.
 type goalState struct {
-	Objective       string    // the user's goal text, verbatim
-	Iteration       int       // outer-loop iterations dispatched so far
-	NoProgress      int       // consecutive iterations with no detected progress
+	Objective       string // the user's goal text, verbatim
+	Iteration       int    // outer-loop iterations dispatched so far
+	NoProgress      int    // consecutive iterations with no detected progress
 	StartedAt       time.Time
 	LastSignature   string // fingerprint of workspace/tool state, for progress detection (step 04)
 	MaxIterations   int    // resolved from cfg at start (0 = unlimited)

@@ -64,7 +64,6 @@ func BuildLoopPromptForTesting(systemPrompt, userTask, history, _ string, step i
 		UserTask:     userTask,
 		History:      history,
 		CWD:          "/tmp/x",
-		MaxSteps:     8,
 	}
 	return buildSystemString(cfg, step, false) + "\n\n" + buildInitialUserMessage(cfg)
 }

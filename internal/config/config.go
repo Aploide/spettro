@@ -46,8 +46,8 @@ type UserConfig struct {
 
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
-	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`     // outer-loop safety cap; 0 → unlimited
-	GoalNoProgressLimit int `json:"goal_no_progress_limit,omitempty"`  // consecutive no-progress iterations before stalling; 0 → default (3)
+	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited
+	GoalNoProgressLimit int `json:"goal_no_progress_limit,omitempty"` // consecutive no-progress iterations before stalling; 0 → default (3)
 }
 
 func Default() UserConfig {

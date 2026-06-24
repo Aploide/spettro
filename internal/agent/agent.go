@@ -121,20 +121,26 @@ type LLMAgent struct {
 	// surfaced to the model as a "Conversation so far" section so follow-up
 	// turns have memory. Empty == first turn (no behavior change). The caller
 	// is responsible for bounding it (see maxHistoryBytes).
-	History       string
-	ToolCallback  func(ToolTrace)
+	History      string
+	ToolCallback func(ToolTrace)
 	// StreamCallback, when set, receives live thinking/answer chunks as the
 	// model streams. Set only on the top-level run (chat/coding/plan/ask).
 	StreamCallback StreamCallback
 	ShellApproval  ShellApprovalCallback
 	AskUser        AskUserCallback
-	Manifest      *config.AgentManifest // for sub-agent spawning via agent tool
+	Manifest       *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
 	// whole agent tree. nil means the sandbox feature is disabled.
 	SandboxState    *SandboxState
 	SessionDir      string
 	DelegationDepth int
 	ParentAgentID   string
+
+	// GoalMode enables generous tool timeouts and (step 03) goal-complete
+	// signaling. Non-goal runs behave exactly as before.
+	GoalMode        bool
+	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
+	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -145,10 +151,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	systemPrompt := loadPromptOrFallback(a.CWD, a.Spec.PromptFile, a.Spec.Description)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
-	maxSteps := a.Spec.MaxSteps
-	if maxSteps <= 0 {
-		maxSteps = 8
-	}
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
@@ -173,7 +175,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		History:         a.History,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
-		MaxSteps:        maxSteps,
 		RequireToolCall: requireToolCall,
 		AllowedTools:    allowedTools,
 		ToolPolicies:    policies,
@@ -195,6 +196,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		SessionDir:      a.SessionDir,
 		DelegationDepth: a.DelegationDepth,
 		ParentAgentID:   a.ParentAgentID,
+		GoalMode:        a.GoalMode,
+		ContextWindow:   a.ContextWindow,
+		ShellTimeoutSec: a.ShellTimeoutSec,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,
 		MaxToolCalls:    maxToolCallsPerStep,

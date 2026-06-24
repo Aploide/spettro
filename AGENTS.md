@@ -84,7 +84,7 @@ This file lets you define, in one place:
 - `allowed_tools`: non-empty tool ID list
 - `permitted_actions`: action list for high-level policy
 - `permission`: `ask-first`, `restricted`, or `yolo`
-- `temperature`, `max_tokens`, `max_steps`
+- `temperature`, `max_tokens`
 - `permission_rules`: optional agent-scoped policy rules
 - `handoffs`: list of target agent IDs
 - `enabled`: boolean

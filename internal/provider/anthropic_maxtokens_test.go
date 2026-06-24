@@ -4,9 +4,9 @@ import "testing"
 
 func TestAnthropicMaxTokensResolution(t *testing.T) {
 	cases := []struct {
-		name     string
-		req      Request
-		wantMin  int64 // resolved maxTokens must be >= this
+		name      string
+		req       Request
+		wantMin   int64 // resolved maxTokens must be >= this
 		wantExact int64 // if > 0, must equal exactly
 	}{
 		{
