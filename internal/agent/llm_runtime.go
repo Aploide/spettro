@@ -84,7 +84,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	if c.ProviderManager.SupportsReasoning(c.ProviderName(), c.ModelName()) {
 		thinking = provider.ThinkingMedium
 	}
-	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, contextTokens, _, _, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
@@ -202,6 +202,9 @@ type toolRuntime struct {
 	skillsCatalog        skills.Catalog
 	goalMode             bool
 	shellTimeoutSec      int
+	goalComplete         bool
+	goalSummary          string
+	goalVerified         bool
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -221,15 +224,15 @@ type parallelResult struct {
 // Cost and occupancy are deliberately distinct: each step's prompt re-embeds
 // the rolling history, so summing every step double-counts the same context.
 // The gauge must use occupancy, not the cumulative sum.
-func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, int, error) {
+func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, int, bool, string, error) {
 	if cfg.ProviderManager == nil {
-		return "", nil, 0, 0, fmt.Errorf("missing provider manager")
+		return "", nil, 0, 0, false, "", fmt.Errorf("missing provider manager")
 	}
 	if cfg.ProviderName == nil || cfg.ModelName == nil {
-		return "", nil, 0, 0, fmt.Errorf("missing provider/model selectors")
+		return "", nil, 0, 0, false, "", fmt.Errorf("missing provider/model selectors")
 	}
 	if strings.TrimSpace(cfg.UserTask) == "" {
-		return "", nil, 0, 0, fmt.Errorf("empty task")
+		return "", nil, 0, 0, false, "", fmt.Errorf("empty task")
 	}
 
 	var totalTokens int
@@ -309,16 +312,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, false, "", err
 	}
 	runtime.allowedShell = allowedShell
 	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, false, "", err
 	}
 	runtime.hooksConfig = hooksCfg
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, false, "", err
 	}
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
@@ -363,7 +366,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			allContent = append(allContent, m.Content)
 		}
 		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
-			return "", traces, totalTokens, contextTokens, err
+			return "", traces, totalTokens, contextTokens, false, "", err
 		}
 		req := provider.Request{
 			System:    system,
@@ -396,7 +399,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			demux.flush()
 		}
 		if err != nil {
-			return "", traces, totalTokens, contextTokens, fmt.Errorf("agent call failed: %w", err)
+			return "", traces, totalTokens, contextTokens, false, "", fmt.Errorf("agent call failed: %w", err)
 		}
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
@@ -437,7 +440,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				}
 			}
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, false, "", nil
+			}
+			if runtime.goalIsComplete() {
+				summary := runtime.goalSummary
+				if summary == "" {
+					summary = strings.TrimSpace(main)
+				}
+				return summary, traces, totalTokens, contextTokens, true, summary, nil
 			}
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
 			continue
@@ -455,7 +465,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
 				continue
 			}
-			return strings.TrimSpace(main), traces, totalTokens, contextTokens, nil
+			return strings.TrimSpace(main), traces, totalTokens, contextTokens, false, "", nil
 		}
 
 		// Text protocol path (fallback for models without native tool support).
@@ -475,7 +485,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
 			}
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, false, "", nil
+			}
+			if runtime.goalIsComplete() {
+				summary := runtime.goalSummary
+				if summary == "" {
+					summary = strings.TrimSpace(main)
+				}
+				return summary, traces, totalTokens, contextTokens, true, summary, nil
 			}
 			for _, perr := range parseErrs {
 				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
@@ -496,7 +513,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
 				continue
 			}
-			return strings.TrimSpace(final), traces, totalTokens, contextTokens, nil
+			return strings.TrimSpace(final), traces, totalTokens, contextTokens, false, "", nil
 		}
 
 		// Plain text without FINAL prefix and without a tool call.
@@ -509,7 +526,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			}
 			continue
 		}
-		return main, traces, totalTokens, contextTokens, nil
+		return main, traces, totalTokens, contextTokens, false, "", nil
 	}
 }
 
@@ -932,6 +949,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskList(call.Args)
 	case "task-stop":
 		return r.runTaskStop(call.Args)
+	case "goal-complete":
+		return r.runGoalComplete(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
 	case "skill-read", "activate-skill", "skill-activate":

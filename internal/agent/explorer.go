@@ -29,7 +29,7 @@ func (e LLMExplorer) Explore(ctx context.Context, task string) (RunResult, error
 	}
 
 	systemPrompt := loadPromptOrFallback(e.CWD, "agents/explore.md", exploreFallbackPrompt)
-	result, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
+	result, traces, tokens, contextTokens, _, _, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		CWD:             e.CWD,

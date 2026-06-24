@@ -52,6 +52,13 @@ type RunResult struct {
 	// sum across steps — each step's prompt re-embeds the rolling history, so
 	// summing would double-count the same context and inflate the gauge.
 	ContextTokens int
+	// GoalComplete is true when the agent called the goal-complete tool during
+	// this run, signalling that the objective has been met. Only meaningful for
+	// goal-mode runs (step 03).
+	GoalComplete bool
+	// GoalSummary is the summary text the agent provided when calling
+	// goal-complete. Empty if the agent didn't provide one.
+	GoalSummary string
 }
 
 // Legacy stub types — kept so existing tests compile.
@@ -103,6 +110,20 @@ func (c Chatter) Reply(ctx context.Context, prompt string, images []string) (pro
 		Thinking: c.Thinking,
 	})
 }
+
+// GoalModePreamble is prepended to the task for /goal runs. It tells the agent
+// the run is autonomous and how to terminate cleanly.
+const GoalModePreamble = `You are operating in GOAL MODE. Work autonomously and persistently toward the objective below until it is fully achieved. There is no step limit and no time pressure — do not stop early, do not ask whether to continue, and do not summarize-and-quit while work remains.
+
+Rules:
+- Break the objective into concrete steps and execute them with tools.
+- Verify your work (run builds/tests/linters where relevant) before claiming done.
+- If a command is slow (installs, builds), let it run.
+- When — and only when — the objective is fully met AND verified, call the goal-complete tool with a short summary and verified=true. Calling goal-complete is the ONLY correct way to finish.
+- If you hit a genuine blocker you cannot resolve (missing credentials, ambiguous requirements that change the outcome), explain it clearly in your response so the operator can intervene.
+
+OBJECTIVE:
+`
 
 // LLMAgent is the unified agent runner. It reads the agent's system prompt from
 // the PromptFile specified in the spec (stripping frontmatter), and runs the
@@ -169,7 +190,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	}
 	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
 	catalog = filterDisabledSkills(catalog)
-	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, contextTokens, goalComplete, goalSummary, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		History:         a.History,
@@ -215,6 +236,8 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Tools:         traces,
 		TokensUsed:    tokens,
 		ContextTokens: contextTokens,
+		GoalComplete:  goalComplete,
+		GoalSummary:   goalSummary,
 	}, nil
 }
 

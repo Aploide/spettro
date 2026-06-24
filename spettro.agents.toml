@@ -334,6 +334,21 @@ primary_only = false
 permission_rules = []
 
 [[tools]]
+id = 'goal-complete'
+name = 'Goal Complete'
+description = 'Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 5
+requires_approval = false
+permitted_actions = ['plan', 'ask']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
 id = 'config'
 name = 'Config'
 description = 'Read or update selected runtime settings.'

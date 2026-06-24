@@ -745,6 +745,34 @@ func (r *toolRuntime) stopMessage() string {
 	return r.stopReason
 }
 
+// runGoalComplete is the authoritative "the goal is done" signal in goal mode.
+// It is only meaningful when the run was started with GoalMode=true; in normal
+// runs it is not in the allowed-tool set, so it can't be called.
+func (r *toolRuntime) runGoalComplete(rawArgs []byte) (string, error) {
+	var args struct {
+		Summary  string `json:"summary"`
+		Verified bool   `json:"verified"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("goal-complete args: %w", err)
+	}
+	if !r.goalMode {
+		return "", fmt.Errorf("goal-complete is only available in goal mode")
+	}
+	r.mu.Lock()
+	r.goalComplete = true
+	r.goalSummary = strings.TrimSpace(args.Summary)
+	r.goalVerified = args.Verified
+	r.mu.Unlock()
+	return "goal marked complete", nil
+}
+
+func (r *toolRuntime) goalIsComplete() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.goalComplete
+}
+
 func (r *toolRuntime) runConfigTool(rawArgs []byte) (string, error) {
 	var args struct {
 		Action string `json:"action"`
