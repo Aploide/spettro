@@ -208,6 +208,20 @@ type queuedPrompt struct {
 	Images         []string
 }
 
+// goalState tracks an in-flight /goal run across the outer orchestration loop.
+// nil means no goal is active. See TODO/04 for the loop that drives it.
+type goalState struct {
+	Objective       string    // the user's goal text, verbatim
+	Iteration       int       // outer-loop iterations dispatched so far
+	NoProgress      int       // consecutive iterations with no detected progress
+	StartedAt       time.Time
+	LastSignature   string // fingerprint of workspace/tool state, for progress detection (step 04)
+	MaxIterations   int    // resolved from cfg at start (0 = unlimited)
+	NoProgressLimit int    // resolved from cfg at start
+	Completed       bool   // set when goal-complete fired (step 03/04)
+	Summary         string // completion summary, if any
+}
+
 type attachmentItem struct {
 	Kind    string // "file"
 	Path    string // absolute path
@@ -392,6 +406,11 @@ type Model struct {
 	// agent run; nil when the binary was started without sandbox plumbing
 	// (tests).
 	sandboxState *agent.SandboxState
+
+	// activeGoal is non-nil while a /goal run is in progress. The goal persists
+	// across agent runs (resetRunState does NOT clear it); it is cleared by the
+	// orchestration loop (step 04) on completion / stall / interrupt.
+	activeGoal *goalState
 }
 
 func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState) Model {

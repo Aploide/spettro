@@ -43,6 +43,11 @@ type UserConfig struct {
 	SpettroEmail      string `json:"spettro_email,omitempty"`
 	SpettroPlan       string `json:"spettro_plan,omitempty"`
 	SpettroPlanStatus string `json:"spettro_plan_status,omitempty"`
+
+	// Goal mode (/goal): autonomous run-until-done.
+	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
+	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`     // outer-loop safety cap; 0 → unlimited
+	GoalNoProgressLimit int `json:"goal_no_progress_limit,omitempty"`  // consecutive no-progress iterations before stalling; 0 → default (3)
 }
 
 func Default() UserConfig {
@@ -102,6 +107,15 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 		cfg.ThinkingLevel = ""
 		changed = true
 	}
+	if cfg.GoalShellTimeoutSec <= 0 {
+		cfg.GoalShellTimeoutSec = 600 // 10 minutes for long-running installs/builds
+		changed = true
+	}
+	if cfg.GoalNoProgressLimit <= 0 {
+		cfg.GoalNoProgressLimit = 3
+		changed = true
+	}
+	// GoalMaxIterations: 0 means unlimited, no default needed
 	return cfg, changed
 }
 

@@ -54,6 +54,7 @@ func (m *Model) stopAgent() {
 	m.progressNote = ""
 	m.activePrompt = nil
 	m.activeAgentID = ""
+	m.activeGoal = nil // Clear goal on user interrupt (stop/Esc)
 }
 
 func (m *Model) pushSystemMsg(content string) {
