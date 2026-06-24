@@ -113,7 +113,7 @@ type ToolSpec struct {
 
 // NativeTool is a structured tool invocation returned by a capable model.
 type NativeTool struct {
-	ID   string          // provider-assigned call ID
+	ID   string // provider-assigned call ID
 	Name string
 	Args json.RawMessage
 }

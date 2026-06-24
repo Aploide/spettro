@@ -58,6 +58,44 @@ func TestRunTaskStopMarksRuntime(t *testing.T) {
 	}
 }
 
+func TestRunGoalCompleteMarksRuntime(t *testing.T) {
+	rt := &toolRuntime{goalMode: true}
+	raw, _ := json.Marshal(map[string]any{"summary": "all tests pass", "verified": true})
+	msg, err := rt.runGoalComplete(raw)
+	if err != nil {
+		t.Fatalf("goal-complete error: %v", err)
+	}
+	if msg != "goal marked complete" {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+	if !rt.goalIsComplete() {
+		t.Fatalf("expected goal complete")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.goalSummary != "all tests pass" {
+		t.Fatalf("unexpected summary: %q", rt.goalSummary)
+	}
+	if !rt.goalVerified {
+		t.Fatalf("expected goalVerified to be true")
+	}
+}
+
+func TestRunGoalCompleteRejectedOutsideGoalMode(t *testing.T) {
+	rt := &toolRuntime{goalMode: false}
+	raw, _ := json.Marshal(map[string]any{"summary": "done"})
+	_, err := rt.runGoalComplete(raw)
+	if err == nil {
+		t.Fatalf("expected error when goal-complete called outside goal mode")
+	}
+	if !strings.Contains(err.Error(), "only available in goal mode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rt.goalIsComplete() {
+		t.Fatalf("goal should not be marked complete in non-goal mode")
+	}
+}
+
 func TestRunConfigToolSetAndGetPermission(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

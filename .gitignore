@@ -21,3 +21,4 @@ go.work.sum
 # Editor/system
 .DS_Store
 .codex
+TODO/*

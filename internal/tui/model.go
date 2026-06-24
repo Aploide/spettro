@@ -87,6 +87,11 @@ type agentDoneMsg struct {
 	tokensUsed    int // cumulative session cost contributed by this run
 	contextTokens int // approximate context occupancy after this run
 	err           error
+	// goalComplete is set when the agent called goal-complete during this run
+	// (only meaningful for goal-mode runs). The outer orchestration loop reads
+	// this to decide whether to stop or continue.
+	goalComplete bool
+	goalSummary  string
 }
 
 type planDoneMsg struct {
@@ -206,6 +211,21 @@ type queuedPrompt struct {
 	Prompt         string
 	MentionedFiles []string
 	Images         []string
+}
+
+// goalState tracks an in-flight /goal run across the outer orchestration loop.
+// nil means no goal is active. See TODO/04 for the loop that drives it.
+type goalState struct {
+	Objective       string // the user's goal text, verbatim
+	Iteration       int    // outer-loop iterations dispatched so far
+	NoProgress      int    // consecutive iterations with no detected progress
+	StartedAt       time.Time
+	LastSignature   string // fingerprint of workspace/tool state, for progress detection (step 04)
+	MaxIterations   int    // resolved from cfg at start (0 = unlimited)
+	NoProgressLimit int    // resolved from cfg at start
+	Completed       bool   // set when goal-complete fired (step 03/04)
+	Summary         string // completion summary, if any
+	Retries         int    // bounded retry counter for hard run errors
 }
 
 type attachmentItem struct {
@@ -392,6 +412,20 @@ type Model struct {
 	// agent run; nil when the binary was started without sandbox plumbing
 	// (tests).
 	sandboxState *agent.SandboxState
+
+	// activeGoal is non-nil while a /goal run is in progress. The goal persists
+	// across agent runs (resetRunState does NOT clear it); it is cleared by the
+	// orchestration loop (step 04) on completion / stall / interrupt.
+	activeGoal *goalState
+
+	// pendingGoalResume is set when a session is loaded and contains an
+	// unfinished goal record. The user is offered to resume via /goal resume.
+	pendingGoalResume *session.GoalRecord
+
+	// goalResumeAfterCompact is set when an inter-iteration compaction is in
+	// flight during a goal run. The compactDoneMsg handler checks it to resume
+	// the goal loop after a successful compaction.
+	goalResumeAfterCompact bool
 }
 
 func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState) Model {
@@ -650,10 +684,28 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// skipped the final assistant message if it landed inside the window.
 		m.autoSave()
 		m.refreshViewport()
-		if cmd := m.autoCompactIfNeeded(); cmd != nil {
+		// Goal orchestration seam: if a goal is active, the loop decides
+		// whether to continue, stall, or report completion — BEFORE the
+		// queued-prompt / auto-compact fallback. Non-goal runs are unaffected.
+		if m.activeGoal != nil && msg.err == nil {
+			if next := m.advanceGoal(msg); next != nil {
+				cmds = append(cmds, next)
+			}
+		} else if m.activeGoal != nil && msg.err != nil {
+			// A hard run error (provider failure, etc.) — retry the iteration a
+			// bounded number of times, else stall.
+			if next := m.advanceGoalOnError(msg); next != nil {
+				cmds = append(cmds, next)
+			}
+		} else if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
 		} else if _, nextCmd := m.maybeRunNextQueuedPrompt(); nextCmd != nil {
 			cmds = append(cmds, nextCmd)
+		}
+		// If goal advancement cleared the active goal (completion/stall/error),
+		// persist the cleared state so resume doesn't offer the finished goal.
+		if m.activeGoal == nil {
+			m.autoSave()
 		}
 	case planDoneMsg:
 		if !m.thinking {
@@ -772,6 +824,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.publishRemoteState("compact_done")
 		m.refreshViewport()
+		// If a goal is active and this compaction was triggered by the goal
+		// loop's inter-iteration compaction, resume the loop now.
+		if m.goalResumeAfterCompact && m.activeGoal != nil && msg.err == nil {
+			m.goalResumeAfterCompact = false
+			_, cmd := m.dispatchGoalIteration()
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	case agentTickMsg:
 		m.tickCount++
 		for _, a := range m.parallelAgents {
@@ -1610,6 +1671,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleHooksCommand()
 	case "/plan":
 		return m.handlePlanCommand(input)
+	case "/goal":
+		return m.handleGoalCommand(input)
 	case "/permissions":
 		return m.handlePermissionsCommand(input)
 	case "/resume":

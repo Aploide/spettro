@@ -32,10 +32,10 @@ type StreamCallback func(StreamChunk)
 // construct one per step.
 type streamDemux struct {
 	cb       StreamCallback
-	inThink  bool           // currently inside a <think>...</think> span
-	tagCarry string         // text held back to detect a tag boundary across deltas
+	inThink  bool            // currently inside a <think>...</think> span
+	tagCarry string          // text held back to detect a tag boundary across deltas
 	pending  strings.Builder // outside-think text awaiting classification
-	decided  int            // 0 = undecided, 1 = answer, 2 = suppressed (tool step)
+	decided  int             // 0 = undecided, 1 = answer, 2 = suppressed (tool step)
 }
 
 func newStreamDemux(cb StreamCallback) *streamDemux { return &streamDemux{cb: cb} }

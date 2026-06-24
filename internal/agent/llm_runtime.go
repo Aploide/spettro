@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"spettro/internal/budget"
+	compactpkg "spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
@@ -83,11 +84,10 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	if c.ProviderManager.SupportsReasoning(c.ProviderName(), c.ModelName()) {
 		thinking = provider.ThinkingMedium
 	}
-	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, contextTokens, _, _, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		MaxSteps:        24,
 		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep"},
 		LogToolCalls:    true,
@@ -120,10 +120,14 @@ type toolLoopConfig struct {
 	// History is an optional bounded transcript of prior conversation turns
 	// (user/assistant), rendered into the prompt as a "Conversation so far"
 	// section before the current Task. Empty means a fresh, first-turn run.
-	History         string
-	CWD             string
-	AgentID         string
-	MaxSteps        int
+	History string
+	CWD     string
+	AgentID string
+	// GoalMode enables generous tool timeouts and (step 03) goal-complete
+	// signaling. Non-goal runs behave exactly as before.
+	GoalMode        bool
+	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
+	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
 	RequireToolCall bool
 	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
@@ -138,8 +142,8 @@ type toolLoopConfig struct {
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
-	StreamCallback StreamCallback
-	Permission     config.PermissionLevel
+	StreamCallback  StreamCallback
+	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
 	Manifest        *config.AgentManifest
@@ -196,6 +200,11 @@ type toolRuntime struct {
 	stopRequested        bool
 	stopReason           string
 	skillsCatalog        skills.Catalog
+	goalMode             bool
+	shellTimeoutSec      int
+	goalComplete         bool
+	goalSummary          string
+	goalVerified         bool
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -215,18 +224,15 @@ type parallelResult struct {
 // Cost and occupancy are deliberately distinct: each step's prompt re-embeds
 // the rolling history, so summing every step double-counts the same context.
 // The gauge must use occupancy, not the cumulative sum.
-func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, int, error) {
+func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, int, bool, string, error) {
 	if cfg.ProviderManager == nil {
-		return "", nil, 0, 0, fmt.Errorf("missing provider manager")
+		return "", nil, 0, 0, false, "", fmt.Errorf("missing provider manager")
 	}
 	if cfg.ProviderName == nil || cfg.ModelName == nil {
-		return "", nil, 0, 0, fmt.Errorf("missing provider/model selectors")
+		return "", nil, 0, 0, false, "", fmt.Errorf("missing provider/model selectors")
 	}
 	if strings.TrimSpace(cfg.UserTask) == "" {
-		return "", nil, 0, 0, fmt.Errorf("empty task")
-	}
-	if cfg.MaxSteps <= 0 {
-		cfg.MaxSteps = 8
+		return "", nil, 0, 0, false, "", fmt.Errorf("empty task")
 	}
 
 	var totalTokens int
@@ -302,18 +308,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	runtime.maxParallelMicroagnt = cfg.MaxMicroagents
 	runtime.maxDelegationDepth = cfg.MaxDepth
 	runtime.maxToolCallsPerStep = cfg.MaxToolCalls
+	runtime.goalMode = cfg.GoalMode
+	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, false, "", err
 	}
 	runtime.allowedShell = allowedShell
 	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, false, "", err
 	}
 	runtime.hooksConfig = hooksCfg
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
-		return "", nil, 0, 0, err
+		return "", nil, 0, 0, false, "", err
 	}
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
@@ -323,7 +331,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	}
 	usedTool := false
 	var traces []ToolTrace
-	var lastContent string // last non-empty response, used as fallback if max steps hit
 
 	// Detect whether the selected model supports native tool calling and build
 	// the ToolSpec list once (it doesn't change between steps).
@@ -341,8 +348,17 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
 	}
 
-	for step := 1; step <= cfg.MaxSteps; step++ {
+	for step := 1; ; step++ {
 		system := buildSystemString(cfg, step, useNativeTools)
+		// In-loop compaction: summarize older turns when context pressure
+		// approaches the window. Fires for all runs (the loop is unbounded).
+		// On error, keep convMsgs as-is — never abort a run for compaction.
+		if compacted, did, err := runtime.maybeCompactConv(ctx, system, convMsgs, cfg.ContextWindow); err == nil {
+			convMsgs = compacted
+			if did && cfg.ToolCallback != nil {
+				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "compacted working context to stay within the window"})
+			}
+		}
 		// Budget validation: sum system + all messages.
 		allContent := make([]string, 0, 1+len(convMsgs))
 		allContent = append(allContent, system)
@@ -350,7 +366,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			allContent = append(allContent, m.Content)
 		}
 		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
-			return "", traces, totalTokens, contextTokens, err
+			return "", traces, totalTokens, contextTokens, false, "", err
 		}
 		req := provider.Request{
 			System:    system,
@@ -383,7 +399,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			demux.flush()
 		}
 		if err != nil {
-			return "", traces, totalTokens, contextTokens, fmt.Errorf("agent call failed: %w", err)
+			return "", traces, totalTokens, contextTokens, false, "", fmt.Errorf("agent call failed: %w", err)
 		}
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
@@ -398,9 +414,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		main = strings.TrimSpace(main)
 		if main == "" && len(resp.ToolCalls) == 0 {
 			continue
-		}
-		if main != "" {
-			lastContent = main
 		}
 
 		// Native tool-calling path: model returned structured tool calls.
@@ -427,7 +440,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				}
 			}
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, false, "", nil
+			}
+			if runtime.goalIsComplete() {
+				summary := runtime.goalSummary
+				if summary == "" {
+					summary = strings.TrimSpace(main)
+				}
+				return summary, traces, totalTokens, contextTokens, true, summary, nil
 			}
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
 			continue
@@ -445,7 +465,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
 				continue
 			}
-			return strings.TrimSpace(main), traces, totalTokens, contextTokens, nil
+			return strings.TrimSpace(main), traces, totalTokens, contextTokens, false, "", nil
 		}
 
 		// Text protocol path (fallback for models without native tool support).
@@ -465,7 +485,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
 			}
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, contextTokens, nil
+				return runtime.stopMessage(), traces, totalTokens, contextTokens, false, "", nil
+			}
+			if runtime.goalIsComplete() {
+				summary := runtime.goalSummary
+				if summary == "" {
+					summary = strings.TrimSpace(main)
+				}
+				return summary, traces, totalTokens, contextTokens, true, summary, nil
 			}
 			for _, perr := range parseErrs {
 				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
@@ -486,7 +513,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
 				continue
 			}
-			return strings.TrimSpace(final), traces, totalTokens, contextTokens, nil
+			return strings.TrimSpace(final), traces, totalTokens, contextTokens, false, "", nil
 		}
 
 		// Plain text without FINAL prefix and without a tool call.
@@ -499,14 +526,103 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			}
 			continue
 		}
-		return main, traces, totalTokens, contextTokens, nil
+		return main, traces, totalTokens, contextTokens, false, "", nil
+	}
+}
+
+// maybeCompactConv summarizes the older portion of convMsgs into a single
+// synthetic message when the estimated request size approaches the context
+// window. Preserves the first user turn (the task) and the most recent turns
+// verbatim, replacing the middle with a model-produced summary. Returns the
+// (possibly shortened) slice, whether it compacted, and any error.
+func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs []provider.Message, window int) ([]provider.Message, bool, error) {
+	if len(msgs) <= 5 {
+		return msgs, false, nil
+	}
+	if window <= 0 {
+		window = 128000 // sane default so compaction always has a threshold
+	}
+	allContent := make([]string, 0, 1+len(msgs))
+	allContent = append(allContent, system)
+	for _, m := range msgs {
+		allContent = append(allContent, m.Content)
+		for _, tc := range m.ToolCalls {
+			allContent = append(allContent, tc.Name, string(tc.Args))
+		}
+		for _, tr := range m.ToolResults {
+			allContent = append(allContent, tr.Output)
+		}
+	}
+	estimate := budget.EstimateTokens(allContent...)
+	eval := compactpkg.Evaluate(window, compactpkg.Config{AutoEnabled: true, AutoThresholdPct: 0, MaxFailures: 3}, compactpkg.State{TokensUsed: estimate})
+	if !eval.ShouldAutoCompact && !eval.IsError {
+		return msgs, false, nil
 	}
 
-	// Max steps exhausted: return whatever content we accumulated rather than discarding it.
-	if lastContent != "" {
-		return lastContent, traces, totalTokens, contextTokens, nil
+	// Keep the first user turn (task) and the last K turns verbatim.
+	const keepLast = 4
+	cutEnd := len(msgs) - keepLast
+	if cutEnd <= 1 {
+		return msgs, false, nil
 	}
-	return "", traces, totalTokens, contextTokens, fmt.Errorf("max tool steps reached without final answer")
+	// Never split an assistant ToolCalls message from its following user
+	// ToolResults message. Move the boundary forward (into the kept tail)
+	// until it lands on a safe cut point.
+	for cutEnd > 1 {
+		if len(msgs[cutEnd-1].ToolCalls) > 0 && cutEnd < len(msgs) {
+			cutEnd++
+			continue
+		}
+		break
+	}
+	if cutEnd <= 1 {
+		return msgs, false, nil
+	}
+	middle := msgs[1:cutEnd]
+	if len(middle) == 0 {
+		return msgs, false, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Summarize this portion of an autonomous coding session. Preserve every decision, file changed, command run and its result, and all remaining work. Output only the summary.\n\n")
+	for _, m := range middle {
+		sb.WriteString("--- turn ---\n")
+		sb.WriteString(fmt.Sprintf("role: %s\n", m.Role))
+		if m.Content != "" {
+			sb.WriteString("content:\n")
+			sb.WriteString(m.Content)
+			sb.WriteString("\n")
+		}
+		for _, tc := range m.ToolCalls {
+			sb.WriteString(fmt.Sprintf("tool_call: %s args=%s\n", tc.Name, truncate(string(tc.Args), 200)))
+		}
+		for _, tr := range m.ToolResults {
+			sb.WriteString(fmt.Sprintf("tool_result[%s]: %s\n", tr.Name, truncate(tr.Output, 500)))
+		}
+	}
+
+	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
+		return msgs, false, fmt.Errorf("compaction: provider not configured")
+	}
+	resp, err := r.providerMgr.Send(ctx, r.providerName(), r.modelName(), provider.Request{
+		Prompt:    sb.String(),
+		MaxTokens: 0,
+	})
+	if err != nil {
+		return msgs, false, fmt.Errorf("compaction summarizer: %w", err)
+	}
+	summary := strings.TrimSpace(resp.Content)
+	if summary == "" {
+		return msgs, false, fmt.Errorf("compaction: empty summary")
+	}
+	out := make([]provider.Message, 0, 2+keepLast)
+	out = append(out, msgs[0])
+	out = append(out, provider.Message{
+		Role:    provider.RoleUser,
+		Content: "[earlier progress summarized]\n" + summary,
+	})
+	out = append(out, msgs[cutEnd:]...)
+	return out, true, nil
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
@@ -619,6 +735,16 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
+	}
+	if r.goalMode {
+		switch call.Tool {
+		case "shell-exec", "bash", "bash-output":
+			if r.shellTimeoutSec > 0 {
+				timeoutSec = r.shellTimeoutSec
+			} else if timeoutSec < 600 {
+				timeoutSec = 600
+			}
+		}
 	}
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
@@ -823,6 +949,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskList(call.Args)
 	case "task-stop":
 		return r.runTaskStop(call.Args)
+	case "goal-complete":
+		return r.runGoalComplete(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
 	case "skill-read", "activate-skill", "skill-activate":

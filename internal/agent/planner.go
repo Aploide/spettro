@@ -67,11 +67,10 @@ func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (RunResult, err
 	}
 
 	systemPrompt := loadPromptOrFallback(p.CWD, "agents/planning.md", planSystemPrompt)
-	plan, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
+	plan, traces, tokens, contextTokens, _, _, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        prompt,
 		CWD:             p.CWD,
-		MaxSteps:        30,
 		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "glob", "grep"},
 		LogToolCalls:    true,

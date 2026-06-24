@@ -52,6 +52,13 @@ type RunResult struct {
 	// sum across steps — each step's prompt re-embeds the rolling history, so
 	// summing would double-count the same context and inflate the gauge.
 	ContextTokens int
+	// GoalComplete is true when the agent called the goal-complete tool during
+	// this run, signalling that the objective has been met. Only meaningful for
+	// goal-mode runs (step 03).
+	GoalComplete bool
+	// GoalSummary is the summary text the agent provided when calling
+	// goal-complete. Empty if the agent didn't provide one.
+	GoalSummary string
 }
 
 // Legacy stub types — kept so existing tests compile.
@@ -104,6 +111,20 @@ func (c Chatter) Reply(ctx context.Context, prompt string, images []string) (pro
 	})
 }
 
+// GoalModePreamble is prepended to the task for /goal runs. It tells the agent
+// the run is autonomous and how to terminate cleanly.
+const GoalModePreamble = `You are operating in GOAL MODE. Work autonomously and persistently toward the objective below until it is fully achieved. There is no step limit and no time pressure — do not stop early, do not ask whether to continue, and do not summarize-and-quit while work remains.
+
+Rules:
+- Break the objective into concrete steps and execute them with tools.
+- Verify your work (run builds/tests/linters where relevant) before claiming done.
+- If a command is slow (installs, builds), let it run.
+- When — and only when — the objective is fully met AND verified, call the goal-complete tool with a short summary and verified=true. Calling goal-complete is the ONLY correct way to finish.
+- If you hit a genuine blocker you cannot resolve (missing credentials, ambiguous requirements that change the outcome), explain it clearly in your response so the operator can intervene.
+
+OBJECTIVE:
+`
+
 // LLMAgent is the unified agent runner. It reads the agent's system prompt from
 // the PromptFile specified in the spec (stripping frontmatter), and runs the
 // standard tool loop with the tools, permissions, and limits from the spec.
@@ -121,20 +142,26 @@ type LLMAgent struct {
 	// surfaced to the model as a "Conversation so far" section so follow-up
 	// turns have memory. Empty == first turn (no behavior change). The caller
 	// is responsible for bounding it (see maxHistoryBytes).
-	History       string
-	ToolCallback  func(ToolTrace)
+	History      string
+	ToolCallback func(ToolTrace)
 	// StreamCallback, when set, receives live thinking/answer chunks as the
 	// model streams. Set only on the top-level run (chat/coding/plan/ask).
 	StreamCallback StreamCallback
 	ShellApproval  ShellApprovalCallback
 	AskUser        AskUserCallback
-	Manifest      *config.AgentManifest // for sub-agent spawning via agent tool
+	Manifest       *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
 	// whole agent tree. nil means the sandbox feature is disabled.
 	SandboxState    *SandboxState
 	SessionDir      string
 	DelegationDepth int
 	ParentAgentID   string
+
+	// GoalMode enables generous tool timeouts and (step 03) goal-complete
+	// signaling. Non-goal runs behave exactly as before.
+	GoalMode        bool
+	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
+	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -145,10 +172,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	systemPrompt := loadPromptOrFallback(a.CWD, a.Spec.PromptFile, a.Spec.Description)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
-	maxSteps := a.Spec.MaxSteps
-	if maxSteps <= 0 {
-		maxSteps = 8
-	}
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
@@ -167,13 +190,12 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	}
 	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
 	catalog = filterDisabledSkills(catalog)
-	out, traces, tokens, contextTokens, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, contextTokens, goalComplete, goalSummary, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		History:         a.History,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
-		MaxSteps:        maxSteps,
 		RequireToolCall: requireToolCall,
 		AllowedTools:    allowedTools,
 		ToolPolicies:    policies,
@@ -195,6 +217,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		SessionDir:      a.SessionDir,
 		DelegationDepth: a.DelegationDepth,
 		ParentAgentID:   a.ParentAgentID,
+		GoalMode:        a.GoalMode,
+		ContextWindow:   a.ContextWindow,
+		ShellTimeoutSec: a.ShellTimeoutSec,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,
 		MaxToolCalls:    maxToolCallsPerStep,
@@ -211,6 +236,8 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Tools:         traces,
 		TokensUsed:    tokens,
 		ContextTokens: contextTokens,
+		GoalComplete:  goalComplete,
+		GoalSummary:   goalSummary,
 	}, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -670,6 +671,20 @@ func (m Model) viewStatusBar(width int) string {
 func (m Model) statusBarMessage() string {
 	if m.banner != "" {
 		return renderStatusBanner(m.banner, m.bannerKind)
+	}
+	if g := m.activeGoal; g != nil {
+		elapsed := time.Since(g.StartedAt).Round(time.Second)
+		// Compact format: objective, iteration, time, state
+		obj := truncateLabel(g.Objective, 40)
+		progress := fmt.Sprintf("iter %d", g.Iteration)
+		if g.NoProgress > 0 {
+			progress = fmt.Sprintf("iter %d · %d/%d", g.Iteration, g.NoProgress, g.NoProgressLimit)
+		}
+		state := "running"
+		if !m.thinking {
+			state = "paused"
+		}
+		return styleSuccess.Render(fmt.Sprintf("◈ %s · %s · %s · %s", obj, progress, elapsed, state))
 	}
 	return ""
 }

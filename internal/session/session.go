@@ -55,6 +55,16 @@ type AgentEvent struct {
 	Reason         string    `json:"reason,omitempty"`
 }
 
+type GoalRecord struct {
+	Objective       string    `json:"objective"`
+	Iteration       int       `json:"iteration"`
+	NoProgress      int       `json:"no_progress"`
+	StartedAt       time.Time `json:"started_at"`
+	MaxIterations   int       `json:"max_iterations"`
+	NoProgressLimit int       `json:"no_progress_limit"`
+	Active          bool      `json:"active"` // true == unfinished when last saved
+}
+
 type Metadata struct {
 	ID          string    `json:"id"`
 	ProjectPath string    `json:"project_path"`
@@ -64,6 +74,9 @@ type Metadata struct {
 	// Preview is the first user message snippet, persisted so the resume
 	// picker can list sessions without loading every message file.
 	Preview string `json:"preview,omitempty"`
+	// Goal is the optional goal run record. When Active is true on reload,
+	// the user is offered to resume the goal.
+	Goal *GoalRecord `json:"goal,omitempty"`
 }
 
 type State struct {

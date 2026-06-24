@@ -1,4 +1,4 @@
-version = 3
+version = 4
 default_agent = 'plan'
 
 [metadata]
@@ -334,6 +334,21 @@ primary_only = false
 permission_rules = []
 
 [[tools]]
+id = 'goal-complete'
+name = 'Goal Complete'
+description = 'Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 5
+requires_approval = false
+permitted_actions = ['plan', 'ask']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
 id = 'config'
 name = 'Config'
 description = 'Read or update selected runtime settings.'
@@ -532,7 +547,6 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
-max_steps = 30
 handoffs = ['explore', 'review', 'docs']
 enabled = true
 
@@ -554,7 +568,6 @@ permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 8192
-max_steps = 32
 handoffs = ['code', 'git', 'test', 'review', 'docs', 'explore']
 enabled = true
 
@@ -576,7 +589,6 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.4
 max_tokens = 8192
-max_steps = 12
 handoffs = ['explore', 'docs']
 enabled = true
 
@@ -598,7 +610,6 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
-max_steps = 24
 handoffs = ['explore', 'review', 'docs']
 enabled = true
 
@@ -620,7 +631,6 @@ permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 8192
-max_steps = 24
 handoffs = ['explore', 'review', 'test', 'docs']
 enabled = true
 
@@ -642,7 +652,6 @@ permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 4096
-max_steps = 20
 handoffs = ['review', 'docs']
 enabled = true
 
@@ -664,7 +673,6 @@ permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 4096
-max_steps = 20
 handoffs = ['review', 'explore']
 enabled = true
 
@@ -686,7 +694,6 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
-max_steps = 20
 handoffs = ['explore', 'docs']
 enabled = true
 
@@ -708,6 +715,5 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
-max_steps = 16
 handoffs = ['explore']
 enabled = true
