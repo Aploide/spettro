@@ -1690,6 +1690,11 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		SandboxState:    m.sandboxState,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
 		DelegationDepth: 0,
+		// Goal-mode fields: set when a goal is active so the runtime uses
+		// generous tool timeouts and recognizes goal-complete.
+		GoalMode:        m.activeGoal != nil,
+		ContextWindow:   resolveGoalContextWindow(m),
+		ShellTimeoutSec: m.cfg.GoalShellTimeoutSec,
 		ToolCallback: func(t agent.ToolTrace) {
 			// Guard the send against a cancelled run: after stopAgent() the TUI
 			// stops draining toolCh, so an unguarded send from an in-flight
@@ -1767,7 +1772,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
 				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens}
 			}
-			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: ""}
+			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary}
 		},
 	)
 }

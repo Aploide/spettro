@@ -54,7 +54,11 @@ func (m *Model) stopAgent() {
 	m.progressNote = ""
 	m.activePrompt = nil
 	m.activeAgentID = ""
-	m.activeGoal = nil // Clear goal on user interrupt (stop/Esc)
+	if m.activeGoal != nil {
+		m.activeGoal = nil // Clear goal on user interrupt (stop/Esc)
+		m.goalResumeAfterCompact = false
+		m.pushSystemMsg("goal abandoned by user")
+	}
 }
 
 func (m *Model) pushSystemMsg(content string) {

@@ -25,6 +25,7 @@ var allCommands = []commandDef{
 	{"/skills", "alias of /skill list"},
 	{"/hooks", "list effective runtime hooks"},
 	{"/plan", "switch plan mode or run plan task"},
+	{"/goal", "run autonomously until an objective is met (no step/token limits)"},
 	{"/permissions", "show/set permission level"},
 	{"/remote", "start loopback HTTP control plane on 127.0.0.1 (optional :PORT)"},
 	{"/remote local", "start LAN HTTP control plane on 0.0.0.0 (optional :PORT)"},
@@ -135,6 +136,13 @@ func isInstantCommand(input string) bool {
 	case "/plan":
 		// /plan with no args just switches mode; /plan <task> launches the plan agent.
 		return len(fields) == 1
+	case "/goal":
+		// /goal stop and /goal status are instant; /goal <objective> starts a run.
+		if len(fields) >= 2 {
+			sub := strings.ToLower(fields[1])
+			return sub == "stop" || sub == "status"
+		}
+		return false
 	case "/compact":
 		// /compact auto <...> and /compact policy only read or toggle config.
 		// /compact (no args) and /compact <focus> trigger an LLM compaction run.
@@ -163,6 +171,9 @@ const helpText = `commands:
   /thinking <l>  alias of /think
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
+  /goal <obj>   run autonomously until the objective is met
+  /goal stop    abandon the active goal
+  /goal status  show goal iteration / progress / elapsed
   /tasks         manage tasks (list/add/done/set/show)
   /mcp           manage MCP resources (list/read/auth)
   /skill         manage Agent Skills (list/install/uninstall/info/enable/disable)
