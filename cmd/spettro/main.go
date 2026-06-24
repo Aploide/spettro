@@ -30,6 +30,7 @@ func main() {
 	bindFlag := flag.String("bind", "127.0.0.1", "bind host (headless mode only; 0.0.0.0 for LAN)")
 	sandboxMode := flag.String("sandbox", "", "OS sandbox for agent shell commands: off|read-only|workspace-write (default: manifest setting, else off)")
 	sandboxNet := flag.String("sandbox-net", "", "sandbox network policy: all|localhost|none|ports:443,8080 (localhost degrades to none on Linux)")
+	goalFlag := flag.String("goal", "", "run in goal mode: execute autonomously until objective is met (headless only)")
 	var sandboxAllowDirs stringListFlag
 	flag.Var(&sandboxAllowDirs, "sandbox-allow-dir", "extra writable directory inside the sandbox (repeatable)")
 	var sandboxReadDirs stringListFlag
@@ -41,6 +42,20 @@ func main() {
 		Net:       *sandboxNet,
 		AllowDirs: sandboxAllowDirs,
 		ReadDirs:  sandboxReadDirs,
+	}
+
+	// Goal mode: autonomous run until objective is met
+	if *goalFlag != "" {
+		cwd := *cwdFlag
+		if cwd == "" {
+			var err error
+			cwd, err = os.Getwd()
+			if err != nil {
+				fatal("cwd error: %v", err)
+			}
+		}
+		runHeadlessGoal(cwd, *goalFlag, sandboxOverrides)
+		return
 	}
 
 	if *headless {
