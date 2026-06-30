@@ -765,7 +765,7 @@ func (m *Model) saveFavorites() {
 	})
 }
 
-func (m *Model) syncInputSuggestions() {
+func (m *Model) syncInputSuggestions() tea.Cmd {
 	val := m.ta.Value()
 	if strings.HasPrefix(val, "/") {
 		if strings.HasPrefix(val, "/permission") && len(val) > len("/permission") {
@@ -783,7 +783,7 @@ func (m *Model) syncInputSuggestions() {
 			}
 			m.mentionItems = nil
 			m.mentionCursor = 0
-			return
+			return nil
 		}
 		if strings.HasPrefix(val, "/thinking") && len(val) > len("/thinking") {
 			filter := strings.TrimPrefix(val, "/thinking")
@@ -800,7 +800,7 @@ func (m *Model) syncInputSuggestions() {
 			}
 			m.mentionItems = nil
 			m.mentionCursor = 0
-			return
+			return nil
 		}
 		if strings.HasPrefix(val, "/think") && !strings.HasPrefix(val, "/thinking") && len(val) > len("/think") {
 			filter := strings.TrimPrefix(val, "/think")
@@ -817,7 +817,7 @@ func (m *Model) syncInputSuggestions() {
 			}
 			m.mentionItems = nil
 			m.mentionCursor = 0
-			return
+			return nil
 		}
 		if strings.HasPrefix(val, "/skill") && !strings.HasPrefix(val, "/skills") && len(val) > len("/skill") {
 			filter := strings.TrimPrefix(val, "/skill")
@@ -834,7 +834,7 @@ func (m *Model) syncInputSuggestions() {
 			}
 			m.mentionItems = nil
 			m.mentionCursor = 0
-			return
+			return nil
 		}
 		query := val[1:]
 		m.cmdItems = filterCommands(query)
@@ -843,7 +843,7 @@ func (m *Model) syncInputSuggestions() {
 		}
 		m.mentionItems = nil
 		m.mentionCursor = 0
-		return
+		return nil
 	}
 
 	m.cmdItems = nil
@@ -853,13 +853,16 @@ func (m *Model) syncInputSuggestions() {
 	if !ok {
 		m.mentionItems = nil
 		m.mentionCursor = 0
-		return
+		return nil
 	}
 
 	m.mentionItems = filterMentionFiles(m.repoFiles, query, 8)
 	if m.mentionCursor >= len(m.mentionItems) {
 		m.mentionCursor = 0
 	}
+	// Trigger a background re-scan so newly added/removed files show up
+	// in the @-mention list. Throttled by scheduleRepoScan.
+	return m.scheduleRepoScan()
 }
 
 func activeMentionQuery(input string) (string, bool) {

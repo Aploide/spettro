@@ -74,6 +74,7 @@ func (m *Model) pushSystemMsg(content string) {
 func (m *Model) showBanner(text, kind string) {
 	m.banner = text
 	m.bannerKind = kind
+	m.bannerClearAt = time.Now().Add(3 * time.Second)
 	m.publishRemote("banner", map[string]interface{}{"text": text, "level": kind})
 }
 
@@ -473,6 +474,25 @@ func (m *Model) trackSessionEditFromTrace(t agent.ToolTrace) {
 // this guard each one would spawn up to four git subprocesses synchronously on
 // the Bubble Tea Update goroutine, serializing the whole UI.
 const minModifiedRefreshInterval = time.Second
+
+// minRepoScanInterval throttles how often the repo-file scan runs from the
+// Update hot path. The scan walks the working directory tree to build the
+// @-mention suggestion list; without throttling, every keystroke after "@"
+// would re-walk the tree.
+const minRepoScanInterval = 2 * time.Second
+
+// scheduleRepoScan returns a tea.Cmd that re-walks the working directory off
+// the Update goroutine, refreshing m.repoFiles so @-mention suggestions stay
+// in sync with files added or removed since startup. Returns nil when a scan
+// ran too recently (the suggestion list is eventually consistent, so dropping
+// a redundant scan is safe).
+func (m *Model) scheduleRepoScan() tea.Cmd {
+	if !m.lastRepoScanAt.IsZero() && time.Since(m.lastRepoScanAt) < minRepoScanInterval {
+		return nil
+	}
+	m.lastRepoScanAt = time.Now()
+	return scanRepoFilesCmd(m.cwd)
+}
 
 // queryModifiedFiles runs the git commands needed to compute the side-panel
 // branch + modified-file list. It is a pure function (no Model state) so it can
