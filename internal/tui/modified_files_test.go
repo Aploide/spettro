@@ -24,6 +24,26 @@ func TestScheduleModifiedRefreshThrottles(t *testing.T) {
 	}
 }
 
+// TestScheduleRepoScanThrottles verifies the ≥2s guard for the repo-file
+// scan that feeds @-mention suggestions: the first call returns a cmd, an
+// immediate second call returns nil, and after the interval elapses it
+// returns a cmd again.
+func TestScheduleRepoScanThrottles(t *testing.T) {
+	m := NewModelForTesting()
+
+	if cmd := m.scheduleRepoScan(); cmd == nil {
+		t.Fatal("first scheduleRepoScan should return a cmd")
+	}
+	if cmd := m.scheduleRepoScan(); cmd != nil {
+		t.Fatal("scheduleRepoScan within the interval should return nil")
+	}
+	// Simulate the interval elapsing.
+	m.lastRepoScanAt = time.Now().Add(-minRepoScanInterval - time.Second)
+	if cmd := m.scheduleRepoScan(); cmd == nil {
+		t.Fatal("scheduleRepoScan after the interval should return a cmd")
+	}
+}
+
 // TestModifiedFilesMsgAppliesToModel verifies the async result is applied.
 func TestModifiedFilesMsgAppliesToModel(t *testing.T) {
 	m := NewModelForTesting()

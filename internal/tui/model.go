@@ -303,8 +303,9 @@ type Model struct {
 
 	pendingPlan string
 
-	banner     string
-	bannerKind string
+	banner      string
+	bannerKind  string
+	bannerClearAt time.Time // when set, banner auto-clears at this time
 
 	ctrlCAt time.Time
 
@@ -346,6 +347,9 @@ type Model struct {
 	// lastModifiedRefreshAt throttles the async git modified-files query
 	// (see scheduleModifiedRefresh).
 	lastModifiedRefreshAt time.Time
+	// lastRepoScanAt throttles the async repo-file scan that feeds @-mention
+	// suggestions (see scheduleRepoScan).
+	lastRepoScanAt time.Time
 	// toolSeq is the monotonic counter handed to completed ToolItems so an
 	// async file diff can be matched back to its entry.
 	toolSeq         int
@@ -483,6 +487,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	m.refreshModifiedFiles()
 	// Scan the working directory in the background: walking a large tree
 	// synchronously here would block the first paint (seen: ~56s from $HOME).
+	m.lastRepoScanAt = time.Now()
 	m.startupCmds = append(m.startupCmds, scanRepoFilesCmd(cwd))
 	if cmd := m.autostartTelegram(); cmd != nil {
 		m.startupCmds = append(m.startupCmds, cmd)
@@ -626,6 +631,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tickMsg:
 		m.eyeFrame++
+		// Auto-clear expired banners so the status bar falls back to
+		// goal info (or empty) after 5 seconds.
+		if m.banner != "" && !m.bannerClearAt.IsZero() && time.Since(m.bannerClearAt) >= 0 {
+			m.banner = ""
+			m.bannerKind = ""
+			m.bannerClearAt = time.Time{}
+		}
 		cmds = append(cmds, tick())
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -878,6 +890,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if cmd := m.scheduleModifiedRefresh(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
+					// Re-scan repo files so @-mention suggestions pick
+					// up files created or deleted by the tool.
+					if cmd := m.scheduleRepoScan(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 			if t.Status == "running" {
@@ -995,7 +1012,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSpettroLoaded(msg)
 	case repoFilesScannedMsg:
 		m.repoFiles = msg.files
-		m.syncInputSuggestions()
+		m.lastRepoScanAt = time.Now()
+		if cmd := m.syncInputSuggestions(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case tea.FocusMsg:
 		m.terminalFocused = true
 	case tea.BlurMsg:
@@ -1003,6 +1023,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bannerClearMsg:
 		m.banner = ""
 		m.bannerKind = ""
+		m.bannerClearAt = time.Time{}
 	case remoteSubmitMsg:
 		newModel, cmd := m.handleRemoteSubmission(msg.req)
 		nm, _ := newModel.(Model)
@@ -1051,6 +1072,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.banner == "press again ctrl C to exit" {
 			m.banner = ""
 			m.bannerKind = ""
+			m.bannerClearAt = time.Time{}
 			m.ctrlCAt = time.Time{}
 		}
 	case tea.MouseMsg:
@@ -1213,7 +1235,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
-		m.syncInputSuggestions()
+		if cmd := m.syncInputSuggestions(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)
@@ -1255,7 +1279,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.recallPreviousInput() {
-			m.syncInputSuggestions()
+			if cmd := m.syncInputSuggestions(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 	case "ctrl+y":
@@ -1326,7 +1352,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.recallNextInput() {
-			m.syncInputSuggestions()
+			if cmd := m.syncInputSuggestions(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 	case "tab":
@@ -1433,7 +1461,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.ta.SetValue(chosen + " ")
 				m.cmdItems = nil
 				m.cmdCursor = 0
-				m.syncInputSuggestions()
+				if cmd := m.syncInputSuggestions(); cmd != nil {
+					return m, cmd
+				}
 				return m, nil
 			}
 			// Other commands: execute if textarea already matches, else complete.
@@ -1452,12 +1482,16 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ta.SetValue(chosen + " ")
 			m.cmdItems = nil
 			m.cmdCursor = 0
-			m.syncInputSuggestions()
+			if cmd := m.syncInputSuggestions(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 		if len(m.mentionItems) > 0 {
 			m = m.acceptMention()
-			m.syncInputSuggestions()
+			if cmd := m.syncInputSuggestions(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 		input := strings.TrimSpace(m.ta.Value())
@@ -1505,7 +1539,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.mentionItems) > 0 {
 			m.mentionItems = nil
 			m.mentionCursor = 0
-			m.syncInputSuggestions()
+			if cmd := m.syncInputSuggestions(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 		m.ta.Reset()
@@ -1515,7 +1551,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var taCmd tea.Cmd
 	m.ta, taCmd = m.ta.Update(msg)
-	m.syncInputSuggestions()
+	if cmd := m.syncInputSuggestions(); cmd != nil {
+		return m, tea.Batch(taCmd, cmd)
+	}
 	return m, taCmd
 }
 
