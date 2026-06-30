@@ -67,6 +67,45 @@ if ! curl -sSfL "$URL" -o "${TMP}/${TARBALL}"; then
   exit 1
 fi
 
+# ── verify checksum ──────────────────────────────────────────────────────────
+CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
+echo "Downloading checksums..."
+if ! curl -sSfL "$CHECKSUMS_URL" -o "${TMP}/checksums.txt"; then
+  echo "error: could not download checksums.txt from release ${VERSION}." >&2
+  echo "Refusing to install without integrity verification." >&2
+  exit 1
+fi
+
+# Extract the expected hash for our tarball
+EXPECTED_HASH="$(grep "[[:space:]]${TARBALL}$" "${TMP}/checksums.txt" | awk '{print $1}')"
+if [ -z "$EXPECTED_HASH" ]; then
+  echo "error: no checksum found for ${TARBALL} in checksums.txt." >&2
+  echo "Refusing to install without integrity verification." >&2
+  exit 1
+fi
+
+# Compute the actual hash (portable across macOS and Linux)
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_HASH="$(sha256sum "${TMP}/${TARBALL}" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL_HASH="$(shasum -a 256 "${TMP}/${TARBALL}" | awk '{print $1}')"
+else
+  echo "error: neither sha256sum nor shasum is available." >&2
+  echo "Cannot verify integrity." >&2
+  exit 1
+fi
+
+if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+  echo "error: checksum verification failed!" >&2
+  echo "  expected: ${EXPECTED_HASH}" >&2
+  echo "  actual:   ${ACTUAL_HASH}" >&2
+  echo "The downloaded tarball may be corrupted or tampered with." >&2
+  echo "Refusing to install." >&2
+  exit 1
+fi
+
+echo "Checksum verified."
+
 tar -xzf "${TMP}/${TARBALL}" -C "${TMP}"
 
 # ── install ───────────────────────────────────────────────────────────────────
