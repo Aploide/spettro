@@ -1546,6 +1546,8 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.ta.Reset()
 		m.banner = ""
+		m.bannerKind = ""
+		m.bannerClearAt = time.Time{}
 		return m, nil
 	}
 

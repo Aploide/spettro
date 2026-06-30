@@ -74,7 +74,7 @@ func (m *Model) pushSystemMsg(content string) {
 func (m *Model) showBanner(text, kind string) {
 	m.banner = text
 	m.bannerKind = kind
-	m.bannerClearAt = time.Now().Add(5 * time.Second)
+	m.bannerClearAt = time.Now().Add(3 * time.Second)
 	m.publishRemote("banner", map[string]interface{}{"text": text, "level": kind})
 }
 
