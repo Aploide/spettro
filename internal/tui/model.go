@@ -711,7 +711,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
-		} else if _, nextCmd := m.maybeRunNextQueuedPrompt(); nextCmd != nil {
+		} else if newModel, nextCmd := m.maybeRunNextQueuedPrompt(); nextCmd != nil {
+			nm, _ := newModel.(Model)
+			m = nm
 			cmds = append(cmds, nextCmd)
 		}
 		// If goal advancement cleared the active goal (completion/stall/error),
