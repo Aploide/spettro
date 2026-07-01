@@ -6,6 +6,7 @@
 - [Architecture overview](architecture.md)
 - [Agent Skills](skills.md)
 - [Remote control plane](remote.md)
+- [Agent Client Protocol (editor integration)](acp.md)
 - [Telegram relay](telegram.md)
 - [Extended thinking levels](thinking.md)
 - [Troubleshooting](troubleshooting.md)
