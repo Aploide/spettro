@@ -56,6 +56,10 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   through `session/request_permission`, so the editor shows its native
   approval prompt. With `/permission yolo` set in Spettro's config, shell
   commands run without asking.
+- **Commands** — `/help`, `/mode`, `/permission`, `/budget`, `/thinking`, and
+  `/clear` are advertised to the client (`available_commands_update`) and
+  resolve in one turn without invoking the model. Anything else needing a
+  TUI dialog (`/models`, `/skill`, `/mcp`, ...) is not available over ACP yet.
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
   context, and images are accepted in prompts.
 - **Cancellation** — `session/cancel` interrupts the running turn; the turn

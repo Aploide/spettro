@@ -74,7 +74,7 @@ func (b *bridge) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (
 	return acpsdk.AuthenticateResponse{}, nil
 }
 
-func (b *bridge) NewSession(_ context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
+func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
 	cwd := params.Cwd
 	if cwd == "" {
 		cwd = b.opts.CWD
@@ -105,6 +105,8 @@ func (b *bridge) NewSession(_ context.Context, params acpsdk.NewSessionRequest) 
 	b.mu.Lock()
 	b.sessions[sid] = s
 	b.mu.Unlock()
+
+	b.announceCommands(ctx, acpsdk.SessionId(sid))
 
 	return acpsdk.NewSessionResponse{
 		SessionId: acpsdk.SessionId(sid),
@@ -155,8 +157,32 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	if err != nil {
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": err.Error()})
 	}
-	if strings.TrimSpace(task) == "" {
+	trimmedTask := strings.TrimSpace(task)
+	if trimmedTask == "" {
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "prompt has no text content"})
+	}
+
+	if strings.HasPrefix(trimmedTask, "/") {
+		b.mu.Lock()
+		reply, modeChanged, handled := handleSlashCommand(s, &cfg, trimmedTask)
+		b.mu.Unlock()
+		if handled {
+			if reply != "" {
+				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+					SessionId: params.SessionId,
+					Update:    acpsdk.UpdateAgentMessageText(reply),
+				})
+			}
+			if modeChanged {
+				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+					SessionId: params.SessionId,
+					Update: acpsdk.SessionUpdate{CurrentModeUpdate: &acpsdk.SessionCurrentModeUpdate{
+						CurrentModeId: acpsdk.SessionModeId(s.agentID),
+					}},
+				})
+			}
+			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+		}
 	}
 
 	b.mu.Lock()
