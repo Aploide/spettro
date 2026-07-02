@@ -25,7 +25,8 @@ func main() {
 	sandbox.RunChildIfRequested()
 
 	headless := flag.Bool("headless", false, "run as headless HTTP/SSE server (for Android)")
-	cwdFlag := flag.String("cwd", "", "working directory (headless mode only)")
+	acpMode := flag.Bool("acp", false, "run as Agent Client Protocol (ACP) agent over stdio (for editors like Zed)")
+	cwdFlag := flag.String("cwd", "", "working directory (headless/acp modes only)")
 	portFlag := flag.Int("port", 7878, "HTTP listen port (headless mode only)")
 	bindFlag := flag.String("bind", "127.0.0.1", "bind host (headless mode only; 0.0.0.0 for LAN)")
 	sandboxMode := flag.String("sandbox", "", "OS sandbox for agent shell commands: off|read-only|workspace-write (default: manifest setting, else off)")
@@ -55,6 +56,19 @@ func main() {
 			}
 		}
 		runHeadlessGoal(cwd, *goalFlag, sandboxOverrides)
+		return
+	}
+
+	if *acpMode {
+		cwd := *cwdFlag
+		if cwd == "" {
+			var err error
+			cwd, err = os.Getwd()
+			if err != nil {
+				fatal("cwd error: %v", err)
+			}
+		}
+		runACP(cwd, sandboxOverrides)
 		return
 	}
 

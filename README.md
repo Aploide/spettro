@@ -91,6 +91,13 @@ Spettro commands are entered with a leading `/`.
 
 For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
+## Editor integration (ACP)
+
+`spettro --acp` runs Spettro as an [Agent Client Protocol](https://agentclientprotocol.com)
+agent over stdio, so ACP-capable editors like Zed can drive it from their
+native agent panel — with streamed reasoning, tool call reporting, mode
+switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
+
 ## Project docs
 
 - [Agent Manifest](AGENTS.md)
@@ -101,6 +108,7 @@ For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 - [Configuration and storage](docs/configuration.md)
 - [Architecture overview](docs/architecture.md)
 - [Remote control plane](docs/remote.md)
+- [Agent Client Protocol (editor integration)](docs/acp.md)
 - [Telegram relay](docs/telegram.md)
 - [Extended thinking levels](docs/thinking.md)
 - [Troubleshooting](docs/troubleshooting.md)
