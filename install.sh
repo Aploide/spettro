@@ -52,8 +52,8 @@ fi
 echo "Installing spettro ${VERSION} (${OS}/${ARCH})..."
 
 # ── download ─────────────────────────────────────────────────────────────────
-BINARY_NAME="spettro_${VERSION}_${OS}_${ARCH}"
-TARBALL="${BINARY_NAME}.tar.gz"
+ARCHIVE_NAME="spettro_${VERSION}_${OS}_${ARCH}"
+TARBALL="${ARCHIVE_NAME}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${TARBALL}"
 
 TMP="$(mktemp -d)"
@@ -117,11 +117,11 @@ fi
 DEST="${INSTALL_DIR}/spettro"
 
 if [ -w "$INSTALL_DIR" ]; then
-  cp "${TMP}/${BINARY_NAME}" "$DEST"
+  cp "${TMP}/spettro" "$DEST"
   chmod +x "$DEST"
 else
   echo "sudo required to write to ${INSTALL_DIR}..."
-  sudo cp "${TMP}/${BINARY_NAME}" "$DEST"
+  sudo cp "${TMP}/spettro" "$DEST"
   sudo chmod +x "$DEST"
 fi
 

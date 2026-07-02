@@ -1,4 +1,4 @@
-# Spettro
+<img src="Logo.png" alt="Spettro logo" width="360" />
 
 [![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
 [![UI Bubble Tea](https://img.shields.io/badge/UI-Bubble%20Tea-ff69b4)](https://github.com/charmbracelet/bubbletea)
@@ -6,8 +6,6 @@
 [![Status](https://img.shields.io/badge/status-experimental-orange)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-green)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cesp99/spettro)
-
-CA: C3fawupKrXdn3X7KPTmmnkwzJQ9qycMNag55ZzQ8pump
 
 Spettro is a terminal-first multi-agent coding assistant written in Go.
 
@@ -121,3 +119,5 @@ make test
 make build
 make build-all
 ```
+
+CA: C3fawupKrXdn3X7KPTmmnkwzJQ9qycMNag55ZzQ8pump

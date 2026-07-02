@@ -223,7 +223,8 @@ func promptFromBlocks(blocks []acpsdk.ContentBlock, mediaDir string) (task strin
 			text.WriteString(block.Text.Text)
 		case block.ResourceLink != nil:
 			path := uriToPath(block.ResourceLink.Uri)
-			text.WriteString("@" + path)
+			text.WriteString("@")
+			text.WriteString(path)
 			mentioned = append(mentioned, path)
 		case block.Resource != nil:
 			if tr := block.Resource.Resource.TextResourceContents; tr != nil {

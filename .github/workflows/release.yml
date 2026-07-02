@@ -39,13 +39,13 @@ jobs:
           CGO_ENABLED: 0
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          BINARY_NAME="spettro_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          ARCHIVE_NAME="spettro_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
           go build \
             -trimpath \
             -ldflags="-s -w -X spettro/internal/version.App=${VERSION}" \
-            -o "${BINARY_NAME}" \
+            -o spettro \
             ./cmd/spettro
-          tar -czf "${BINARY_NAME}.tar.gz" "${BINARY_NAME}"
+          tar -czf "${ARCHIVE_NAME}.tar.gz" spettro
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

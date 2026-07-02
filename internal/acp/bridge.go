@@ -72,12 +72,27 @@ func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 				EmbeddedContext: true,
 			},
 		},
-		AuthMethods: []acpsdk.AuthMethod{},
+		AuthMethods: []acpsdk.AuthMethod{
+			{
+				Terminal: &acpsdk.AuthMethodTerminalInline{
+					Id:   "spettro-setup",
+					Name: "Configure a provider",
+					Description: acpsdk.Ptr(
+						"Launch Spettro's own interactive TUI (no --acp flag) and " +
+							"run /models to add a provider API key; ACP sessions " +
+							"reuse that stored configuration.",
+					),
+					// No extra args: the plain `spettro` invocation already opens
+					// the interactive TUI where /models manages provider keys.
+					Args: []string{},
+				},
+			},
+		},
 	}, nil
 }
 
-// Authenticate is a no-op: Spettro reads provider API keys from its own
-// config, so no ACP-level auth methods are advertised.
+// Authenticate is a no-op: the advertised auth method just points the client
+// at running `spettro` directly, which handles provider setup itself.
 func (b *bridge) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
 	return acpsdk.AuthenticateResponse{}, nil
 }
