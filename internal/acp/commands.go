@@ -16,15 +16,17 @@ import (
 // clients like Zed intercept any "/word" the user types and reject it
 // locally ("not a recognized command") before it ever reaches Prompt.
 //
-// Only commands that resolve to a plain config/session mutation are
-// included: anything that needs a TUI dialog (models, skills, mcp, resume,
-// ...) stays TUI-only for now, since ACP has no equivalent surface.
+// Only commands that resolve from plain text are included: anything that
+// needs a TUI dialog (skills, mcp, resume, ...) stays TUI-only for now,
+// since ACP has no equivalent surface.
 var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "help", Description: "show available commands"},
 	{Name: "mode", Description: "switch agent mode", Input: hintInput("plan|coding|ask|...")},
+	{Name: "models", Description: "show or set the active model", Input: hintInput("provider:model [api_key]")},
 	{Name: "permission", Description: "set permission level", Input: hintInput("yolo|restricted|ask-first")},
 	{Name: "budget", Description: "set token budget per request", Input: hintInput("<n|0>")},
 	{Name: "thinking", Description: "set extended-thinking level", Input: hintInput("off|low|medium|high|x-high|max")},
+	{Name: "goal", Description: "work autonomously toward an objective", Input: hintInput("<objective> | status")},
 	{Name: "clear", Description: "clear conversation history"},
 }
 
@@ -51,8 +53,9 @@ func (b *bridge) announceCommands(ctx context.Context, sid acpsdk.SessionId) {
 // mirroring internal/tui/model.go's handleCommand and cmd/spettro/headless.go's
 // handleHeadlessCommand: ACP has no dialog surface, so these must resolve in
 // one turn from plain text. handled=false means the input isn't one of ours
-// and should fall through to the LLM as an ordinary prompt.
-func handleSlashCommand(s *acpSession, cfg *config.UserConfig, input string) (reply string, modeChanged bool, handled bool) {
+// and should fall through to the LLM as an ordinary prompt. /goal is NOT
+// handled here — it needs the turn's streaming machinery (see goal.go).
+func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Manager, input string) (reply string, modeChanged bool, handled bool) {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
 		return "", false, false
@@ -71,6 +74,35 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, input string) (re
 		}
 		s.agentID = id
 		return "mode: " + id, true, true
+
+	case "/models", "/model":
+		if len(fields) < 2 {
+			return modelsText(pm, cfg), false, true
+		}
+		parts := strings.SplitN(fields[1], ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "usage: /models <provider:model> [api_key]", false, true
+		}
+		if !pm.HasModel(parts[0], parts[1]) {
+			return "unknown model: " + fields[1] + "\n\n" + modelsText(pm, cfg), false, true
+		}
+		if len(fields) >= 3 {
+			if err := config.SaveAPIKey(parts[0], fields[2]); err != nil {
+				return "error saving API key: " + err.Error(), false, true
+			}
+		}
+		if _, err := config.Update(func(c *config.UserConfig) error {
+			c.ActiveProvider = parts[0]
+			c.ActiveModel = parts[1]
+			return nil
+		}); err != nil {
+			return "error: " + err.Error(), false, true
+		}
+		if fresh, err := config.LoadFull(); err == nil {
+			*cfg = fresh
+			pm.SetAPIKeys(cfg.APIKeys)
+		}
+		return "model set to " + fields[1], false, true
 
 	case "/permission", "/permissions":
 		if len(fields) < 2 {
@@ -149,10 +181,29 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, input string) (re
 	return "", false, false
 }
 
+// modelsText renders the current model plus the connected roster, the ACP
+// text stand-in for the TUI's model selector dialog.
+func modelsText(pm *provider.Manager, cfg *config.UserConfig) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "current model: %s:%s\n", cfg.ActiveProvider, cfg.ActiveModel)
+	if connected := pm.ConnectedModels(cfg.APIKeys); len(connected) > 0 {
+		b.WriteString("connected models:\n")
+		for _, m := range connected {
+			fmt.Fprintf(&b, "  %s:%s\n", m.Provider, m.Name)
+		}
+	} else {
+		b.WriteString("no connected models (add an API key: /models <provider:model> <api_key>)\n")
+	}
+	b.WriteString("usage: /models <provider:model> [api_key]")
+	return b.String()
+}
+
 const acpHelpText = `commands:
   /help                 this message
   /mode <agent-id>      switch agent mode (plan, coding, ask, ...)
+  /models [p:m [key]]   show connected models or set the active one
   /permission <level>   set permission: yolo | restricted | ask-first
   /budget [n|0]         set token budget per request (0 = unlimited)
   /think <level>        set extended-thinking level (off|low|medium|high|x-high|max)
+  /goal <objective>     work autonomously until the objective is met (/goal status)
   /clear                clear conversation history`

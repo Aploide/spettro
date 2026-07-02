@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
@@ -41,6 +42,13 @@ type acpSession struct {
 	// history is the bounded oldest-first transcript of prior turns, in the
 	// same "user:/assistant:" line format the TUI feeds LLMAgent.History.
 	history []string
+	// commandsAnnounced records that a prompt turn has re-sent the available
+	// commands list, the fallback for clients that dropped the initial
+	// announcement (see NewSession).
+	commandsAnnounced bool
+	// lastGoal is the outcome summary of the most recent /goal run, surfaced
+	// by /goal status.
+	lastGoal string
 }
 
 var _ acpsdk.Agent = (*bridge)(nil)
@@ -106,11 +114,30 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 	b.sessions[sid] = s
 	b.mu.Unlock()
 
-	b.announceCommands(ctx, acpsdk.SessionId(sid))
+	// Config options describe the mode, model, permission, and thinking
+	// selectors the editor draws in its toolbar. Load fresh config so those
+	// selectors reflect the current model/permission (mirrors Prompt).
+	cfg := b.opts.Cfg
+	if fresh, err := config.LoadFull(); err == nil {
+		cfg = fresh
+		b.opts.Providers.SetAPIKeys(cfg.APIKeys)
+	}
+
+	// The command list must be announced AFTER the session/new response is on
+	// the wire: clients (Zed) only register the session when the response
+	// arrives and silently drop session/update notifications for unknown
+	// sessions — announcing synchronously here loses the commands and the
+	// editor rejects every "/…" input with "not a recognized command".
+	// Deferring past the handler return keeps the write ordered behind the
+	// response. Prompt re-announces once more as a belt-and-braces fallback.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		b.announceCommands(context.Background(), acpsdk.SessionId(sid))
+	}()
 
 	return acpsdk.NewSessionResponse{
-		SessionId: acpsdk.SessionId(sid),
-		Modes:     sessionModes(manifest, agentID),
+		SessionId:     acpsdk.SessionId(sid),
+		ConfigOptions: buildConfigOptions(s, &cfg, b.opts.Providers),
 	}, nil
 }
 
@@ -139,9 +166,20 @@ func (b *bridge) Cancel(_ context.Context, _ acpsdk.CancelNotification) error {
 func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
 	b.mu.Lock()
 	s, ok := b.sessions[string(params.SessionId)]
+	var announced bool
+	if ok {
+		announced = s.commandsAnnounced
+		s.commandsAnnounced = true
+	}
 	b.mu.Unlock()
 	if !ok {
 		return acpsdk.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+	}
+	// Re-announce the commands once per session from inside a prompt turn:
+	// by now the client provably knows the session, so this delivery cannot
+	// be dropped even if the deferred NewSession announcement raced.
+	if !announced {
+		b.announceCommands(ctx, params.SessionId)
 	}
 
 	// Reload config each turn so key/model/permission changes made in a
@@ -162,9 +200,23 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "prompt has no text content"})
 	}
 
+	turn := &turnState{
+		bridge:    b,
+		ctx:       ctx,
+		sessionID: params.SessionId,
+		open:      make(map[string][]acpsdk.ToolCallId),
+	}
+
 	if strings.HasPrefix(trimmedTask, "/") {
+		if fields := strings.Fields(trimmedTask); fields[0] == "/goal" {
+			return b.runGoalCommand(ctx, s, &cfg, turn, trimmedTask)
+		}
 		b.mu.Lock()
-		reply, modeChanged, handled := handleSlashCommand(s, &cfg, trimmedTask)
+		reply, _, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
+		var options []acpsdk.SessionConfigOption
+		if handled {
+			options = buildConfigOptions(s, &cfg, b.opts.Providers)
+		}
 		b.mu.Unlock()
 		if handled {
 			if reply != "" {
@@ -173,14 +225,15 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 					Update:    acpsdk.UpdateAgentMessageText(reply),
 				})
 			}
-			if modeChanged {
-				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
-					SessionId: params.SessionId,
-					Update: acpsdk.SessionUpdate{CurrentModeUpdate: &acpsdk.SessionCurrentModeUpdate{
-						CurrentModeId: acpsdk.SessionModeId(s.agentID),
-					}},
-				})
-			}
+			// A slash command may have changed the mode, model, permission, or
+			// thinking level; push the refreshed option set so the editor's
+			// toolbar selectors stay in sync (supersedes current_mode_update).
+			_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+				SessionId: params.SessionId,
+				Update: acpsdk.SessionUpdate{ConfigOptionUpdate: &acpsdk.SessionConfigOptionUpdate{
+					ConfigOptions: options,
+				}},
+			})
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 		}
 	}
@@ -196,13 +249,6 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return acpsdk.PromptResponse{}, fmt.Errorf("agent not found: %s", agentID)
 	}
 	spec.Permission = cfg.Permission
-
-	turn := &turnState{
-		bridge:    b,
-		ctx:       ctx,
-		sessionID: params.SessionId,
-		open:      make(map[string][]acpsdk.ToolCallId),
-	}
 
 	thinking := provider.ThinkingLevel("")
 	if b.opts.Providers.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
@@ -259,30 +305,6 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		StopReason: acpsdk.StopReasonEndTurn,
 		Meta:       map[string]any{"spettro.dev/tokensUsed": result.TokensUsed},
 	}, nil
-}
-
-// sessionModes converts the manifest's enabled agents into the ACP session
-// mode list, so editors surface Spettro's agent roster in their mode picker.
-func sessionModes(manifest config.AgentManifest, current string) *acpsdk.SessionModeState {
-	agents := manifest.EnabledAgents()
-	if len(agents) == 0 {
-		return nil
-	}
-	modes := make([]acpsdk.SessionMode, 0, len(agents))
-	for _, a := range agents {
-		mode := acpsdk.SessionMode{
-			Id:   acpsdk.SessionModeId(a.ID),
-			Name: a.Name,
-		}
-		if a.Description != "" {
-			mode.Description = acpsdk.Ptr(a.Description)
-		}
-		modes = append(modes, mode)
-	}
-	return &acpsdk.SessionModeState{
-		AvailableModes: modes,
-		CurrentModeId:  acpsdk.SessionModeId(current),
-	}
 }
 
 // requestShellApproval bridges Spettro's shell approval flow to ACP's
@@ -386,8 +408,48 @@ func (b *bridge) ResumeSession(_ context.Context, _ acpsdk.ResumeSessionRequest)
 	return acpsdk.ResumeSessionResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodSessionResume)
 }
 
-func (b *bridge) SetSessionConfigOption(_ context.Context, _ acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
-	return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodSessionSetConfigOption)
+// SetSessionConfigOption applies a change made in the editor's toolbar
+// selectors (mode, model, permission, thinking) and returns the full, updated
+// option set so the client reflects any dependent changes.
+func (b *bridge) SetSessionConfigOption(_ context.Context, params acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
+	var sid acpsdk.SessionId
+	var configID, value string
+	switch {
+	case params.ValueId != nil:
+		sid = params.ValueId.SessionId
+		configID = string(params.ValueId.ConfigId)
+		value = string(params.ValueId.Value)
+	case params.Boolean != nil:
+		sid = params.Boolean.SessionId
+		configID = string(params.Boolean.ConfigId)
+		if params.Boolean.Value {
+			value = "true"
+		} else {
+			value = "false"
+		}
+	default:
+		return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "missing config option value"})
+	}
+
+	// Reload config so a concurrent TUI's changes are the baseline we mutate.
+	cfg := b.opts.Cfg
+	if fresh, err := config.LoadFull(); err == nil {
+		cfg = fresh
+		b.opts.Providers.SetAPIKeys(cfg.APIKeys)
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.sessions[string(sid)]
+	if !ok {
+		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", sid)
+	}
+	if err := b.applyConfigOption(s, &cfg, configID, value); err != nil {
+		return acpsdk.SetSessionConfigOptionResponse{}, err
+	}
+	return acpsdk.SetSessionConfigOptionResponse{
+		ConfigOptions: buildConfigOptions(s, &cfg, b.opts.Providers),
+	}, nil
 }
 
 // maxHistoryBytes mirrors the TUI's maxConversationHistoryBytes: the bounded

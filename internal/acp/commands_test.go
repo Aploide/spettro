@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"spettro/internal/config"
+	"spettro/internal/provider"
 )
 
 func testSession(t *testing.T) *acpSession {
@@ -27,7 +28,7 @@ func testSession(t *testing.T) *acpSession {
 func TestHandleSlashCommand_Unrecognized(t *testing.T) {
 	s := testSession(t)
 	cfg := config.UserConfig{}
-	_, _, handled := handleSlashCommand(s, &cfg, "/nope")
+	_, _, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/nope")
 	if handled {
 		t.Fatalf("expected /nope to be unhandled so it falls through to the LLM")
 	}
@@ -36,7 +37,7 @@ func TestHandleSlashCommand_Unrecognized(t *testing.T) {
 func TestHandleSlashCommand_Help(t *testing.T) {
 	s := testSession(t)
 	cfg := config.UserConfig{}
-	reply, modeChanged, handled := handleSlashCommand(s, &cfg, "/help")
+	reply, modeChanged, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/help")
 	if !handled || modeChanged || !strings.Contains(reply, "/permission") {
 		t.Fatalf("unexpected /help result: reply=%q modeChanged=%v handled=%v", reply, modeChanged, handled)
 	}
@@ -46,7 +47,7 @@ func TestHandleSlashCommand_Mode(t *testing.T) {
 	s := testSession(t)
 	cfg := config.UserConfig{}
 
-	reply, modeChanged, handled := handleSlashCommand(s, &cfg, "/mode coding")
+	reply, modeChanged, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/mode coding")
 	if !handled || !modeChanged {
 		t.Fatalf("expected /mode coding to be handled and change mode, got reply=%q modeChanged=%v handled=%v", reply, modeChanged, handled)
 	}
@@ -54,7 +55,7 @@ func TestHandleSlashCommand_Mode(t *testing.T) {
 		t.Fatalf("expected agentID coding, got %q", s.agentID)
 	}
 
-	reply, modeChanged, handled = handleSlashCommand(s, &cfg, "/mode bogus")
+	reply, modeChanged, handled = handleSlashCommand(s, &cfg, provider.NewManager(), "/mode bogus")
 	if !handled || modeChanged || !strings.Contains(reply, "unknown mode") {
 		t.Fatalf("expected /mode bogus to be rejected, got reply=%q modeChanged=%v handled=%v", reply, modeChanged, handled)
 	}
@@ -67,7 +68,7 @@ func TestHandleSlashCommand_Permission(t *testing.T) {
 	s := testSession(t)
 	cfg := config.UserConfig{}
 
-	reply, _, handled := handleSlashCommand(s, &cfg, "/permission yolo")
+	reply, _, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/permission yolo")
 	if !handled || !strings.Contains(reply, "yolo") {
 		t.Fatalf("expected /permission yolo to succeed, got reply=%q handled=%v", reply, handled)
 	}
@@ -75,9 +76,30 @@ func TestHandleSlashCommand_Permission(t *testing.T) {
 		t.Fatalf("expected cfg.Permission=yolo, got %q", cfg.Permission)
 	}
 
-	reply, _, handled = handleSlashCommand(s, &cfg, "/permission bogus")
+	reply, _, handled = handleSlashCommand(s, &cfg, provider.NewManager(), "/permission bogus")
 	if !handled || !strings.Contains(reply, "invalid permission") {
 		t.Fatalf("expected /permission bogus to be rejected, got reply=%q handled=%v", reply, handled)
+	}
+}
+
+func TestHandleSlashCommand_Models(t *testing.T) {
+	s := testSession(t)
+	cfg := config.UserConfig{ActiveProvider: "openai", ActiveModel: "gpt-4o"}
+	pm := provider.NewManager()
+
+	reply, _, handled := handleSlashCommand(s, &cfg, pm, "/models")
+	if !handled || !strings.Contains(reply, "openai:gpt-4o") {
+		t.Fatalf("expected /models to show the current model, got reply=%q handled=%v", reply, handled)
+	}
+
+	reply, _, handled = handleSlashCommand(s, &cfg, pm, "/models bogus:model")
+	if !handled || !strings.Contains(reply, "unknown model") {
+		t.Fatalf("expected unknown model to be rejected, got reply=%q handled=%v", reply, handled)
+	}
+
+	reply, _, handled = handleSlashCommand(s, &cfg, pm, "/models nocolon")
+	if !handled || !strings.Contains(reply, "usage:") {
+		t.Fatalf("expected malformed /models arg to show usage, got reply=%q handled=%v", reply, handled)
 	}
 }
 
@@ -86,7 +108,7 @@ func TestHandleSlashCommand_Clear(t *testing.T) {
 	s.history = []string{"user: hi", "assistant: hello"}
 	cfg := config.UserConfig{}
 
-	reply, _, handled := handleSlashCommand(s, &cfg, "/clear")
+	reply, _, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/clear")
 	if !handled || reply == "" {
 		t.Fatalf("expected /clear to be handled, got reply=%q handled=%v", reply, handled)
 	}

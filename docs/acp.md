@@ -45,9 +45,22 @@ Then open the Agent Panel and pick *Spettro* as the agent.
 
 - **Sessions** — each `session/new` gets its own working directory (the
   project the editor has open), conversation history, and agent mode.
-- **Modes** — the enabled agents from the [manifest](../AGENTS.md) (`plan`,
-  `coding`, `ask`, `explore`, ...) are advertised as ACP session modes, so
-  the editor's mode picker switches Spettro agents.
+- **Toolbar selectors** — Spettro advertises ACP *session config options* so
+  the editor draws native selectors in its message toolbar:
+  - **Mode** — the orchestrator agents from the [manifest](../AGENTS.md)
+    (`plan`, `coding`, `ask`); worker/subagent roles are internal delegation
+    targets and stay hidden.
+  - **Model** — the connected models, grouped by provider, switch the active
+    model for the session (persisted to your config).
+  - **Permission** — `ask-first`, `restricted`, or `yolo`.
+  - **Thinking** — the extended-thinking level, shown only for
+    reasoning-capable models.
+
+  Changing a selector calls `session/set_config_option`; the equivalent slash
+  commands (`/mode`, `/models`, `/permission`, `/thinking`) push a
+  `config_option_update` back so the selectors stay in sync. This supersedes
+  the deprecated `session/set_mode` "modes" mechanism, which current clients
+  no longer render.
 - **Streaming** — the model's reasoning streams live as thought chunks and
   every tool call is reported with kind, status, file locations, and output,
   so the editor can render progress and follow the agent across files. The
@@ -56,10 +69,14 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   through `session/request_permission`, so the editor shows its native
   approval prompt. With `/permission yolo` set in Spettro's config, shell
   commands run without asking.
-- **Commands** — `/help`, `/mode`, `/permission`, `/budget`, `/thinking`, and
-  `/clear` are advertised to the client (`available_commands_update`) and
-  resolve in one turn without invoking the model. Anything else needing a
-  TUI dialog (`/models`, `/skill`, `/mcp`, ...) is not available over ACP yet.
+- **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
+  `/thinking`, `/goal`, and `/clear` are advertised to the client
+  (`available_commands_update`). Config commands resolve in one turn without
+  invoking the model; `/models` with no argument lists the connected models,
+  and `/models provider:model [api_key]` switches the active one. `/goal
+  <objective>` runs the autonomous goal loop inside the prompt turn — cancel
+  the turn to stop it. Anything needing a TUI dialog (`/skill`, `/mcp`,
+  `/resume`, ...) is not available over ACP yet.
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
   context, and images are accepted in prompts.
 - **Cancellation** — `session/cancel` interrupts the running turn; the turn
