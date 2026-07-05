@@ -19,5 +19,8 @@ build-all:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/$(APP)-darwin-amd64 ./cmd/spettro
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/$(APP)-darwin-arm64 ./cmd/spettro
 
+INSTALL_DIR ?= $(HOME)/.local/bin
+
 install: build
-	cp bin/$(APP) /usr/local/bin/$(APP)
+	mkdir -p $(INSTALL_DIR)
+	cp bin/$(APP) $(INSTALL_DIR)/$(APP)

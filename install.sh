@@ -10,7 +10,7 @@
 set -euo pipefail
 
 REPO="cesp99/spettro"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── detect OS ───────────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -109,31 +109,34 @@ echo "Checksum verified."
 tar -xzf "${TMP}/${TARBALL}" -C "${TMP}"
 
 # ── install ───────────────────────────────────────────────────────────────────
-if [ ! -d "$INSTALL_DIR" ]; then
-  echo "error: install directory does not exist: ${INSTALL_DIR}" >&2
-  exit 1
-fi
+# INSTALL_DIR defaults to a directory the current user already owns, so
+# installing (and later self-updating in place) never requires sudo. Set
+# INSTALL_DIR to override, e.g. INSTALL_DIR=/usr/local/bin, in which case you
+# are responsible for its permissions.
+mkdir -p "$INSTALL_DIR"
 
 DEST="${INSTALL_DIR}/spettro"
 
-if [ -w "$INSTALL_DIR" ]; then
-  cp "${TMP}/spettro" "$DEST"
-  chmod +x "$DEST"
-else
-  echo "sudo required to write to ${INSTALL_DIR}..."
-  sudo cp "${TMP}/spettro" "$DEST"
-  sudo chmod +x "$DEST"
+if [ ! -w "$INSTALL_DIR" ]; then
+  echo "error: ${INSTALL_DIR} is not writable." >&2
+  echo "Choose a directory you own, e.g.: INSTALL_DIR=\$HOME/.local/bin sh install.sh" >&2
+  exit 1
 fi
 
+cp "${TMP}/spettro" "$DEST"
+chmod +x "$DEST"
+
 # ── verify ────────────────────────────────────────────────────────────────────
-if command -v spettro >/dev/null 2>&1; then
-  echo ""
-  echo "spettro ${VERSION} installed successfully."
-  echo "Run 'spettro' to get started."
-else
-  echo ""
-  echo "spettro ${VERSION} installed to ${DEST}."
-  echo ""
-  echo "Make sure ${INSTALL_DIR} is in your PATH:"
-  echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
-fi
+echo ""
+echo "spettro ${VERSION} installed to ${DEST}."
+
+case ":${PATH}:" in
+  *":${INSTALL_DIR}:"*)
+    echo "Run 'spettro' to get started."
+    ;;
+  *)
+    echo ""
+    echo "${INSTALL_DIR} is not on your PATH. Add it, e.g.:"
+    echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.bashrc  # or ~/.zshrc"
+    ;;
+esac
