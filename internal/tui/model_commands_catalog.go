@@ -36,6 +36,7 @@ var allCommands = []commandDef{
 	{"/think", "set extended-thinking level (alias of /thinking)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
+	{"/update", "update spettro to the latest release"},
 	{"/exit", "exit spettro"},
 }
 
@@ -131,6 +132,7 @@ func isInstantCommand(input string) bool {
 		"/mode", "/next",
 		"/remote",
 		"/telegram", "/tg",
+		"/update",
 		"/exit", "/quit":
 		return true
 	case "/plan":
@@ -158,6 +160,7 @@ func isInstantCommand(input string) bool {
 const helpText = `commands:
   /help          this message
   /exit /quit    quit spettro  (or ctrl+c twice)
+  /update        download and install the latest release, then restart
   /login         sign in to your Spettro subscription (opens browser)
   /logout        sign out of your Spettro subscription
   /mode          cycle to next mode  (or shift+tab)

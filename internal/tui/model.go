@@ -21,6 +21,8 @@ import (
 	"spettro/internal/spettro"
 	"spettro/internal/storage"
 	"spettro/internal/telegram"
+	"spettro/internal/update"
+	"spettro/internal/version"
 )
 
 const coAuthorInfo = "Co-Authored-By: Spettro <spettro@eyed.to>"
@@ -390,6 +392,16 @@ type Model struct {
 
 	telegramRelay *telegram.Relay
 
+	// updateAvailable is populated by a background version check on startup;
+	// nil means none was found (or the check hasn't completed / failed —
+	// failures are silent since this is a passive background check).
+	updateAvailable *update.Release
+	updateBusy      bool
+	// relaunchBinary is set once /update has finished installing a new
+	// binary. main() reads it via RelaunchPath after the TUI exits and execs
+	// into it so the restart is seamless.
+	relaunchBinary string
+
 	// startupCmds are tea.Cmds that need to fire on Init. Populated by
 	// New() when initial state requires background work (e.g. autostarting
 	// the Telegram relay) before the first tea event is processed.
@@ -489,6 +501,12 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	// synchronously here would block the first paint (seen: ~56s from $HOME).
 	m.lastRepoScanAt = time.Now()
 	m.startupCmds = append(m.startupCmds, scanRepoFilesCmd(cwd))
+	// Skip the update check entirely for from-source ("dev") builds — there
+	// is no meaningful version to compare, and self-replacing a dev binary
+	// with an official release would surprise a developer.
+	if version.App != "dev" {
+		m.startupCmds = append(m.startupCmds, checkUpdateCmd())
+	}
 	if cmd := m.autostartTelegram(); cmd != nil {
 		m.startupCmds = append(m.startupCmds, cmd)
 	}
@@ -1012,6 +1030,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleLoginPolled(msg)
 	case spettroLoadedMsg:
 		return m.handleSpettroLoaded(msg)
+	case updateCheckMsg:
+		return m.handleUpdateCheck(msg)
+	case updateAppliedMsg:
+		return m.handleUpdateApplied(msg)
 	case repoFilesScannedMsg:
 		m.repoFiles = msg.files
 		m.lastRepoScanAt = time.Now()
@@ -1571,6 +1593,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.pushSystemMsg(helpText)
 	case "/exit", "/quit":
 		return m, tea.Quit
+	case "/update":
+		return m.runUpdateCommand()
 	case "/mode", "/next":
 		m.mode = nextAgent(m.manifest, m.mode)
 		m.persistUIState()
