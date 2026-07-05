@@ -2,14 +2,19 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"charm.land/fantasy"
+	openai "github.com/openai/openai-go/v3"
 
 	"spettro/internal/budget"
 	"spettro/internal/models"
@@ -260,7 +265,35 @@ func (m *Manager) HasModel(providerName, modelName string) bool {
 	return false
 }
 
+// Send dispatches req and transparently waits out rate limits rather than
+// surfacing them as errors. The only rate limit this currently applies to is
+// the Spettro Subscription overflow tier: pro/max accounts get throttled onto
+// a free-tier model once their credit budget is exhausted, and the backend always returns 429 with
+// a bounded Retry-After for that specific case, so retrying is guaranteed to
+// eventually succeed. Any other error (including 429s from other providers)
+// is returned immediately.
 func (m *Manager) Send(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
+	for {
+		resp, err := m.sendOnce(ctx, providerName, modelName, req)
+		if err == nil {
+			return resp, nil
+		}
+		retryAfter, ok := rateLimitRetryAfter(providerName, err)
+		if !ok {
+			return Response{}, err
+		}
+		if req.OnRateLimit != nil {
+			req.OnRateLimit(retryAfter)
+		}
+		select {
+		case <-time.After(retryAfter):
+		case <-ctx.Done():
+			return Response{}, ctx.Err()
+		}
+	}
+}
+
+func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
 	m.mu.RLock()
 	apiKey := m.apiKeys[providerName]
 	baseURL := m.providerAPIs[providerName]
@@ -322,6 +355,65 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		return Response{}, err
 	}
 	return finalizeResponse(resp, providerName, modelName, allParts), nil
+}
+
+// defaultRateLimitRetryAfter is used when a 429 carries no (or an
+// unparsable) Retry-After header. It matches the backend overflow bucket's
+// worst-case refill window (6s) plus the same +1s margin the backend itself
+// adds when it does send the header.
+const defaultRateLimitRetryAfter = 7 * time.Second
+
+// rateLimitRetryAfter reports how long to wait before retrying req after err,
+// or false if err is not a rate limit the CLI should wait out. Only the
+// Spettro Subscription provider is eligible: it is the sole source of the
+// overflow-tier 429 (pro/max accounts throttled onto a free model once their
+// budget is exhausted), which always resolves on its own within a few
+// seconds. 429s from any other provider are treated as ordinary errors.
+func rateLimitRetryAfter(providerName string, err error) (time.Duration, bool) {
+	if providerName != spettroProviderID {
+		return 0, false
+	}
+	statusCode, header, ok := httpErrorDetails(err)
+	if !ok || statusCode != http.StatusTooManyRequests {
+		return 0, false
+	}
+	return retryAfterDuration(header), true
+}
+
+// httpErrorDetails unwraps err looking for the HTTP status code and response
+// headers of the failed request, checking both the fantasy SDK's wrapper
+// (used by the streaming/non-streaming Spettro path) and the raw openai-go
+// error (used by the legacy adapter path, e.g. when images are attached).
+func httpErrorDetails(err error) (statusCode int, header http.Header, ok bool) {
+	var providerErr *fantasy.ProviderError
+	if errors.As(err, &providerErr) {
+		h := make(http.Header, len(providerErr.ResponseHeaders))
+		for k, v := range providerErr.ResponseHeaders {
+			h.Set(k, v)
+		}
+		return providerErr.StatusCode, h, true
+	}
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) && apiErr.Response != nil {
+		return apiErr.StatusCode, apiErr.Response.Header, true
+	}
+	return 0, nil, false
+}
+
+func retryAfterDuration(header http.Header) time.Duration {
+	v := header.Get("Retry-After")
+	if v == "" {
+		return defaultRateLimitRetryAfter
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return defaultRateLimitRetryAfter
 }
 
 func legacyAdapterFor(providerName, apiKey, baseURL string) (Adapter, error) {

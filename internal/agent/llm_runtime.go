@@ -380,6 +380,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		if step == 1 && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
 		}
+		if cfg.ToolCallback != nil {
+			req.OnRateLimit = func(d time.Duration) {
+				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
+			}
+		}
 		var demux *streamDemux
 		if cfg.StreamCallback != nil {
 			// Clear any draft left by a previous step before this one streams.

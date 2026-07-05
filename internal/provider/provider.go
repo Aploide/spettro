@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // ThinkingLevel selects how much "extended thinking" / reasoning compute the
@@ -158,6 +159,10 @@ type Request struct {
 	// reasoning deltas arrive. Streaming is best-effort: paths that cannot
 	// stream still return the full Response and simply never call OnStream.
 	OnStream func(StreamEvent)
+	// OnRateLimit, when non-nil, is called just before Manager.Send sleeps to
+	// honour a provider-issued rate limit (currently: the Spettro Subscription
+	// overflow tier's 429/Retry-After) instead of surfacing it as an error.
+	OnRateLimit func(time.Duration)
 }
 
 type Response struct {
