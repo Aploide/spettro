@@ -16,6 +16,7 @@ import (
 	"spettro/internal/sandbox"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
+	"spettro/internal/update"
 )
 
 func main() {
@@ -152,6 +153,15 @@ func main() {
 		fatal("runtime error: %v", err)
 	}
 	tui.PrintGoodbye(final)
+
+	// /update installs the new binary in place before quitting; relaunch
+	// into it now so the restart is seamless. On success this does not
+	// return.
+	if path := tui.RelaunchPath(final); path != "" {
+		if err := update.Relaunch(path); err != nil {
+			fmt.Fprintf(os.Stderr, "spettro was updated, but could not restart automatically: %v\nrun spettro again to use the new version.\n", err)
+		}
+	}
 }
 
 func fatal(format string, args ...any) {
