@@ -84,7 +84,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	if c.ProviderManager.SupportsReasoning(c.ProviderName(), c.ModelName()) {
 		thinking = provider.ThinkingMedium
 	}
-	out, traces, tokens, contextTokens, _, _, err := runToolLoop(ctx, toolLoopConfig{
+	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
@@ -105,12 +105,13 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	if err != nil {
 		return RunResult{}, err
 	}
-	main, _ := stripThinkTags(out)
+	main, _ := stripThinkTags(res.content)
 	return RunResult{
 		Content:       strings.TrimSpace(main),
-		Tools:         traces,
-		TokensUsed:    tokens,
-		ContextTokens: contextTokens,
+		Tools:         res.traces,
+		TokensUsed:    res.tokens,
+		ContextTokens: res.contextTokens,
+		Messages:      res.messages,
 	}, nil
 }
 
@@ -120,9 +121,18 @@ type toolLoopConfig struct {
 	// History is an optional bounded transcript of prior conversation turns
 	// (user/assistant), rendered into the prompt as a "Conversation so far"
 	// section before the current Task. Empty means a fresh, first-turn run.
+	// Only consulted when Messages is empty (legacy/degraded path, e.g. the
+	// first turn after resuming a session saved without structured context).
 	History string
-	CWD     string
-	AgentID string
+	// Messages is the structured prior conversation carried across turns,
+	// exactly as returned by the previous run (assistant turns, tool calls and
+	// tool results included). When non-empty the loop appends a task-only user
+	// turn to it instead of rebuilding a first message, keeping the request
+	// prefix byte-identical with prior requests so provider prompt caching
+	// keeps hitting and no generated tokens are discarded between turns.
+	Messages []provider.Message
+	CWD      string
+	AgentID  string
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
@@ -216,23 +226,38 @@ type parallelResult struct {
 	status  string
 }
 
-// runToolLoop returns the final output, the tool traces, the cumulative token
-// count (sum of every step's prompt+completion — the session COST), the
-// approximate context occupancy (the largest single-step prompt+completion,
-// which best estimates how full the window is — see EFF-3), and an error.
+// toolLoopResult carries everything a run produces.
 //
-// Cost and occupancy are deliberately distinct: each step's prompt re-embeds
-// the rolling history, so summing every step double-counts the same context.
-// The gauge must use occupancy, not the cumulative sum.
-func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, int, bool, string, error) {
+// tokens is the cumulative count across all LLM calls (sum of every step's
+// prompt+completion — the session COST); contextTokens approximates context
+// occupancy (the largest single-step prompt+completion — see EFF-3). They are
+// deliberately distinct: each step's prompt re-embeds the rolling history, so
+// summing every step double-counts the same context. The gauge must use
+// occupancy, not the cumulative sum.
+//
+// messages is the full post-run conversation (prior history + this turn's
+// user task, tool calls/results, and the final assistant answer). Callers
+// pass it back as the next turn's cfg.Messages so the provider sees a stable,
+// growing prefix — the prompt-cache contract.
+type toolLoopResult struct {
+	content       string
+	traces        []ToolTrace
+	tokens        int
+	contextTokens int
+	goalComplete  bool
+	goalSummary   string
+	messages      []provider.Message
+}
+
+func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error) {
 	if cfg.ProviderManager == nil {
-		return "", nil, 0, 0, false, "", fmt.Errorf("missing provider manager")
+		return toolLoopResult{}, fmt.Errorf("missing provider manager")
 	}
 	if cfg.ProviderName == nil || cfg.ModelName == nil {
-		return "", nil, 0, 0, false, "", fmt.Errorf("missing provider/model selectors")
+		return toolLoopResult{}, fmt.Errorf("missing provider/model selectors")
 	}
 	if strings.TrimSpace(cfg.UserTask) == "" {
-		return "", nil, 0, 0, false, "", fmt.Errorf("empty task")
+		return toolLoopResult{}, fmt.Errorf("empty task")
 	}
 
 	var totalTokens int
@@ -312,16 +337,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, 0, false, "", err
+		return toolLoopResult{}, err
 	}
 	runtime.allowedShell = allowedShell
 	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
 	if err != nil {
-		return "", nil, 0, 0, false, "", err
+		return toolLoopResult{}, err
 	}
 	runtime.hooksConfig = hooksCfg
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
-		return "", nil, 0, 0, false, "", err
+		return toolLoopResult{}, err
 	}
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
@@ -330,6 +355,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		}
 	}
 	usedTool := false
+	imagesSent := false
 	var traces []ToolTrace
 
 	// Detect whether the selected model supports native tool calling and build
@@ -343,13 +369,46 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		}
 	}
 
-	// Seed the message array with the first user turn (task + working dir + history).
-	convMsgs := []provider.Message{
-		{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
+	// Seed the message array. With a carried structured history the new turn is
+	// appended after it — the carried prefix must stay byte-identical to what
+	// the provider already cached. Without one, the first user turn is built
+	// fresh (task + working dir + optional legacy history transcript).
+	var convMsgs []provider.Message
+	if len(cfg.Messages) > 0 {
+		convMsgs = make([]provider.Message, 0, len(cfg.Messages)+8)
+		convMsgs = append(convMsgs, cfg.Messages...)
+		convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: buildTurnUserMessage(cfg)})
+	} else {
+		convMsgs = []provider.Message{
+			{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
+		}
 	}
 
-	for step := 1; ; step++ {
-		system := buildSystemString(cfg, step, useNativeTools)
+	// finish appends the final assistant turn so the returned conversation is
+	// complete and reusable as the next turn's prefix.
+	finish := func(content string, goalDone bool, goalSummary string) (toolLoopResult, error) {
+		if strings.TrimSpace(content) != "" {
+			last := len(convMsgs) - 1
+			if last < 0 || convMsgs[last].Role != provider.RoleAssistant || convMsgs[last].Content != content {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: content})
+			}
+		}
+		return toolLoopResult{
+			content:       content,
+			traces:        traces,
+			tokens:        totalTokens,
+			contextTokens: contextTokens,
+			goalComplete:  goalDone,
+			goalSummary:   goalSummary,
+			messages:      convMsgs,
+		}, nil
+	}
+
+	// The system prompt is intentionally built once: it must not vary between
+	// steps or the provider-side prompt cache misses on every call.
+	system := buildSystemString(cfg, useNativeTools)
+
+	for {
 		// In-loop compaction: summarize older turns when context pressure
 		// approaches the window. Fires for all runs (the loop is unbounded).
 		// On error, keep convMsgs as-is — never abort a run for compaction.
@@ -366,7 +425,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			allContent = append(allContent, m.Content)
 		}
 		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
-			return "", traces, totalTokens, contextTokens, false, "", err
+			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, err
 		}
 		req := provider.Request{
 			System:    system,
@@ -377,8 +436,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		if useNativeTools {
 			req.Tools = nativeToolSpecs
 		}
-		if step == 1 && len(cfg.Images) > 0 {
+		if !imagesSent && len(cfg.Images) > 0 {
 			req.Images = cfg.Images
+			imagesSent = true
 		}
 		if cfg.ToolCallback != nil {
 			req.OnRateLimit = func(d time.Duration) {
@@ -404,7 +464,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			demux.flush()
 		}
 		if err != nil {
-			return "", traces, totalTokens, contextTokens, false, "", fmt.Errorf("agent call failed: %w", err)
+			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
 		}
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
@@ -444,17 +504,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 					IsErr:  res.status == "error",
 				}
 			}
+			// Tool results are appended before any exit check: an assistant
+			// tool-call turn without its matching results is an invalid prefix
+			// for the next request (and would poison the carried history).
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, contextTokens, false, "", nil
+				return finish(runtime.stopMessage(), false, "")
 			}
 			if runtime.goalIsComplete() {
 				summary := runtime.goalSummary
 				if summary == "" {
 					summary = strings.TrimSpace(main)
 				}
-				return summary, traces, totalTokens, contextTokens, true, summary, nil
+				return finish(summary, true, summary)
 			}
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
 			continue
 		}
 
@@ -470,7 +533,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
 				continue
 			}
-			return strings.TrimSpace(main), traces, totalTokens, contextTokens, false, "", nil
+			return finish(strings.TrimSpace(main), false, "")
 		}
 
 		// Text protocol path (fallback for models without native tool support).
@@ -489,20 +552,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				// human-facing tool logging is disabled in the manifest.
 				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
 			}
+			for _, perr := range parseErrs {
+				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
+			}
+			// Feedback lands in the history before any exit check so the carried
+			// conversation never ends on an unanswered tool request.
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n")})
 			if runtime.shouldStop() {
-				return runtime.stopMessage(), traces, totalTokens, contextTokens, false, "", nil
+				return finish(runtime.stopMessage(), false, "")
 			}
 			if runtime.goalIsComplete() {
 				summary := runtime.goalSummary
 				if summary == "" {
 					summary = strings.TrimSpace(main)
 				}
-				return summary, traces, totalTokens, contextTokens, true, summary, nil
+				return finish(summary, true, summary)
 			}
-			for _, perr := range parseErrs {
-				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
-			}
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n")})
 			continue
 		}
 
@@ -518,7 +583,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
 				continue
 			}
-			return strings.TrimSpace(final), traces, totalTokens, contextTokens, false, "", nil
+			return finish(strings.TrimSpace(final), false, "")
 		}
 
 		// Plain text without FINAL prefix and without a tool call.
@@ -531,7 +596,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			}
 			continue
 		}
-		return main, traces, totalTokens, contextTokens, false, "", nil
+		return finish(main, false, "")
 	}
 }
 

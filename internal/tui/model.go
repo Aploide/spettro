@@ -94,6 +94,9 @@ type agentDoneMsg struct {
 	// this to decide whether to stop or continue.
 	goalComplete bool
 	goalSummary  string
+	// messages is the full structured post-run conversation (RunResult.Messages),
+	// stored as the next turn's cache-stable prefix.
+	messages []provider.Message
 }
 
 type planDoneMsg struct {
@@ -102,6 +105,9 @@ type planDoneMsg struct {
 	tokensUsed    int
 	contextTokens int
 	err           error
+	// messages mirrors agentDoneMsg.messages: the structured post-run
+	// conversation carried into the next turn.
+	messages []provider.Message
 }
 
 type commitDoneMsg struct {
@@ -262,6 +268,14 @@ type Model struct {
 	cfg  config.UserConfig
 
 	messages []ChatMessage
+
+	// convHistory is the structured model-facing conversation carried across
+	// turns (user/assistant turns, tool calls and tool results), exactly as
+	// returned by the last run's RunResult.Messages. Passing it back verbatim
+	// keeps the provider request prefix byte-stable so prompt caching hits and
+	// previously generated tokens are never re-summarized or discarded. It is
+	// distinct from m.messages, which is the human-facing transcript.
+	convHistory []provider.Message
 
 	inputHistory    []string
 	historyIndex    int
@@ -682,6 +696,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.publishRemote("assistant_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
+			// Adopt the run's structured conversation as the next turn's carried
+			// history: reusing it verbatim is what keeps the prompt-cache prefix
+			// stable and preserves tool calls/results for the model.
+			if len(msg.messages) > 0 {
+				m.convHistory = msg.messages
+			}
 			// Fold the live-streamed reasoning into the final message and drop
 			// the transient draft blocks before appending the authoritative
 			// result (which always supersedes whatever was streamed live).
@@ -762,6 +782,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.publishRemote("plan_error", map[string]interface{}{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
+			if len(msg.messages) > 0 {
+				m.convHistory = msg.messages
+			}
 			m.pendingPlan = msg.plan
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleAssistant,
@@ -853,6 +876,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content: compactSummaryPrefix + "\n\n" + msg.summary,
 				At:      time.Now(),
 			}}
+			// Reseed the carried structured history from the summary. The old
+			// prefix is gone (one deliberate cache miss); every turn after this
+			// extends the new prefix and caches again.
+			m.convHistory = compactedHistorySeed(msg.summary)
 		}
 		m.publishRemoteState("compact_done")
 		m.refreshViewport()
@@ -1720,6 +1747,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
+		m.convHistory = nil
 		m.sessionID = ""
 		m.todos = nil
 		// Occupancy resets with the conversation; keep the gauge honest.
