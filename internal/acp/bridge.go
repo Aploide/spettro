@@ -39,9 +39,13 @@ type acpSession struct {
 	agentID  string
 	manifest config.AgentManifest
 	mediaDir string
-	// history is the bounded oldest-first transcript of prior turns, in the
-	// same "user:/assistant:" line format the TUI feeds LLMAgent.History.
-	history []string
+	// history is the structured conversation carried across prompt turns,
+	// exactly as returned by the last run's RunResult.Messages (assistant
+	// turns, tool calls and tool results included). Passing it back verbatim
+	// keeps the provider request prefix byte-stable so prompt caching hits;
+	// growth is bounded by the runtime's in-loop compaction, not by evicting
+	// lines here (head eviction would churn the prefix and defeat the cache).
+	history []provider.Message
 	// commandsAnnounced records that a prompt turn has re-sent the available
 	// commands list, the fallback for clients that dropped the initial
 	// announcement (see NewSession).
@@ -256,7 +260,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	b.mu.Lock()
 	agentID := s.agentID
 	manifest := s.manifest
-	history := strings.Join(s.history, "\n")
+	history := s.history
 	b.mu.Unlock()
 
 	spec, ok := manifest.AgentByID(agentID)
@@ -280,10 +284,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		Thinking:        thinking,
 		RequiredReads:   mentioned,
 		Images:          images,
-		History:         history,
+		Messages:        history,
 		Manifest:        &manifest,
 		SandboxState:    b.opts.SandboxState,
 		SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
+		ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
 		StreamCallback:  turn.onStream,
 		ToolCallback:    turn.onTool,
 		ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
@@ -309,12 +314,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content))
 	}
 
-	b.mu.Lock()
-	s.appendHistory("user: " + singleLineHistory(task))
-	if result.Content != "" {
-		s.appendHistory("assistant: " + singleLineHistory(result.Content))
+	if len(result.Messages) > 0 {
+		b.mu.Lock()
+		s.history = result.Messages
+		b.mu.Unlock()
 	}
-	b.mu.Unlock()
 
 	return acpsdk.PromptResponse{
 		StopReason: acpsdk.StopReasonEndTurn,
@@ -465,35 +469,6 @@ func (b *bridge) SetSessionConfigOption(_ context.Context, params acpsdk.SetSess
 	return acpsdk.SetSessionConfigOptionResponse{
 		ConfigOptions: buildConfigOptions(s, &cfg, b.opts.Providers),
 	}, nil
-}
-
-// maxHistoryBytes mirrors the TUI's maxConversationHistoryBytes: the bounded
-// cross-turn transcript fed back to the model, most-recent turns winning.
-const maxHistoryBytes = 32 * 1024
-
-// appendHistory adds one formatted turn line and evicts oldest lines past the
-// byte cap. Caller holds the bridge mutex.
-func (s *acpSession) appendHistory(line string) {
-	s.history = append(s.history, line)
-	total := 0
-	for _, l := range s.history {
-		total += len(l) + 1
-	}
-	for total > maxHistoryBytes && len(s.history) > 1 {
-		total -= len(s.history[0]) + 1
-		s.history = s.history[1:]
-	}
-}
-
-// singleLineHistory collapses a turn to a single bounded line, matching the
-// TUI's transcript format so prompts look identical across front-ends.
-func singleLineHistory(v string) string {
-	v = strings.Join(strings.Fields(v), " ")
-	const maxPerTurn = 4000
-	if len(v) > maxPerTurn {
-		v = v[:maxPerTurn] + " …(truncated)"
-	}
-	return v
 }
 
 // ensureMediaDir creates the session's media directory for decoded image

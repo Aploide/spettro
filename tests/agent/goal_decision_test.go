@@ -89,13 +89,13 @@ func TestShouldContinueGoal_NoProgressStall(t *testing.T) {
 	cwd := t.TempDir()
 	// Get the actual signature for this directory
 	actualSig := agent.WorkspaceSignature(cwd)
-	
+
 	state := &agent.GoalState{
 		Objective:       "test objective",
 		Iteration:       5,
 		NoProgress:      2, // Already 2 iterations with no progress
 		MaxIterations:   10,
-		NoProgressLimit: 3, // Stall after 3 consecutive no-progress
+		NoProgressLimit: 3,         // Stall after 3 consecutive no-progress
 		LastSignature:   actualSig, // Match the actual signature so it increments
 	}
 

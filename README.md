@@ -100,6 +100,12 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 
 ## Project docs
 
+- [Session Lifecycle](docs/session.md) — auto-save, resume, compact, clear
+- [Goal Mode](docs/goal.md) — autonomous `/goal` runs
+- [Runtime Hooks](docs/hooks.md) — custom bash middleware
+- [Clipboard and Attachments](docs/clipboard.md) — image paste, file attach
+- [First-Launch Onboarding](docs/onboarding.md)
+- [Spettro Subscription](docs/subscription.md) — login, plans, credits
 - [Agent Manifest](AGENTS.md)
 - [Agent Prompts](agents/README.md)
 - [Agent Skills](docs/skills.md)

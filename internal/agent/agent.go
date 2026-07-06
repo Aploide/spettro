@@ -59,6 +59,13 @@ type RunResult struct {
 	// GoalSummary is the summary text the agent provided when calling
 	// goal-complete. Empty if the agent didn't provide one.
 	GoalSummary string
+	// Messages is the full structured conversation after the run: the carried
+	// prior history plus this turn's user task, every tool call and result,
+	// and the final assistant answer. Callers hand it back as the next run's
+	// LLMAgent.Messages so the provider request keeps a byte-stable, growing
+	// prefix — that stability is what makes prompt caching hit and stops
+	// generated tokens from being thrown away between turns.
+	Messages []provider.Message
 }
 
 // Legacy stub types — kept so existing tests compile.
@@ -140,9 +147,13 @@ type LLMAgent struct {
 	Images          []string // only used on first LLM call (chat use case)
 	// History is an optional bounded transcript of prior conversation turns,
 	// surfaced to the model as a "Conversation so far" section so follow-up
-	// turns have memory. Empty == first turn (no behavior change). The caller
-	// is responsible for bounding it (see maxHistoryBytes).
-	History      string
+	// turns have memory. Only consulted when Messages is empty — the degraded
+	// path for resumed sessions whose structured context was not persisted.
+	History string
+	// Messages is the structured prior conversation, exactly as returned in
+	// the previous RunResult.Messages. Preferred over History: it preserves
+	// tool calls/results verbatim and keeps the request prefix cache-stable.
+	Messages     []provider.Message
 	ToolCallback func(ToolTrace)
 	// StreamCallback, when set, receives live thinking/answer chunks as the
 	// model streams. Set only on the top-level run (chat/coding/plan/ask).
@@ -190,10 +201,11 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	}
 	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
 	catalog = filterDisabledSkills(catalog)
-	out, traces, tokens, contextTokens, goalComplete, goalSummary, err := runToolLoop(ctx, toolLoopConfig{
+	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		History:         a.History,
+		Messages:        a.Messages,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
 		RequireToolCall: requireToolCall,
@@ -228,16 +240,17 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
 	}
-	out = strings.TrimSpace(out)
+	out := strings.TrimSpace(res.content)
 	out = stripLeakedToolCalls(out)
 	main, _ := stripThinkTags(out)
 	return RunResult{
 		Content:       strings.TrimSpace(main),
-		Tools:         traces,
-		TokensUsed:    tokens,
-		ContextTokens: contextTokens,
-		GoalComplete:  goalComplete,
-		GoalSummary:   goalSummary,
+		Tools:         res.traces,
+		TokensUsed:    res.tokens,
+		ContextTokens: res.contextTokens,
+		GoalComplete:  res.goalComplete,
+		GoalSummary:   res.goalSummary,
+		Messages:      res.messages,
 	}, nil
 }
 

@@ -1512,6 +1512,10 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.todos = state.Todos
 			m.parallelAgents = nil
 			m.activityFeed = nil
+			// The structured carried history belongs to the previous in-memory
+			// conversation; drop it so the resumed session's first turn rebuilds
+			// context from the loaded transcript instead.
+			m.convHistory = nil
 			m.messages = make([]ChatMessage, 0, len(state.Messages))
 			for _, cm := range state.Messages {
 				m.messages = append(m.messages, ChatMessage{

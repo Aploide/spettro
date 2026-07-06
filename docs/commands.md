@@ -8,10 +8,14 @@
 | `/exit`, `/quit` | Quit Spettro. |
 | `/mode`, `/next` | Cycle active manifest agent/mode. |
 | `/connect` | Open provider/local-endpoint connect dialog. |
-| `/login` | Sign in to a Spettro subscription (device flow). |
-| `/logout` | Sign out and remove the saved Spettro subscription key. |
+| `/login` | Sign in to a Spettro subscription (device flow). See [Subscription](subscription.md). |
+| `/logout` | Sign out and remove the saved Spettro subscription key. See [Subscription](subscription.md). |
 | `/models` | Open model selector dialog (connected providers). |
 | `/models <provider:model> [api_key]` | Set model directly; optional API key saves for provider. |
+| `/goal <objective>` | Start an autonomous goal-mode run. See [Goal Mode](goal.md). |
+| `/goal stop` | Abandon the active goal and cancel any in-flight run. |
+| `/goal status` | Show the current goal's iteration count, no-progress counter, and elapsed time. |
+| `/goal resume` | Resume an unfinished goal from a loaded session. |
 | `/permission <ask-first\|restricted\|yolo>` | Set execution policy. |
 | `/permissions [ask-first\|restricted\|yolo]` | Show or set policy alias. |
 | `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
@@ -63,8 +67,14 @@
 | `Ctrl+O` | Toggle expanded context/tool details in side panel. |
 | `Ctrl+C` twice | Quit with safety confirmation. |
 | `Ctrl+Q` | Quit immediately. |
+| `Ctrl+V` | Paste image from clipboard (vision-capable models only). |
+| `Ctrl+F` | Attach a workspace file path to your next prompt. |
+| `Ctrl+R` | Remove the most recent attachment. |
+| `Ctrl+Y` | Copy the last assistant response to clipboard. |
+| `Ctrl+T` | Toggle text-select mode (mouse capture on/off). |
 | `Up` / `Down` | Navigate command suggestions and dialogs. |
 | `Tab` | Move selection in dialogs/palettes. |
+| `Esc` | Interrupt the current agent run (stops and abandons goals). |
 
 ## Notes
 
@@ -75,3 +85,10 @@
 - `/connect` includes `Local endpoint (LM Studio/Ollama)` and probes `/v1/models`.
 - In `/models`, press `f` to toggle favorites for highlighted model.
 - Pressing `Enter` on a highlighted command suggestion inserts it first; pressing `Enter` again executes it.
+- `/goal` runs the **coding** orchestrator autonomously. Interrupt with `Esc` or `/goal stop`. Permission `yolo` is required for fully unattended operation; otherwise approval prompts pause the loop. See [Goal Mode](goal.md).
+- `/clear` **saves** the session first, then starts fresh. The saved session is available via `/resume`. See [Session Lifecycle](session.md).
+- `/compact` replaces the transcript with a summary. Auto-compact triggers at 85 % context window by default. See [Session Lifecycle](session.md).
+- `/login` and `/logout` manage your Spettro Subscription. See [Subscription](subscription.md).
+- Clipboard pasting (`Ctrl+V`), file attachments (`Ctrl+F`), and text-select mode (`Ctrl+T`) are described in [Clipboard and Attachments](clipboard.md).
+- The first-launch onboarding wizard is documented in [Onboarding](onboarding.md).
+- Runtime hooks (`/hooks`) are documented in [Runtime Hooks](hooks.md).

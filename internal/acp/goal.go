@@ -49,7 +49,11 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 	b.mu.Lock()
 	manifest := s.manifest
 	cwd := s.cwd
-	history := strings.Join(s.history, "\n")
+	// The goal loop starts from the session's carried conversation and then
+	// threads each iteration's RunResult.Messages into the next, so every
+	// iteration extends a byte-stable prompt prefix (cache hits) instead of
+	// rediscovering the workspace from scratch.
+	history := s.history
 	b.mu.Unlock()
 
 	spec, ok := manifest.AgentByID("coding")
@@ -84,8 +88,11 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			objective, outcome, state.Iteration, time.Since(state.StartedAt).Round(time.Second))
 		b.mu.Lock()
 		s.lastGoal = summary
-		s.appendHistory("user: " + singleLineHistory("/goal "+objective))
-		s.appendHistory("assistant: " + singleLineHistory(outcome))
+		// Adopt the loop's final conversation so follow-up prompts in this
+		// session keep the goal run's context and cache prefix.
+		if len(history) > 0 {
+			s.history = history
+		}
 		b.mu.Unlock()
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(outcome))
 		return acpsdk.PromptResponse{
@@ -118,7 +125,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			CWD:             cwd,
 			MaxTokens:       cfg.TokenBudget,
 			Thinking:        thinking,
-			History:         history,
+			Messages:        history,
 			Manifest:        &manifest,
 			SandboxState:    b.opts.SandboxState,
 			SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
@@ -152,6 +159,9 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 		retries = 0
 		totalTokens += result.TokensUsed
+		if len(result.Messages) > 0 {
+			history = result.Messages
+		}
 		if result.Content != "" {
 			turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content + "\n"))
 		}

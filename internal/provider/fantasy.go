@@ -168,10 +168,17 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 			}
 		}
 		if providerName == "anthropic" {
+			// Two cache breakpoints: the system prompt and the final message.
+			// Marking the FINAL message caches the whole request — including
+			// the newest tool results, which are often the largest blocks — so
+			// the next call in the loop reads everything before it from cache.
+			// (Anthropic looks the prefix up from previously-written
+			// breakpoints, so moving the marker forward each step is the
+			// intended incremental pattern.)
 			cc := anthropicEphemeralOpts()
 			prompt[0].ProviderOptions = cc
 			if len(prompt) >= 2 {
-				prompt[len(prompt)-2].ProviderOptions = cc
+				prompt[len(prompt)-1].ProviderOptions = cc
 			}
 		}
 	} else {

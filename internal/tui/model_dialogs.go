@@ -1622,6 +1622,22 @@ func (m Model) buildConversationHistory() string {
 	return strings.Join(kept, "\n")
 }
 
+// compactedHistorySeed builds the structured conversation that replaces the
+// carried history after a /compact: a user turn holding the summary and a
+// short assistant acknowledgment. It starts with a user turn (a provider
+// requirement) and gives every subsequent turn a stable prefix to extend, so
+// prompt caching resumes immediately after the one unavoidable compaction miss.
+func compactedHistorySeed(summary string) []provider.Message {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return nil
+	}
+	return []provider.Message{
+		{Role: provider.RoleUser, Content: "Context from the conversation so far (compacted summary):\n" + summary},
+		{Role: provider.RoleAssistant, Content: "Understood. I have the compacted context and will continue from there."},
+	}
+}
+
 // singleLineHistory collapses a turn to a single line so the transcript stays
 // compact and unambiguous in the prompt. Very long turns are truncated to keep
 // any single entry from dominating the budget.
@@ -1675,9 +1691,16 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	agentID := spec.ID
 
 	manifest := m.manifest
-	// Bounded cross-turn history so follow-up turns (and /compact) have memory.
-	// Built before the goroutine closure to capture the current m.messages.
-	history := m.buildConversationHistory()
+	// Structured cross-turn history: the previous run's conversation is passed
+	// back verbatim so the provider sees a byte-stable, growing prefix (prompt
+	// caching) and keeps every tool call/result. The flattened transcript is
+	// only the degraded fallback for the first turn after resuming a session,
+	// where no structured context exists yet.
+	convHistory := m.convHistory
+	history := ""
+	if len(convHistory) == 0 {
+		history = m.buildConversationHistory()
+	}
 	a := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: pm,
@@ -1689,6 +1712,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		RequiredReads:   mentionedFiles,
 		Images:          images,
 		History:         history,
+		Messages:        convHistory,
 		Manifest:        &manifest,
 		SandboxState:    m.sandboxState,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
@@ -1773,9 +1797,9 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			}
 			if agentID == "plan" || spec.Mode == "planning" {
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
-				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens}
+				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, messages: result.Messages}
 			}
-			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary}
+			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary, messages: result.Messages}
 		},
 	)
 }

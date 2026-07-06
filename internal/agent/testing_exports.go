@@ -57,15 +57,23 @@ func BuildToolSchemaSectionForTesting(allowedTools []string) string {
 // BuildLoopPromptForTesting concatenates the system string and the initial user
 // message for a minimal config so tests can assert how the cross-turn
 // conversation History is surfaced. The toolLog argument is ignored (tool
-// results are now separate message turns, not a flat log string).
-func BuildLoopPromptForTesting(systemPrompt, userTask, history, _ string, step int) string {
+// results are now separate message turns, not a flat log string). The step
+// argument is likewise ignored: the system prompt is deliberately identical on
+// every step so the provider prompt cache keeps hitting.
+func BuildLoopPromptForTesting(systemPrompt, userTask, history, _ string, _ int) string {
 	cfg := toolLoopConfig{
 		SystemPrompt: systemPrompt,
 		UserTask:     userTask,
 		History:      history,
 		CWD:          "/tmp/x",
 	}
-	return buildSystemString(cfg, step, false) + "\n\n" + buildInitialUserMessage(cfg)
+	return buildSystemString(cfg, false) + "\n\n" + buildInitialUserMessage(cfg)
+}
+
+// BuildTurnUserMessageForTesting exposes the follow-up-turn user message built
+// when a structured prior conversation is carried in.
+func BuildTurnUserMessageForTesting(userTask string, requiredReads []string) string {
+	return buildTurnUserMessage(toolLoopConfig{UserTask: userTask, RequiredReads: requiredReads, CWD: "/tmp/x"})
 }
 
 func TailTrimHistoryForTesting(history string, maxBytes int) string {

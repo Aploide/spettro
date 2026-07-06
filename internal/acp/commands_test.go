@@ -105,7 +105,10 @@ func TestHandleSlashCommand_Models(t *testing.T) {
 
 func TestHandleSlashCommand_Clear(t *testing.T) {
 	s := testSession(t)
-	s.history = []string{"user: hi", "assistant: hello"}
+	s.history = []provider.Message{
+		{Role: provider.RoleUser, Content: "hi"},
+		{Role: provider.RoleAssistant, Content: "hello"},
+	}
 	cfg := config.UserConfig{}
 
 	reply, _, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/clear")

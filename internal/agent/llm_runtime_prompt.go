@@ -115,7 +115,12 @@ func summarizeLoopToolArgs(name, args string) string {
 // buildSystemString returns the system-role content for the request.
 // When nativeTools is true the TOOL_CALL/FINAL text protocol is omitted because
 // the model receives tool schemas via the API and uses structured tool calls.
-func buildSystemString(cfg toolLoopConfig, step int, nativeTools bool) string {
+//
+// The result MUST be byte-for-byte identical for every step of a run (and every
+// turn of a session): the system prompt is the first segment of the provider
+// cache prefix, so any variation invalidates prompt caching for the entire
+// request. Never embed step counters, timestamps, or other per-call state here.
+func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
 		base = "You are an assistant."
@@ -135,7 +140,7 @@ func buildSystemString(cfg toolLoopConfig, step int, nativeTools bool) string {
 		}
 	}
 	if nativeTools {
-		return fmt.Sprintf("%s%s\n\nCurrent step: %d", base, commentGuidance, step)
+		return base + commentGuidance
 	}
 	toolList := strings.Join(cfg.AllowedTools, ", ")
 	schemaSection := buildToolSchemaSection(cfg.AllowedTools)
@@ -161,9 +166,7 @@ Rules:
 - Creating a brand-new file without reading is allowed.
 - Keep tool args minimal and valid JSON.
 - If a tool fails, adapt and continue.
-%s
-
-Current step: %d`, base, toolList, schemaSection, commentGuidance, step)
+%s`, base, toolList, schemaSection, commentGuidance)
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation
@@ -193,6 +196,32 @@ func buildInitialUserMessage(cfg toolLoopConfig) string {
 	}
 	sb.WriteString("\n\nWorking directory:\n")
 	sb.WriteString(cfg.CWD)
+	return sb.String()
+}
+
+// buildTurnUserMessage returns the user turn appended when a structured prior
+// conversation (cfg.Messages) is carried in. Unlike buildInitialUserMessage it
+// contains only this turn's task and required reads: the working directory and
+// any earlier context already live in the carried messages, and repeating them
+// here would both waste tokens and change the prompt prefix between turns.
+func buildTurnUserMessage(cfg toolLoopConfig) string {
+	var sb strings.Builder
+	sb.WriteString("Task:\n")
+	sb.WriteString(cfg.UserTask)
+	if len(cfg.RequiredReads) > 0 {
+		paths := make([]string, 0, len(cfg.RequiredReads))
+		for _, p := range cfg.RequiredReads {
+			p = filepath.ToSlash(strings.TrimSpace(p))
+			if p != "" {
+				paths = append(paths, p)
+			}
+		}
+		sort.Strings(paths)
+		if len(paths) > 0 {
+			sb.WriteString("\n\nRequired first reads (must be done with file-read before anything else):\n- ")
+			sb.WriteString(strings.Join(paths, "\n- "))
+		}
+	}
 	return sb.String()
 }
 

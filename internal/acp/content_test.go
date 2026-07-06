@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+
+	"spettro/internal/provider"
 )
 
 func TestPromptFromBlocks_TextAndResourceLink(t *testing.T) {
@@ -98,20 +100,21 @@ func TestToolLocations(t *testing.T) {
 	}
 }
 
-func TestAppendHistoryBounded(t *testing.T) {
+// TestSessionHistoryIsStructured pins the cross-turn contract: the session
+// stores the run's structured conversation verbatim (no flattening, no head
+// eviction), because any mutation of carried turns would change the provider
+// request prefix and defeat prompt caching.
+func TestSessionHistoryIsStructured(t *testing.T) {
 	s := &acpSession{}
-	line := "user: " + strings.Repeat("x", 1024)
-	for i := 0; i < 100; i++ {
-		s.appendHistory(line)
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: "Task:\ndo the thing"},
+		{Role: provider.RoleAssistant, Content: "done: " + strings.Repeat("x", 1024)},
 	}
-	total := 0
-	for _, l := range s.history {
-		total += len(l) + 1
+	s.history = msgs
+	if len(s.history) != 2 {
+		t.Fatalf("expected 2 carried messages, got %d", len(s.history))
 	}
-	if total > maxHistoryBytes {
-		t.Fatalf("history not bounded: %d bytes", total)
-	}
-	if len(s.history) == 0 {
-		t.Fatalf("history should keep the most recent lines")
+	if s.history[0].Content != msgs[0].Content || s.history[1].Content != msgs[1].Content {
+		t.Fatalf("carried history must be stored verbatim")
 	}
 }
