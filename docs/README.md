@@ -4,7 +4,13 @@
 - [Commands and keybindings](commands.md)
 - [Configuration and storage](configuration.md)
 - [Architecture overview](architecture.md)
+- [Session Lifecycle](session.md) — auto-save, resume, compact, clear, auto-compact
+- [Goal Mode](goal.md) — autonomous `/goal` runs
 - [Agent Skills](skills.md)
+- [Runtime Hooks](hooks.md) — custom bash middleware for tool events
+- [Clipboard and Attachments](clipboard.md) — image paste, file attach, text select
+- [First-Launch Onboarding](onboarding.md)
+- [Spettro Subscription](subscription.md) — login, plans, credits
 - [Remote control plane](remote.md)
 - [Agent Client Protocol (editor integration)](acp.md)
 - [Telegram relay](telegram.md)
