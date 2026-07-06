@@ -115,6 +115,12 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	fmt.Printf("Starting goal mode: %s\n", objective)
 	fmt.Printf("Max iterations: %d (0=unlimited), No-progress limit: %d\n", state.MaxIterations, state.NoProgressLimit)
 
+	// history carries the structured conversation across iterations so each
+	// one extends a byte-stable prompt prefix (provider cache hits) instead of
+	// re-exploring the workspace from a blank context. In-loop compaction
+	// bounds its growth.
+	var history []provider.Message
+
 	// Outer loop
 	for {
 		select {
@@ -141,6 +147,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
+			Messages:        history,
 			Manifest:        &manifest,
 			SandboxState:    sb,
 			SessionDir:      sessionDir,
@@ -175,6 +182,10 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			fmt.Fprintf(os.Stderr, "Agent error: %v\n", err)
 			// Continue to next iteration on transient errors
 			continue
+		}
+
+		if len(result.Messages) > 0 {
+			history = result.Messages
 		}
 
 		if result.Content != "" {

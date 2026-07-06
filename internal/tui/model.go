@@ -319,8 +319,8 @@ type Model struct {
 
 	pendingPlan string
 
-	banner      string
-	bannerKind  string
+	banner        string
+	bannerKind    string
 	bannerClearAt time.Time // when set, banner auto-clears at this time
 
 	ctrlCAt time.Time

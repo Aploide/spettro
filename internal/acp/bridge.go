@@ -471,35 +471,6 @@ func (b *bridge) SetSessionConfigOption(_ context.Context, params acpsdk.SetSess
 	}, nil
 }
 
-// maxHistoryBytes mirrors the TUI's maxConversationHistoryBytes: the bounded
-// cross-turn transcript fed back to the model, most-recent turns winning.
-const maxHistoryBytes = 32 * 1024
-
-// appendHistory adds one formatted turn line and evicts oldest lines past the
-// byte cap. Caller holds the bridge mutex.
-func (s *acpSession) appendHistory(line string) {
-	s.history = append(s.history, line)
-	total := 0
-	for _, l := range s.history {
-		total += len(l) + 1
-	}
-	for total > maxHistoryBytes && len(s.history) > 1 {
-		total -= len(s.history[0]) + 1
-		s.history = s.history[1:]
-	}
-}
-
-// singleLineHistory collapses a turn to a single bounded line, matching the
-// TUI's transcript format so prompts look identical across front-ends.
-func singleLineHistory(v string) string {
-	v = strings.Join(strings.Fields(v), " ")
-	const maxPerTurn = 4000
-	if len(v) > maxPerTurn {
-		v = v[:maxPerTurn] + " …(truncated)"
-	}
-	return v
-}
-
 // ensureMediaDir creates the session's media directory for decoded image
 // attachments.
 func ensureMediaDir(dir string) error {

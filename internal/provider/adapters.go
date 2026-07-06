@@ -13,6 +13,19 @@ import (
 	openaiOption "github.com/openai/openai-go/v3/option"
 )
 
+// lastUserIndex returns the index of the last plain user turn (the current
+// request) in msgs, or -1 if there is none. Tool-result turns are skipped:
+// they carry provider tool output, not user content, so attachments never
+// belong there.
+func lastUserIndex(msgs []Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleUser && len(msgs[i].ToolResults) == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
 // mediaTypeFromPath returns the MIME type for an image file based on extension.
 func mediaTypeFromPath(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -42,11 +55,14 @@ func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Req
 		if req.System != "" {
 			messages = append(messages, openai.SystemMessage(req.System))
 		}
-		firstUser := true
-		for _, m := range req.Messages {
+		// Images belong to the CURRENT turn — the last user message. Attaching
+		// them to the first would both bind them to a stale turn and mutate the
+		// carried history prefix, breaking provider-side prompt caching.
+		imageIdx := lastUserIndex(req.Messages)
+		for i, m := range req.Messages {
 			switch m.Role {
 			case RoleUser:
-				if firstUser && len(req.Images) > 0 {
+				if i == imageIdx && len(req.Images) > 0 {
 					var parts []openai.ChatCompletionContentPartUnionParam
 					for _, imgPath := range req.Images {
 						data, err := os.ReadFile(imgPath)
@@ -59,7 +75,6 @@ func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Req
 					}
 					parts = append(parts, openai.TextContentPart(m.Content))
 					messages = append(messages, openai.UserMessage(parts))
-					firstUser = false
 				} else {
 					messages = append(messages, openai.UserMessage(m.Content))
 				}
@@ -153,13 +168,16 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 			sysBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
 			params.System = []anthropic.TextBlockParam{sysBlock}
 		}
-		firstUser := true
+		// Images attach to the CURRENT turn (last user message), never the
+		// first: mutating an already-sent turn would change the cached prefix
+		// and force a full prompt-cache miss on every request of the session.
+		imageIdx := lastUserIndex(req.Messages)
 		var msgs []anthropic.MessageParam
-		for _, m := range req.Messages {
+		for i, m := range req.Messages {
 			switch m.Role {
 			case RoleUser:
 				var blocks []anthropic.ContentBlockParamUnion
-				if firstUser && len(req.Images) > 0 {
+				if i == imageIdx && len(req.Images) > 0 {
 					for _, imgPath := range req.Images {
 						data, err := os.ReadFile(imgPath)
 						if err != nil {
@@ -168,7 +186,6 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 						mt := mediaTypeFromPath(imgPath)
 						blocks = append(blocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
 					}
-					firstUser = false
 				}
 				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
 				msgs = append(msgs, anthropic.NewUserMessage(blocks...))
@@ -176,10 +193,13 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 				msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
 			}
 		}
-		if len(msgs) >= 2 {
-			penultimate := &msgs[len(msgs)-2]
-			if n := len(penultimate.Content); n > 0 {
-				last := &penultimate.Content[n-1]
+		// Second cache breakpoint on the final message (the system block holds
+		// the first): the next request extends this exact prefix, so marking
+		// the newest content is what makes the follow-up call a cache read.
+		if n := len(msgs); n > 0 {
+			final := &msgs[n-1]
+			if k := len(final.Content); k > 0 {
+				last := &final.Content[k-1]
 				if last.OfText != nil {
 					last.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
 				}
