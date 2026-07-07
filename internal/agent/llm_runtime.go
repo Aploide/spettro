@@ -156,6 +156,10 @@ type toolLoopConfig struct {
 	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
+	// Checkpoint, when set, is invoked synchronously right before any
+	// file-modifying tool executes (file-write, file-edit, shell), so the host
+	// can snapshot the working tree and conversation for /rewind.
+	Checkpoint      func(tool string)
 	Manifest        *config.AgentManifest
 	SandboxState    *SandboxState // session-scoped OS sandbox policy; nil = disabled
 	SessionDir      string
@@ -197,6 +201,7 @@ type toolRuntime struct {
 	maxTokens     int
 	thinkingLevel provider.ThinkingLevel
 	toolCallback  func(ToolTrace)
+	checkpoint    func(tool string)
 	sessionDir    string
 	agentID       string
 	parentID      string
@@ -293,6 +298,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		modelName:       cfg.ModelName,
 		maxTokens:       cfg.MaxTokens,
 		toolCallback:    cfg.ToolCallback,
+		checkpoint:      cfg.Checkpoint,
 		sessionDir:      cfg.SessionDir,
 		agentID:         cfg.AgentID,
 		parentID:        cfg.ParentAgentID,
@@ -852,6 +858,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
+	if r.checkpoint != nil && isMutatingTool(call.Tool) {
+		r.checkpoint(call.Tool)
+	}
 	switch call.Tool {
 	case "repo-search":
 		var args struct {
@@ -1208,6 +1217,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			MaxTokens:       r.maxTokens,
 			Thinking:        r.thinkingLevel,
 			ToolCallback:    r.toolCallback,
+			Checkpoint:      r.checkpoint,
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,
 			Manifest:        r.manifest,
@@ -1224,6 +1234,18 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}
+}
+
+// isMutatingTool reports whether a tool can modify the working tree and thus
+// warrants a pre-execution checkpoint. Shell tools are always treated as
+// mutating: classifying arbitrary commands reliably is not possible, and a
+// spurious checkpoint is cheap while a missed one is unrecoverable.
+func isMutatingTool(tool string) bool {
+	switch tool {
+	case "file-write", "file-edit", "shell-exec", "bash":
+		return true
+	}
+	return false
 }
 
 // skipDirs are directories to skip when walking the workspace.

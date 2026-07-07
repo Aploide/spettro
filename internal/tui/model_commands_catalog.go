@@ -36,6 +36,7 @@ var allCommands = []commandDef{
 	{"/think", "set extended-thinking level (alias of /thinking)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
+	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
 	{"/update", "update spettro to the latest release"},
 	{"/exit", "exit spettro"},
 }
@@ -195,8 +196,10 @@ const helpText = `commands:
   /telegram start|stop|status  control the Telegram relay
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
+  /rewind        restore files and/or conversation to a pre-edit checkpoint
 
 keys:
+  esc esc        open the rewind picker (when idle)
   shift+tab      cycle mode (plan → coding → ask)
   f2             cycle to next favorite model
   shift+f2       cycle to previous favorite model

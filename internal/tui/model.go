@@ -15,6 +15,7 @@ import (
 	"github.com/atotto/clipboard"
 
 	"spettro/internal/agent"
+	"spettro/internal/checkpoint"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
@@ -400,6 +401,20 @@ type Model struct {
 	resumeCursor int
 	resumeScroll int
 
+	// Checkpointing / rewind (TODO 01). checkpointer is opened lazily on the
+	// first agent run; checkpointerFailed latches an open failure so we don't
+	// retry (and re-warn) every run.
+	checkpointer       *checkpoint.Checkpointer
+	checkpointerFailed bool
+	showRewind         bool
+	rewindItems        []checkpoint.Checkpoint
+	rewindCursor       int
+	rewindScroll       int
+	rewindModePick     bool
+	rewindModeCursor   int
+	// lastEscAt drives the esc-esc shortcut that opens /rewind when idle.
+	lastEscAt time.Time
+
 	todos []session.Todo
 
 	remoteServer        *remote.Server
@@ -617,6 +632,7 @@ const (
 	modalLogin
 	modalOnboarding
 	modalResume
+	modalRewind
 	modalConnect
 	modalSelector
 	modalSetup
@@ -635,6 +651,8 @@ func (m Model) activeModal() modal {
 		return modalOnboarding
 	case m.showResume:
 		return modalResume
+	case m.showRewind:
+		return modalRewind
 	case m.showConnect:
 		return modalConnect
 	case m.showSelector:
@@ -1278,6 +1296,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTrust(msg)
 		case modalResume:
 			return m.updateResume(msg)
+		case modalRewind:
+			return m.updateRewind(msg)
 		case modalConnect:
 			return m.updateConnect(msg)
 		case modalSelector:
@@ -1606,6 +1626,12 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Double-esc while idle opens the rewind picker (like /rewind).
+		if !m.lastEscAt.IsZero() && time.Since(m.lastEscAt) < 500*time.Millisecond {
+			m.lastEscAt = time.Time{}
+			return m.openRewind()
+		}
+		m.lastEscAt = time.Now()
 		m.ta.Reset()
 		m.banner = ""
 		m.bannerKind = ""
@@ -1780,6 +1806,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleGoalCommand(input)
 	case "/permissions":
 		return m.handlePermissionsCommand(input)
+	case "/rewind":
+		return m.openRewind()
 	case "/resume":
 		items, err := session.List(m.store.GlobalDir, m.cwd)
 		if err != nil || len(items) == 0 {
