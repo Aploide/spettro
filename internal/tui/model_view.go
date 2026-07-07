@@ -2,18 +2,37 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/compact"
 	"spettro/internal/version"
 )
 
-func (m Model) View() string {
+// View assembles the frame and declares terminal features (alt screen, mouse
+// mode, focus reporting) on the returned tea.View, per the bubbletea v2
+// declarative model.
+func (m Model) View() tea.View {
+	v := tea.NewView(m.viewContent())
+	v.AltScreen = true
+	// Focus/blur events drive m.terminalFocused (desktop notifications).
+	v.ReportFocus = true
+	// ctrl+t toggles mouse capture off so the terminal's native text
+	// selection works (see the KeyPressMsg handler in update()).
+	if m.mouseCaptureOff {
+		v.MouseMode = tea.MouseModeNone
+	} else {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
+	return v
+}
+
+func (m Model) viewContent() string {
 	if !m.ready {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("\n  loading…")
 	}
@@ -49,7 +68,7 @@ func (m Model) View() string {
 		if innerH < 4 {
 			innerH = 4
 		}
-		overlay := m.viewCmdOverlay(m.vp.Width, innerH)
+		overlay := m.viewCmdOverlay(m.vp.Width(), innerH)
 		parts = []string{overlay, inputArea, statusBar}
 	} else {
 		eyes := renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)
@@ -207,7 +226,10 @@ func renderPlanLabel(plan string, frame int) string {
 	case "pro":
 		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#C4B5FD")).Render(label)
 	case "max":
-		rainbow := []lipgloss.Color{"#FF6B6B", "#FF9E4F", "#FFD93D", "#6BCB77", "#4D96FF", "#C77DFF"}
+		rainbow := []color.Color{
+			lipgloss.Color("#FF6B6B"), lipgloss.Color("#FF9E4F"), lipgloss.Color("#FFD93D"),
+			lipgloss.Color("#6BCB77"), lipgloss.Color("#4D96FF"), lipgloss.Color("#C77DFF"),
+		}
 		var out string
 		for i, ch := range label {
 			c := rainbow[(i+frame)%len(rainbow)]
@@ -298,7 +320,7 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title,
@@ -312,7 +334,7 @@ func (m Model) viewCmdOverlay(width, height int) string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(colorDim),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 	)
 }
 
@@ -341,7 +363,7 @@ func (m Model) viewMentionPalette(width int) string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
-		Width(boxW).
+		Width(boxW + 2).
 		PaddingLeft(2).PaddingRight(2).
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
@@ -427,7 +449,7 @@ func (m Model) viewInput(width int) string {
 	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(width - 2).
+		Width(width).
 		PaddingLeft(1).PaddingRight(1)
 
 	inner := strings.Join(lines, "\n")
@@ -443,7 +465,7 @@ func (m Model) viewInput(width int) string {
 
 // renderGlare produces a shimmer that sweeps left-to-right across text.
 // frame drives the position; agentColor sets the gradient's base hue.
-func renderGlare(text string, frame int, agentColor lipgloss.Color) string {
+func renderGlare(text string, frame int, agentColor color.Color) string {
 	runes := []rune(text)
 	n := len(runes)
 	if n == 0 {
@@ -462,7 +484,7 @@ func renderGlare(text string, frame int, agentColor lipgloss.Color) string {
 		if dist < 0 {
 			dist = -dist
 		}
-		var fg lipgloss.Color
+		var fg color.Color
 		switch {
 		case dist == 0:
 			fg = grad[0]
@@ -639,7 +661,7 @@ func (m Model) viewStatusBar(width int) string {
 	eval := m.evaluateCompact()
 	// The gauge shows occupancy (how full the window is), not cumulative cost.
 	used := m.contextTokens
-	var ctxColor lipgloss.Color
+	var ctxColor color.Color
 	switch {
 	case eval.IsError:
 		ctxColor = lipgloss.Color("#EF4444")
@@ -1036,8 +1058,8 @@ func (m Model) viewSidePanel(width int) string {
 		parts = append(parts, "", styleMuted.Render("Observability is on. Commands, edits, and other tool activity will appear here."))
 		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
 		box := lipgloss.NewStyle().
-			Width(width).
-			Height(innerHeight).
+			Width(width+2).
+			Height(innerHeight+2).
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorder).
 			Padding(0, 1).
@@ -1080,8 +1102,8 @@ func (m Model) viewSidePanel(width int) string {
 	content = clampLines(content, innerHeight)
 
 	box := lipgloss.NewStyle().
-		Width(width).
-		Height(innerHeight).
+		Width(width+2).
+		Height(innerHeight+2).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
 		Padding(0, 1).

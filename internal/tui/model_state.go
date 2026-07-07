@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"image/color"
 	"io"
 	"os"
 	"os/exec"
@@ -14,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -1102,7 +1103,7 @@ func (m *Model) refreshViewport() {
 	m.vp.GotoBottom()
 }
 
-func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
+func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
 	innerW := m.paneWidth() - 8
 	if innerW < 10 {
 		innerW = 10
@@ -1121,7 +1122,7 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
 	box := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(innerW+2).
+		Width(innerW+4).
 		Padding(0, 1).
 		Render(strings.Join(bodyParts, "\n"))
 
@@ -1195,7 +1196,7 @@ type renderCacheState struct {
 
 // renderMessageBlock renders a single chat message to its display string. It is
 // the pure, cacheable unit of renderMessages.
-func (m Model) renderMessageBlock(msg ChatMessage, mc lipgloss.Color) string {
+func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	switch msg.Role {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
@@ -1275,7 +1276,7 @@ func (m *Model) renderMessages() string {
 
 	mc := m.currentColor()
 	width := m.paneWidth()
-	color := string(mc)
+	color := colorCacheKey(mc)
 
 	// Reuse the prior cache only when the layout params match; otherwise start
 	// fresh so width/showTools/color changes fully re-render.
@@ -1345,8 +1346,8 @@ func (m Model) recalcLayout() Model {
 		vpW = 10
 	}
 
-	m.vp.Width = vpW
-	m.vp.Height = contentH
+	m.vp.SetWidth(vpW)
+	m.vp.SetHeight(contentH)
 	m.ta.SetWidth(m.paneWidth() - 6)
 
 	return m
@@ -1469,7 +1470,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	}
 }
 
-func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.showResume = false
@@ -1641,7 +1642,7 @@ func (m Model) viewResume() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title, "",
@@ -1654,11 +1655,11 @@ func (m Model) viewResume() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(colorDim),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 	)
 }
 
-func (m Model) updateTrust(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateTrust(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "shift+tab":
 		if m.trustCursor > 0 {
@@ -1746,7 +1747,7 @@ func (m Model) viewTrust() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(inner)
 
@@ -1754,6 +1755,6 @@ func (m Model) viewTrust() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(colorDim),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 	)
 }

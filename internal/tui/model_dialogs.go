@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -24,7 +24,7 @@ var planApprovalOptions = []string{
 	"Edit — tell me what to change",
 }
 
-func (m Model) updatePlanApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updatePlanApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	n := len(planApprovalOptions)
 	switch msg.String() {
 	case "up":
@@ -96,7 +96,7 @@ var shellApprovalOptions = []string{
 
 const askUserFreeResponseOption = "Type my own answer"
 
-func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth == nil {
 		return m, nil
 	}
@@ -193,7 +193,7 @@ func askUserDefaultCursor(req agent.AskUserRequest) int {
 	return 0
 }
 
-func (m Model) updateAskUserQuestion(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateAskUserQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pendingQuestion == nil {
 		return m, nil
 	}
@@ -287,7 +287,7 @@ func (m Model) rejectAskUser(banner string) Model {
 	return m
 }
 
-func (m Model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateSetup(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" || strings.ToLower(m.ta.Value()) == "/cancel" {
 		m.showSetup = false
 		m.ta.Reset()
@@ -538,7 +538,7 @@ var connectConfirmOptions = []string{
 	"Cancel",
 }
 
-func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.connectStep {
 	case 0:
 		switch msg.String() {
@@ -1108,7 +1108,7 @@ func injectMentionGuidance(input string, mentionedFiles []string) string {
 	return sb.String()
 }
 
-func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateSelector(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.showSelector = false
@@ -1197,14 +1197,14 @@ func (m Model) viewSelector() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(2, 4).
 			Render(msg)
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(colorDim),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 		)
 	}
 
@@ -1304,7 +1304,7 @@ func (m Model) viewSelector() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title,
@@ -1320,7 +1320,7 @@ func (m Model) viewSelector() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(colorDim),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 	)
 }
 
@@ -1369,7 +1369,7 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
 
@@ -1377,7 +1377,7 @@ func (m Model) viewConnect() string {
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(colorDim),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 		)
 	}
 
@@ -1410,14 +1410,14 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(colorDim),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 		)
 	}
 
@@ -1452,14 +1452,14 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#FF5555")).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(colorDim),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 		)
 	}
 
@@ -1545,7 +1545,7 @@ func (m Model) viewConnect() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title, "",
@@ -1559,7 +1559,7 @@ func (m Model) viewConnect() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(colorDim),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
 	)
 }
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/session"
 	"spettro/internal/tui"
@@ -20,7 +20,7 @@ func TestCtrlT_TogglesMouseCapture(t *testing.T) {
 		t.Fatal("expected mouse capture to be on by default")
 	}
 
-	next, _ := m.UpdateForTesting(tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ := m.UpdateForTesting(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	model := next.(tui.Model)
 	if !model.MouseCaptureOffForTesting() {
 		t.Fatal("expected ctrl+t to disable mouse capture")
@@ -29,7 +29,7 @@ func TestCtrlT_TogglesMouseCapture(t *testing.T) {
 		t.Fatalf("expected banner to mention text-select mode, got %q", model.BannerForTesting())
 	}
 
-	next, _ = model.UpdateForTesting(tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, _ = model.UpdateForTesting(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	model = next.(tui.Model)
 	if model.MouseCaptureOffForTesting() {
 		t.Fatal("expected ctrl+t to re-enable mouse capture")
@@ -46,14 +46,14 @@ func TestMouseEvents_IgnoredWhenCaptureOff(t *testing.T) {
 		{ID: "3", StartedAt: time.Now()},
 	})
 
-	off, _ := m.UpdateForTesting(tea.KeyMsg{Type: tea.KeyCtrlT})
+	off, _ := m.UpdateForTesting(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	model := off.(tui.Model)
 	if !model.MouseCaptureOffForTesting() {
 		t.Fatal("expected mouse capture off after ctrl+t")
 	}
 
 	startCursor := model.ResumeCursorForTesting()
-	next, _ := model.UpdateForTesting(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	next, _ := model.UpdateForTesting(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	after := next.(tui.Model)
 	if after.ResumeCursorForTesting() != startCursor {
 		t.Fatalf("expected mouse wheel to be ignored while capture is off, cursor moved %d→%d",

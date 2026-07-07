@@ -3,15 +3,16 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -464,9 +465,11 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.FocusedStyle.Prompt = lipgloss.NewStyle()
-	ta.BlurredStyle.Prompt = lipgloss.NewStyle()
+	taStyles := textarea.DefaultDarkStyles()
+	taStyles.Focused.CursorLine = lipgloss.NewStyle()
+	taStyles.Focused.Prompt = lipgloss.NewStyle()
+	taStyles.Blurred.Prompt = lipgloss.NewStyle()
+	ta.SetStyles(taStyles)
 	ta.Focus()
 
 	sp := spinner.New()
@@ -546,7 +549,7 @@ func (m Model) currentAgent() (config.AgentSpec, bool) {
 	return m.manifest.AgentByID(m.mode)
 }
 
-func (m Model) currentColor() lipgloss.Color {
+func (m Model) currentColor() color.Color {
 	if spec, ok := m.manifest.AgentByID(m.mode); ok {
 		return modeColor(spec.Color)
 	}
@@ -1130,15 +1133,24 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mouseCaptureOff {
 			return m, tea.Batch(cmds...)
 		}
+		// v2 splits mouse events into distinct message types; only wheel and
+		// click (press) events drive the UI here — motion and release are
+		// ignored, matching the v1 behavior of matching on wheel/left buttons.
+		switch msg.(type) {
+		case tea.MouseWheelMsg, tea.MouseClickMsg:
+		default:
+			return m, tea.Batch(cmds...)
+		}
+		mouse := msg.Mouse()
 		if m.showResume {
-			switch msg.Button {
-			case tea.MouseButtonWheelUp:
+			switch mouse.Button {
+			case tea.MouseWheelUp:
 				if m.resumeCursor > 0 {
 					m.resumeCursor--
 				}
 				m.ensureResumeWindow()
 				return m, tea.Batch(cmds...)
-			case tea.MouseButtonWheelDown:
+			case tea.MouseWheelDown:
 				if m.resumeCursor < len(m.resumeItems)-1 {
 					m.resumeCursor++
 				}
@@ -1147,15 +1159,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		sideW := m.sidePanelWidth()
-		onSidePanel := sideW > 0 && msg.X >= m.paneWidth()+1
+		onSidePanel := sideW > 0 && mouse.X >= m.paneWidth()+1
 		if onSidePanel {
 			items := m.sidePanelItems()
 			innerHeight := m.sidePanelInnerHeight()
 			_, gitRows := m.sidePanelGitSummary(sideW)
 			_, _, rows := m.sidePanelWindow(items, innerHeight, gitRows)
 			maxStart := max(0, len(items)-rows)
-			switch msg.Button {
-			case tea.MouseButtonWheelUp:
+			switch mouse.Button {
+			case tea.MouseWheelUp:
 				if m.sideDetailScroll > 0 {
 					m.sideDetailScroll--
 					return m, tea.Batch(cmds...)
@@ -1168,7 +1180,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
-			case tea.MouseButtonWheelDown:
+			case tea.MouseWheelDown:
 				detailMax := m.sidePanelDetailMaxScroll(sideW)
 				if m.sideDetailScroll < detailMax {
 					m.sideDetailScroll++
@@ -1182,9 +1194,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
-			case tea.MouseButtonLeft:
+			case tea.MouseLeft:
 				startY, _ := m.sideListGeometry()
-				row := msg.Y - startY
+				row := mouse.Y - startY
 				if row >= 0 {
 					cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
 					_, rowToItem := m.sidePanelLines(items, sideW, cursor, start, rows)
@@ -1210,8 +1222,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 			}
 		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			switch {
 			case m.showOnboarding && m.onboarding.step == 0:
 				if m.onboarding.cursor > 0 {
@@ -1226,9 +1238,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.connectCursor--
 				}
 			default:
-				m.vp.LineUp(3)
+				m.vp.ScrollUp(3)
 			}
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			switch {
 			case m.showOnboarding && m.onboarding.step == 0:
 				if m.onboarding.cursor < len(m.onboarding.items)-1 {
@@ -1243,22 +1255,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.connectCursor++
 				}
 			default:
-				m.vp.LineDown(3)
+				m.vp.ScrollDown(3)
 			}
 		}
 		return m, tea.Batch(cmds...)
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+t" {
+			// View() reads mouseCaptureOff to pick the view's MouseMode; no
+			// imperative enable/disable command exists in v2.
 			m.mouseCaptureOff = !m.mouseCaptureOff
-			var mouseCmd tea.Cmd
 			if m.mouseCaptureOff {
-				mouseCmd = tea.DisableMouse
 				m.showBanner("text-select mode — mouse off, ctrl+t to re-enable", "info")
 			} else {
-				mouseCmd = tea.EnableMouseCellMotion
 				m.showBanner("mouse on — scroll wheel and side panel clicks active", "info")
 			}
-			return m, tea.Batch(append(cmds, mouseCmd)...)
+			return m, tea.Batch(cmds...)
 		}
 		switch m.activeModal() {
 		case modalLogin:
@@ -1298,7 +1309,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.showPlanApproval {
 		return m.updatePlanApproval(msg)
 	}

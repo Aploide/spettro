@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/tui"
 )
@@ -14,7 +14,7 @@ func TestUpdateMain_SecondEnterExecutesSelectedCommand(t *testing.T) {
 	m.SetTextareaValueForTesting("/help ")
 	m.SetCommandItemsForTesting([]string{"/help"})
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	messages := got.MessagesForTesting()
@@ -30,14 +30,14 @@ func TestUpdateMain_UpArrowRecallsPreviousInput(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetInputHistoryForTesting([]string{"first prompt", "second prompt"})
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyUp})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyUp})
 	got := gotModel.(tui.Model)
 
 	if got.TextareaValueForTesting() != "second prompt" {
 		t.Fatalf("expected latest prompt recalled, got %q", got.TextareaValueForTesting())
 	}
 
-	gotModel, _ = got.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyUp})
+	gotModel, _ = got.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyUp})
 	got = gotModel.(tui.Model)
 
 	if got.TextareaValueForTesting() != "first prompt" {
@@ -50,9 +50,9 @@ func TestUpdateMain_DownArrowRestoresDraftAfterHistory(t *testing.T) {
 	m.SetTextareaValueForTesting("draft")
 	m.SetInputHistoryForTesting([]string{"first prompt", "second prompt"})
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyUp})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyUp})
 	got := gotModel.(tui.Model)
-	gotModel, _ = got.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyDown})
+	gotModel, _ = got.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyDown})
 	got = gotModel.(tui.Model)
 
 	if got.TextareaValueForTesting() != "draft" {

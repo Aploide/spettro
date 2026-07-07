@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
@@ -260,7 +260,7 @@ func (m Model) handleLogout() (tea.Model, tea.Cmd) {
 
 // ── Key handling ─────────────────────────────────────────────────────────────
 
-func (m Model) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateLogin(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit

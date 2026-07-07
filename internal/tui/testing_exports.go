@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -227,7 +227,7 @@ func (m Model) ActivityCountForTesting() int {
 	return len(m.activityFeed)
 }
 
-func (m Model) UpdateMainForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) UpdateMainForTesting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m.updateMain(msg)
 }
 
@@ -266,7 +266,7 @@ func AgentDoneMsgForTesting(content string) tea.Msg {
 	return agentDoneMsg{content: content}
 }
 
-func (m Model) UpdateShellApprovalForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) UpdateShellApprovalForTesting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m.updateShellApproval(msg)
 }
 
@@ -274,7 +274,7 @@ func AskUserOptionsForTesting(req agent.AskUserRequest) []string {
 	return askUserOptions(req)
 }
 
-func (m Model) UpdateAskUserQuestionForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) UpdateAskUserQuestionForTesting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m.updateAskUserQuestion(msg)
 }
 
@@ -312,7 +312,7 @@ func (m Model) ResumeCursorForTesting() int {
 }
 
 func (m Model) ViewForTesting() string {
-	return m.View()
+	return m.View().Content
 }
 
 func (m *Model) AddActivityForTesting(kind, id, agentID, title, detail, body, status string) {

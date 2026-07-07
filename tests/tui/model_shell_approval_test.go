@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/tui"
 )
@@ -26,7 +26,7 @@ func TestUpdateShellApproval_Option3EntersAlternativeTextMode(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetPendingShellApprovalForTesting(3)
 
-	gotModel, _ := m.UpdateShellApprovalForTesting(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	gotModel, _ := m.UpdateShellApprovalForTesting(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	got := gotModel.(tui.Model)
 	if !got.HasPendingShellApprovalForTesting() {
 		t.Fatal("pending approval should not resolve when typing alternative text")
@@ -40,7 +40,7 @@ func TestUpdateShellApproval_DownMovesCursor(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetPendingShellApprovalForTesting(0)
 
-	gotModel, _ := m.UpdateShellApprovalForTesting(tea.KeyMsg{Type: tea.KeyDown})
+	gotModel, _ := m.UpdateShellApprovalForTesting(tea.KeyPressMsg{Code: tea.KeyDown})
 	got := gotModel.(tui.Model)
 	if got.ApprovalCursorForTesting() != 1 {
 		t.Fatalf("expected cursor 1 after down, got %d", got.ApprovalCursorForTesting())

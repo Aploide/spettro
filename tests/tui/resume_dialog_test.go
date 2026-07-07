@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/session"
 	"spettro/internal/tui"
@@ -47,7 +47,7 @@ func TestResumeDialog_MouseWheelMovesSelection(t *testing.T) {
 		{ID: "3", StartedAt: time.Now()},
 	})
 
-	nextModel, _ := m.UpdateForTesting(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	nextModel, _ := m.UpdateForTesting(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	next := nextModel.(tui.Model)
 	if next.ResumeCursorForTesting() != 1 {
 		t.Fatalf("expected resume cursor to move on wheel down, got %d", next.ResumeCursorForTesting())
