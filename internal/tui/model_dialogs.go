@@ -1197,7 +1197,7 @@ func (m Model) viewSelector() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(2, 4).
 			Render(msg)
 		return lipgloss.Place(m.width, m.height,
@@ -1304,7 +1304,7 @@ func (m Model) viewSelector() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title,
@@ -1369,7 +1369,7 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
 
@@ -1410,7 +1410,7 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mc).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
 		return lipgloss.Place(m.width, m.height,
@@ -1452,7 +1452,7 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#FF5555")).
-			Width(dialogWidth).
+			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
 		return lipgloss.Place(m.width, m.height,
@@ -1545,7 +1545,7 @@ func (m Model) viewConnect() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title, "",

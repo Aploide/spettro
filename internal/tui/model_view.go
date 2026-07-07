@@ -320,7 +320,7 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title,
@@ -363,7 +363,7 @@ func (m Model) viewMentionPalette(width int) string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
-		Width(boxW).
+		Width(boxW + 2).
 		PaddingLeft(2).PaddingRight(2).
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
@@ -449,7 +449,7 @@ func (m Model) viewInput(width int) string {
 	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(width - 2).
+		Width(width).
 		PaddingLeft(1).PaddingRight(1)
 
 	inner := strings.Join(lines, "\n")
@@ -1058,8 +1058,8 @@ func (m Model) viewSidePanel(width int) string {
 		parts = append(parts, "", styleMuted.Render("Observability is on. Commands, edits, and other tool activity will appear here."))
 		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
 		box := lipgloss.NewStyle().
-			Width(width).
-			Height(innerHeight).
+			Width(width+2).
+			Height(innerHeight+2).
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorder).
 			Padding(0, 1).
@@ -1102,8 +1102,8 @@ func (m Model) viewSidePanel(width int) string {
 	content = clampLines(content, innerHeight)
 
 	box := lipgloss.NewStyle().
-		Width(width).
-		Height(innerHeight).
+		Width(width+2).
+		Height(innerHeight+2).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
 		Padding(0, 1).

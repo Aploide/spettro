@@ -1122,7 +1122,7 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
 	box := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(innerW+2).
+		Width(innerW+4).
 		Padding(0, 1).
 		Render(strings.Join(bodyParts, "\n"))
 
@@ -1642,7 +1642,7 @@ func (m Model) viewResume() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
 			title, "",
@@ -1747,7 +1747,7 @@ func (m Model) viewTrust() string {
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth).
+		Width(dialogWidth+2).
 		Padding(1, 2).
 		Render(inner)
 
