@@ -76,7 +76,7 @@ func TestActiveModalViewDoesNotPanic(t *testing.T) {
 		case modalSetup:
 			m.showSetup = true
 		}
-		if out := m.View(); out == "" {
+		if out := m.View().Content; out == "" {
 			t.Fatalf("View() returned empty for modal %v", mod)
 		}
 	}

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
@@ -74,7 +74,7 @@ func (m Model) allOnboardingModels(filter string) []provider.Model {
 }
 
 // updateOnboarding dispatches key events to the active step handler.
-func (m Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateOnboarding(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.onboarding.step {
 	case 0:
 		return m.updateOnboardingPicker(msg)
@@ -102,7 +102,7 @@ func (m Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateOnboardingPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateOnboardingPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		return m, tea.Quit
@@ -151,7 +151,7 @@ func (m Model) updateOnboardingPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateOnboardingKeyEntry(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateOnboardingKeyEntry(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.onboarding.step = 0

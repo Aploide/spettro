@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -144,10 +144,9 @@ func main() {
 
 	m := tui.New(cwd, cfg, store, pm, sb)
 
-	p := tea.NewProgram(m,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	// Alt screen and mouse mode are declared on the tea.View in Model.View
+	// (bubbletea v2 removed the imperative program options).
+	p := tea.NewProgram(m)
 	final, err := p.Run()
 	if err != nil {
 		fatal("runtime error: %v", err)

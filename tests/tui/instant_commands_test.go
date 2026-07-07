@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/tui"
 )
@@ -71,7 +71,7 @@ func TestUpdateMain_InstantCommandRunsWhileThinking(t *testing.T) {
 	m.SetThinkingForTesting(true)
 	m.SetTextareaValueForTesting("/help")
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	msgs := got.MessagesForTesting()
@@ -90,7 +90,7 @@ func TestUpdateMain_InstantCommandSkipsInputHistory(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetTextareaValueForTesting("/permission yolo")
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	for _, entry := range got.InputHistoryForTesting() {
@@ -105,7 +105,7 @@ func TestUpdateMain_InstantCommandDoesNotPushIntoSharedHistory(t *testing.T) {
 	m.SetInputHistoryForTesting([]string{"first prompt", "second prompt"})
 	m.SetTextareaValueForTesting("/help")
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	history := got.InputHistoryForTesting()
@@ -127,7 +127,7 @@ func TestUpdateMain_NonInstantCommandBlockedWhileThinking(t *testing.T) {
 
 	beforeMsgCount := len(m.MessagesForTesting())
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	if got.BannerForTesting() != "commands cannot be queued while an agent is running" {
@@ -142,7 +142,7 @@ func TestUpdateMain_PromptsStillEnterInputHistory(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetTextareaValueForTesting("explain this code")
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	history := got.InputHistoryForTesting()
@@ -157,7 +157,7 @@ func TestUpdateMain_AutocompleteInstantCommandRunsWhileThinking(t *testing.T) {
 	m.SetTextareaValueForTesting("/help")
 	m.SetCommandItemsForTesting([]string{"/help"})
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	msgs := got.MessagesForTesting()
@@ -177,7 +177,7 @@ func TestUpdateMain_AutocompleteNonInstantCommandBlockedWhileThinking(t *testing
 
 	beforeMsgCount := len(m.MessagesForTesting())
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	if got.BannerForTesting() != "commands cannot be queued while an agent is running" {

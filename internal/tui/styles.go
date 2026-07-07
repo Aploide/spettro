@@ -2,9 +2,9 @@ package tui
 
 import (
 	"fmt"
-	"strconv"
+	"image/color"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Color palette
@@ -26,7 +26,7 @@ var (
 	colorSelBg    = lipgloss.Color("#1F2937") // selection highlight bg (new)
 )
 
-func modeColor(colorName string) lipgloss.Color {
+func modeColor(colorName string) color.Color {
 	switch colorName {
 	case "blue":
 		return lipgloss.Color("#A78BFA")
@@ -108,13 +108,10 @@ func dimBorderStyle() lipgloss.Style {
 
 // glareGradient returns 5 color stops for the glare sweep, derived from base:
 // [0]=peak (near-white tint), [1..3]=fade toward base, [4]=base.
-func glareGradient(base lipgloss.Color) [5]lipgloss.Color {
-	hex := string(base)
-	if len(hex) != 7 || hex[0] != '#' {
-		return [5]lipgloss.Color{base, base, base, base, base}
-	}
-	r, g, b := parseHexColor(hex)
-	return [5]lipgloss.Color{
+func glareGradient(base color.Color) [5]color.Color {
+	r16, g16, b16, _ := base.RGBA()
+	r, g, b := uint8(r16>>8), uint8(g16>>8), uint8(b16>>8)
+	return [5]color.Color{
 		lerpToWhite(r, g, b, 0.88),
 		lerpToWhite(r, g, b, 0.60),
 		lerpToWhite(r, g, b, 0.30),
@@ -123,15 +120,14 @@ func glareGradient(base lipgloss.Color) [5]lipgloss.Color {
 	}
 }
 
-func parseHexColor(hex string) (r, g, b uint8) {
-	val, err := strconv.ParseUint(hex[1:], 16, 32)
-	if err != nil {
-		return 0, 0, 0
-	}
-	return uint8(val >> 16), uint8((val >> 8) & 0xFF), uint8(val & 0xFF)
+// colorCacheKey returns a stable "#RRGGBB" string for c, used to compare
+// colors when deciding whether the render cache is still valid.
+func colorCacheKey(c color.Color) string {
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("#%02X%02X%02X", uint8(r>>8), uint8(g>>8), uint8(b>>8))
 }
 
-func lerpToWhite(r, g, b uint8, t float64) lipgloss.Color {
+func lerpToWhite(r, g, b uint8, t float64) color.Color {
 	lerp := func(c uint8) uint8 { return uint8(float64(c) + t*(255-float64(c))) }
 	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", lerp(r), lerp(g), lerp(b)))
 }

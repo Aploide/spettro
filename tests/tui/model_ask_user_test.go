@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/tui"
@@ -30,7 +30,7 @@ func TestUpdateAskUserQuestion_DownMovesCursor(t *testing.T) {
 		Options:  []string{"Option A", "Option B"},
 	}, false)
 
-	gotModel, _ := m.UpdateAskUserQuestionForTesting(tea.KeyMsg{Type: tea.KeyDown})
+	gotModel, _ := m.UpdateAskUserQuestionForTesting(tea.KeyPressMsg{Code: tea.KeyDown})
 	got := gotModel.(tui.Model)
 	if got.QuestionCursorForTesting() != 1 {
 		t.Fatalf("expected cursor 1 after down, got %d", got.QuestionCursorForTesting())
@@ -44,7 +44,7 @@ func TestUpdateAskUserQuestion_EnterFreeformKeepsTypedText(t *testing.T) {
 		AllowFreeResponse: true,
 	}, true)
 
-	gotModel, _ := m.UpdateAskUserQuestionForTesting(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	gotModel, _ := m.UpdateAskUserQuestionForTesting(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	got := gotModel.(tui.Model)
 	if !got.HasPendingAskUserForTesting() {
 		t.Fatal("pending question should remain while typing a freeform response")
@@ -64,7 +64,7 @@ func TestUpdateAskUserQuestion_EnterOptionResolvesPrompt(t *testing.T) {
 		Options:  []string{"Option A", "Option B"},
 	}, false)
 
-	gotModel, _ := m.UpdateAskUserQuestionForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateAskUserQuestionForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 	if got.HasPendingAskUserForTesting() {
 		t.Fatal("expected question to resolve after selecting an option")

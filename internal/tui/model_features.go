@@ -2,12 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/notify"
 )
@@ -104,7 +105,7 @@ func (m *Model) ensureClipboardTempDir() error {
 
 // renderAttachmentChips returns a line of chips for the input area showing
 // both file and image attachments. Returns an empty string when there are none.
-func (m Model) renderAttachmentChips(mc lipgloss.Color) string {
+func (m Model) renderAttachmentChips(mc color.Color) string {
 	if len(m.attachments) == 0 {
 		return ""
 	}

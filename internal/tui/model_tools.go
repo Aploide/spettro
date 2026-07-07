@@ -3,10 +3,11 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -74,7 +75,7 @@ func waitForAskUser(ch chan askUserRequestMsg) tea.Cmd {
 	}
 }
 
-func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc lipgloss.Color) string {
+func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc color.Color) string {
 	var sb strings.Builder
 	sb.WriteString(styleMuted.Render("  "+title) + "\n")
 	for i, opt := range options {
@@ -742,7 +743,7 @@ func stripToolCallLines(content string) string {
 	return strings.TrimSpace(strings.Join(filtered, "\n"))
 }
 
-func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) string {
+func renderToolGroups(tools []ToolItem, showTools bool, mc color.Color) string {
 	if len(tools) == 0 {
 		return ""
 	}

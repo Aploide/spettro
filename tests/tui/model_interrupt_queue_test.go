@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
@@ -19,7 +20,7 @@ func TestUpdateMain_EnterWhileThinkingQueuesPrompt(t *testing.T) {
 	m.SetThinkingForTesting(true)
 	m.SetTextareaValueForTesting("please review the latest change")
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	if got.PendingPromptCountForTesting() != 1 {
@@ -48,7 +49,7 @@ func TestUpdateMain_EscWhileThinkingPreservesProgressAndAsksInstead(t *testing.T
 		Args:   `{"pattern":"approval"}`,
 	})
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyEsc})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEsc})
 	got := gotModel.(tui.Model)
 
 	if !got.AwaitingInsteadForTesting() {
@@ -72,7 +73,7 @@ func TestUpdateShellApproval_DenyInterruptsAndAsksInstead(t *testing.T) {
 	m.SetThinkingForTesting(true)
 	m.SetPendingShellApprovalForTesting(2)
 
-	gotModel, _ := m.UpdateShellApprovalForTesting(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, _ := m.UpdateShellApprovalForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
 	if !got.AwaitingInsteadForTesting() {
@@ -122,7 +123,10 @@ func TestRenderMessages_KeepsCommentsAndToolEventsInOrder(t *testing.T) {
 		At: time.Now(),
 	})
 
-	rendered := m.RenderMessagesForTesting()
+	// lipgloss v2 always emits ANSI styling (downsampling happens in the
+	// bubbletea renderer, not at Render time), so strip it before matching
+	// plain substrings.
+	rendered := ansi.Strip(m.RenderMessagesForTesting())
 	wantOrder := []string{
 		"Let me read the key files first.",
 		"Read internal/tui/model.go",
@@ -171,7 +175,7 @@ func TestNew_RestoresLastAgentAndPanelState(t *testing.T) {
 func TestUpdateMain_CtrlCShowsExitHint(t *testing.T) {
 	m := tui.NewModelForTesting()
 
-	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyCtrlC})
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	got := gotModel.(tui.Model)
 
 	if got.BannerForTesting() != "press again ctrl C to exit" {
@@ -182,7 +186,7 @@ func TestUpdateMain_CtrlCShowsExitHint(t *testing.T) {
 func TestQuitWarningMsg_ClearsExitHintAfterTimeout(t *testing.T) {
 	m := tui.NewModelForTesting()
 
-	gotModel, _ := m.UpdateForTesting(tea.KeyMsg{Type: tea.KeyCtrlC})
+	gotModel, _ := m.UpdateForTesting(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	got := gotModel.(tui.Model)
 	if got.BannerForTesting() != "press again ctrl C to exit" {
 		t.Fatalf("unexpected ctrl+c banner: %q", got.BannerForTesting())
