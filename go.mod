@@ -16,7 +16,7 @@ require (
 	github.com/landlock-lsm/go-landlock v0.8.1
 	github.com/openai/openai-go/v3 v3.4.0
 	github.com/pelletier/go-toml/v2 v2.2.4
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 )
 
 require (
