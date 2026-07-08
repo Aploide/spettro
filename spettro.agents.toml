@@ -13,6 +13,15 @@ sandbox_mode = 'full-access'
 permission_rules = []
 allow_network_tools = false
 
+[runtime.fallback]
+# mode: 'prompt' (ask before switching the main conversation), 'silent', or 'off'.
+mode = 'prompt'
+# Ordered 'provider/model' refs tried when the selected model hits quota/5xx/timeouts.
+chain = []
+# Optional small/cheap 'provider/model' for internal calls (compaction, titling);
+# these fall back silently through the chain, independent of the UI-selected model.
+internal_model = ''
+
 [runtime.delegation]
 max_parallel_workers = 4
 max_depth = 2

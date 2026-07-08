@@ -93,6 +93,38 @@ type RuntimePolicy struct {
 	// Limits overrides the default character caps for tool output retained in
 	// model context. Zero values fall back to the built-in defaults.
 	Limits ContextLimits `toml:"limits,omitempty"`
+	// Fallback configures model availability routing: what to do when the
+	// selected model fails with a quota/server/timeout error.
+	Fallback FallbackPolicy `toml:"fallback,omitempty"`
+}
+
+// FallbackMode controls how a fallback model is adopted after the primary
+// model fails with a transient availability error.
+type FallbackMode string
+
+const (
+	// FallbackPrompt asks the user before switching the main conversation to
+	// a fallback model (a swap invalidates the provider prompt cache).
+	FallbackPrompt FallbackMode = "prompt"
+	// FallbackSilent switches without asking. Only honoured on the main
+	// conversation when no interactive prompt is available (headless runs);
+	// internal utility calls always fall back silently.
+	FallbackSilent FallbackMode = "silent"
+	// FallbackOff disables fallback routing entirely.
+	FallbackOff FallbackMode = "off"
+)
+
+// FallbackPolicy configures the fallback chain for model availability
+// failures. Chain entries and InternalModel are "provider/model" refs.
+type FallbackPolicy struct {
+	// Mode: "prompt" (default), "silent", or "off".
+	Mode FallbackMode `toml:"mode,omitempty"`
+	// Chain is the ordered list of fallback models tried after the primary.
+	Chain []string `toml:"chain,omitempty"`
+	// InternalModel, when set, routes internal utility calls (compaction,
+	// titling, classification) to a designated small/cheap model with silent
+	// fallback, independent of the UI-selected model.
+	InternalModel string `toml:"internal_model,omitempty"`
 }
 
 // ContextLimits caps how many characters of tool output are retained in model
@@ -431,6 +463,9 @@ func (m AgentManifest) Validate() error {
 	if err := validatePermissionRules(m.Runtime.PermissionRules, "runtime.permission_rules"); err != nil {
 		return err
 	}
+	if err := validateFallbackPolicy(m.Runtime.Fallback); err != nil {
+		return err
+	}
 
 	toolIDs := map[string]struct{}{}
 	for _, tool := range m.Tools {
@@ -558,6 +593,35 @@ func validateAgentRole(role AgentRole) error {
 	default:
 		return fmt.Errorf("unsupported role %q; must be primary, subagent, orchestrator, or worker", role)
 	}
+}
+
+func validateFallbackPolicy(p FallbackPolicy) error {
+	switch p.Mode {
+	case "", FallbackPrompt, FallbackSilent, FallbackOff:
+	default:
+		return fmt.Errorf("agent manifest: runtime.fallback.mode must be prompt, silent, or off")
+	}
+	for i, ref := range p.Chain {
+		if err := validateModelRef(ref); err != nil {
+			return fmt.Errorf("agent manifest: runtime.fallback.chain[%d]: %w", i, err)
+		}
+	}
+	if strings.TrimSpace(p.InternalModel) != "" {
+		if err := validateModelRef(p.InternalModel); err != nil {
+			return fmt.Errorf("agent manifest: runtime.fallback.internal_model: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateModelRef checks the "provider/model" shape used by fallback config.
+func validateModelRef(ref string) error {
+	ref = strings.TrimSpace(ref)
+	i := strings.Index(ref, "/")
+	if i <= 0 || i == len(ref)-1 {
+		return fmt.Errorf("model ref %q must be provider/model", ref)
+	}
+	return nil
 }
 
 func validatePermissionRules(rules []PermissionRule, field string) error {

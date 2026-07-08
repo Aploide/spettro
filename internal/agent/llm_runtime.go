@@ -220,6 +220,77 @@ type toolRuntime struct {
 	goalComplete         bool
 	goalSummary          string
 	goalVerified         bool
+
+	// Model fallback routing (manifest [runtime.fallback]). modelOverride is
+	// set once the user consents to a switch and pins the rest of the run to
+	// the fallback model; fallbackTried prevents re-offering a model that
+	// already failed this run.
+	fallbackMode     config.FallbackMode
+	fallbackChain    []provider.ModelRef
+	internalModelRef provider.ModelRef
+	modelOverride    *provider.ModelRef
+	fallbackTried    map[provider.ModelRef]bool
+}
+
+// effectiveModel returns the model the main loop should call: the consented
+// fallback override if one is active, otherwise the live UI selection.
+func (r *toolRuntime) effectiveModel() provider.ModelRef {
+	if r.modelOverride != nil {
+		return *r.modelOverride
+	}
+	return provider.ModelRef{Provider: r.providerName(), Model: r.modelName()}
+}
+
+// offerFallback decides whether the failed main-loop request should be
+// retried on a fallback model. Transient availability failures only. The
+// user is asked before any main-thread switch (a swap invalidates the prompt
+// cache); FallbackSilent skips the question only when no interactive prompt
+// is available (headless). Returns the model to switch to and true to retry.
+func (r *toolRuntime) offerFallback(ctx context.Context, failed provider.ModelRef, cause error) (provider.ModelRef, bool) {
+	if r.fallbackMode == config.FallbackOff || len(r.fallbackChain) == 0 {
+		return provider.ModelRef{}, false
+	}
+	kind := provider.Classify(cause)
+	if !kind.Transient() {
+		return provider.ModelRef{}, false
+	}
+	if r.fallbackTried == nil {
+		r.fallbackTried = map[provider.ModelRef]bool{}
+	}
+	r.fallbackTried[failed] = true
+	var next provider.ModelRef
+	for _, ref := range r.fallbackChain {
+		if ref == failed || r.fallbackTried[ref] {
+			continue
+		}
+		if r.providerMgr != nil && !r.providerMgr.HasModel(ref.Provider, ref.Model) {
+			continue
+		}
+		next = ref
+		break
+	}
+	if next.IsZero() {
+		return provider.ModelRef{}, false
+	}
+	if r.askUser == nil {
+		// No way to ask: only proceed when the manifest explicitly opts into
+		// silent switching; never silently swap the main thread otherwise.
+		if r.fallbackMode == config.FallbackSilent {
+			return next, true
+		}
+		return provider.ModelRef{}, false
+	}
+	switchOpt := fmt.Sprintf("Switch to %s", next)
+	answer, err := r.askUser(ctx, AskUserRequest{
+		Question:      fmt.Sprintf("Model %s is unavailable (%s). Switch to %s for the rest of this run? Note: switching models invalidates the prompt cache.", failed, kind, next),
+		Options:       []string{switchOpt, "Abort"},
+		Context:       truncate(cause.Error(), 300),
+		DefaultOption: switchOpt,
+	})
+	if err != nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "switch") {
+		return provider.ModelRef{}, false
+	}
+	return next, true
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -309,6 +380,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		runtime.logToolCalls = false
 	}
 	if cfg.Manifest != nil {
+		fb := cfg.Manifest.Runtime.Fallback
+		runtime.fallbackMode = fb.Mode
+		// Refs are validated at manifest load; a parse error here just means
+		// no chain, never a failed run.
+		if chain, err := provider.ParseModelRefs(fb.Chain); err == nil {
+			runtime.fallbackChain = chain
+		}
+		if ref, err := provider.ParseModelRef(fb.InternalModel); err == nil {
+			runtime.internalModelRef = ref
+		}
 		runtime.runtimeRules = append(runtime.runtimeRules, cfg.Manifest.Runtime.PermissionRules...)
 		if spec, ok := cfg.Manifest.AgentByID(cfg.AgentID); ok {
 			runtime.agentRules = append(runtime.agentRules, spec.PermissionRules...)
@@ -465,11 +546,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				}
 			}
 		}
-		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), req)
+		model := runtime.effectiveModel()
+		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()
 		}
 		if err != nil {
+			// Availability failure (quota/5xx/timeout): offer the configured
+			// fallback model instead of failing the turn. The switch requires
+			// user consent on interactive runs and pins the rest of the run.
+			if next, ok := runtime.offerFallback(ctx, model, err); ok {
+				runtime.modelOverride = &next
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
+				}
+				continue
+			}
 			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
 		}
 		totalTokens += resp.EstimatedTokens
@@ -680,10 +772,24 @@ func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs 
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
 	}
-	resp, err := r.providerMgr.Send(ctx, r.providerName(), r.modelName(), provider.Request{
-		Prompt:    sb.String(),
-		MaxTokens: 0,
-	})
+	// Compaction is an internal utility call: route it to the designated
+	// small/cheap model when configured and fall back silently through the
+	// chain on availability failures — the main conversation model (and its
+	// prompt cache) is unaffected either way.
+	primary := r.internalModelRef
+	if primary.IsZero() || !r.providerMgr.HasModel(primary.Provider, primary.Model) {
+		primary = provider.ModelRef{Provider: r.providerName(), Model: r.modelName()}
+	}
+	chain := r.fallbackChain
+	if r.fallbackMode == config.FallbackOff {
+		chain = nil
+	}
+	resp, err := provider.SendWithFallback(ctx,
+		func(ctx context.Context, ref provider.ModelRef, req provider.Request) (provider.Response, error) {
+			return r.providerMgr.Send(ctx, ref.Provider, ref.Model, req)
+		},
+		primary, chain,
+		provider.Request{Prompt: sb.String(), MaxTokens: 0}, nil)
 	if err != nil {
 		return msgs, false, fmt.Errorf("compaction summarizer: %w", err)
 	}
