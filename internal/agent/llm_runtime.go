@@ -89,7 +89,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		UserTask:        plan,
 		CWD:             c.CWD,
 		RequireToolCall: true,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep", "diagnostics", "references"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -951,9 +951,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
 		if exists {
-			return fmt.Sprintf("updated %s", rel), nil
+			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
-		return fmt.Sprintf("created %s", rel), nil
+		return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("created %s", rel)), nil
 	case "shell-exec":
 		return r.runShellTool(ctx, call.Tool, call.Args, "shell-exec")
 	case "glob":
@@ -1038,6 +1038,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSkillList(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
+	case "diagnostics":
+		return r.runLSPDiagnostics(ctx, call.Args)
+	case "references":
+		return r.runLSPReferences(ctx, call.Args)
+	case "lsp-restart":
+		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
 		return r.runMCPListResources(ctx, call.Args)
 	case "mcp-read-resource":

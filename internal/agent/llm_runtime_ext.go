@@ -574,7 +574,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
-	return fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements), nil
+	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)), nil
 }
 
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {

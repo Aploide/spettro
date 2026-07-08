@@ -37,7 +37,7 @@ func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
 		return 40000
-	case "repo-search", "grep", "glob", "ls":
+	case "repo-search", "grep", "glob", "ls", "diagnostics", "references":
 		return 16000
 	case "shell-exec", "bash", "bash-output":
 		return 8000
@@ -268,6 +268,9 @@ var builtinToolSchemas = map[string]string{
 	"mcp-list-resources": `{"server_id": string}`,
 	"mcp-read-resource":  `{"server_id": string, "resource_id": string}`,
 	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
+	"diagnostics":        `{"path"?: string}`,
+	"references":         `{"path": string, "symbol"?: string, "kind"?: "references"|"definition", "line"?: int, "character"?: int}`,
+	"lsp-restart":        `{"server"?: string}`,
 	"enter-plan-mode":    `{"reason"?: string}`,
 	"exit-plan-mode":     `{"reason"?: string}`,
 	"enter-worktree":     `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
@@ -306,6 +309,9 @@ var builtinNativeToolDescs = map[string]string{
 	"activate-skill":     "Activate a skill.",
 	"skill-activate":     "Activate a skill.",
 	"config":             "Get or set configuration values.",
+	"diagnostics":        "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
+	"references":         "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+	"lsp-restart":        "Restart a wedged language server (all servers when none named).",
 	"enter-plan-mode":    "Enter plan mode.",
 	"exit-plan-mode":     "Exit plan mode.",
 	"enter-worktree":     "Enter an isolated git worktree.",
@@ -348,6 +354,9 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"activate-skill":     json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
 	"skill-activate":     json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
+	"diagnostics":        json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	"references":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"lsp-restart":        json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
 	"enter-plan-mode":    json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"exit-plan-mode":     json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"enter-worktree":     json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"branch":{"type":"string"},"allow_dirty":{"type":"boolean"}}}`),
