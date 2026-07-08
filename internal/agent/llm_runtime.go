@@ -230,6 +230,10 @@ type toolRuntime struct {
 	internalModelRef provider.ModelRef
 	modelOverride    *provider.ModelRef
 	fallbackTried    map[provider.ModelRef]bool
+
+	// loopDetect spots the agent repeating itself (manifest
+	// [runtime.loop_detection]); nil when disabled.
+	loopDetect *loopDetector
 }
 
 // effectiveModel returns the model the main loop should call: the consented
@@ -376,6 +380,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
 	}
+	var loopPolicy config.LoopDetectionPolicy
+	if cfg.Manifest != nil {
+		loopPolicy = cfg.Manifest.Runtime.LoopDetection
+	}
+	runtime.loopDetect = newLoopDetector(loopPolicy)
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
 	}
@@ -586,6 +595,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for i, tc := range resp.ToolCalls {
 				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
 			}
+			// Loop check before execution: an abort skips the repeated calls
+			// entirely (the assistant turn is not yet in the history, so the
+			// carried prefix stays valid); a nudge lets the step run and is
+			// injected alongside the tool results below.
+			loopAct := runtime.loopDetect.observe(internalCalls, main)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
 			convMsgs = append(convMsgs, provider.Message{
 				Role:      provider.RoleAssistant,
@@ -605,7 +622,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// Tool results are appended before any exit check: an assistant
 			// tool-call turn without its matching results is an invalid prefix
 			// for the next request (and would poison the carried history).
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
+			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults}
+			if loopAct == loopNudge {
+				resultsMsg.Content = loopNudgeMessage
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+				}
+			}
+			convMsgs = append(convMsgs, resultsMsg)
 			if runtime.shouldStop() {
 				return finish(runtime.stopMessage(), false, "")
 			}
@@ -640,6 +664,10 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if len(calls) > 0 {
 				usedTool = true
 			}
+			loopAct := runtime.loopDetect.observe(calls, main)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 			var toolFeedback strings.Builder
@@ -652,6 +680,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 			for _, perr := range parseErrs {
 				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
+			}
+			if loopAct == loopNudge {
+				toolFeedback.WriteString(loopNudgeMessage + "\n")
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+				}
 			}
 			// Feedback lands in the history before any exit check so the carried
 			// conversation never ends on an unanswered tool request.
@@ -686,12 +720,21 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 
 		// Plain text without FINAL prefix and without a tool call.
 		if cfg.RequireToolCall {
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			if !usedTool {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: use TOOL_CALL before providing the final answer."})
-			} else {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."})
+			// Identical text emitted step after step is also a loop (e.g. the
+			// model keeps restating a plan instead of acting).
+			loopAct := runtime.loopDetect.observe(nil, main)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
 			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+			feedback := "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."
+			if !usedTool {
+				feedback = "system: use TOOL_CALL before providing the final answer."
+			}
+			if loopAct == loopNudge {
+				feedback += "\n" + loopNudgeMessage
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: feedback})
 			continue
 		}
 		return finish(main, false, "")

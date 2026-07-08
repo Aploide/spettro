@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,9 +17,11 @@ import (
 // "max tool steps reached" error.
 func TestUnboundedLoop_NoStepCap(t *testing.T) {
 	// Build a scripted sequence: 50 tool-call responses then a final answer.
+	// Each step uses distinct args so the run reads as real progress and the
+	// loop detector (which stops identical repeated calls) does not trip.
 	responses := make([]string, 0, 51)
 	for i := 0; i < 50; i++ {
-		responses = append(responses, `TOOL_CALL {"tool":"comment","args":{"message":"step"}}`)
+		responses = append(responses, fmt.Sprintf(`TOOL_CALL {"tool":"comment","args":{"message":"step %d"}}`, i))
 	}
 	responses = append(responses, "FINAL\nAll 50 steps completed successfully.")
 

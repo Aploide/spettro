@@ -96,6 +96,30 @@ type RuntimePolicy struct {
 	// Fallback configures model availability routing: what to do when the
 	// selected model fails with a quota/server/timeout error.
 	Fallback FallbackPolicy `toml:"fallback,omitempty"`
+	// LoopDetection configures detection of the agent repeating itself
+	// (identical tool calls or identical text output) so a run is nudged and
+	// then stopped instead of burning tokens.
+	LoopDetection LoopDetectionPolicy `toml:"loop_detection,omitempty"`
+}
+
+// LoopDetectionPolicy configures agent repetition detection. Zero values for
+// the thresholds fall back to built-in defaults; Disabled turns the feature
+// off entirely.
+type LoopDetectionPolicy struct {
+	// Disabled turns loop detection off.
+	Disabled bool `toml:"disabled,omitempty"`
+	// ConsecutiveThreshold trips after N identical consecutive tool calls
+	// (same tool, same normalized args). Default 3.
+	ConsecutiveThreshold int `toml:"consecutive_threshold,omitempty"`
+	// WindowSize is the rolling window of recent tool calls inspected for
+	// non-consecutive repetition. Default 20.
+	WindowSize int `toml:"window_size,omitempty"`
+	// WindowRepeatThreshold trips when the same call/args pair occurs M times
+	// within the window. Default 5.
+	WindowRepeatThreshold int `toml:"window_repeat_threshold,omitempty"`
+	// TextRepeatThreshold trips after N identical consecutive assistant text
+	// outputs. Default 3.
+	TextRepeatThreshold int `toml:"text_repeat_threshold,omitempty"`
 }
 
 // FallbackMode controls how a fallback model is adopted after the primary
