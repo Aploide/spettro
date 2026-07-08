@@ -191,8 +191,9 @@ func extractBinary(archivePath, dir string) (string, error) {
 // running process keeps its old inode open until it exits); a same-directory
 // temp file (see downloadToTemp/extractBinary) keeps this a same-filesystem
 // rename in the common case. If rename isn't possible we fall back to a
-// copy, which will cleanly fail with "text file busy" on Linux rather than
-// corrupt the running image.
+// copy onto a fresh inode: the target is unlinked first, never truncated in
+// place — on macOS, rewriting an existing executable's inode leaves the
+// kernel's cached code signature stale and the binary is SIGKILLed at launch.
 func replaceExecutable(newPath, target string) error {
 	if err := os.Rename(newPath, target); err == nil {
 		return nil
@@ -202,7 +203,10 @@ func replaceExecutable(newPath, target string) error {
 		return err
 	}
 	defer src.Close()
-	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
 	if err != nil {
 		return err
 	}
