@@ -93,6 +93,62 @@ type RuntimePolicy struct {
 	// Limits overrides the default character caps for tool output retained in
 	// model context. Zero values fall back to the built-in defaults.
 	Limits ContextLimits `toml:"limits,omitempty"`
+	// Fallback configures model availability routing: what to do when the
+	// selected model fails with a quota/server/timeout error.
+	Fallback FallbackPolicy `toml:"fallback,omitempty"`
+	// LoopDetection configures detection of the agent repeating itself
+	// (identical tool calls or identical text output) so a run is nudged and
+	// then stopped instead of burning tokens.
+	LoopDetection LoopDetectionPolicy `toml:"loop_detection,omitempty"`
+}
+
+// LoopDetectionPolicy configures agent repetition detection. Zero values for
+// the thresholds fall back to built-in defaults; Disabled turns the feature
+// off entirely.
+type LoopDetectionPolicy struct {
+	// Disabled turns loop detection off.
+	Disabled bool `toml:"disabled,omitempty"`
+	// ConsecutiveThreshold trips after N identical consecutive tool calls
+	// (same tool, same normalized args). Default 3.
+	ConsecutiveThreshold int `toml:"consecutive_threshold,omitempty"`
+	// WindowSize is the rolling window of recent tool calls inspected for
+	// non-consecutive repetition. Default 20.
+	WindowSize int `toml:"window_size,omitempty"`
+	// WindowRepeatThreshold trips when the same call/args pair occurs M times
+	// within the window. Default 5.
+	WindowRepeatThreshold int `toml:"window_repeat_threshold,omitempty"`
+	// TextRepeatThreshold trips after N identical consecutive assistant text
+	// outputs. Default 3.
+	TextRepeatThreshold int `toml:"text_repeat_threshold,omitempty"`
+}
+
+// FallbackMode controls how a fallback model is adopted after the primary
+// model fails with a transient availability error.
+type FallbackMode string
+
+const (
+	// FallbackPrompt asks the user before switching the main conversation to
+	// a fallback model (a swap invalidates the provider prompt cache).
+	FallbackPrompt FallbackMode = "prompt"
+	// FallbackSilent switches without asking. Only honoured on the main
+	// conversation when no interactive prompt is available (headless runs);
+	// internal utility calls always fall back silently.
+	FallbackSilent FallbackMode = "silent"
+	// FallbackOff disables fallback routing entirely.
+	FallbackOff FallbackMode = "off"
+)
+
+// FallbackPolicy configures the fallback chain for model availability
+// failures. Chain entries and InternalModel are "provider/model" refs.
+type FallbackPolicy struct {
+	// Mode: "prompt" (default), "silent", or "off".
+	Mode FallbackMode `toml:"mode,omitempty"`
+	// Chain is the ordered list of fallback models tried after the primary.
+	Chain []string `toml:"chain,omitempty"`
+	// InternalModel, when set, routes internal utility calls (compaction,
+	// titling, classification) to a designated small/cheap model with silent
+	// fallback, independent of the UI-selected model.
+	InternalModel string `toml:"internal_model,omitempty"`
 }
 
 // ContextLimits caps how many characters of tool output are retained in model
@@ -172,6 +228,9 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 			{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
 			{ID: "file-edit", Name: "File Edit", Description: "Apply targeted edits to existing files.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
+			{ID: "diagnostics", Name: "LSP Diagnostics", Description: "Fetch language-server diagnostics for a file or the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+			{ID: "references", Name: "LSP References", Description: "Find references or the definition of a symbol via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+			{ID: "lsp-restart", Name: "LSP Restart", Description: "Restart a wedged language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 			{ID: "shell-exec", Name: "Shell Executor", Description: "Runs shell commands in the project directory.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
 			{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
 			{ID: "tool-search", Name: "Tool Search", Description: "Search available tools for current agent.", Kind: "builtin", Enabled: true, TimeoutSec: 20, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
@@ -185,6 +244,8 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "goal-complete", Name: "Goal Complete", Description: "Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan", "ask"}, RiskLevel: "low"},
 			{ID: "config", Name: "Config", Description: "Read or update selected runtime settings.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "write", "plan"}, RiskLevel: "medium"},
 			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
+			{ID: "job-output", Name: "Job Output", Description: "Fetch accumulated output of a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
+			{ID: "job-kill", Name: "Job Kill", Description: "Terminate a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
 			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 			{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"},
 			{ID: "enter-plan-mode", Name: "Enter Plan Mode", Description: "Switch execution into planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
@@ -204,13 +265,13 @@ func DefaultAgentManifest() AgentManifest {
 		},
 		Agents: []AgentSpec{
 			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list", "grok-image", "grok-video"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list", "grok-image", "grok-video"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
 			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "mcp-list-resources", "mcp-read-resource", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
 			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
-			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "todo-write", "skill-read", "skill-list", "grok-image", "grok-video"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
-			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
-			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
-			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
+			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "todo-write", "skill-read", "skill-list", "grok-image", "grok-video"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
+			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
+			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
+			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
 			{ID: "docs", Name: "Docs", Description: "Read-only documentation worker", Skill: "documentation", Mode: "worker", Role: AgentRoleSubagent, Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore"}, PromptFile: "agents/docs-writer.md"},
 		},
 	}
@@ -428,6 +489,9 @@ func (m AgentManifest) Validate() error {
 	if err := validatePermissionRules(m.Runtime.PermissionRules, "runtime.permission_rules"); err != nil {
 		return err
 	}
+	if err := validateFallbackPolicy(m.Runtime.Fallback); err != nil {
+		return err
+	}
 
 	toolIDs := map[string]struct{}{}
 	for _, tool := range m.Tools {
@@ -555,6 +619,35 @@ func validateAgentRole(role AgentRole) error {
 	default:
 		return fmt.Errorf("unsupported role %q; must be primary, subagent, orchestrator, or worker", role)
 	}
+}
+
+func validateFallbackPolicy(p FallbackPolicy) error {
+	switch p.Mode {
+	case "", FallbackPrompt, FallbackSilent, FallbackOff:
+	default:
+		return fmt.Errorf("agent manifest: runtime.fallback.mode must be prompt, silent, or off")
+	}
+	for i, ref := range p.Chain {
+		if err := validateModelRef(ref); err != nil {
+			return fmt.Errorf("agent manifest: runtime.fallback.chain[%d]: %w", i, err)
+		}
+	}
+	if strings.TrimSpace(p.InternalModel) != "" {
+		if err := validateModelRef(p.InternalModel); err != nil {
+			return fmt.Errorf("agent manifest: runtime.fallback.internal_model: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateModelRef checks the "provider/model" shape used by fallback config.
+func validateModelRef(ref string) error {
+	ref = strings.TrimSpace(ref)
+	i := strings.Index(ref, "/")
+	if i <= 0 || i == len(ref)-1 {
+		return fmt.Errorf("model ref %q must be provider/model", ref)
+	}
+	return nil
 }
 
 func validatePermissionRules(rules []PermissionRule, field string) error {

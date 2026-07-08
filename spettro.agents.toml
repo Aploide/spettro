@@ -13,6 +13,15 @@ sandbox_mode = 'full-access'
 permission_rules = []
 allow_network_tools = false
 
+[runtime.fallback]
+# mode: 'prompt' (ask before switching the main conversation), 'silent', or 'off'.
+mode = 'prompt'
+# Ordered 'provider/model' refs tried when the selected model hits quota/5xx/timeouts.
+chain = []
+# Optional small/cheap 'provider/model' for internal calls (compaction, titling);
+# these fall back silently through the chain, independent of the UI-selected model.
+internal_model = ''
+
 [runtime.delegation]
 max_parallel_workers = 4
 max_depth = 2
@@ -195,6 +204,51 @@ requires_approval = true
 permitted_actions = ['write']
 aliases = []
 risk_level = 'high'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'diagnostics'
+name = 'LSP Diagnostics'
+description = 'Fetch language-server diagnostics for a file or the workspace.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read', 'search']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'references'
+name = 'LSP References'
+description = 'Find references or the definition of a symbol via the language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read', 'search']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'lsp-restart'
+name = 'LSP Restart'
+description = 'Restart a wedged language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read']
+aliases = []
+risk_level = 'low'
 primary_only = false
 permission_rules = []
 
@@ -562,7 +616,7 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/coding.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'shell-exec', 'bash', 'ls', 'tool-search', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'send-message', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'ls', 'tool-search', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'send-message', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video']
 permitted_actions = ['read', 'search', 'plan', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []
@@ -625,7 +679,7 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/code.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'shell-exec', 'bash', 'ls', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'ls', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video']
 permitted_actions = ['read', 'search', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []

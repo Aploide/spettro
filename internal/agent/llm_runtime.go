@@ -89,7 +89,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		UserTask:        plan,
 		CWD:             c.CWD,
 		RequireToolCall: true,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -156,6 +156,10 @@ type toolLoopConfig struct {
 	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
 	AskUser         AskUserCallback
+	// Checkpoint, when set, is invoked synchronously right before any
+	// file-modifying tool executes (file-write, file-edit, shell), so the host
+	// can snapshot the working tree and conversation for /rewind.
+	Checkpoint      func(tool string)
 	Manifest        *config.AgentManifest
 	SandboxState    *SandboxState // session-scoped OS sandbox policy; nil = disabled
 	SessionDir      string
@@ -197,6 +201,7 @@ type toolRuntime struct {
 	maxTokens     int
 	thinkingLevel provider.ThinkingLevel
 	toolCallback  func(ToolTrace)
+	checkpoint    func(tool string)
 	sessionDir    string
 	agentID       string
 	parentID      string
@@ -215,6 +220,81 @@ type toolRuntime struct {
 	goalComplete         bool
 	goalSummary          string
 	goalVerified         bool
+
+	// Model fallback routing (manifest [runtime.fallback]). modelOverride is
+	// set once the user consents to a switch and pins the rest of the run to
+	// the fallback model; fallbackTried prevents re-offering a model that
+	// already failed this run.
+	fallbackMode     config.FallbackMode
+	fallbackChain    []provider.ModelRef
+	internalModelRef provider.ModelRef
+	modelOverride    *provider.ModelRef
+	fallbackTried    map[provider.ModelRef]bool
+
+	// loopDetect spots the agent repeating itself (manifest
+	// [runtime.loop_detection]); nil when disabled.
+	loopDetect *loopDetector
+}
+
+// effectiveModel returns the model the main loop should call: the consented
+// fallback override if one is active, otherwise the live UI selection.
+func (r *toolRuntime) effectiveModel() provider.ModelRef {
+	if r.modelOverride != nil {
+		return *r.modelOverride
+	}
+	return provider.ModelRef{Provider: r.providerName(), Model: r.modelName()}
+}
+
+// offerFallback decides whether the failed main-loop request should be
+// retried on a fallback model. Transient availability failures only. The
+// user is asked before any main-thread switch (a swap invalidates the prompt
+// cache); FallbackSilent skips the question only when no interactive prompt
+// is available (headless). Returns the model to switch to and true to retry.
+func (r *toolRuntime) offerFallback(ctx context.Context, failed provider.ModelRef, cause error) (provider.ModelRef, bool) {
+	if r.fallbackMode == config.FallbackOff || len(r.fallbackChain) == 0 {
+		return provider.ModelRef{}, false
+	}
+	kind := provider.Classify(cause)
+	if !kind.Transient() {
+		return provider.ModelRef{}, false
+	}
+	if r.fallbackTried == nil {
+		r.fallbackTried = map[provider.ModelRef]bool{}
+	}
+	r.fallbackTried[failed] = true
+	var next provider.ModelRef
+	for _, ref := range r.fallbackChain {
+		if ref == failed || r.fallbackTried[ref] {
+			continue
+		}
+		if r.providerMgr != nil && !r.providerMgr.HasModel(ref.Provider, ref.Model) {
+			continue
+		}
+		next = ref
+		break
+	}
+	if next.IsZero() {
+		return provider.ModelRef{}, false
+	}
+	if r.askUser == nil {
+		// No way to ask: only proceed when the manifest explicitly opts into
+		// silent switching; never silently swap the main thread otherwise.
+		if r.fallbackMode == config.FallbackSilent {
+			return next, true
+		}
+		return provider.ModelRef{}, false
+	}
+	switchOpt := fmt.Sprintf("Switch to %s", next)
+	answer, err := r.askUser(ctx, AskUserRequest{
+		Question:      fmt.Sprintf("Model %s is unavailable (%s). Switch to %s for the rest of this run? Note: switching models invalidates the prompt cache.", failed, kind, next),
+		Options:       []string{switchOpt, "Abort"},
+		Context:       truncate(cause.Error(), 300),
+		DefaultOption: switchOpt,
+	})
+	if err != nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "switch") {
+		return provider.ModelRef{}, false
+	}
+	return next, true
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -293,16 +373,32 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		modelName:       cfg.ModelName,
 		maxTokens:       cfg.MaxTokens,
 		toolCallback:    cfg.ToolCallback,
+		checkpoint:      cfg.Checkpoint,
 		sessionDir:      cfg.SessionDir,
 		agentID:         cfg.AgentID,
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
 	}
+	var loopPolicy config.LoopDetectionPolicy
+	if cfg.Manifest != nil {
+		loopPolicy = cfg.Manifest.Runtime.LoopDetection
+	}
+	runtime.loopDetect = newLoopDetector(loopPolicy)
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
 	}
 	if cfg.Manifest != nil {
+		fb := cfg.Manifest.Runtime.Fallback
+		runtime.fallbackMode = fb.Mode
+		// Refs are validated at manifest load; a parse error here just means
+		// no chain, never a failed run.
+		if chain, err := provider.ParseModelRefs(fb.Chain); err == nil {
+			runtime.fallbackChain = chain
+		}
+		if ref, err := provider.ParseModelRef(fb.InternalModel); err == nil {
+			runtime.internalModelRef = ref
+		}
 		runtime.runtimeRules = append(runtime.runtimeRules, cfg.Manifest.Runtime.PermissionRules...)
 		if spec, ok := cfg.Manifest.AgentByID(cfg.AgentID); ok {
 			runtime.agentRules = append(runtime.agentRules, spec.PermissionRules...)
@@ -459,11 +555,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				}
 			}
 		}
-		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), req)
+		model := runtime.effectiveModel()
+		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()
 		}
 		if err != nil {
+			// Availability failure (quota/5xx/timeout): offer the configured
+			// fallback model instead of failing the turn. The switch requires
+			// user consent on interactive runs and pins the rest of the run.
+			if next, ok := runtime.offerFallback(ctx, model, err); ok {
+				runtime.modelOverride = &next
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
+				}
+				continue
+			}
 			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
 		}
 		totalTokens += resp.EstimatedTokens
@@ -488,6 +595,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for i, tc := range resp.ToolCalls {
 				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
 			}
+			// Loop check before execution: an abort skips the repeated calls
+			// entirely (the assistant turn is not yet in the history, so the
+			// carried prefix stays valid); a nudge lets the step run and is
+			// injected alongside the tool results below.
+			loopAct := runtime.loopDetect.observe(internalCalls, main)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
 			convMsgs = append(convMsgs, provider.Message{
 				Role:      provider.RoleAssistant,
@@ -507,7 +622,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// Tool results are appended before any exit check: an assistant
 			// tool-call turn without its matching results is an invalid prefix
 			// for the next request (and would poison the carried history).
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, ToolResults: toolResults})
+			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults}
+			if loopAct == loopNudge {
+				resultsMsg.Content = loopNudgeMessage
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+				}
+			}
+			convMsgs = append(convMsgs, resultsMsg)
 			if runtime.shouldStop() {
 				return finish(runtime.stopMessage(), false, "")
 			}
@@ -542,6 +664,10 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if len(calls) > 0 {
 				usedTool = true
 			}
+			loopAct := runtime.loopDetect.observe(calls, main)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 			var toolFeedback strings.Builder
@@ -554,6 +680,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 			for _, perr := range parseErrs {
 				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
+			}
+			if loopAct == loopNudge {
+				toolFeedback.WriteString(loopNudgeMessage + "\n")
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+				}
 			}
 			// Feedback lands in the history before any exit check so the carried
 			// conversation never ends on an unanswered tool request.
@@ -588,12 +720,21 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 
 		// Plain text without FINAL prefix and without a tool call.
 		if cfg.RequireToolCall {
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			if !usedTool {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: use TOOL_CALL before providing the final answer."})
-			} else {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."})
+			// Identical text emitted step after step is also a loop (e.g. the
+			// model keeps restating a plan instead of acting).
+			loopAct := runtime.loopDetect.observe(nil, main)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
 			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+			feedback := "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."
+			if !usedTool {
+				feedback = "system: use TOOL_CALL before providing the final answer."
+			}
+			if loopAct == loopNudge {
+				feedback += "\n" + loopNudgeMessage
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: feedback})
 			continue
 		}
 		return finish(main, false, "")
@@ -674,10 +815,24 @@ func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs 
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
 	}
-	resp, err := r.providerMgr.Send(ctx, r.providerName(), r.modelName(), provider.Request{
-		Prompt:    sb.String(),
-		MaxTokens: 0,
-	})
+	// Compaction is an internal utility call: route it to the designated
+	// small/cheap model when configured and fall back silently through the
+	// chain on availability failures — the main conversation model (and its
+	// prompt cache) is unaffected either way.
+	primary := r.internalModelRef
+	if primary.IsZero() || !r.providerMgr.HasModel(primary.Provider, primary.Model) {
+		primary = provider.ModelRef{Provider: r.providerName(), Model: r.modelName()}
+	}
+	chain := r.fallbackChain
+	if r.fallbackMode == config.FallbackOff {
+		chain = nil
+	}
+	resp, err := provider.SendWithFallback(ctx,
+		func(ctx context.Context, ref provider.ModelRef, req provider.Request) (provider.Response, error) {
+			return r.providerMgr.Send(ctx, ref.Provider, ref.Model, req)
+		},
+		primary, chain,
+		provider.Request{Prompt: sb.String(), MaxTokens: 0}, nil)
 	if err != nil {
 		return msgs, false, fmt.Errorf("compaction summarizer: %w", err)
 	}
@@ -852,6 +1007,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
+	if r.checkpoint != nil && isMutatingTool(call.Tool) {
+		r.checkpoint(call.Tool)
+	}
 	switch call.Tool {
 	case "repo-search":
 		var args struct {
@@ -942,9 +1100,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
 		if exists {
-			return fmt.Sprintf("updated %s", rel), nil
+			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
-		return fmt.Sprintf("created %s", rel), nil
+		return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("created %s", rel)), nil
 	case "shell-exec":
 		return r.runShellTool(ctx, call.Tool, call.Args, "shell-exec")
 	case "glob":
@@ -1029,6 +1187,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSkillList(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
+	case "diagnostics":
+		return r.runLSPDiagnostics(ctx, call.Args)
+	case "references":
+		return r.runLSPReferences(ctx, call.Args)
+	case "lsp-restart":
+		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
 		return r.runMCPListResources(ctx, call.Args)
 	case "mcp-read-resource":
@@ -1109,6 +1273,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
+	case "job-output":
+		return r.runJobOutput(call.Args)
+	case "job-kill":
+		return r.runJobKill(call.Args)
 	case "comment":
 		var args struct {
 			Message string `json:"message"`
@@ -1208,6 +1376,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			MaxTokens:       r.maxTokens,
 			Thinking:        r.thinkingLevel,
 			ToolCallback:    r.toolCallback,
+			Checkpoint:      r.checkpoint,
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,
 			Manifest:        r.manifest,
@@ -1224,6 +1393,18 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}
+}
+
+// isMutatingTool reports whether a tool can modify the working tree and thus
+// warrants a pre-execution checkpoint. Shell tools are always treated as
+// mutating: classifying arbitrary commands reliably is not possible, and a
+// spurious checkpoint is cheap while a missed one is unrecoverable.
+func isMutatingTool(tool string) bool {
+	switch tool {
+	case "file-write", "file-edit", "shell-exec", "bash":
+		return true
+	}
+	return false
 }
 
 // skipDirs are directories to skip when walking the workspace.

@@ -160,7 +160,11 @@ type LLMAgent struct {
 	StreamCallback StreamCallback
 	ShellApproval  ShellApprovalCallback
 	AskUser        AskUserCallback
-	Manifest       *config.AgentManifest // for sub-agent spawning via agent tool
+	// Checkpoint, when set, is called synchronously before every
+	// file-modifying tool executes (including in sub-agents) so the host can
+	// snapshot files + conversation for /rewind.
+	Checkpoint func(tool string)
+	Manifest   *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
 	// whole agent tree. nil means the sandbox feature is disabled.
 	SandboxState    *SandboxState
@@ -224,6 +228,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Permission:      a.Spec.Permission,
 		ShellApproval:   a.ShellApproval,
 		AskUser:         a.AskUser,
+		Checkpoint:      a.Checkpoint,
 		Manifest:        a.Manifest,
 		SandboxState:    a.SandboxState,
 		SessionDir:      a.SessionDir,

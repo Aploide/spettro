@@ -37,9 +37,9 @@ func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
 		return 40000
-	case "repo-search", "grep", "glob", "ls":
+	case "repo-search", "grep", "glob", "ls", "diagnostics", "references":
 		return 16000
-	case "shell-exec", "bash", "bash-output":
+	case "shell-exec", "bash", "bash-output", "job-output":
 		return 8000
 	case "agent":
 		return 8000
@@ -243,9 +243,11 @@ var builtinToolSchemas = map[string]string{
 	"grep":               `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
 	"repo-search":        `{"query": string}`,
 	"sandbox":            `{"action": "status"|"request", "add_writable_dir"?: string, "net"?: "all"|"localhost"|"none"|"ports", "ports"?: [int], "reason"?: string}`,
-	"shell-exec":         `{"command": string}`,
-	"bash":               `{"command": string}`,
-	"bash-output":        `{"command": string}`,
+	"shell-exec":         `{"command": string, "run_in_background"?: bool}`,
+	"bash":               `{"command": string, "run_in_background"?: bool}`,
+	"bash-output":        `{"command": string, "run_in_background"?: bool}`,
+	"job-output":         `{"job_id": string, "offset"?: int}`,
+	"job-kill":           `{"job_id": string}`,
 	"web-fetch":          `{"url": string}`,
 	"web-search":         `{"query": string, "max_results"?: int}`,
 	"grok-image":         `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
@@ -268,6 +270,9 @@ var builtinToolSchemas = map[string]string{
 	"mcp-list-resources": `{"server_id": string}`,
 	"mcp-read-resource":  `{"server_id": string, "resource_id": string}`,
 	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
+	"diagnostics":        `{"path"?: string}`,
+	"references":         `{"path": string, "symbol"?: string, "kind"?: "references"|"definition", "line"?: int, "character"?: int}`,
+	"lsp-restart":        `{"server"?: string}`,
 	"enter-plan-mode":    `{"reason"?: string}`,
 	"exit-plan-mode":     `{"reason"?: string}`,
 	"enter-worktree":     `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
@@ -286,9 +291,11 @@ var builtinNativeToolDescs = map[string]string{
 	"glob":               "Find files matching a glob pattern (** for recursive search).",
 	"grep":               "Search files with a regular expression.",
 	"repo-search":        "Semantic full-text search across the repository.",
-	"shell-exec":         "Execute a shell command.",
-	"bash":               "Execute a shell command.",
-	"bash-output":        "Execute a shell command.",
+	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"bash-output":        "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"job-output":         "Fetch accumulated stdout/stderr of a background job. Pass the next_offset from the previous call to read incrementally.",
+	"job-kill":           "Terminate a background job by ID.",
 	"web-fetch":          "Fetch the content of a URL.",
 	"web-search":         "Search the web.",
 	"ask-user":           "Ask the user a question and wait for their answer.",
@@ -306,6 +313,9 @@ var builtinNativeToolDescs = map[string]string{
 	"activate-skill":     "Activate a skill.",
 	"skill-activate":     "Activate a skill.",
 	"config":             "Get or set configuration values.",
+	"diagnostics":        "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
+	"references":         "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+	"lsp-restart":        "Restart a wedged language server (all servers when none named).",
 	"enter-plan-mode":    "Enter plan mode.",
 	"exit-plan-mode":     "Exit plan mode.",
 	"enter-worktree":     "Enter an isolated git worktree.",
@@ -328,9 +338,11 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"glob":               json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
 	"grep":               json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"glob":{"type":"string"},"type":{"type":"string"},"case_insensitive":{"type":"boolean"},"context":{"type":"integer"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"max_results":{"type":"integer"}},"required":["pattern"]}`),
 	"repo-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
-	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
-	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
-	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"job-output":         json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer"}},"required":["job_id"]}`),
+	"job-kill":           json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}`),
 	"web-fetch":          json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}`),
 	"web-search":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`),
 	"ask-user":           json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"context":{"type":"string"},"default_option":{"type":"string"},"allow_free_response":{"type":"boolean"}},"required":["question"]}`),
@@ -348,6 +360,9 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"activate-skill":     json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
 	"skill-activate":     json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
+	"diagnostics":        json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	"references":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"lsp-restart":        json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
 	"enter-plan-mode":    json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"exit-plan-mode":     json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"enter-worktree":     json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"branch":{"type":"string"},"allow_dirty":{"type":"boolean"}}}`),

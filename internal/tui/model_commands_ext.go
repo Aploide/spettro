@@ -13,6 +13,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/hooks"
+	"spettro/internal/jobs"
 	"spettro/internal/mcp"
 	"spettro/internal/session"
 	"spettro/internal/skills"
@@ -552,6 +553,52 @@ func (m Model) handlePermissionsCommand(input string) (tea.Model, tea.Cmd) {
 	default:
 		m.showBanner("invalid permission", "error")
 	}
+	return m, nil
+}
+
+// handleJobsCommand lists and kills background shell jobs started by the
+// agent (bash run_in_background). /jobs, /jobs kill <id>, /jobs kill all.
+func (m Model) handleJobsCommand(input string) (tea.Model, tea.Cmd) {
+	mgr := jobs.Default()
+	fields := strings.Fields(input)
+	if len(fields) == 1 || strings.EqualFold(fields[1], "list") {
+		list := mgr.List()
+		if len(list) == 0 {
+			m.pushSystemMsg("no background jobs in this session")
+			return m, nil
+		}
+		var rows []string
+		for _, j := range list {
+			status := "running"
+			if !j.Running() {
+				status = "exited"
+			}
+			rows = append(rows, fmt.Sprintf("- %s [%s] %s (started %s ago)", j.ID, status, truncateLabel(j.Command, 60), time.Since(j.Started).Round(time.Second)))
+		}
+		m.pushSystemMsg("background jobs:\n" + strings.Join(rows, "\n") + "\n\nkill with /jobs kill <id> or /jobs kill all")
+		m.refreshViewport()
+		return m, nil
+	}
+	if strings.EqualFold(fields[1], "kill") {
+		if len(fields) < 3 {
+			m.showBanner("usage: /jobs kill <id>|all", "error")
+			return m, nil
+		}
+		target := fields[2]
+		if strings.EqualFold(target, "all") {
+			n := mgr.RunningCount()
+			mgr.KillAll()
+			m.showBanner(fmt.Sprintf("killed %d background job(s)", n), "success")
+			return m, nil
+		}
+		if err := mgr.Kill(target); err != nil {
+			m.showBanner("jobs kill failed: "+err.Error(), "error")
+			return m, nil
+		}
+		m.showBanner("killed "+target, "success")
+		return m, nil
+	}
+	m.showBanner("usage: /jobs [list] | /jobs kill <id>|all", "error")
 	return m, nil
 }
 

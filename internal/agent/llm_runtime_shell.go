@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/sandbox"
 )
 
@@ -32,7 +33,8 @@ func isBlockedCommand(cmd string) bool {
 
 func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
 	var args struct {
-		Command string `json:"command"`
+		Command         string `json:"command"`
+		RunInBackground bool   `json:"run_in_background"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("%s args: %w", prefix, err)
@@ -48,6 +50,18 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// Auto-inject the `--trailer` flag whenever an LLM agent runs `git commit`
 	// through shell/bash so the policy holds even if the model forgets it.
 	cmdText = EnforceCommitCoAuthor(cmdText)
+	if args.RunInBackground {
+		// Detached jobs must outlive this tool call: build the command on a
+		// background context so the per-tool timeout doesn't kill it. The same
+		// sandbox policy still wraps the process.
+		cmd := sandbox.Command(context.Background(), r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
+		cmd.Dir = r.cwd
+		job, err := jobs.Default().Start(cmd, cmdText)
+		if err != nil {
+			return "", fmt.Errorf("start background job: %w", err)
+		}
+		return fmt.Sprintf("started background job %s (poll with job-output, terminate with job-kill)", job.ID), nil
+	}
 	// OS-native confinement enforces the active sandbox policy at the kernel
 	// level. The policy is set once at startup (CLI flags / manifest) and is
 	// not visible to the model: blocked operations surface as ordinary command

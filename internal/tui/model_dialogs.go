@@ -1701,6 +1701,19 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	if len(convHistory) == 0 {
 		history = m.buildConversationHistory()
 	}
+	// Checkpointing (TODO 01): before any file-modifying tool executes, the
+	// runtime calls back so the working tree is committed to the shadow repo
+	// together with the conversation as it stood when this run started. The
+	// snapshot blob is captured now — the model value is immutable during the
+	// run — and the checkpointer itself is thread-safe.
+	var checkpointFn func(string)
+	if cp := m.ensureCheckpointer(); cp != nil {
+		convSnapshot := m.conversationSnapshot()
+		prompt := input
+		checkpointFn = func(tool string) {
+			_, _ = cp.Snapshot(tool, prompt, convSnapshot)
+		}
+	}
 	a := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: pm,
@@ -1713,6 +1726,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		Images:          images,
 		History:         history,
 		Messages:        convHistory,
+		Checkpoint:      checkpointFn,
 		Manifest:        &manifest,
 		SandboxState:    m.sandboxState,
 		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),

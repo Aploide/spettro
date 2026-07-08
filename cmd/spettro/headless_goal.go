@@ -11,6 +11,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/sandbox"
@@ -25,6 +26,9 @@ import (
 func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	// Kill detached background shell jobs on exit; they are in their own
+	// process groups and would otherwise outlive the run.
+	defer jobs.Default().KillAll()
 
 	store, err := storage.New(cwd)
 	if err != nil {
