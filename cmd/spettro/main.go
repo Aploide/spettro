@@ -11,6 +11,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/sandbox"
@@ -148,6 +149,9 @@ func main() {
 	// (bubbletea v2 removed the imperative program options).
 	p := tea.NewProgram(m)
 	final, err := p.Run()
+	// Background shell jobs are detached into their own process groups, so
+	// they would outlive spettro unless killed explicitly on session exit.
+	jobs.Default().KillAll()
 	if err != nil {
 		fatal("runtime error: %v", err)
 	}

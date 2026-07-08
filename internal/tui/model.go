@@ -1526,7 +1526,19 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
-			// Sub-commands (e.g. "/think high") execute immediately when selected.
+			// Commands that require a parameter (including sub-commands like
+			// "/jobs kill <id>") complete into the input and wait instead of
+			// executing.
+			if requiresParam(chosen) {
+				m.ta.SetValue(chosen + " ")
+				m.cmdItems = nil
+				m.cmdCursor = 0
+				if cmd := m.syncInputSuggestions(); cmd != nil {
+					return m, cmd
+				}
+				return m, nil
+			}
+			// Self-contained sub-commands (e.g. "/think high") execute immediately.
 			if strings.Contains(chosen[1:], " ") {
 				m.ta.Reset()
 				m.cmdItems = nil
@@ -1537,16 +1549,6 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m.handleCommand(chosen)
-			}
-			// Commands that require a parameter always open the second-level selector.
-			if requiresParam(chosen) {
-				m.ta.SetValue(chosen + " ")
-				m.cmdItems = nil
-				m.cmdCursor = 0
-				if cmd := m.syncInputSuggestions(); cmd != nil {
-					return m, cmd
-				}
-				return m, nil
 			}
 			// Other commands: execute if textarea already matches, else complete.
 			current := strings.TrimSpace(m.ta.Value())
@@ -1800,6 +1802,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleSkillsCommand(input)
 	case "/hooks":
 		return m.handleHooksCommand()
+	case "/jobs":
+		return m.handleJobsCommand(input)
 	case "/plan":
 		return m.handlePlanCommand(input)
 	case "/goal":

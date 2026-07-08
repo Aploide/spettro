@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"spettro/internal/compact"
+	"spettro/internal/jobs"
 	"spettro/internal/version"
 )
 
@@ -677,6 +678,13 @@ func (m Model) viewStatusBar(width int) string {
 		ctxLabel += " (auto off)"
 	}
 	right := lipgloss.NewStyle().Foreground(ctxColor).Render(ctxLabel)
+	if n := jobs.Default().RunningCount(); n > 0 {
+		label := fmt.Sprintf("◉ %d bg job", n)
+		if n > 1 {
+			label += "s"
+		}
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(label) + "  " + right
+	}
 
 	leftWidth := width - lipgloss.Width(right) - 2
 	if leftWidth < 0 {

@@ -89,7 +89,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		UserTask:        plan,
 		CWD:             c.CWD,
 		RequireToolCall: true,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep", "diagnostics", "references"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -1230,6 +1230,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
+	case "job-output":
+		return r.runJobOutput(call.Args)
+	case "job-kill":
+		return r.runJobKill(call.Args)
 	case "comment":
 		var args struct {
 			Message string `json:"message"`

@@ -34,6 +34,8 @@ var allCommands = []commandDef{
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
+	{"/jobs", "list background shell jobs"},
+	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
@@ -82,6 +84,9 @@ var thinkCommands = []commandDef{
 func requiresParam(cmd string) bool {
 	switch strings.ToLower(strings.TrimSpace(cmd)) {
 	case "/think", "/thinking", "/permission", "/permissions":
+		return true
+	case "/jobs kill":
+		// Needs a job ID (or "all"); executing bare would just error.
 		return true
 	}
 	return false
@@ -194,6 +199,8 @@ const helpText = `commands:
   /telegram setup <token>  configure BotFather token (alias /tg)
   /telegram allow <@u|id>  allow a username or chat ID to drive Spettro
   /telegram start|stop|status  control the Telegram relay
+  /jobs          list background shell jobs started by the agent
+  /jobs kill <id>|all  terminate a background job (or all of them)
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
   /rewind        restore files and/or conversation to a pre-edit checkpoint

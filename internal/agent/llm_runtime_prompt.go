@@ -39,7 +39,7 @@ func toolOutputHistoryLimit(name string) int {
 		return 40000
 	case "repo-search", "grep", "glob", "ls", "diagnostics", "references":
 		return 16000
-	case "shell-exec", "bash", "bash-output":
+	case "shell-exec", "bash", "bash-output", "job-output":
 		return 8000
 	case "agent":
 		return 8000
@@ -243,9 +243,11 @@ var builtinToolSchemas = map[string]string{
 	"grep":               `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
 	"repo-search":        `{"query": string}`,
 	"sandbox":            `{"action": "status"|"request", "add_writable_dir"?: string, "net"?: "all"|"localhost"|"none"|"ports", "ports"?: [int], "reason"?: string}`,
-	"shell-exec":         `{"command": string}`,
-	"bash":               `{"command": string}`,
-	"bash-output":        `{"command": string}`,
+	"shell-exec":         `{"command": string, "run_in_background"?: bool}`,
+	"bash":               `{"command": string, "run_in_background"?: bool}`,
+	"bash-output":        `{"command": string, "run_in_background"?: bool}`,
+	"job-output":         `{"job_id": string, "offset"?: int}`,
+	"job-kill":           `{"job_id": string}`,
 	"web-fetch":          `{"url": string}`,
 	"web-search":         `{"query": string, "max_results"?: int}`,
 	"grok-image":         `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
@@ -289,9 +291,11 @@ var builtinNativeToolDescs = map[string]string{
 	"glob":               "Find files matching a glob pattern (** for recursive search).",
 	"grep":               "Search files with a regular expression.",
 	"repo-search":        "Semantic full-text search across the repository.",
-	"shell-exec":         "Execute a shell command.",
-	"bash":               "Execute a shell command.",
-	"bash-output":        "Execute a shell command.",
+	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"bash-output":        "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"job-output":         "Fetch accumulated stdout/stderr of a background job. Pass the next_offset from the previous call to read incrementally.",
+	"job-kill":           "Terminate a background job by ID.",
 	"web-fetch":          "Fetch the content of a URL.",
 	"web-search":         "Search the web.",
 	"ask-user":           "Ask the user a question and wait for their answer.",
@@ -334,9 +338,11 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"glob":               json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
 	"grep":               json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"glob":{"type":"string"},"type":{"type":"string"},"case_insensitive":{"type":"boolean"},"context":{"type":"integer"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"max_results":{"type":"integer"}},"required":["pattern"]}`),
 	"repo-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
-	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
-	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
-	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"job-output":         json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer"}},"required":["job_id"]}`),
+	"job-kill":           json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}`),
 	"web-fetch":          json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}`),
 	"web-search":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`),
 	"ask-user":           json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"context":{"type":"string"},"default_option":{"type":"string"},"allow_free_response":{"type":"boolean"}},"required":["question"]}`),
