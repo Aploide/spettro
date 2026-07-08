@@ -120,9 +120,17 @@ func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Req
 	if len(completion.Choices) > 0 {
 		content = completion.Choices[0].Message.Content
 	}
+	// OpenAI reports cached tokens as a SUBSET of prompt_tokens; normalize to
+	// Anthropic-style split (InputTokens excludes cache reads).
+	cached := int(completion.Usage.PromptTokensDetails.CachedTokens)
 	return Response{
 		Content:         content,
 		EstimatedTokens: int(completion.Usage.TotalTokens),
+		Usage: Usage{
+			InputTokens:     int(completion.Usage.PromptTokens) - cached,
+			OutputTokens:    int(completion.Usage.CompletionTokens),
+			CacheReadTokens: cached,
+		},
 	}, nil
 }
 
@@ -141,6 +149,10 @@ func (a OpenAICompatibleAdapter) sendLegacyCompletion(ctx context.Context, clien
 	return Response{
 		Content:         content,
 		EstimatedTokens: int(completion.Usage.TotalTokens),
+		Usage: Usage{
+			InputTokens:  int(completion.Usage.PromptTokens),
+			OutputTokens: int(completion.Usage.CompletionTokens),
+		},
 	}, nil
 }
 
@@ -255,5 +267,11 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 	return Response{
 		Content:         sb.String(),
 		EstimatedTokens: int(msg.Usage.InputTokens + msg.Usage.OutputTokens),
+		Usage: Usage{
+			InputTokens:      int(msg.Usage.InputTokens),
+			OutputTokens:     int(msg.Usage.OutputTokens),
+			CacheReadTokens:  int(msg.Usage.CacheReadInputTokens),
+			CacheWriteTokens: int(msg.Usage.CacheCreationInputTokens),
+		},
 	}, nil
 }

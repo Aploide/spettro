@@ -1076,6 +1076,9 @@ func (m *Model) autoSave() {
 		ProjectHash: session.ProjectHash(m.cwd),
 		StartedAt:   msgs[0].At,
 	}
+	if usage := m.providers.UsageSnapshot(); usage.Totals.Requests > 0 {
+		metadata.Stats = &usage
+	}
 	if m.activeGoal != nil {
 		metadata.Goal = &session.GoalRecord{
 			Objective:       m.activeGoal.Objective,
@@ -1528,6 +1531,12 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				})
 			}
 			m.rebuildActivitiesFromEvents(state.Events)
+			// Restore usage counters so /stats continues from the saved session.
+			if state.Metadata.Stats != nil {
+				m.providers.RestoreUsage(*state.Metadata.Stats)
+			} else {
+				m.providers.ResetUsage()
+			}
 			// Restore unfinished goal (step 05): surface it but do NOT auto-start.
 			m.pendingGoalResume = nil
 			if state.Metadata.Goal != nil && state.Metadata.Goal.Active {

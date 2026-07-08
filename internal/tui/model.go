@@ -1791,9 +1791,13 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.todos = nil
 		// Occupancy resets with the conversation; keep the gauge honest.
 		m.contextTokens = 0
+		// Usage counters are per-conversation; a cleared session starts at zero.
+		m.providers.ResetUsage()
 		m.compactWarningLevel = 0
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
+	case "/stats":
+		m.pushSystemMsg(m.renderStats())
 	case "/tasks":
 		return m.handleTasksCommand(input)
 	case "/mcp":

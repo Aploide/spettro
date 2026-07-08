@@ -678,6 +678,15 @@ func (m Model) viewStatusBar(width int) string {
 		ctxLabel += " (auto off)"
 	}
 	right := lipgloss.NewStyle().Foreground(ctxColor).Render(ctxLabel)
+	// Live prompt-cache cue: hit rate of the LAST request. A sudden drop means
+	// the cached prefix broke — visible without running /stats.
+	if label, healthy := m.cacheIndicator(); label != "" {
+		cacheColor := lipgloss.Color("#F59E0B")
+		if healthy {
+			cacheColor = lipgloss.Color("#10B981")
+		}
+		right = lipgloss.NewStyle().Foreground(cacheColor).Render(label) + "  " + right
+	}
 	if n := jobs.Default().RunningCount(); n > 0 {
 		label := fmt.Sprintf("◉ %d bg job", n)
 		if n > 1 {
