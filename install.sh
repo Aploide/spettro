@@ -123,6 +123,10 @@ if [ ! -w "$INSTALL_DIR" ]; then
   exit 1
 fi
 
+# Remove any existing binary first: on macOS, cp onto an existing inode
+# leaves the kernel's cached code signature stale and the new binary is
+# SIGKILLed ("Code Signature Invalid") at launch.
+rm -f "$DEST"
 cp "${TMP}/spettro" "$DEST"
 chmod +x "$DEST"
 

@@ -23,4 +23,7 @@ INSTALL_DIR ?= $(HOME)/.local/bin
 
 install: build
 	mkdir -p $(INSTALL_DIR)
+	# rm first: cp onto an existing inode leaves the kernel's cached code
+	# signature stale on macOS, and the binary gets SIGKILLed at launch
+	rm -f $(INSTALL_DIR)/$(APP)
 	cp bin/$(APP) $(INSTALL_DIR)/$(APP)
