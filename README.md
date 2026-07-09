@@ -88,6 +88,7 @@ Spettro commands are entered with a leading `/`.
 - `/remote [:port]` expose a loopback HTTP/SSE control plane (see [`docs/remote.md`](docs/remote.md))
 - `/remote local [:port]` expose the control plane to LAN devices on `0.0.0.0` (see [`docs/remote.md`](docs/remote.md))
 - `/telegram setup <token>` configure a Telegram bot relay so you can drive Spettro from a chat (see [`docs/telegram.md`](docs/telegram.md)). Alias: `/tg`.
+- `/<custom> [args]` run your own saved prompts from `~/.spettro/commands/` or `.spettro/commands/` (see [`docs/custom-commands.md`](docs/custom-commands.md))
 
 For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
@@ -111,6 +112,7 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 - [Agent Skills](docs/skills.md)
 - [Getting started and workflow](docs/getting-started.md)
 - [Commands and keybindings](docs/commands.md)
+- [Custom slash commands](docs/custom-commands.md) — save reusable prompts as your own `/commands`
 - [Configuration and storage](docs/configuration.md)
 - [Architecture overview](docs/architecture.md)
 - [Remote control plane](docs/remote.md)

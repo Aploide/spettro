@@ -16,6 +16,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/checkpoint"
+	"spettro/internal/commands"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
@@ -304,6 +305,10 @@ type Model struct {
 	cmdItems  []commandDef
 	cmdCursor int
 
+	// customCommands are user-defined slash commands discovered from
+	// ~/.spettro/commands and <cwd>/.spettro/commands at startup.
+	customCommands []commands.Command
+
 	repoFiles     []string
 	mentionItems  []string
 	mentionCursor int
@@ -528,6 +533,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		sandboxState: sb,
 		historyIndex: -1,
 	}
+	m.customCommands, _ = commands.Discover(cwd)
 	m.refreshModifiedFiles()
 	// Scan the working directory in the background: walking a large tree
 	// synchronously here would block the first paint (seen: ~56s from $HOME).
@@ -1656,7 +1662,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 
 	switch cmd {
 	case "/help":
-		m.pushSystemMsg(helpText)
+		m.pushSystemMsg(helpText + m.customCommandsHelp())
 	case "/exit", "/quit":
 		return m, tea.Quit
 	case "/update":
@@ -1831,6 +1837,16 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/telegram", "/tg":
 		return m.handleTelegramCommand(input)
 	default:
+		if custom, ok := m.findCustomCommand(cmd); ok {
+			args := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
+			allowShell := m.cfg.Permission == config.PermissionYOLO
+			expanded, err := commands.Expand(custom, args, m.cwd, allowShell)
+			if err != nil {
+				m.showBanner(err.Error(), "error")
+				return m, nil
+			}
+			return m.handlePrompt(expanded)
+		}
 		m.showBanner("unknown command: "+cmd, "error")
 	}
 

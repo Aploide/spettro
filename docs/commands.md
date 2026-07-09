@@ -50,6 +50,7 @@
 | `/telegram start` / `/telegram stop` | Start or stop the relay's long-poll worker. Autostarted on next launch when previously running. |
 | `/telegram status` / `/telegram list` | Print runtime state, bound chats and allowlist. |
 | `/telegram deny <@u\|id>` / `/telegram reset` | Remove an allowlist entry or wipe the entire relay configuration. |
+| `/<custom> [args]` | Run a user-defined command from `~/.spettro/commands/` or `<root>/.spettro/commands/`. See [Custom Slash Commands](custom-commands.md). |
 
 ## Agent usage
 
@@ -92,3 +93,4 @@
 - Clipboard pasting (`Ctrl+V`), file attachments (`Ctrl+F`), and text-select mode (`Ctrl+T`) are described in [Clipboard and Attachments](clipboard.md).
 - The first-launch onboarding wizard is documented in [Onboarding](onboarding.md).
 - Runtime hooks (`/hooks`) are documented in [Runtime Hooks](hooks.md).
+- User-defined slash commands (reusable prompt files with `{{args}}` and shell interpolation) are documented in [Custom Slash Commands](custom-commands.md).

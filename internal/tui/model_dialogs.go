@@ -837,7 +837,7 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 			return nil
 		}
 		query := val[1:]
-		m.cmdItems = filterCommands(query)
+		m.cmdItems = m.filterCommands(query)
 		if m.cmdCursor >= len(m.cmdItems) {
 			m.cmdCursor = 0
 		}

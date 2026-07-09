@@ -11,6 +11,7 @@ Spettro uses both project-local and user-global storage.
 | `trusted.json` | Permanently trusted project paths. |
 | `models.json` | Cached `models.dev` catalog. |
 | `hooks.json` | Global runtime hooks fallback/default. |
+| `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
 
@@ -21,6 +22,7 @@ Spettro uses both project-local and user-global storage.
 | `PLAN.md` | Last generated implementation plan. |
 | `allowed_commands.json` | Commands approved with “allow always” for this project. |
 | `hooks.json` | Project runtime hooks (overrides global by `(event, matcher, id)`). |
+| `commands/` | Project [custom slash commands](custom-commands.md); override global commands on name conflict. |
 | `index.json` | Optional project snapshot when indexer-style flow is used. |
 
 ## Project root
