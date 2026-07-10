@@ -339,23 +339,26 @@ type Model struct {
 
 	mouseCaptureOff bool
 
-	liveTools        []ToolItem
-	currentTool      *ToolItem
-	toolCh           chan agent.ToolTrace
-	streamCh         chan agent.StreamChunk
-	approvalCh       chan shellApprovalRequestMsg
-	askUserCh        chan askUserRequestMsg
-	cancelAgent      context.CancelFunc
-	pendingAuth      *shellApprovalRequestMsg
-	pendingQuestion  *askUserRequestMsg
-	approvalCursor   int
-	questionCursor   int
-	questionFreeform bool
-	progressNote     string
-	pendingPrompts   []queuedPrompt
-	awaitingInstead  bool
-	activePrompt     *queuedPrompt
-	activeAgentID    string
+	liveTools       []ToolItem
+	currentTool     *ToolItem
+	toolCh          chan agent.ToolTrace
+	streamCh        chan agent.StreamChunk
+	approvalCh      chan shellApprovalRequestMsg
+	askUserCh       chan askUserRequestMsg
+	cancelAgent     context.CancelFunc
+	pendingAuth     *shellApprovalRequestMsg
+	pendingQuestion *askUserRequestMsg
+	approvalCursor  int
+	// approvalDiffExpanded toggles (ctrl+o) the full diff in a file-write /
+	// file-edit approval prompt; collapsed shows the first lines only.
+	approvalDiffExpanded bool
+	questionCursor       int
+	questionFreeform     bool
+	progressNote         string
+	pendingPrompts       []queuedPrompt
+	awaitingInstead      bool
+	activePrompt         *queuedPrompt
+	activeAgentID        string
 
 	showPlanApproval   bool
 	planApprovalCursor int
@@ -1804,6 +1807,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 	case "/stats":
 		m.pushSystemMsg(m.renderStats())
+	case "/diff":
+		return m.handleDiffCommand(input)
 	case "/tasks":
 		return m.handleTasksCommand(input)
 	case "/mcp":

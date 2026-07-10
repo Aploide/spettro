@@ -97,7 +97,7 @@ func TestAuthorizeWriteAccess(t *testing.T) {
 			return ShellApprovalDeny, nil
 		},
 	}
-	if err := denied.authorizeWriteAccess(ctx, "file-write", "x.go"); err == nil {
+	if err := denied.authorizeWriteAccess(ctx, "file-write", "x.go", ""); err == nil {
 		t.Fatal("expected denial error")
 	}
 
@@ -109,7 +109,7 @@ func TestAuthorizeWriteAccess(t *testing.T) {
 			return ShellApprovalAllowOnce, nil
 		},
 	}
-	if err := allowed.authorizeWriteAccess(ctx, "file-write", "x.go"); err != nil {
+	if err := allowed.authorizeWriteAccess(ctx, "file-write", "x.go", ""); err != nil {
 		t.Fatalf("expected approval to pass, got %v", err)
 	}
 
@@ -122,13 +122,13 @@ func TestAuthorizeWriteAccess(t *testing.T) {
 			return ShellApprovalDeny, nil
 		},
 	}
-	if err := open.authorizeWriteAccess(ctx, "file-write", "x.go"); err != nil {
+	if err := open.authorizeWriteAccess(ctx, "file-write", "x.go", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// YOLO bypasses approval even when the policy requires it.
 	yolo := &toolRuntime{permission: config.PermissionYOLO, toolPolicies: policy}
-	if err := yolo.authorizeWriteAccess(ctx, "file-write", "x.go"); err != nil {
+	if err := yolo.authorizeWriteAccess(ctx, "file-write", "x.go", ""); err != nil {
 		t.Fatalf("yolo should bypass write approval, got %v", err)
 	}
 }

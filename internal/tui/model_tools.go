@@ -11,6 +11,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/diff"
 )
 
 func stripThinking(content string) (main, thinking string) {
@@ -1199,43 +1200,16 @@ func formatApprovalCommandLabel(command string) string {
 	return "$ " + command
 }
 
-func renderDiffBlock(diff string, expanded bool) string {
-	if strings.TrimSpace(diff) == "" {
-		return ""
+func renderDiffBlock(diffText string, expanded bool) string {
+	maxLines := 20
+	if expanded {
+		maxLines = 0
 	}
-	const prefix = "       "
-	const collapsedMax = 20
-	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
-	maxLines := len(lines)
-	if !expanded && maxLines > collapsedMax {
-		maxLines = collapsedMax
-	}
-	shown := lines[:maxLines]
-	truncated := len(lines) - maxLines
-
-	var rendered []string
-	for _, line := range shown {
-		var s string
-		switch {
-		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-			s = styleMuted.Render(prefix + line)
-		case strings.HasPrefix(line, "@@"):
-			s = lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA")).Italic(true).Render(prefix + line)
-		case strings.HasPrefix(line, "+"):
-			s = lipgloss.NewStyle().Foreground(colorSuccess).Render(prefix + line)
-		case strings.HasPrefix(line, "-"):
-			s = lipgloss.NewStyle().Foreground(colorError).Render(prefix + line)
-		case strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "index "):
-			s = styleMuted.Render(prefix + line)
-		default:
-			s = styleDim.Render(prefix + line)
-		}
-		rendered = append(rendered, s)
-	}
-	if truncated > 0 {
-		rendered = append(rendered, styleMuted.Render(fmt.Sprintf("%s… %d more lines (ctrl+o to expand)", prefix, truncated)))
-	}
-	return strings.Join(rendered, "\n")
+	return diff.Render(diffText, diff.Options{
+		MaxLines:   maxLines,
+		ExpandHint: "(ctrl+o to expand)",
+		Indent:     "       ",
+	})
 }
 
 func trimToolOutput(output string, maxLines int) string {

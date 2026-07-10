@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"spettro/internal/config"
+	"spettro/internal/diff"
 	"spettro/internal/mcp"
 	"spettro/internal/session"
 )
@@ -497,9 +498,6 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if err != nil {
 		return "", err
 	}
-	if err := r.authorizeWriteAccess(ctx, "file-edit", rel); err != nil {
-		return "", err
-	}
 	hasSingle := strings.TrimSpace(args.OldString) != ""
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
@@ -568,6 +566,11 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
 	}
 	updated = prefix + updated + suffix
+	// Approval comes after the edit is fully computed so the user can be shown
+	// the exact diff that would be applied.
+	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 		return "", err
 	}
@@ -994,7 +997,7 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 // manifest's `requires_approval = true` on the write tools actually take
 // effect. When the policy does not require approval (the default) or we are in
 // YOLO mode, writes proceed unchanged.
-func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath string) error {
+func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath, diff string) error {
 	// The OS sandbox policy is non-negotiable and independent of the approval
 	// flow (it is an operator setting, not a per-command permission). The
 	// in-process file tools must honor the same FS scope the kernel enforces on
@@ -1018,6 +1021,7 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath 
 		ToolID:  toolID,
 		Command: toolID + " " + relPath,
 		Reason:  "file modification requires approval",
+		Diff:    diff,
 	})
 	if err != nil {
 		return fmt.Errorf("write approval failed: %w", err)

@@ -50,7 +50,7 @@ func TestFileWriteHonorsReadOnlySandbox(t *testing.T) {
 		sandboxState: NewSandboxState(sandbox.Policy{FS: sandbox.FSReadOnly}),
 		toolPolicies: map[string]config.ToolSpec{"file-write": {RequiresApproval: true}},
 	}
-	if err := ro.authorizeWriteAccess(ctx, "file-write", "src/main.go"); err == nil {
+	if err := ro.authorizeWriteAccess(ctx, "file-write", "src/main.go", ""); err == nil {
 		t.Fatal("read-only sandbox must deny workspace writes via file-write, even under YOLO")
 	}
 
@@ -61,13 +61,13 @@ func TestFileWriteHonorsReadOnlySandbox(t *testing.T) {
 		sandboxState: NewSandboxState(sandbox.Policy{FS: sandbox.FSWorkspaceWrite}),
 		toolPolicies: map[string]config.ToolSpec{"file-write": {RequiresApproval: true}},
 	}
-	if err := ws2.authorizeWriteAccess(ctx, "file-write", "src/main.go"); err != nil {
+	if err := ws2.authorizeWriteAccess(ctx, "file-write", "src/main.go", ""); err != nil {
 		t.Fatalf("workspace-write sandbox must allow workspace writes: %v", err)
 	}
 
 	// No sandbox: unchanged behavior.
 	off := &toolRuntime{cwd: ws, permission: config.PermissionYOLO, toolPolicies: map[string]config.ToolSpec{}}
-	if err := off.authorizeWriteAccess(ctx, "file-write", "src/main.go"); err != nil {
+	if err := off.authorizeWriteAccess(ctx, "file-write", "src/main.go", ""); err != nil {
 		t.Fatalf("no sandbox must not block writes: %v", err)
 	}
 }

@@ -42,6 +42,7 @@ var allCommands = []commandDef{
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/stats", "show session token usage and prompt-cache metrics"},
+	{"/diff", "show diffs of files modified this session (optional paths)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
@@ -182,6 +183,7 @@ func isInstantCommand(input string) bool {
 		"/hooks",
 		"/tasks",
 		"/stats",
+		"/diff",
 		"/mcp",
 		"/mode", "/next",
 		"/remote",
@@ -248,6 +250,7 @@ const helpText = `commands:
   /telegram allow <@u|id>  allow a username or chat ID to drive Spettro
   /telegram start|stop|status  control the Telegram relay
   /stats         show session token usage and prompt-cache hit rate
+  /diff [path]   show diffs of files modified this session (all, or given paths)
   /jobs          list background shell jobs started by the agent
   /jobs kill <id>|all  terminate a background job (or all of them)
   /clear         clear conversation history (auto-saves first)
