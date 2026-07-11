@@ -32,6 +32,7 @@ type Manager struct {
 	spettroModels []Model
 	apiKeys       map[string]string
 	providerAPIs  map[string]string
+	usageRec      usageRecorder
 }
 
 func NewManager() *Manager {
@@ -276,6 +277,7 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	for {
 		resp, err := m.sendOnce(ctx, providerName, modelName, req)
 		if err == nil {
+			m.usageRec.record(providerName, modelName, resp.Usage)
 			return resp, nil
 		}
 		retryAfter, ok := rateLimitRetryAfter(providerName, err)

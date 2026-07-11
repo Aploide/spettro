@@ -1,6 +1,11 @@
 package tui
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+
+	"spettro/internal/commands"
+)
 
 type commandDef struct {
 	name string
@@ -36,6 +41,8 @@ var allCommands = []commandDef{
 	{"/think", "set extended-thinking level (alias of /thinking)"},
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
+	{"/stats", "show session token usage and prompt-cache metrics"},
+	{"/diff", "show diffs of files modified this session (optional paths)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
@@ -92,18 +99,59 @@ func requiresParam(cmd string) bool {
 	return false
 }
 
-func filterCommands(query string) []commandDef {
+// filterCommands matches query against the built-in catalog plus any
+// user-defined custom commands discovered at startup.
+func (m Model) filterCommands(query string) []commandDef {
+	catalog := append([]commandDef(nil), allCommands...)
+	for _, c := range m.customCommands {
+		desc := c.Description
+		if desc == "" {
+			desc = "custom command (" + c.Scope + ")"
+		}
+		catalog = append(catalog, commandDef{"/" + c.Name, desc})
+	}
 	if query == "" {
-		return append([]commandDef(nil), allCommands...)
+		return catalog
 	}
 	q := strings.ToLower(query)
 	var out []commandDef
-	for _, c := range allCommands {
-		if strings.Contains(c.name, q) || strings.Contains(c.desc, q) {
+	for _, c := range catalog {
+		if strings.Contains(strings.ToLower(c.name), q) || strings.Contains(strings.ToLower(c.desc), q) {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// findCustomCommand resolves "/name" (case-insensitive) to a user-defined
+// custom command.
+func (m Model) findCustomCommand(cmd string) (commands.Command, bool) {
+	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
+	for _, c := range m.customCommands {
+		if strings.ToLower(c.Name) == name {
+			return c, true
+		}
+	}
+	return commands.Command{}, false
+}
+
+// customCommandsHelp renders the user-defined commands section appended to
+// /help output; empty when no custom commands are defined.
+func (m Model) customCommandsHelp() string {
+	if len(m.customCommands) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\ncustom commands (~/.spettro/commands, .spettro/commands):\n")
+	for _, c := range m.customCommands {
+		desc := c.Description
+		if desc == "" {
+			desc = "custom command"
+		}
+		fmt.Fprintf(&b, "  /%-13s %s (%s)\n", c.Name, desc, c.Scope)
+	}
+	b.WriteString("  supports {{args}}; shell interpolation !`cmd` requires yolo permission")
+	return b.String()
 }
 
 // isInstantCommand reports whether the given slash command can be executed
@@ -134,6 +182,8 @@ func isInstantCommand(input string) bool {
 		"/skill", "/skills",
 		"/hooks",
 		"/tasks",
+		"/stats",
+		"/diff",
 		"/mcp",
 		"/mode", "/next",
 		"/remote",
@@ -199,6 +249,8 @@ const helpText = `commands:
   /telegram setup <token>  configure BotFather token (alias /tg)
   /telegram allow <@u|id>  allow a username or chat ID to drive Spettro
   /telegram start|stop|status  control the Telegram relay
+  /stats         show session token usage and prompt-cache hit rate
+  /diff [path]   show diffs of files modified this session (all, or given paths)
   /jobs          list background shell jobs started by the agent
   /jobs kill <id>|all  terminate a background job (or all of them)
   /clear         clear conversation history (auto-saves first)

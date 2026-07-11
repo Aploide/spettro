@@ -11,9 +11,46 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"spettro/internal/compact"
+	"spettro/internal/diff"
 	"spettro/internal/jobs"
 	"spettro/internal/version"
 )
+
+// approvalDiffCollapsedLines is how many diff lines a file-write/file-edit
+// approval prompt shows before collapsing (ctrl+o expands).
+const approvalDiffCollapsedLines = 16
+
+// approvalDiffChromeLines is everything in the frame besides the diff when an
+// approval dialog is open: header(1) + eyes(8) + separators(2) + status(1) +
+// input box incl. borders(6) + approval label/reason/picker(6) + the 3-line
+// minimum viewport, plus one row of slack.
+const approvalDiffChromeLines = 28
+
+// approvalDiffView renders the diff block of a pending file-write/file-edit
+// approval, sized so the whole input box always fits the terminal. Both
+// viewInput and recalcLayout call this, so the layout budget and the actual
+// render can never disagree.
+func (m Model) approvalDiffView(width int) string {
+	if m.pendingAuth == nil || m.pendingAuth.request.Diff == "" {
+		return ""
+	}
+	maxLines := approvalDiffCollapsedLines
+	if m.approvalDiffExpanded {
+		maxLines = 1 << 20 // no cap beyond what fits on screen
+	}
+	if fit := m.height - approvalDiffChromeLines; fit < maxLines {
+		maxLines = fit
+	}
+	if maxLines < 3 {
+		maxLines = 3
+	}
+	return diff.Render(m.pendingAuth.request.Diff, diff.Options{
+		Width:      width - 6,
+		MaxLines:   maxLines,
+		ExpandHint: "(ctrl+o to expand)",
+		Indent:     "  ",
+	})
+}
 
 // View assembles the frame and declares terminal features (alt screen, mouse
 // mode, focus reporting) on the returned tea.View, per the bubbletea v2
@@ -429,6 +466,9 @@ func (m Model) viewInput(width int) string {
 		if len(m.pendingAuth.request.Segments) > 0 && m.cfg.ShowPermissionDebug {
 			lines = append(lines, styleMuted.Render("  segments: "+strings.Join(m.pendingAuth.request.Segments, " | ")))
 		}
+		if block := m.approvalDiffView(width); block != "" {
+			lines = append(lines, block)
+		}
 		if m.approvalCursor == 3 {
 			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
 			lines = append(lines, m.ta.View())
@@ -678,6 +718,15 @@ func (m Model) viewStatusBar(width int) string {
 		ctxLabel += " (auto off)"
 	}
 	right := lipgloss.NewStyle().Foreground(ctxColor).Render(ctxLabel)
+	// Live prompt-cache cue: hit rate of the LAST request. A sudden drop means
+	// the cached prefix broke — visible without running /stats.
+	if label, healthy := m.cacheIndicator(); label != "" {
+		cacheColor := lipgloss.Color("#F59E0B")
+		if healthy {
+			cacheColor = lipgloss.Color("#10B981")
+		}
+		right = lipgloss.NewStyle().Foreground(cacheColor).Render(label) + "  " + right
+	}
 	if n := jobs.Default().RunningCount(); n > 0 {
 		label := fmt.Sprintf("◉ %d bg job", n)
 		if n > 1 {

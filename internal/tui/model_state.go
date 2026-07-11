@@ -20,6 +20,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/diff"
 	"spettro/internal/session"
 )
 
@@ -621,7 +622,7 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 	if status != "success" {
 		return ""
 	}
-	if name != "file-write" && name != "file-edit" {
+	if name != "file-write" && name != "file-edit" && name != "multi-edit" {
 		return ""
 	}
 	var args struct {
@@ -630,8 +631,12 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 	if json.Unmarshal([]byte(argsJSON), &args) != nil || strings.TrimSpace(args.Path) == "" {
 		return ""
 	}
-	path := strings.TrimSpace(args.Path)
+	return gitPathDiff(cwd, strings.TrimSpace(args.Path))
+}
 
+// gitPathDiff returns a unified diff for path against HEAD: working-tree
+// first, then staged, then an all-additions pseudo-diff for untracked files.
+func gitPathDiff(cwd, path string) string {
 	// Try working-tree diff vs HEAD (covers modified tracked files).
 	cmd := exec.Command("git", "diff", "HEAD", "--", path)
 	cmd.Dir = cwd
@@ -686,6 +691,45 @@ func buildNewFileDiff(path, content string) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// handleDiffCommand implements /diff [path…]: it pushes a colored diff view of
+// the files modified this session (per git), or of the given paths, into the
+// transcript as a Kind:"diff" system message.
+func (m Model) handleDiffCommand(input string) (tea.Model, tea.Cmd) {
+	fields := strings.Fields(input)
+	var paths []string
+	if len(fields) > 1 {
+		paths = fields[1:]
+	} else {
+		m.refreshModifiedFiles()
+		for _, f := range m.modifiedFiles {
+			paths = append(paths, f.Path)
+		}
+	}
+	if len(paths) == 0 {
+		m.showBanner("no modified files in the working tree", "info")
+		return m, nil
+	}
+	var parts []string
+	for _, p := range paths {
+		if d := gitPathDiff(m.cwd, p); strings.TrimSpace(d) != "" {
+			parts = append(parts, strings.TrimRight(d, "\n"))
+		}
+	}
+	if len(parts) == 0 {
+		m.showBanner("no diffs to show", "info")
+		return m, nil
+	}
+	m.messages = append(m.messages, ChatMessage{
+		Role:    RoleSystem,
+		Kind:    "diff",
+		Content: strings.Join(parts, "\n"),
+		At:      time.Now(),
+	})
+	m.autoSaveDebounced()
+	m.refreshViewport()
+	return m, nil
 }
 
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
@@ -1076,6 +1120,9 @@ func (m *Model) autoSave() {
 		ProjectHash: session.ProjectHash(m.cwd),
 		StartedAt:   msgs[0].At,
 	}
+	if usage := m.providers.UsageSnapshot(); usage.Totals.Requests > 0 {
+		metadata.Stats = &usage
+	}
 	if m.activeGoal != nil {
 		metadata.Goal = &session.GoalRecord{
 			Objective:       m.activeGoal.Objective,
@@ -1227,6 +1274,12 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		}
 		return strings.Join(entryLines, "\n")
 	case RoleSystem:
+		if msg.Kind == "diff" {
+			return diff.Render(msg.Content, diff.Options{
+				Width:  m.paneWidth() - 8,
+				Indent: "    ",
+			})
+		}
 		return lipgloss.NewStyle().
 			Foreground(colorMuted).
 			PaddingLeft(4).
@@ -1324,6 +1377,9 @@ func (m Model) recalcLayout() Model {
 		inputH += 2 + len(planApprovalOptions)
 	} else if m.pendingAuth != nil {
 		inputH += 2 + len(shellApprovalOptions)
+		if block := m.approvalDiffView(m.paneWidth()); block != "" {
+			inputH += lipgloss.Height(block)
+		}
 	}
 	if len(m.mentionItems) > 0 {
 		inputH += 5 + len(m.mentionItems)
@@ -1528,6 +1584,12 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				})
 			}
 			m.rebuildActivitiesFromEvents(state.Events)
+			// Restore usage counters so /stats continues from the saved session.
+			if state.Metadata.Stats != nil {
+				m.providers.RestoreUsage(*state.Metadata.Stats)
+			} else {
+				m.providers.ResetUsage()
+			}
 			// Restore unfinished goal (step 05): surface it but do NOT auto-start.
 			m.pendingGoalResume = nil
 			if state.Metadata.Goal != nil && state.Metadata.Goal.Active {

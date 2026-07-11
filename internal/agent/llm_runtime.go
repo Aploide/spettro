@@ -17,6 +17,7 @@ import (
 	"spettro/internal/budget"
 	compactpkg "spettro/internal/compact"
 	"spettro/internal/config"
+	"spettro/internal/diff"
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
 	"spettro/internal/session"
@@ -57,6 +58,10 @@ type ShellApprovalRequest struct {
 	ToolID   string
 	Segments []string
 	Reason   string
+	// Diff is a plain unified diff of the proposed file change (file-write /
+	// file-edit approvals only); the UI renders it so the user sees exactly
+	// what will change before approving.
+	Diff string
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
@@ -152,10 +157,10 @@ type toolLoopConfig struct {
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
-	StreamCallback  StreamCallback
-	Permission      config.PermissionLevel
-	ShellApproval   ShellApprovalCallback
-	AskUser         AskUserCallback
+	StreamCallback StreamCallback
+	Permission     config.PermissionLevel
+	ShellApproval  ShellApprovalCallback
+	AskUser        AskUserCallback
 	// Checkpoint, when set, is invoked synchronously right before any
 	// file-modifying tool executes (file-write, file-edit, shell), so the host
 	// can snapshot the working tree and conversation for /rewind.
@@ -1068,6 +1073,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		_, statErr := os.Stat(abs)
 		exists := statErr == nil
+		oldContent := ""
 		if exists {
 			r.mu.Lock()
 			_, alreadyRead := r.readSet[rel]
@@ -1075,8 +1081,15 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			if !alreadyRead {
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
+			if raw, err := os.ReadFile(abs); err == nil {
+				oldContent = string(raw)
+			}
 		}
-		if err := r.authorizeWriteAccess(ctx, "file-write", rel); err != nil {
+		newContent := args.Content
+		if args.Append {
+			newContent = oldContent + args.Content
+		}
+		if err := r.authorizeWriteAccess(ctx, "file-write", rel, diff.Unified(rel, oldContent, newContent)); err != nil {
 			return "", err
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -1265,6 +1278,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":
 		return r.runFileEdit(ctx, call.Args)
+	case "multi-edit":
+		return r.runMultiEdit(ctx, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
@@ -1401,7 +1416,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // spurious checkpoint is cheap while a missed one is unrecoverable.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "shell-exec", "bash":
+	case "file-write", "file-edit", "multi-edit", "shell-exec", "bash":
 		return true
 	}
 	return false

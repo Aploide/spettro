@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"spettro/internal/config"
+	"spettro/internal/diff"
 	"spettro/internal/mcp"
 	"spettro/internal/session"
 )
@@ -497,9 +498,6 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if err != nil {
 		return "", err
 	}
-	if err := r.authorizeWriteAccess(ctx, "file-edit", rel); err != nil {
-		return "", err
-	}
 	hasSingle := strings.TrimSpace(args.OldString) != ""
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
@@ -568,6 +566,11 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
 	}
 	updated = prefix + updated + suffix
+	// Approval comes after the edit is fully computed so the user can be shown
+	// the exact diff that would be applied.
+	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 		return "", err
 	}
@@ -575,6 +578,72 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
 	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)), nil
+}
+
+// runMultiEdit applies an ordered list of find/replace edits to one file
+// atomically: every edit runs against the in-memory result of the previous
+// one, and if any edit fails to match (or matches ambiguously without
+// replace_all) the whole call errors and the file is left untouched.
+func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string, error) {
+	var args struct {
+		Path  string `json:"path"`
+		Edits []struct {
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		} `json:"edits"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("multi-edit args: %w", err)
+	}
+	abs, rel, err := r.resolvePath(args.Path)
+	if err != nil {
+		return "", err
+	}
+	if len(args.Edits) == 0 {
+		return "", fmt.Errorf("multi-edit: edits is required")
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return "", err
+	}
+	content := string(raw)
+	updated := content
+	totalReplacements := 0
+	for i, e := range args.Edits {
+		if e.OldString == "" {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
+		}
+		if e.OldString == e.NewString {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
+		}
+		n := strings.Count(updated, e.OldString)
+		if n == 0 {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string not found: %q (file untouched)", i+1, truncate(e.OldString, 80))
+		}
+		if e.ReplaceAll {
+			updated = strings.ReplaceAll(updated, e.OldString, e.NewString)
+			totalReplacements += n
+			continue
+		}
+		if n > 1 {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string matches %d times; add surrounding context to make it unique or set replace_all (file untouched)", i+1, n)
+		}
+		updated = strings.Replace(updated, e.OldString, e.NewString, 1)
+		totalReplacements++
+	}
+	// Approval comes after all edits are computed so the user is shown the
+	// combined diff exactly as it would be applied.
+	if err := r.authorizeWriteAccess(ctx, "multi-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	r.readSet[rel] = struct{}{}
+	r.mu.Unlock()
+	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)), nil
 }
 
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {
@@ -994,7 +1063,7 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 // manifest's `requires_approval = true` on the write tools actually take
 // effect. When the policy does not require approval (the default) or we are in
 // YOLO mode, writes proceed unchanged.
-func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath string) error {
+func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath, diff string) error {
 	// The OS sandbox policy is non-negotiable and independent of the approval
 	// flow (it is an operator setting, not a per-command permission). The
 	// in-process file tools must honor the same FS scope the kernel enforces on
@@ -1018,6 +1087,7 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath 
 		ToolID:  toolID,
 		Command: toolID + " " + relPath,
 		Reason:  "file modification requires approval",
+		Diff:    diff,
 	})
 	if err != nil {
 		return fmt.Errorf("write approval failed: %w", err)

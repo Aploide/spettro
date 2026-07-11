@@ -11,6 +11,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/diff"
 )
 
 func stripThinking(content string) (main, thinking string) {
@@ -109,7 +110,7 @@ func formatToolLabel(name, argsJSON string) string {
 			return "Wrote " + args.Path
 		}
 		return "Wrote file"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -332,7 +333,7 @@ func formatRunningLabel(name, argsJSON string) string {
 			return "Writing " + args.Path + "…"
 		}
 		return "Writing…"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -464,7 +465,7 @@ func toolActionVerb(name string) string {
 		return "Read"
 	case "file-write":
 		return "Wrote"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		return "Edited"
 	case "repo-search", "tool-search", "web-search":
 		return "Searched"
@@ -514,7 +515,7 @@ func toolActionVerb(name string) string {
 
 func toolNounCount(name string, count int) string {
 	switch name {
-	case "file-read", "file-write", "file-edit":
+	case "file-read", "file-write", "file-edit", "multi-edit":
 		if count == 1 {
 			return "1 file"
 		}
@@ -869,7 +870,7 @@ func formatRunningToolGroupLabel(name string, group []ToolItem) string {
 			return "Writing 1 file…"
 		}
 		return fmt.Sprintf("Writing %d files…", count)
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		if count == 1 {
 			return "Editing 1 file…"
 		}
@@ -1032,7 +1033,7 @@ func formatDetailedGroupLabel(name string, running bool, group []ToolItem) strin
 
 func toolDescriptor(name, argsJSON string) string {
 	switch name {
-	case "file-read", "file-write", "file-edit", "enter-worktree", "exit-worktree", "ls":
+	case "file-read", "file-write", "file-edit", "multi-edit", "enter-worktree", "exit-worktree", "ls":
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -1102,7 +1103,7 @@ func runningVerb(name string) string {
 		return "Reading"
 	case "file-write":
 		return "Writing"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		return "Editing"
 	case "repo-search", "tool-search", "web-search":
 		return "Searching"
@@ -1199,43 +1200,16 @@ func formatApprovalCommandLabel(command string) string {
 	return "$ " + command
 }
 
-func renderDiffBlock(diff string, expanded bool) string {
-	if strings.TrimSpace(diff) == "" {
-		return ""
+func renderDiffBlock(diffText string, expanded bool) string {
+	maxLines := 20
+	if expanded {
+		maxLines = 0
 	}
-	const prefix = "       "
-	const collapsedMax = 20
-	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
-	maxLines := len(lines)
-	if !expanded && maxLines > collapsedMax {
-		maxLines = collapsedMax
-	}
-	shown := lines[:maxLines]
-	truncated := len(lines) - maxLines
-
-	var rendered []string
-	for _, line := range shown {
-		var s string
-		switch {
-		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-			s = styleMuted.Render(prefix + line)
-		case strings.HasPrefix(line, "@@"):
-			s = lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA")).Italic(true).Render(prefix + line)
-		case strings.HasPrefix(line, "+"):
-			s = lipgloss.NewStyle().Foreground(colorSuccess).Render(prefix + line)
-		case strings.HasPrefix(line, "-"):
-			s = lipgloss.NewStyle().Foreground(colorError).Render(prefix + line)
-		case strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "index "):
-			s = styleMuted.Render(prefix + line)
-		default:
-			s = styleDim.Render(prefix + line)
-		}
-		rendered = append(rendered, s)
-	}
-	if truncated > 0 {
-		rendered = append(rendered, styleMuted.Render(fmt.Sprintf("%s… %d more lines (ctrl+o to expand)", prefix, truncated)))
-	}
-	return strings.Join(rendered, "\n")
+	return diff.Render(diffText, diff.Options{
+		MaxLines:   maxLines,
+		ExpandHint: "(ctrl+o to expand)",
+		Indent:     "       ",
+	})
 }
 
 func trimToolOutput(output string, maxLines int) string {

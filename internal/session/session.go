@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"time"
+
+	"spettro/internal/provider"
 )
 
 const (
@@ -77,6 +79,9 @@ type Metadata struct {
 	// Goal is the optional goal run record. When Active is true on reload,
 	// the user is offered to resume the goal.
 	Goal *GoalRecord `json:"goal,omitempty"`
+	// Stats carries the session's accumulated token/cache usage so /resume
+	// restores the /stats counters.
+	Stats *provider.SessionUsage `json:"stats,omitempty"`
 }
 
 type State struct {

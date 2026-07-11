@@ -46,6 +46,7 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 		Content:         fantasyText(resp),
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
+		Usage:           usageFromFantasy(resp.Usage),
 	}, nil
 }
 
@@ -113,7 +114,18 @@ func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey,
 		Content:         textSB.String(),
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
+		Usage:           usageFromFantasy(usage),
 	}, nil
+}
+
+// usageFromFantasy maps fantasy's usage block onto Spettro's Usage type.
+func usageFromFantasy(u fantasy.Usage) Usage {
+	return Usage{
+		InputTokens:      int(u.InputTokens),
+		OutputTokens:     int(u.OutputTokens),
+		CacheReadTokens:  int(u.CacheReadTokens),
+		CacheWriteTokens: int(u.CacheCreationTokens),
+	}
 }
 
 // buildFantasyCall assembles the shared fantasy.Call used by both the streaming

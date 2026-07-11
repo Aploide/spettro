@@ -124,6 +124,11 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	n := len(shellApprovalOptions)
 	switch msg.String() {
+	case "ctrl+o":
+		if m.pendingAuth.request.Diff != "" {
+			m.approvalDiffExpanded = !m.approvalDiffExpanded
+		}
+		return m, nil
 	case "up":
 		if m.approvalCursor > 0 {
 			m.approvalCursor--
@@ -166,6 +171,7 @@ func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner
 	}
 	m.pendingAuth = nil
 	m.approvalCursor = 0
+	m.approvalDiffExpanded = false
 	m.ta.Reset()
 	m.showBanner(banner, "info")
 	m.refreshViewport()
@@ -837,7 +843,7 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 			return nil
 		}
 		query := val[1:]
-		m.cmdItems = filterCommands(query)
+		m.cmdItems = m.filterCommands(query)
 		if m.cmdCursor >= len(m.cmdItems) {
 			m.cmdCursor = 0
 		}

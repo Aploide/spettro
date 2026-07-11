@@ -168,8 +168,12 @@ type Request struct {
 type Response struct {
 	Content         string
 	EstimatedTokens int
-	Provider        string
-	Model           string
+	// Usage is the provider-reported token accounting for this request,
+	// including prompt-cache reads/writes. Zero-valued when the backend did
+	// not report usage (EstimatedTokens then carries a local estimate).
+	Usage    Usage
+	Provider string
+	Model    string
 	// ToolCalls is populated on the native tool-calling path.
 	ToolCalls []NativeTool
 }
