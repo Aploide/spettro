@@ -33,6 +33,11 @@
 | `/skill where` | Show the discovery roots being scanned. |
 | `/skills` | Alias of `/skill`. |
 | `/hooks` | Show effective runtime hooks (project + global). |
+| `/memory [show]` | Show persistent cross-session memory (user + project). See [Persistent Memory](memory.md). |
+| `/memory edit [user\|project]` | Edit a memory file in `$EDITOR`. |
+| `/memory clear [user\|project\|all]` | Erase saved memory. |
+| `/memory mine [n]` | Scan recent saved sessions in the background and draft candidate memories into the review inbox. |
+| `/memory review` | Approve or discard drafted memory candidates (nothing saves without approval). |
 | `/compact [focus...]` | Summarize the current conversation. |
 | `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
 | `/compact policy` | Show compact thresholds and failure counters. |

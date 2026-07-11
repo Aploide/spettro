@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"spettro/internal/config"
+	"spettro/internal/memory"
 	"spettro/internal/provider"
 	"spettro/internal/skills"
 )
@@ -185,6 +186,10 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("empty task")
 	}
 	systemPrompt := loadPromptOrFallback(a.CWD, a.Spec.PromptFile, a.Spec.Description)
+	// Persistent cross-session memory: the snapshot is loaded once per process
+	// and frozen (see memory.SessionContext), so appending it here keeps the
+	// system prompt byte-stable across every turn of the session.
+	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
 	logToolCalls := true

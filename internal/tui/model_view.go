@@ -87,6 +87,8 @@ func (m Model) viewContent() string {
 		return m.viewOnboarding()
 	case modalResume:
 		return m.viewResume()
+	case modalMemoryReview:
+		return m.viewMemoryReview()
 	case modalRewind:
 		return m.viewRewind()
 	case modalConnect:

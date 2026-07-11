@@ -18,6 +18,7 @@ import (
 	"spettro/internal/checkpoint"
 	"spettro/internal/commands"
 	"spettro/internal/config"
+	"spettro/internal/memory"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/session"
@@ -123,6 +124,8 @@ type searchDoneMsg struct {
 	err    error
 }
 
+type memoryEditDoneMsg struct{ err error }
+
 type bannerClearMsg struct{}
 type quitWarningMsg struct{}
 
@@ -225,7 +228,7 @@ type queuedPrompt struct {
 }
 
 // goalState tracks an in-flight /goal run across the outer orchestration loop.
-// nil means no goal is active. See TODO/04 for the loop that drives it.
+// nil means no goal is active.
 type goalState struct {
 	Objective       string // the user's goal text, verbatim
 	Iteration       int    // outer-loop iterations dispatched so far
@@ -409,7 +412,13 @@ type Model struct {
 	resumeCursor int
 	resumeScroll int
 
-	// Checkpointing / rewind (TODO 01). checkpointer is opened lazily on the
+	// Memory review inbox: candidates drafted by
+	// /memory mine awaiting approval or discard.
+	showMemoryReview   bool
+	memoryReviewItems  []memory.Candidate
+	memoryReviewCursor int
+
+	// Checkpointing / rewind checkpointer is opened lazily on the
 	// first agent run; checkpointerFailed latches an open failure so we don't
 	// retry (and re-warn) every run.
 	checkpointer       *checkpoint.Checkpointer
@@ -641,6 +650,7 @@ const (
 	modalLogin
 	modalOnboarding
 	modalResume
+	modalMemoryReview
 	modalRewind
 	modalConnect
 	modalSelector
@@ -660,6 +670,8 @@ func (m Model) activeModal() modal {
 		return modalOnboarding
 	case m.showResume:
 		return modalResume
+	case m.showMemoryReview:
+		return modalMemoryReview
 	case m.showRewind:
 		return modalRewind
 	case m.showConnect:
@@ -880,6 +892,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.publishRemoteState("search_done")
 		m.autoSave()
 		m.refreshViewport()
+	case memoryMineDoneMsg:
+		switch {
+		case msg.err != nil:
+			m.showBanner("memory mining failed: "+msg.err.Error(), "error")
+		case msg.added == 0:
+			m.showBanner(fmt.Sprintf("memory mining done — no new candidates (%d session(s) scanned)", msg.scanned), "info")
+		default:
+			m.showBanner(fmt.Sprintf("memory mining done — %d candidate(s) drafted, review with /memory review", msg.added), "success")
+		}
+	case memoryEditDoneMsg:
+		if msg.err != nil {
+			m.showBanner("memory edit failed: "+msg.err.Error(), "error")
+		} else {
+			m.showBanner("memory updated — applies from the next session", "success")
+		}
 	case compactDoneMsg:
 		if !m.thinking {
 			break
@@ -1305,6 +1332,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTrust(msg)
 		case modalResume:
 			return m.updateResume(msg)
+		case modalMemoryReview:
+			return m.updateMemoryReview(msg)
 		case modalRewind:
 			return m.updateRewind(msg)
 		case modalConnect:
@@ -1817,6 +1846,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleSkillsCommand(input)
 	case "/hooks":
 		return m.handleHooksCommand()
+	case "/memory":
+		return m.handleMemoryCommand(input)
 	case "/jobs":
 		return m.handleJobsCommand(input)
 	case "/plan":

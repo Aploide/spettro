@@ -1707,7 +1707,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	if len(convHistory) == 0 {
 		history = m.buildConversationHistory()
 	}
-	// Checkpointing (TODO 01): before any file-modifying tool executes, the
+	// Checkpointing: before any file-modifying tool executes, the
 	// runtime calls back so the working tree is committed to the shadow repo
 	// together with the conversation as it stood when this run started. The
 	// snapshot blob is captured now — the model value is immutable during the

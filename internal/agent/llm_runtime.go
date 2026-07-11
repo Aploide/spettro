@@ -1217,6 +1217,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runMCPReadResource(ctx, call.Args)
 	case "mcp-auth":
 		return r.runMCPAuth(ctx, call.Args)
+	case "save-memory":
+		return r.runSaveMemory(call.Args)
 	case "todo-write":
 		var args struct {
 			Todos []interface{} `json:"todos"`
