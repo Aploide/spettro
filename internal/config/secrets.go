@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/scrypt"
 )
@@ -82,9 +84,48 @@ func LoadAPIKeys() (map[string]string, error) {
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
 	}
 
-	key, err := deriveKey(salt)
+	plain, err := decryptWithSecrets(salt, nonce, ciphertext)
 	if err != nil {
 		return nil, err
+	}
+
+	out := map[string]string{}
+	if err := json.Unmarshal(plain, &out); err != nil {
+		return nil, fmt.Errorf("decode key map: %w", err)
+	}
+	return out, nil
+}
+
+// decryptWithSecrets tries the persisted master secret first, then falls back
+// to legacy identity-derived secrets (username|hostname|home) so files written
+// by older versions — possibly under a different hostname or via sudo — stay
+// readable. A successful legacy decrypt is migrated to the master secret.
+func decryptWithSecrets(salt, nonce, ciphertext []byte) ([]byte, error) {
+	secret, err := machineSecret()
+	if err != nil {
+		return nil, err
+	}
+	plain, err := decryptWithSecret(secret, salt, nonce, ciphertext)
+	if err == nil {
+		return plain, nil
+	}
+
+	for _, legacy := range legacySecrets() {
+		if plain, legacyErr := decryptWithSecret(legacy, salt, nonce, ciphertext); legacyErr == nil {
+			var keys map[string]string
+			if jsonErr := json.Unmarshal(plain, &keys); jsonErr == nil {
+				_ = saveAPIKeys(keys)
+			}
+			return plain, nil
+		}
+	}
+	return nil, fmt.Errorf("decrypt keys: %w", err)
+}
+
+func decryptWithSecret(secret string, salt, nonce, ciphertext []byte) ([]byte, error) {
+	key, err := scrypt.Key([]byte(secret), salt, 32768, 8, 1, 32)
+	if err != nil {
+		return nil, fmt.Errorf("derive key: %w", err)
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -94,16 +135,33 @@ func LoadAPIKeys() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create gcm: %w", err)
 	}
-	plain, err := aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt keys: %w", err)
-	}
+	return aead.Open(nil, nonce, ciphertext, nil)
+}
 
-	out := map[string]string{}
-	if err := json.Unmarshal(plain, &out); err != nil {
-		return nil, fmt.Errorf("decode key map: %w", err)
+// legacySecrets returns key-derivation secrets used by older versions, which
+// were bound to username|hostname|home. The hostname component drifts with
+// the network on macOS, so both current and mDNS-style names are tried.
+func legacySecrets() []string {
+	username, home, err := secretsIdentity()
+	if err != nil {
+		return nil
 	}
-	return out, nil
+	hosts := map[string]bool{}
+	if h, err := os.Hostname(); err == nil {
+		hosts[h] = true
+	}
+	if out, err := exec.Command("scutil", "--get", "LocalHostName").Output(); err == nil {
+		if h := strings.TrimSpace(string(out)); h != "" {
+			hosts[h] = true
+			hosts[h+".local"] = true
+		}
+	}
+	var secrets []string
+	for h := range hosts {
+		hash := sha256.Sum256([]byte(username + "|" + h + "|" + home))
+		secrets = append(secrets, base64.StdEncoding.EncodeToString(hash[:]))
+	}
+	return secrets
 }
 
 func SaveAPIKey(provider, apiKey string) error {
@@ -184,18 +242,37 @@ func deriveKey(salt []byte) ([]byte, error) {
 	return scrypt.Key([]byte(secret), salt, 32768, 8, 1, 32)
 }
 
+// machineSecret returns the key-encryption secret. It is a random value
+// persisted alongside keys.enc so it survives hostname changes, sudo, and
+// account renames; older versions derived it from mutable machine identity
+// (see legacySecrets).
 func machineSecret() (string, error) {
 	if v := os.Getenv("SPETTRO_MASTER_KEY"); v != "" {
 		return v, nil
 	}
-	username, home, err := secretsIdentity()
+	_, home, err := secretsIdentity()
 	if err != nil {
 		return "", err
 	}
-	host, err := os.Hostname()
-	if err != nil {
-		return "", fmt.Errorf("resolve hostname: %w", err)
+	p := filepath.Join(home, ".spettro", "master.key")
+	if data, err := os.ReadFile(p); err == nil {
+		if s := strings.TrimSpace(string(data)); s != "" {
+			return s, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read master key: %w", err)
 	}
-	hash := sha256.Sum256([]byte(username + "|" + host + "|" + home))
-	return base64.StdEncoding.EncodeToString(hash[:]), nil
+
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate master key: %w", err)
+	}
+	secret := base64.StdEncoding.EncodeToString(raw)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return "", fmt.Errorf("create global config dir: %w", err)
+	}
+	if err := os.WriteFile(p, []byte(secret), 0o600); err != nil {
+		return "", fmt.Errorf("write master key: %w", err)
+	}
+	return secret, nil
 }
