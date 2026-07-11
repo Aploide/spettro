@@ -176,6 +176,10 @@ type toolLoopConfig struct {
 	MaxDepth        int
 	MaxToolCalls    int            // max tool calls per LLM step (0 → default 32)
 	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
+	// Steering, when set, is drained at every step boundary; each pending
+	// message is appended to the conversation as a user turn so the model sees
+	// it before its next step. Top-level runs only — sub-agents never get one.
+	Steering *SteeringQueue
 }
 
 type toolCall struct {
@@ -516,6 +520,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	system := buildSystemString(cfg, useNativeTools)
 
 	for {
+		// Mid-run steering: deliver any guidance the user typed while the run
+		// was executing. Each message is appended as a user turn at this step
+		// boundary — the conversation only ever grows, so the cached prompt
+		// prefix stays valid. (Tool results from the previous step are already
+		// in convMsgs at this point, so a steering turn can never split an
+		// assistant tool-call message from its results.)
+		if cfg.Steering != nil {
+			for _, s := range cfg.Steering.Drain() {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: steeringMessagePrefix + s})
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "steering delivered: " + truncate(s, 200)})
+				}
+			}
+		}
 		// In-loop compaction: summarize older turns when context pressure
 		// approaches the window. Fires for all runs (the loop is unbounded).
 		// On error, keep convMsgs as-is — never abort a run for compaction.

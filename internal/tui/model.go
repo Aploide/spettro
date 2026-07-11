@@ -360,6 +360,16 @@ type Model struct {
 	progressNote         string
 	pendingPrompts       []queuedPrompt
 	awaitingInstead      bool
+	// steering carries mid-run user guidance into the active run; the agent
+	// loop drains it at every step boundary. One queue per Model so goal-mode
+	// iterations share it (a message typed between iterations reaches the
+	// next one). Pointer: survives Bubble Tea's value-copy semantics.
+	steering *agent.SteeringQueue
+	// showSteerChoice is the "steer now or queue?" picker opened when the
+	// user submits input while a run is active; steerPending holds that input.
+	showSteerChoice bool
+	steerCursor     int
+	steerPending    string
 	activePrompt         *queuedPrompt
 	activeAgentID        string
 
@@ -776,6 +786,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// skipped the final assistant message if it landed inside the window.
 		m.autoSave()
 		m.refreshViewport()
+		// Steering messages the run never got to (pushed after its last step
+		// boundary) must not be lost: with no goal continuing, requeue them as
+		// ordinary prompts. A live goal keeps them in the queue — the next
+		// iteration shares it and delivers them.
+		if m.activeGoal == nil && m.steering.Len() > 0 {
+			for _, s := range m.steering.Drain() {
+				m.queuePrompt(s, s, nil, nil)
+				m.pushSystemMsg(fmt.Sprintf("undelivered steering re-queued as request: %s", truncateLabel(s, 140)))
+			}
+		}
 		// Goal orchestration seam: if a goal is active, the loop decides
 		// whether to continue, stall, or report completion — BEFORE the
 		// queued-prompt / auto-compact fallback. Non-goal runs are unaffected.
@@ -1371,6 +1391,9 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.showPlanApproval {
 		return m.updatePlanApproval(msg)
 	}
+	if m.showSteerChoice {
+		return m.updateSteerChoice(msg)
+	}
 	if m.pendingAuth != nil {
 		return m.updateShellApproval(msg)
 	}
@@ -1637,6 +1660,15 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.handleCommand(input)
+		}
+		if m.thinking {
+			// A run is active: let the user choose between steering the
+			// current run and queueing the message for after it.
+			m.showSteerChoice = true
+			m.steerPending = input
+			m.steerCursor = 0
+			m.refreshViewport()
+			return m, nil
 		}
 		return m.handlePrompt(input)
 	case "esc":
@@ -1927,6 +1959,11 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
+	// Discard stale steering left over from an interrupted run: the user is
+	// starting fresh with a full prompt, so old mid-run guidance no longer
+	// applies (undelivered steering from a *completed* run was already
+	// re-queued as prompts by the agentDoneMsg handler).
+	m.steering.Drain()
 	m.parallelAgents = nil
 	m.ensureSession()
 	m.messages = append(m.messages, ChatMessage{

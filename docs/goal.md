@@ -152,11 +152,35 @@ Max iterations: 0 (unlimited), No-progress limit: 3
 Iterations: 3, Duration: 2m15s
 ```
 
+## Steering a running goal
+
+You don't have to stop a goal to correct its course. Type a message while the
+run is active and press enter — Spettro asks how to deliver it:
+
+- **Steer now** — the message is injected into the running conversation at the
+  agent's next step boundary, as a user turn the model sees before its next
+  action. The run continues without restarting, and the injection is
+  append-only so the provider prompt cache keeps hitting.
+- **Queue for after the run** — the previous behavior: the message becomes a
+  normal prompt once the run finishes.
+- **Discard** — closes the picker and puts the text back in the input box
+  (`Esc` does the same).
+
+Steering works in normal runs too, not just goal mode. In goal mode the
+steering queue is shared across iterations, so a message typed between
+iterations is delivered to the next one. If a run finishes before a steering
+message could be delivered, the message is re-queued as an ordinary prompt so
+it is never lost. A "steering delivered" note appears in the transcript when
+the agent actually receives it.
+
 ## ACP mode
 
 Over the Agent Client Protocol (ACP), `/goal <objective>` is advertised as an
 available command and runs the autonomous loop inside the prompt turn. Cancel
-the turn (`session/cancel`) to stop the goal.
+the turn (`session/cancel`) or send `/goal stop` as a new prompt to stop the
+goal. Steering works here too: any prompt sent while the goal turn is running
+is delivered to the agent at its next step boundary instead of interrupting
+the loop (see [ACP mode → Mid-run steering](acp.md)).
 
 ## Caveats
 

@@ -59,6 +59,11 @@ func (t *turnState) onStream(c agent.StreamChunk) {
 // covered by the tool updates themselves, so they are dropped.
 func (t *turnState) onTool(tr agent.ToolTrace) {
 	if tr.Name == "comment" {
+		// Steering delivery is the one comment worth surfacing: it is the
+		// user's confirmation that their mid-run message reached the model.
+		if strings.HasPrefix(tr.Output, "steering delivered") {
+			t.sessionUpdate(acpsdk.UpdateAgentMessageText("✔ " + tr.Output + "\n"))
+		}
 		return
 	}
 	key := tr.AgentID + "\x00" + tr.Name + "\x00" + tr.Args

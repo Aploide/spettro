@@ -178,6 +178,11 @@ type LLMAgent struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+
+	// Steering, when set, lets the host inject user guidance while the run is
+	// executing: the tool loop drains it at every step boundary and appends
+	// each message as a user turn (append-only, so prompt caching still hits).
+	Steering *SteeringQueue
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -246,6 +251,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		MaxDepth:        maxDelegationDepth,
 		MaxToolCalls:    maxToolCallsPerStep,
 		SkillsCatalog:   catalog,
+		Steering:        a.Steering,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)

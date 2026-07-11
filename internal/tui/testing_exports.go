@@ -270,6 +270,28 @@ func (m Model) UpdateShellApprovalForTesting(msg tea.KeyPressMsg) (tea.Model, te
 	return m.updateShellApproval(msg)
 }
 
+func (m Model) ShowSteerChoiceForTesting() bool {
+	return m.showSteerChoice
+}
+
+func (m Model) SteerPendingForTesting() string {
+	return m.steerPending
+}
+
+// SteeringQueueForTesting returns the Model's mid-run steering queue (nil
+// until a run has started or a test installs one).
+func (m Model) SteeringQueueForTesting() *agent.SteeringQueue {
+	return m.steering
+}
+
+func (m *Model) SetSteeringQueueForTesting(q *agent.SteeringQueue) {
+	m.steering = q
+}
+
+func SteerChoiceOptionsForTesting() []string {
+	return append([]string(nil), steerChoiceOptions...)
+}
+
 func AskUserOptionsForTesting(req agent.AskUserRequest) []string {
 	return askUserOptions(req)
 }

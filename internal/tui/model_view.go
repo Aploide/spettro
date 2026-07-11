@@ -457,6 +457,15 @@ func (m Model) viewInput(width int) string {
 		if m.pendingPlan != "" {
 			lines = append(lines, m.ta.View())
 		}
+	} else if m.showSteerChoice {
+		lines = append(lines, styleMuted.Render("  "+truncateLabel(m.steerPending, 100)))
+		lines = append(lines, m.renderApprovalPicker(
+			"agent is running — deliver this message how?",
+			steerChoiceOptions,
+			m.steerCursor,
+			mc,
+		))
+		lines = append(lines, styleMuted.Render("  enter selects  esc keeps typing"))
 	} else if m.pendingQuestion != nil {
 		lines = append(lines, m.renderAskUserPrompt())
 	} else if m.pendingAuth != nil {

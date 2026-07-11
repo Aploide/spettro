@@ -80,7 +80,19 @@ Then open the Agent Panel and pick *Spettro* as the agent.
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
   context, and images are accepted in prompts.
 - **Cancellation** — `session/cancel` interrupts the running turn; the turn
-  ends with the `cancelled` stop reason.
+  ends with the `cancelled` stop reason. `/goal stop` sent as a new prompt
+  also cancels a running goal turn.
+- **Mid-run steering** — a `session/prompt` sent while a turn is already
+  executing does not kill or replace the run: it is delivered to the running
+  agent as steering, injected as a user message at the agent's next step
+  boundary (append-only, so the provider prompt cache keeps hitting). The
+  steering prompt's own turn ends immediately with a "steering queued" note,
+  and a "✔ steering delivered" message streams when the agent actually sees
+  it. This works for normal turns and for `/goal` turns (the queue is shared
+  across goal iterations). Clients that want the classic replace behavior
+  keep it: sending `session/cancel` first stops the run, and the next prompt
+  starts a fresh turn. A steering message the run never reached is held and
+  delivered at the start of the session's next turn.
 
 Session persistence (`session/load`) and ACP-provided MCP servers are not
 supported yet; Spettro's own MCP configuration applies as usual.
