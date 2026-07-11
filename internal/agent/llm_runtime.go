@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -225,6 +226,11 @@ type toolRuntime struct {
 	goalComplete         bool
 	goalSummary          string
 	goalVerified         bool
+
+	// httpClient overrides the hardened SSRF-safe client used by web-fetch,
+	// web-search and download. Nil in production (the safe client is built per
+	// call); tests inject a plain client so httptest loopback servers work.
+	httpClient *http.Client
 
 	// Model fallback routing (manifest [runtime.fallback]). modelOverride is
 	// set once the user consents to a switch and pins the rest of the run to
@@ -1164,10 +1170,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return strings.Join(lines, "\n"), nil
 	case "web-fetch":
-		if err := r.authorizeNetworkAccess(ctx, "web-fetch", "web-fetch"); err != nil {
-			return "", err
-		}
 		return r.runWebFetch(ctx, call.Args)
+	case "download":
+		return r.runDownload(ctx, call.Args)
 	case "web-search":
 		return r.runWebSearch(ctx, call.Args)
 	case "grok-image":

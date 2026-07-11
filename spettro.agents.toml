@@ -433,6 +433,36 @@ primary_only = false
 permission_rules = []
 
 [[tools]]
+id = 'web-fetch'
+name = 'Web Fetch'
+description = 'Fetch a URL and return readable text/markdown content.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 45
+requires_approval = true
+permitted_actions = ['read', 'network']
+aliases = []
+risk_level = 'medium'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'download'
+name = 'Download'
+description = 'Download a URL to a file inside the workspace (size-limited).'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 180
+requires_approval = true
+permitted_actions = ['write', 'network']
+aliases = []
+risk_level = 'high'
+primary_only = false
+permission_rules = []
+
+[[tools]]
 id = 'grok-image'
 name = 'Grok Image'
 description = 'Generate images via the xAI Grok Imagine API and save them to the workspace (defaults to assets/ or Next.js public/).'
@@ -616,7 +646,7 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/coding.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'ls', 'tool-search', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'send-message', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'ls', 'tool-search', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'send-message', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video', 'web-fetch', 'download']
 permitted_actions = ['read', 'search', 'plan', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []
@@ -637,7 +667,7 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/chat.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'tool-search', 'web-search', 'mcp-list-resources', 'mcp-read-resource', 'comment', 'skill-read', 'skill-list']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'tool-search', 'web-search', 'web-fetch', 'mcp-list-resources', 'mcp-read-resource', 'comment', 'skill-read', 'skill-list']
 permitted_actions = ['ask', 'read', 'search']
 permission = 'ask-first'
 permission_rules = []
@@ -679,7 +709,7 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/code.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'ls', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'ls', 'task-create', 'task-get', 'task-update', 'task-list', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'todo-write', 'comment', 'skill-read', 'skill-list', 'grok-image', 'grok-video', 'web-fetch', 'download']
 permitted_actions = ['read', 'search', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []

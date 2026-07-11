@@ -53,6 +53,13 @@ Spettro uses both project-local and user-global storage.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
 
+### Web access (web-search / web-fetch / download)
+
+- `web-search`, `web-fetch`, and `download` are built-in network tools; see [Web Tools](web-tools.md) for behavior, limits, and the HTML-to-markdown engine.
+- In non-`yolo` modes each network target requires approval; "allow always" persists targets in `.spettro/allowed_network.json`.
+- All three go through the SSRF-hardened HTTP client: only http/https, non-public IPs (loopback, private ranges, cloud metadata) blocked at dial time, max 5 redirects.
+- `download` additionally honors file-write approval and OS sandbox write roots; it never leaves partial files.
+
 ### Commit co-authoring (mandatory)
 
 - Every commit Spettro produces — directly via the built-in committer or indirectly when an agent runs `git commit` through `shell-exec`/`bash` — carries the trailer `Co-Authored-By: Spettro <spettro@eyed.to>`.

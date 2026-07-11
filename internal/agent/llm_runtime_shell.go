@@ -4,13 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"spettro/internal/config"
 	"spettro/internal/jobs"
@@ -74,37 +71,6 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 		return text, fmt.Errorf("command failed: %w", err)
 	}
 	return text, nil
-}
-
-func (r *toolRuntime) runWebFetch(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		URL string `json:"url"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("web-fetch args: %w", err)
-	}
-	urlText := strings.TrimSpace(args.URL)
-	if urlText == "" {
-		return "", fmt.Errorf("web-fetch: url required")
-	}
-	if err := validatePublicURL(urlText); err != nil {
-		return "", fmt.Errorf("web-fetch: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlText, nil)
-	if err != nil {
-		return "", fmt.Errorf("web-fetch: %w", err)
-	}
-	client := newSafeHTTPClient(15 * time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("web-fetch: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
-	if err != nil {
-		return "", fmt.Errorf("web-fetch: read: %w", err)
-	}
-	return string(body), nil
 }
 
 type allowedCommandsFile struct {

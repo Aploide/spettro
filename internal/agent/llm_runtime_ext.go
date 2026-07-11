@@ -308,9 +308,8 @@ func (r *toolRuntime) runWebSearch(ctx context.Context, rawArgs []byte) (string,
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "spettro-web-search/1.0")
-	client := newSafeHTTPClient(15 * time.Second)
-	resp, err := client.Do(req)
+	req.Header.Set("User-Agent", "Spettro Agent/1.0")
+	resp, err := r.fetchClient(15 * time.Second).Do(req)
 	if err != nil {
 		return "", err
 	}

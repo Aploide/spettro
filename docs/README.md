@@ -9,6 +9,7 @@
 - [Goal Mode](goal.md) — autonomous `/goal` runs
 - [Agent Skills](skills.md)
 - [Runtime Hooks](hooks.md) — custom bash middleware for tool events
+- [Web Tools](web-tools.md) — web-search, web-fetch markdown engine, download
 - [Clipboard and Attachments](clipboard.md) — image paste, file attach, text select
 - [First-Launch Onboarding](onboarding.md)
 - [Spettro Subscription](subscription.md) — login, plans, credits
