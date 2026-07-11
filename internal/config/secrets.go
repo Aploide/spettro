@@ -23,11 +23,32 @@ type encryptedSecrets struct {
 }
 
 func keysPath() (string, error) {
-	home, err := os.UserHomeDir()
+	_, home, err := secretsIdentity()
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", err
 	}
 	return filepath.Join(home, ".spettro", "keys.enc"), nil
+}
+
+// secretsIdentity returns the username and home directory that key material
+// is bound to. Under sudo the effective user is root, which would change both
+// the derived encryption key and the keys.enc location; resolving SUDO_USER
+// keeps secrets readable in elevated sessions.
+func secretsIdentity() (username, home string, err error) {
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" && os.Geteuid() == 0 {
+		if u, lookupErr := user.Lookup(sudoUser); lookupErr == nil && u.HomeDir != "" {
+			return u.Username, u.HomeDir, nil
+		}
+	}
+	current, err := user.Current()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve current user: %w", err)
+	}
+	home, err = os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return current.Username, home, nil
 }
 
 func LoadAPIKeys() (map[string]string, error) {
@@ -167,18 +188,14 @@ func machineSecret() (string, error) {
 	if v := os.Getenv("SPETTRO_MASTER_KEY"); v != "" {
 		return v, nil
 	}
-	current, err := user.Current()
+	username, home, err := secretsIdentity()
 	if err != nil {
-		return "", fmt.Errorf("resolve current user: %w", err)
+		return "", err
 	}
 	host, err := os.Hostname()
 	if err != nil {
 		return "", fmt.Errorf("resolve hostname: %w", err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	hash := sha256.Sum256([]byte(current.Username + "|" + host + "|" + home))
+	hash := sha256.Sum256([]byte(username + "|" + host + "|" + home))
 	return base64.StdEncoding.EncodeToString(hash[:]), nil
 }
