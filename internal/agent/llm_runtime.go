@@ -1278,6 +1278,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":
 		return r.runFileEdit(ctx, call.Args)
+	case "multi-edit":
+		return r.runMultiEdit(ctx, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
@@ -1414,7 +1416,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // spurious checkpoint is cheap while a missed one is unrecoverable.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "shell-exec", "bash":
+	case "file-write", "file-edit", "multi-edit", "shell-exec", "bash":
 		return true
 	}
 	return false

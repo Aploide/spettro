@@ -110,7 +110,7 @@ func formatToolLabel(name, argsJSON string) string {
 			return "Wrote " + args.Path
 		}
 		return "Wrote file"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -333,7 +333,7 @@ func formatRunningLabel(name, argsJSON string) string {
 			return "Writing " + args.Path + "…"
 		}
 		return "Writing…"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -465,7 +465,7 @@ func toolActionVerb(name string) string {
 		return "Read"
 	case "file-write":
 		return "Wrote"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		return "Edited"
 	case "repo-search", "tool-search", "web-search":
 		return "Searched"
@@ -515,7 +515,7 @@ func toolActionVerb(name string) string {
 
 func toolNounCount(name string, count int) string {
 	switch name {
-	case "file-read", "file-write", "file-edit":
+	case "file-read", "file-write", "file-edit", "multi-edit":
 		if count == 1 {
 			return "1 file"
 		}
@@ -870,7 +870,7 @@ func formatRunningToolGroupLabel(name string, group []ToolItem) string {
 			return "Writing 1 file…"
 		}
 		return fmt.Sprintf("Writing %d files…", count)
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		if count == 1 {
 			return "Editing 1 file…"
 		}
@@ -1033,7 +1033,7 @@ func formatDetailedGroupLabel(name string, running bool, group []ToolItem) strin
 
 func toolDescriptor(name, argsJSON string) string {
 	switch name {
-	case "file-read", "file-write", "file-edit", "enter-worktree", "exit-worktree", "ls":
+	case "file-read", "file-write", "file-edit", "multi-edit", "enter-worktree", "exit-worktree", "ls":
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -1103,7 +1103,7 @@ func runningVerb(name string) string {
 		return "Reading"
 	case "file-write":
 		return "Writing"
-	case "file-edit":
+	case "file-edit", "multi-edit":
 		return "Editing"
 	case "repo-search", "tool-search", "web-search":
 		return "Searching"

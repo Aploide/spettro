@@ -580,6 +580,72 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)), nil
 }
 
+// runMultiEdit applies an ordered list of find/replace edits to one file
+// atomically: every edit runs against the in-memory result of the previous
+// one, and if any edit fails to match (or matches ambiguously without
+// replace_all) the whole call errors and the file is left untouched.
+func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string, error) {
+	var args struct {
+		Path  string `json:"path"`
+		Edits []struct {
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		} `json:"edits"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("multi-edit args: %w", err)
+	}
+	abs, rel, err := r.resolvePath(args.Path)
+	if err != nil {
+		return "", err
+	}
+	if len(args.Edits) == 0 {
+		return "", fmt.Errorf("multi-edit: edits is required")
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return "", err
+	}
+	content := string(raw)
+	updated := content
+	totalReplacements := 0
+	for i, e := range args.Edits {
+		if e.OldString == "" {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
+		}
+		if e.OldString == e.NewString {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
+		}
+		n := strings.Count(updated, e.OldString)
+		if n == 0 {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string not found: %q (file untouched)", i+1, truncate(e.OldString, 80))
+		}
+		if e.ReplaceAll {
+			updated = strings.ReplaceAll(updated, e.OldString, e.NewString)
+			totalReplacements += n
+			continue
+		}
+		if n > 1 {
+			return "", fmt.Errorf("multi-edit: edit %d: old_string matches %d times; add surrounding context to make it unique or set replace_all (file untouched)", i+1, n)
+		}
+		updated = strings.Replace(updated, e.OldString, e.NewString, 1)
+		totalReplacements++
+	}
+	// Approval comes after all edits are computed so the user is shown the
+	// combined diff exactly as it would be applied.
+	if err := r.authorizeWriteAccess(ctx, "multi-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	r.readSet[rel] = struct{}{}
+	r.mu.Unlock()
+	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)), nil
+}
+
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {
 	var args struct {
 		Reason string `json:"reason"`

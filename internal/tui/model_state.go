@@ -622,7 +622,7 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 	if status != "success" {
 		return ""
 	}
-	if name != "file-write" && name != "file-edit" {
+	if name != "file-write" && name != "file-edit" && name != "multi-edit" {
 		return ""
 	}
 	var args struct {
