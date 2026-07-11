@@ -46,6 +46,13 @@ type acpSession struct {
 	// growth is bounded by the runtime's in-loop compaction, not by evicting
 	// lines here (head eviction would churn the prefix and defeat the cache).
 	history []provider.Message
+	// transcript is the flat user/assistant conversation persisted to the
+	// session store after each turn (the same store the TUI's /resume reads).
+	// It is what session/load replays and what seeds the flattened History
+	// fallback on the first turn after a load, when no structured history
+	// exists yet.
+	transcript []session.Message
+	startedAt  time.Time
 	// commandsAnnounced records that a prompt turn has re-sent the available
 	// commands list, the fallback for clients that dropped the initial
 	// announcement (see NewSession).
@@ -70,7 +77,11 @@ func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 			Version: version.App,
 		},
 		AgentCapabilities: acpsdk.AgentCapabilities{
-			LoadSession: false,
+			LoadSession: true,
+			SessionCapabilities: acpsdk.SessionCapabilities{
+				List:   &acpsdk.SessionListCapabilities{},
+				Resume: &acpsdk.SessionResumeCapabilities{},
+			},
 			PromptCapabilities: acpsdk.PromptCapabilities{
 				Image:           true,
 				EmbeddedContext: true,
@@ -123,11 +134,12 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 
 	sid := session.NewID(cwd)
 	s := &acpSession{
-		id:       sid,
-		cwd:      cwd,
-		agentID:  agentID,
-		manifest: manifest,
-		mediaDir: filepath.Join(session.SessionDir(b.opts.GlobalDir, sid), "acp-media"),
+		id:        sid,
+		cwd:       cwd,
+		agentID:   agentID,
+		manifest:  manifest,
+		mediaDir:  filepath.Join(session.SessionDir(b.opts.GlobalDir, sid), "acp-media"),
+		startedAt: time.Now(),
 	}
 	b.mu.Lock()
 	b.sessions[sid] = s
@@ -261,6 +273,12 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	agentID := s.agentID
 	manifest := s.manifest
 	history := s.history
+	// First turn after session/load: no structured history exists yet, so
+	// fall back to the flattened stored transcript (mirrors the TUI's resume).
+	flatHistory := ""
+	if len(history) == 0 && len(s.transcript) > 0 {
+		flatHistory = flattenTranscript(s.transcript)
+	}
 	b.mu.Unlock()
 
 	spec, ok := manifest.AgentByID(agentID)
@@ -284,6 +302,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		Thinking:        thinking,
 		RequiredReads:   mentioned,
 		Images:          images,
+		History:         flatHistory,
 		Messages:        history,
 		Manifest:        &manifest,
 		SandboxState:    b.opts.SandboxState,
@@ -314,11 +333,20 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content))
 	}
 
+	b.mu.Lock()
 	if len(result.Messages) > 0 {
-		b.mu.Lock()
 		s.history = result.Messages
-		b.mu.Unlock()
 	}
+	now := time.Now()
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
+	if result.Content != "" {
+		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
+	}
+	state := s.persistState()
+	b.mu.Unlock()
+	// Persist so the TUI's /resume and future session/load calls see this
+	// conversation; a save failure must not fail the prompt turn.
+	_ = session.Save(b.opts.GlobalDir, state)
 
 	return acpsdk.PromptResponse{
 		StopReason: acpsdk.StopReasonEndTurn,
@@ -417,14 +445,6 @@ func (b *bridge) Logout(_ context.Context, _ acpsdk.LogoutRequest) (acpsdk.Logou
 
 func (b *bridge) CloseSession(_ context.Context, params acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
 	return acpsdk.CloseSessionResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodSessionClose)
-}
-
-func (b *bridge) ListSessions(_ context.Context, _ acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
-	return acpsdk.ListSessionsResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodSessionList)
-}
-
-func (b *bridge) ResumeSession(_ context.Context, _ acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
-	return acpsdk.ResumeSessionResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodSessionResume)
 }
 
 // SetSessionConfigOption applies a change made in the editor's toolbar
