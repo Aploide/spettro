@@ -3,11 +3,13 @@ package acp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/config"
+	"spettro/internal/memory"
 	"spettro/internal/provider"
 )
 
@@ -27,6 +29,7 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "budget", Description: "set token budget per request", Input: hintInput("<n|0>")},
 	{Name: "thinking", Description: "set extended-thinking level", Input: hintInput("off|low|medium|high|x-high|max")},
 	{Name: "goal", Description: "work autonomously toward an objective", Input: hintInput("<objective> | status")},
+	{Name: "memory", Description: "show, add to, or clear persistent memory", Input: hintInput("[show | add [user|project] <fact> | clear [user|project|all]]")},
 	{Name: "clear", Description: "clear conversation history"},
 }
 
@@ -174,11 +177,89 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		}
 		return "thinking level set to " + display, false, true
 
+	case "/memory":
+		return handleMemoryCommand(s.cwd, fields[1:]), false, true
+
 	case "/clear":
 		s.history = nil
 		return "conversation history cleared", false, true
 	}
 	return "", false, false
+}
+
+// handleMemoryCommand is the ACP text stand-in for the TUI's /memory command
+// (internal/tui/model_commands_ext.go handleMemoryCommand). Only the
+// subcommands that resolve from plain text are supported: show, add, and
+// clear. edit ($EDITOR), mine (background run + banner), and review (modal)
+// have no ACP surface. "add" replaces "edit" as the way to grow memory over
+// ACP; it appends one fact via the same append-only store the save-memory
+// tool uses.
+func handleMemoryCommand(cwd string, args []string) string {
+	store := memory.DefaultStore(cwd)
+	sub := "show"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "show":
+		var rows []string
+		for _, sc := range []memory.Scope{memory.ScopeUser, memory.ScopeProject} {
+			path := store.Path(sc)
+			if path == "" {
+				continue
+			}
+			data, err := os.ReadFile(path)
+			content := strings.TrimSpace(string(data))
+			if err != nil || content == "" {
+				rows = append(rows, fmt.Sprintf("%s memory (%s): empty", sc, path))
+				continue
+			}
+			rows = append(rows, fmt.Sprintf("%s memory (%s):\n%s", sc, path, content))
+		}
+		rows = append(rows, "", "changes apply from the next session")
+		return strings.Join(rows, "\n")
+
+	case "add":
+		rest := args[1:]
+		scope := memory.ScopeUser
+		if len(rest) > 0 {
+			switch strings.ToLower(rest[0]) {
+			case "user":
+				rest = rest[1:]
+			case "project":
+				scope = memory.ScopeProject
+				rest = rest[1:]
+			}
+		}
+		fact := strings.TrimSpace(strings.Join(rest, " "))
+		if fact == "" {
+			return "usage: /memory add [user|project] <fact>"
+		}
+		path, err := store.Save(scope, fact)
+		if err != nil {
+			return "memory save failed: " + err.Error()
+		}
+		return fmt.Sprintf("saved to %s memory (%s) — active from the next session", scope, path)
+
+	case "clear":
+		scopes := []memory.Scope{memory.ScopeUser, memory.ScopeProject}
+		switch {
+		case len(args) < 2 || strings.EqualFold(args[1], "all"):
+		case strings.EqualFold(args[1], "user"):
+			scopes = []memory.Scope{memory.ScopeUser}
+		case strings.EqualFold(args[1], "project"):
+			scopes = []memory.Scope{memory.ScopeProject}
+		default:
+			return "usage: /memory clear [user|project|all]"
+		}
+		for _, sc := range scopes {
+			if err := store.Clear(sc); err != nil {
+				return "memory clear failed: " + err.Error()
+			}
+		}
+		return "memory cleared — applies from the next session"
+	}
+	return "usage: /memory [show] | /memory add [user|project] <fact> | /memory clear [user|project|all]"
 }
 
 // modelsText renders the current model plus the connected roster, the ACP
@@ -206,4 +287,7 @@ const acpHelpText = `commands:
   /budget [n|0]         set token budget per request (0 = unlimited)
   /think <level>        set extended-thinking level (off|low|medium|high|x-high|max)
   /goal <objective>     work autonomously until the objective is met (/goal status)
+  /memory [show]        show persistent memory (user + project)
+  /memory add [user|project] <fact>   save one fact to persistent memory
+  /memory clear [user|project|all]    erase saved memory
   /clear                clear conversation history`

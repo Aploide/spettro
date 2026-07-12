@@ -9,13 +9,14 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
 )
 
-func TestUpdateMain_EnterWhileThinkingQueuesPrompt(t *testing.T) {
+func TestUpdateMain_EnterWhileThinkingOffersSteerOrQueue(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetThinkingForTesting(true)
 	m.SetTextareaValueForTesting("please review the latest change")
@@ -23,15 +24,85 @@ func TestUpdateMain_EnterWhileThinkingQueuesPrompt(t *testing.T) {
 	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := gotModel.(tui.Model)
 
-	if got.PendingPromptCountForTesting() != 1 {
-		t.Fatalf("expected one queued prompt, got %d", got.PendingPromptCountForTesting())
+	if !got.ShowSteerChoiceForTesting() {
+		t.Fatal("expected the steer/queue picker to open while a run is active")
+	}
+	if got.SteerPendingForTesting() != "please review the latest change" {
+		t.Fatalf("unexpected pending steer input: %q", got.SteerPendingForTesting())
 	}
 	if strings.TrimSpace(got.TextareaValueForTesting()) != "" {
-		t.Fatalf("expected textarea to reset after queueing, got %q", got.TextareaValueForTesting())
+		t.Fatalf("expected textarea to reset while picker is open, got %q", got.TextareaValueForTesting())
+	}
+
+	// Choosing "Queue for after the run" (option 2) falls back to the old
+	// queueing behavior.
+	gotModel, _ = got.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyDown})
+	got = gotModel.(tui.Model)
+	gotModel, _ = got.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got = gotModel.(tui.Model)
+
+	if got.ShowSteerChoiceForTesting() {
+		t.Fatal("picker should close after a choice")
+	}
+	if got.PendingPromptCountForTesting() != 1 {
+		t.Fatalf("expected one queued prompt, got %d", got.PendingPromptCountForTesting())
 	}
 	msgs := got.MessagesForTesting()
 	if len(msgs) == 0 || !strings.Contains(msgs[len(msgs)-1].Content, "queued request") {
 		t.Fatalf("expected queued request system message, got %+v", msgs)
+	}
+}
+
+func TestUpdateMain_SteerNowPushesToSteeringQueue(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetThinkingForTesting(true)
+	m.SetSteeringQueueForTesting(agent.NewSteeringQueue())
+	m.SetTextareaValueForTesting("use table-driven tests instead")
+
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := gotModel.(tui.Model)
+	// Option 1 ("Steer now") is preselected.
+	gotModel, _ = got.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got = gotModel.(tui.Model)
+
+	if got.ShowSteerChoiceForTesting() {
+		t.Fatal("picker should close after steering")
+	}
+	q := got.SteeringQueueForTesting()
+	if q == nil || q.Len() != 1 {
+		t.Fatalf("expected one steering message in the queue, got %v", q.Len())
+	}
+	if msgs := q.Drain(); msgs[0] != "use table-driven tests instead" {
+		t.Fatalf("unexpected steering message: %q", msgs[0])
+	}
+	if got.PendingPromptCountForTesting() != 0 {
+		t.Fatal("steer-now must not also queue the prompt")
+	}
+	msgs := got.MessagesForTesting()
+	if len(msgs) < 2 || msgs[len(msgs)-2].Role != tui.RoleUser ||
+		!strings.Contains(msgs[len(msgs)-1].Content, "delivered at the agent's next step") {
+		t.Fatalf("expected user message + delivery notice in transcript, got %+v", msgs)
+	}
+}
+
+func TestUpdateMain_SteerChoiceEscRestoresInput(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetThinkingForTesting(true)
+	m.SetTextareaValueForTesting("half-typed thought")
+
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := gotModel.(tui.Model)
+	gotModel, _ = got.UpdateMainForTesting(tea.KeyPressMsg{Code: tea.KeyEsc})
+	got = gotModel.(tui.Model)
+
+	if got.ShowSteerChoiceForTesting() {
+		t.Fatal("esc should close the picker")
+	}
+	if got.TextareaValueForTesting() != "half-typed thought" {
+		t.Fatalf("esc should restore the typed input, got %q", got.TextareaValueForTesting())
+	}
+	if got.PendingPromptCountForTesting() != 0 {
+		t.Fatal("esc must not queue anything")
 	}
 }
 

@@ -29,6 +29,9 @@ var allCommands = []commandDef{
 	{"/skill", "manage Agent Skills (list/install/info/enable/disable/uninstall/where/reload)"},
 	{"/skills", "alias of /skill list"},
 	{"/hooks", "list effective runtime hooks"},
+	{"/memory", "show/edit/clear persistent cross-session memory"},
+	{"/memory mine", "scan saved sessions and draft candidate memories into the review inbox"},
+	{"/memory review", "approve or discard drafted memory candidates"},
 	{"/plan", "switch plan mode or run plan task"},
 	{"/goal", "run autonomously until an objective is met (no step/token limits)"},
 	{"/permissions", "show/set permission level"},
@@ -238,6 +241,11 @@ const helpText = `commands:
   /skill         manage Agent Skills (list/install/uninstall/info/enable/disable)
   /skill install <source>   install from path, https git URL, or owner/repo
   /hooks         list effective runtime hooks (project + global)
+  /memory        show persistent memory (user + project)
+  /memory edit [user|project]   edit a memory file in $EDITOR
+  /memory clear [user|project|all]  erase saved memory
+  /memory mine [n]   scan saved sessions, draft memory candidates (background)
+  /memory review     approve/discard drafted candidates (nothing saves without approval)
   /init          analyze codebase and write SPETTRO.md
   /compact [x]   summarize conversation (optional focus instruction)
   /compact auto  view/set auto-compact (status|on|off)

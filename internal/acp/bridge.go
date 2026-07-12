@@ -31,8 +31,9 @@ type bridge struct {
 }
 
 // acpSession is the per-conversation state. Mutable fields are guarded by the
-// owning bridge's mu; a session runs at most one prompt turn at a time (the
-// SDK cancels the previous turn's context when a new prompt arrives).
+// owning bridge's mu. A session runs at most one agent turn at a time; a
+// prompt that arrives while one is running is delivered to it as mid-run
+// steering (see beginRun / steerRunningTurn) rather than starting a new turn.
 type acpSession struct {
 	id       string
 	cwd      string
@@ -60,6 +61,17 @@ type acpSession struct {
 	// lastGoal is the outcome summary of the most recent /goal run, surfaced
 	// by /goal status.
 	lastGoal string
+	// running / runCancel track the in-flight prompt turn. The agent runs
+	// under a session-owned context detached from the SDK's request context
+	// (the SDK cancels that as soon as ANY new prompt arrives for the
+	// session); runCancel is what an explicit session/cancel fires instead.
+	running   bool
+	runCancel context.CancelFunc
+	// steering carries user text sent while a turn is running into that run:
+	// the tool loop drains it at every step boundary. It outlives single
+	// turns, so a message the run never reached is delivered at the start of
+	// the next one instead of being lost.
+	steering *agent.SteeringQueue
 }
 
 var _ acpsdk.Agent = (*bridge)(nil)
@@ -188,10 +200,69 @@ func (b *bridge) SetSessionMode(_ context.Context, params acpsdk.SetSessionModeR
 	return acpsdk.SetSessionModeResponse{}, nil
 }
 
-// Cancel is a no-op: the SDK already cancels the in-flight Prompt context for
-// the session when the client sends session/cancel.
-func (b *bridge) Cancel(_ context.Context, _ acpsdk.CancelNotification) error {
+// Cancel stops the session's in-flight run. The SDK also cancels the prompt
+// request context, but the agent deliberately does not run under that context
+// (a new prompt for the session cancels it too — see Prompt's steering path),
+// so the explicit cancel must land here.
+func (b *bridge) Cancel(_ context.Context, params acpsdk.CancelNotification) error {
+	b.mu.Lock()
+	var cancel context.CancelFunc
+	if s, ok := b.sessions[string(params.SessionId)]; ok {
+		cancel = s.runCancel
+	}
+	b.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
+}
+
+// beginRun atomically claims the session's single run slot. On success it
+// returns the context the agent must run under — derived from the bridge
+// lifetime but NOT from the SDK's per-request context, which is cancelled
+// whenever another prompt arrives for the session — plus a finish func that
+// releases the slot. ok=false means a turn is already running: the caller
+// should deliver the prompt as steering instead. Explicit session/cancel
+// goes through Cancel → s.runCancel.
+func (b *bridge) beginRun(ctx context.Context, s *acpSession) (runCtx context.Context, finish func(), ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if s.steering == nil {
+		s.steering = agent.NewSteeringQueue()
+	}
+	if s.running {
+		return nil, nil, false
+	}
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.running = true
+	s.runCancel = cancel
+	return runCtx, func() {
+		b.mu.Lock()
+		s.running = false
+		s.runCancel = nil
+		b.mu.Unlock()
+		cancel()
+	}, true
+}
+
+// steerRunningTurn delivers a prompt that arrived while a turn was already in
+// flight as mid-run steering: the text is queued for injection at the agent's
+// next step boundary and this (second) prompt turn ends immediately. Clients
+// that want replace-semantics instead send session/cancel first, which stops
+// the run before the new prompt arrives.
+func (b *bridge) steerRunningTurn(ctx context.Context, s *acpSession, sessionID acpsdk.SessionId, task string) (acpsdk.PromptResponse, error) {
+	b.mu.Lock()
+	q := s.steering
+	// Record the steering text in the flat transcript now; the structured
+	// history picks it up from the running turn's RunResult.Messages.
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: time.Now()})
+	b.mu.Unlock()
+	q.Push(task)
+	_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+		SessionId: sessionID,
+		Update:    acpsdk.UpdateAgentMessageText("→ steering queued: the running agent will see this message at its next step"),
+	})
+	return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 }
 
 func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
@@ -240,7 +311,30 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 
 	if strings.HasPrefix(trimmedTask, "/") {
 		if fields := strings.Fields(trimmedTask); fields[0] == "/goal" {
-			return b.runGoalCommand(ctx, s, &cfg, turn, trimmedTask)
+			if strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")) == "stop" {
+				// /goal stop while a goal turn is running: cancel that run.
+				b.mu.Lock()
+				cancel := s.runCancel
+				b.mu.Unlock()
+				if cancel != nil {
+					cancel()
+					_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+						SessionId: params.SessionId,
+						Update:    acpsdk.UpdateAgentMessageText("goal stopped"),
+					})
+					return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+				}
+			}
+			runCtx, finish, ok := b.beginRun(ctx, s)
+			if !ok {
+				// A goal/run is already in flight: treat "/goal <text>" sent
+				// mid-turn as steering for it (minus the command prefix).
+				return b.steerRunningTurn(ctx, s, params.SessionId,
+					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")))
+			}
+			defer finish()
+			turn.ctx = runCtx
+			return b.runGoalCommand(runCtx, s, &cfg, turn, trimmedTask)
 		}
 		b.mu.Lock()
 		reply, _, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
@@ -269,9 +363,21 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		}
 	}
 
+	// Claim the session's run slot. If a turn is already executing, this
+	// prompt becomes mid-run steering for it instead of a new turn (the SDK
+	// has already cancelled the request context of the running turn, but the
+	// agent runs under runCtx, so it is unaffected).
+	runCtx, finish, ok := b.beginRun(ctx, s)
+	if !ok {
+		return b.steerRunningTurn(ctx, s, params.SessionId, task)
+	}
+	defer finish()
+	turn.ctx = runCtx
+
 	b.mu.Lock()
 	agentID := s.agentID
 	manifest := s.manifest
+	steering := s.steering
 	history := s.history
 	// First turn after session/load: no structured history exists yet, so
 	// fall back to the flattened stored transcript (mirrors the TUI's resume).
@@ -308,6 +414,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		SandboxState:    b.opts.SandboxState,
 		SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
 		ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
+		Steering:        steering,
 		StreamCallback:  turn.onStream,
 		ToolCallback:    turn.onTool,
 		ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
@@ -319,9 +426,9 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		AskUser: turn.askUser,
 	}
 
-	result, runErr := ag.Run(ctx, task)
+	result, runErr := ag.Run(runCtx, task)
 	if runErr != nil {
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 		}
 		return acpsdk.PromptResponse{}, runErr

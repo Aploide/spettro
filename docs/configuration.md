@@ -11,6 +11,8 @@ Spettro uses both project-local and user-global storage.
 | `trusted.json` | Permanently trusted project paths. |
 | `models.json` | Cached `models.dev` catalog. |
 | `hooks.json` | Global runtime hooks fallback/default. |
+| `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
+| `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
@@ -22,6 +24,7 @@ Spettro uses both project-local and user-global storage.
 | `PLAN.md` | Last generated implementation plan. |
 | `allowed_commands.json` | Commands approved with “allow always” for this project. |
 | `hooks.json` | Project runtime hooks (overrides global by `(event, matcher, id)`). |
+| `memory.md` | [Persistent memory](memory.md): project-scope facts loaded into agent context each session. |
 | `commands/` | Project [custom slash commands](custom-commands.md); override global commands on name conflict. |
 | `index.json` | Optional project snapshot when indexer-style flow is used. |
 
@@ -52,6 +55,13 @@ Spettro uses both project-local and user-global storage.
 - Some safe read-only commands are always allowed.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
+
+### Web access (web-search / web-fetch / download)
+
+- `web-search`, `web-fetch`, and `download` are built-in network tools; see [Web Tools](web-tools.md) for behavior, limits, and the HTML-to-markdown engine.
+- In non-`yolo` modes each network target requires approval; "allow always" persists targets in `.spettro/allowed_network.json`.
+- All three go through the SSRF-hardened HTTP client: only http/https, non-public IPs (loopback, private ranges, cloud metadata) blocked at dial time, max 5 redirects.
+- `download` additionally honors file-write approval and OS sandbox write roots; it never leaves partial files.
 
 ### Commit co-authoring (mandatory)
 

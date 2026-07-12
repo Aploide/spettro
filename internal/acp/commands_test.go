@@ -119,3 +119,43 @@ func TestHandleSlashCommand_Clear(t *testing.T) {
 		t.Fatalf("expected history to be cleared, got %v", s.history)
 	}
 }
+
+func TestHandleSlashCommand_Memory(t *testing.T) {
+	s := testSession(t)
+	s.cwd = t.TempDir()
+	cfg := config.UserConfig{}
+	pm := provider.NewManager()
+
+	reply, _, handled := handleSlashCommand(s, &cfg, pm, "/memory")
+	if !handled || !strings.Contains(reply, "user memory") || !strings.Contains(reply, "empty") {
+		t.Fatalf("expected empty memory listing, got handled=%v reply=%q", handled, reply)
+	}
+
+	reply, _, handled = handleSlashCommand(s, &cfg, pm, "/memory add project prefers tabs")
+	if !handled || !strings.Contains(reply, "saved to project memory") {
+		t.Fatalf("expected project save confirmation, got handled=%v reply=%q", handled, reply)
+	}
+	reply, _, _ = handleSlashCommand(s, &cfg, pm, "/memory show")
+	if !strings.Contains(reply, "prefers tabs") {
+		t.Fatalf("expected saved fact in show output, got %q", reply)
+	}
+
+	reply, _, _ = handleSlashCommand(s, &cfg, pm, "/memory add")
+	if !strings.Contains(reply, "usage: /memory add") {
+		t.Fatalf("expected add usage, got %q", reply)
+	}
+
+	reply, _, _ = handleSlashCommand(s, &cfg, pm, "/memory clear all")
+	if !strings.Contains(reply, "memory cleared") {
+		t.Fatalf("expected clear confirmation, got %q", reply)
+	}
+	reply, _, _ = handleSlashCommand(s, &cfg, pm, "/memory")
+	if strings.Contains(reply, "prefers tabs") {
+		t.Fatalf("expected fact gone after clear, got %q", reply)
+	}
+
+	reply, _, _ = handleSlashCommand(s, &cfg, pm, "/memory bogus")
+	if !strings.Contains(reply, "usage: /memory") {
+		t.Fatalf("expected usage message, got %q", reply)
+	}
+}

@@ -17,6 +17,7 @@ require (
 	github.com/openai/openai-go/v3 v3.4.0
 	github.com/pelletier/go-toml/v2 v2.2.4
 	golang.org/x/crypto v0.52.0
+	golang.org/x/net v0.55.0
 )
 
 require (
@@ -80,7 +81,6 @@ require (
 	go.opentelemetry.io/otel/metric v1.42.0 // indirect
 	go.opentelemetry.io/otel/trace v1.42.0 // indirect
 	golang.org/x/image v0.41.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect

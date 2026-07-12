@@ -42,13 +42,20 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 		return reply(last)
 	case "stop", "resume":
-		return reply("over ACP a goal runs inside a single prompt turn; use the editor's stop/cancel to interrupt it, or send a new prompt")
+		// A running goal never reaches here: Prompt intercepts "/goal stop"
+		// while a turn is in flight and cancels it directly.
+		return reply("no goal is running; over ACP a goal runs inside a single prompt turn — while it runs, /goal stop or the editor's stop/cancel interrupts it, and any other prompt steers it")
 	}
 	objective := rest
 
 	b.mu.Lock()
 	manifest := s.manifest
 	cwd := s.cwd
+	// Steering: prompts sent while this goal turn runs are queued by Prompt
+	// and injected at the running iteration's next step boundary. The queue
+	// is shared across iterations, so text arriving between iterations
+	// reaches the next one.
+	steering := s.steering
 	// The goal loop starts from the session's carried conversation and then
 	// threads each iteration's RunResult.Messages into the next, so every
 	// iteration extends a byte-stable prompt prefix (cache hits) instead of
@@ -132,6 +139,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			GoalMode:        true,
 			ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
 			ShellTimeoutSec: cfg.GoalShellTimeoutSec,
+			Steering:        steering,
 			StreamCallback:  turn.onStream,
 			ToolCallback:    turn.onTool,
 			ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {

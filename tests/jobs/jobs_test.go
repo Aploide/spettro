@@ -64,7 +64,7 @@ func TestBackgroundJobLifecycle(t *testing.T) {
 	}
 }
 
-// TestBackgroundHTTPServer mirrors the TODO acceptance flow: start a server
+// TestBackgroundHTTPServer acceptance flow: start a server
 // detached, hit it from the foreground, then kill it.
 func TestBackgroundHTTPServer(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

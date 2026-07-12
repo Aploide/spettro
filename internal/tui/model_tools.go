@@ -154,6 +154,15 @@ func formatToolLabel(name, argsJSON string) string {
 			return fmt.Sprintf("Fetched %q", u)
 		}
 		return "Fetched web page"
+	case "download":
+		var args struct {
+			URL  string `json:"url"`
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.URL != "" {
+			return fmt.Sprintf("Downloaded %q", truncateLabel(args.URL, 60))
+		}
+		return "Downloaded file"
 	case "shell-exec", "bash", "bash-output":
 		var args struct {
 			Command string `json:"command"`
@@ -227,6 +236,14 @@ func formatToolLabel(name, argsJSON string) string {
 		return "Updated task"
 	case "task-list":
 		return "Listed tasks"
+	case "task-delete":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			return fmt.Sprintf("Deleted task %s", truncateLabel(args.ID, 40))
+		}
+		return "Deleted tasks"
 	case "ask-user":
 		var args struct {
 			Question string `json:"question"`
@@ -377,6 +394,15 @@ func formatRunningLabel(name, argsJSON string) string {
 			return fmt.Sprintf("Fetching %q…", u)
 		}
 		return "Fetching web page…"
+	case "download":
+		var args struct {
+			URL  string `json:"url"`
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.URL != "" {
+			return fmt.Sprintf("Downloading %q…", truncateLabel(args.URL, 60))
+		}
+		return "Downloading file…"
 	case "shell-exec", "bash", "bash-output":
 		var args struct {
 			Command string `json:"command"`
@@ -422,6 +448,8 @@ func formatRunningLabel(name, argsJSON string) string {
 		return "Updating task…"
 	case "task-list":
 		return "Listing tasks…"
+	case "task-delete":
+		return "Deleting task…"
 	case "ask-user":
 		return "Asking user…"
 	case "enter-plan-mode":
@@ -471,6 +499,8 @@ func toolActionVerb(name string) string {
 		return "Searched"
 	case "web-fetch":
 		return "Fetched"
+	case "download":
+		return "Downloaded"
 	case "shell-exec", "bash", "bash-output":
 		return "Ran"
 	case "glob":
@@ -489,6 +519,8 @@ func toolActionVerb(name string) string {
 		return "Updated"
 	case "task-list":
 		return "Listed"
+	case "task-delete":
+		return "Deleted"
 	case "ask-user":
 		return "Asked"
 	case "enter-plan-mode":
@@ -540,6 +572,11 @@ func toolNounCount(name string, count int) string {
 			return "1 page"
 		}
 		return fmt.Sprintf("%d pages", count)
+	case "download":
+		if count == 1 {
+			return "1 download"
+		}
+		return fmt.Sprintf("%d downloads", count)
 	case "ls":
 		if count == 1 {
 			return "1 listing"
@@ -550,7 +587,7 @@ func toolNounCount(name string, count int) string {
 			return "1 todo batch"
 		}
 		return fmt.Sprintf("%d todo batches", count)
-	case "task-create", "task-get", "task-update", "task-list":
+	case "task-create", "task-get", "task-update", "task-list", "task-delete":
 		if count == 1 {
 			return "1 task"
 		}
@@ -895,6 +932,11 @@ func formatRunningToolGroupLabel(name string, group []ToolItem) string {
 			return "Fetching 1 page…"
 		}
 		return fmt.Sprintf("Fetching %d pages…", count)
+	case "download":
+		if count == 1 {
+			return "Downloading 1 file…"
+		}
+		return fmt.Sprintf("Downloading %d files…", count)
 	case "shell-exec", "bash", "bash-output":
 		if count == 1 {
 			return "Running 1 command…"
@@ -935,6 +977,11 @@ func formatRunningToolGroupLabel(name string, group []ToolItem) string {
 			return "Listing tasks…"
 		}
 		return fmt.Sprintf("Listing tasks %d times…", count)
+	case "task-delete":
+		if count == 1 {
+			return "Deleting 1 task…"
+		}
+		return fmt.Sprintf("Deleting %d tasks…", count)
 	case "ask-user":
 		if count == 1 {
 			return "Asking 1 question…"
@@ -1061,6 +1108,13 @@ func toolDescriptor(name, argsJSON string) string {
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.URL) != "" {
 			return fmt.Sprintf("%q", truncateLabel(args.URL, 36))
 		}
+	case "download":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.URL) != "" {
+			return fmt.Sprintf("%q", truncateLabel(args.URL, 36))
+		}
 	case "shell-exec", "bash", "bash-output":
 		var args struct {
 			Command string `json:"command"`
@@ -1109,6 +1163,8 @@ func runningVerb(name string) string {
 		return "Searching"
 	case "web-fetch":
 		return "Fetching"
+	case "download":
+		return "Downloading"
 	case "shell-exec", "bash", "bash-output":
 		return "Running"
 	case "glob":
@@ -1127,6 +1183,8 @@ func runningVerb(name string) string {
 		return "Updating"
 	case "task-list":
 		return "Listing"
+	case "task-delete":
+		return "Deleting"
 	case "ask-user":
 		return "Asking"
 	case "enter-plan-mode":
@@ -1186,7 +1244,9 @@ func formatApprovalCommandLabel(command string) string {
 		case "web-search":
 			return fmt.Sprintf("Searching web for %q", truncateLabel(target, 60))
 		case "web-fetch":
-			return "Fetching a web page"
+			return fmt.Sprintf("Fetching %s", truncateLabel(target, 60))
+		case "download":
+			return fmt.Sprintf("Downloading %s", truncateLabel(target, 60))
 		case "mcp-list-resources":
 			return fmt.Sprintf("Listing MCP resources for %s", truncateLabel(target, 40))
 		case "mcp-read-resource":

@@ -18,6 +18,7 @@ import (
 	"spettro/internal/checkpoint"
 	"spettro/internal/commands"
 	"spettro/internal/config"
+	"spettro/internal/memory"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/session"
@@ -123,6 +124,8 @@ type searchDoneMsg struct {
 	err    error
 }
 
+type memoryEditDoneMsg struct{ err error }
+
 type bannerClearMsg struct{}
 type quitWarningMsg struct{}
 
@@ -225,7 +228,7 @@ type queuedPrompt struct {
 }
 
 // goalState tracks an in-flight /goal run across the outer orchestration loop.
-// nil means no goal is active. See TODO/04 for the loop that drives it.
+// nil means no goal is active.
 type goalState struct {
 	Objective       string // the user's goal text, verbatim
 	Iteration       int    // outer-loop iterations dispatched so far
@@ -357,6 +360,16 @@ type Model struct {
 	progressNote         string
 	pendingPrompts       []queuedPrompt
 	awaitingInstead      bool
+	// steering carries mid-run user guidance into the active run; the agent
+	// loop drains it at every step boundary. One queue per Model so goal-mode
+	// iterations share it (a message typed between iterations reaches the
+	// next one). Pointer: survives Bubble Tea's value-copy semantics.
+	steering *agent.SteeringQueue
+	// showSteerChoice is the "steer now or queue?" picker opened when the
+	// user submits input while a run is active; steerPending holds that input.
+	showSteerChoice bool
+	steerCursor     int
+	steerPending    string
 	activePrompt         *queuedPrompt
 	activeAgentID        string
 
@@ -409,7 +422,13 @@ type Model struct {
 	resumeCursor int
 	resumeScroll int
 
-	// Checkpointing / rewind (TODO 01). checkpointer is opened lazily on the
+	// Memory review inbox: candidates drafted by
+	// /memory mine awaiting approval or discard.
+	showMemoryReview   bool
+	memoryReviewItems  []memory.Candidate
+	memoryReviewCursor int
+
+	// Checkpointing / rewind checkpointer is opened lazily on the
 	// first agent run; checkpointerFailed latches an open failure so we don't
 	// retry (and re-warn) every run.
 	checkpointer       *checkpoint.Checkpointer
@@ -641,6 +660,7 @@ const (
 	modalLogin
 	modalOnboarding
 	modalResume
+	modalMemoryReview
 	modalRewind
 	modalConnect
 	modalSelector
@@ -660,6 +680,8 @@ func (m Model) activeModal() modal {
 		return modalOnboarding
 	case m.showResume:
 		return modalResume
+	case m.showMemoryReview:
+		return modalMemoryReview
 	case m.showRewind:
 		return modalRewind
 	case m.showConnect:
@@ -764,6 +786,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// skipped the final assistant message if it landed inside the window.
 		m.autoSave()
 		m.refreshViewport()
+		// Steering messages the run never got to (pushed after its last step
+		// boundary) must not be lost: with no goal continuing, requeue them as
+		// ordinary prompts. A live goal keeps them in the queue — the next
+		// iteration shares it and delivers them.
+		if m.activeGoal == nil && m.steering.Len() > 0 {
+			for _, s := range m.steering.Drain() {
+				m.queuePrompt(s, s, nil, nil)
+				m.pushSystemMsg(fmt.Sprintf("undelivered steering re-queued as request: %s", truncateLabel(s, 140)))
+			}
+		}
 		// Goal orchestration seam: if a goal is active, the loop decides
 		// whether to continue, stall, or report completion — BEFORE the
 		// queued-prompt / auto-compact fallback. Non-goal runs are unaffected.
@@ -880,6 +912,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.publishRemoteState("search_done")
 		m.autoSave()
 		m.refreshViewport()
+	case memoryMineDoneMsg:
+		switch {
+		case msg.err != nil:
+			m.showBanner("memory mining failed: "+msg.err.Error(), "error")
+		case msg.added == 0:
+			m.showBanner(fmt.Sprintf("memory mining done — no new candidates (%d session(s) scanned)", msg.scanned), "info")
+		default:
+			m.showBanner(fmt.Sprintf("memory mining done — %d candidate(s) drafted, review with /memory review", msg.added), "success")
+		}
+	case memoryEditDoneMsg:
+		if msg.err != nil {
+			m.showBanner("memory edit failed: "+msg.err.Error(), "error")
+		} else {
+			m.showBanner("memory updated — applies from the next session", "success")
+		}
 	case compactDoneMsg:
 		if !m.thinking {
 			break
@@ -954,8 +1001,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vp.GotoBottom()
 				break
 			}
-			if t.Name == "todo-write" && t.Status != "running" {
-				m.syncTodosFromSession()
+			switch t.Name {
+			case "todo-write", "task-create", "task-update", "task-delete":
+				if t.Status != "running" {
+					m.syncTodosFromSession()
+				}
 			}
 			m.trackSessionEditFromTrace(t)
 			if t.Status != "running" {
@@ -1305,6 +1355,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTrust(msg)
 		case modalResume:
 			return m.updateResume(msg)
+		case modalMemoryReview:
+			return m.updateMemoryReview(msg)
 		case modalRewind:
 			return m.updateRewind(msg)
 		case modalConnect:
@@ -1341,6 +1393,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.showPlanApproval {
 		return m.updatePlanApproval(msg)
+	}
+	if m.showSteerChoice {
+		return m.updateSteerChoice(msg)
 	}
 	if m.pendingAuth != nil {
 		return m.updateShellApproval(msg)
@@ -1609,6 +1664,15 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m.handleCommand(input)
 		}
+		if m.thinking {
+			// A run is active: let the user choose between steering the
+			// current run and queueing the message for after it.
+			m.showSteerChoice = true
+			m.steerPending = input
+			m.steerCursor = 0
+			m.refreshViewport()
+			return m, nil
+		}
 		return m.handlePrompt(input)
 	case "esc":
 		if m.showAttachPrompt {
@@ -1817,6 +1881,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleSkillsCommand(input)
 	case "/hooks":
 		return m.handleHooksCommand()
+	case "/memory":
+		return m.handleMemoryCommand(input)
 	case "/jobs":
 		return m.handleJobsCommand(input)
 	case "/plan":
@@ -1896,6 +1962,11 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
+	// Discard stale steering left over from an interrupted run: the user is
+	// starting fresh with a full prompt, so old mid-run guidance no longer
+	// applies (undelivered steering from a *completed* run was already
+	// re-queued as prompts by the agentDoneMsg handler).
+	m.steering.Drain()
 	m.parallelAgents = nil
 	m.ensureSession()
 	m.messages = append(m.messages, ChatMessage{

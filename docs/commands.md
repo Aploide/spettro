@@ -23,7 +23,7 @@
 | `/thinking <off\|low\|medium\|high\|x-high\|max>` | Set extended-thinking compute budget for the active model. Honoured by Anthropic Claude Opus / Sonnet; ignored by providers that don't expose a thinking parameter. |
 | `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
 | `/approve` | Execute pending plan through `coding` agent. |
-| `/tasks [list\|add\|done\|set\|show]` | Manage session tasks. |
+| `/tasks [list\|add\|done\|set\|show\|rm\|clear]` | Manage the session task graph. `list` prints tasks in dependency order with `deps:` and `[blocked]` markers; `set` accepts `pending`, `in_progress`, `completed`, `blocked` or `cancelled`; `rm <id>` deletes a task (stripping references to it from other tasks' dependencies); `clear` prunes all completed/cancelled tasks. |
 | `/mcp <list\|read\|auth>` | Manage MCP resources and auth. |
 | `/skill list` | List installed Agent Skills. |
 | `/skill install <source>` | Install a skill from a local path, https git URL, or `owner/repo` shorthand. |
@@ -33,6 +33,11 @@
 | `/skill where` | Show the discovery roots being scanned. |
 | `/skills` | Alias of `/skill`. |
 | `/hooks` | Show effective runtime hooks (project + global). |
+| `/memory [show]` | Show persistent cross-session memory (user + project). See [Persistent Memory](memory.md). |
+| `/memory edit [user\|project]` | Edit a memory file in `$EDITOR`. |
+| `/memory clear [user\|project\|all]` | Erase saved memory. |
+| `/memory mine [n]` | Scan recent saved sessions in the background and draft candidate memories into the review inbox. |
+| `/memory review` | Approve or discard drafted memory candidates (nothing saves without approval). |
 | `/compact [focus...]` | Summarize the current conversation. |
 | `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
 | `/compact policy` | Show compact thresholds and failure counters. |

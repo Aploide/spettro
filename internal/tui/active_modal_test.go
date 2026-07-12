@@ -15,6 +15,7 @@ func TestActiveModalSingle(t *testing.T) {
 		{"login", func(m *Model) { m.showLogin = true }, modalLogin},
 		{"onboarding", func(m *Model) { m.showOnboarding = true }, modalOnboarding},
 		{"resume", func(m *Model) { m.showResume = true }, modalResume},
+		{"memory-review", func(m *Model) { m.showMemoryReview = true }, modalMemoryReview},
 		{"connect", func(m *Model) { m.showConnect = true }, modalConnect},
 		{"selector", func(m *Model) { m.showSelector = true }, modalSelector},
 		{"setup", func(m *Model) { m.showSetup = true }, modalSetup},
@@ -55,7 +56,7 @@ func TestActiveModalPrecedence(t *testing.T) {
 // be renderable by View (or, for modalSetup, intentionally fall through). We
 // assert View does not panic and returns non-empty output for each.
 func TestActiveModalViewDoesNotPanic(t *testing.T) {
-	for _, mod := range []modal{modalTrust, modalLogin, modalOnboarding, modalResume, modalConnect, modalSelector, modalSetup, modalNone} {
+	for _, mod := range []modal{modalTrust, modalLogin, modalOnboarding, modalResume, modalMemoryReview, modalConnect, modalSelector, modalSetup, modalNone} {
 		m := NewModelForTesting()
 		m.ready = true
 		m.width, m.height = 80, 24
@@ -69,6 +70,8 @@ func TestActiveModalViewDoesNotPanic(t *testing.T) {
 			m.showOnboarding = true
 		case modalResume:
 			m.showResume = true
+		case modalMemoryReview:
+			m.showMemoryReview = true
 		case modalConnect:
 			m.showConnect = true
 		case modalSelector:

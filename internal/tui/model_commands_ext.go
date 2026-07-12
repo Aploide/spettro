@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"spettro/internal/hooks"
 	"spettro/internal/jobs"
 	"spettro/internal/mcp"
+	"spettro/internal/memory"
 	"spettro/internal/session"
 	"spettro/internal/skills"
 )
@@ -28,9 +30,24 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 			m.pushSystemMsg("no tasks in this session")
 			return m, nil
 		}
-		var rows []string
+		// Render in dependency order with blocked derivation so the graph
+		// state is readable straight from /tasks.
+		byID := make(map[string]session.Todo, len(m.todos))
 		for _, t := range m.todos {
-			rows = append(rows, fmt.Sprintf("- [%s] %s (%s)", t.Status, t.Content, t.ID))
+			byID[t.ID] = t
+		}
+		blocked := session.BlockedIDs(m.todos)
+		var rows []string
+		for _, id := range session.TopoOrder(m.todos) {
+			t := byID[id]
+			row := fmt.Sprintf("- [%s] %s (%s)", t.Status, t.Content, t.ID)
+			if len(t.Dependencies) > 0 {
+				row += " deps: " + strings.Join(t.Dependencies, ", ")
+			}
+			if _, ok := blocked[t.ID]; ok && t.Status != "blocked" {
+				row += " [blocked]"
+			}
+			rows = append(rows, row)
 		}
 		m.pushSystemMsg("tasks:\n" + strings.Join(rows, "\n"))
 		return m, nil
@@ -43,8 +60,8 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 			m.showBanner("usage: /tasks add <content>", "error")
 			return m, nil
 		}
+		// ID is minted by UpsertTodo (collision-free against the stored list).
 		item := session.Todo{
-			ID:      fmt.Sprintf("task-%d", time.Now().UnixMilli()),
 			Content: content,
 			Status:  "pending",
 			Source:  "command",
@@ -82,7 +99,12 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 			m.showBanner("usage: /tasks set <id> <status>", "error")
 			return m, nil
 		}
-		id, st := strings.TrimSpace(fields[2]), strings.TrimSpace(fields[3])
+		id := strings.TrimSpace(fields[2])
+		st, err := session.NormalizeTaskStatus(fields[3])
+		if err != nil {
+			m.showBanner("tasks set failed: "+err.Error(), "error")
+			return m, nil
+		}
 		item, ok, err := session.GetTodo(globalDir, m.sessionID, id)
 		if err != nil {
 			m.showBanner("tasks set failed: "+err.Error(), "error")
@@ -116,8 +138,33 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 		}
 		raw, _ := json.MarshalIndent(item, "", "  ")
 		m.pushSystemMsg(string(raw))
+	case "rm", "delete":
+		if len(fields) < 3 {
+			m.showBanner("usage: /tasks rm <id>", "error")
+			return m, nil
+		}
+		id := strings.TrimSpace(fields[2])
+		found, err := session.DeleteTodo(globalDir, m.sessionID, id)
+		if err != nil {
+			m.showBanner("tasks rm failed: "+err.Error(), "error")
+			return m, nil
+		}
+		if !found {
+			m.showBanner("task not found: "+id, "error")
+			return m, nil
+		}
+		m.syncTodosFromSession()
+		m.showBanner("task deleted", "success")
+	case "clear":
+		n, err := session.ClearCompletedTodos(globalDir, m.sessionID)
+		if err != nil {
+			m.showBanner("tasks clear failed: "+err.Error(), "error")
+			return m, nil
+		}
+		m.syncTodosFromSession()
+		m.showBanner(fmt.Sprintf("removed %d completed/cancelled tasks", n), "success")
 	default:
-		m.showBanner("usage: /tasks [list|add|done|set|show]", "info")
+		m.showBanner("usage: /tasks [list|add|done|set|show|rm|clear]", "info")
 	}
 	return m, nil
 }
@@ -727,4 +774,105 @@ func (m Model) handleCompactCommand(input string) (tea.Model, tea.Cmd) {
 	}
 	focus := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
 	return m.runCompact(focus)
+}
+
+// handleMemoryCommand implements /memory show|edit|clear over the persistent
+// cross-session memory files (user: ~/.spettro/memory.md, project:
+// <root>/.spettro/memory.md). Changes take effect at the next session start —
+// the running session's context snapshot is frozen for prompt-cache stability.
+func (m Model) handleMemoryCommand(input string) (tea.Model, tea.Cmd) {
+	store := memory.DefaultStore(m.cwd)
+	fields := strings.Fields(input)
+	sub := "show"
+	if len(fields) >= 2 {
+		sub = strings.ToLower(fields[1])
+	}
+	scopeArg := ""
+	if len(fields) >= 3 {
+		scopeArg = strings.ToLower(fields[2])
+	}
+	switch sub {
+	case "show":
+		var rows []string
+		for _, sc := range []memory.Scope{memory.ScopeUser, memory.ScopeProject} {
+			path := store.Path(sc)
+			if path == "" {
+				continue
+			}
+			data, err := os.ReadFile(path)
+			content := strings.TrimSpace(string(data))
+			if err != nil || content == "" {
+				rows = append(rows, fmt.Sprintf("%s memory (%s): empty", sc, path))
+				continue
+			}
+			rows = append(rows, fmt.Sprintf("%s memory (%s):\n%s", sc, path, content))
+		}
+		if cands, err := memory.DefaultInbox().Load(); err == nil && len(cands) > 0 {
+			rows = append(rows, "", fmt.Sprintf("%d candidate(s) pending in the review inbox — /memory review", len(cands)))
+		}
+		rows = append(rows, "", "changes take effect at the next session start")
+		m.pushSystemMsg(strings.Join(rows, "\n"))
+		m.refreshViewport()
+		return m, nil
+	case "mine":
+		limit := 0
+		if scopeArg != "" {
+			if _, err := fmt.Sscanf(scopeArg, "%d", &limit); err != nil || limit <= 0 {
+				m.showBanner("usage: /memory mine [max-sessions]", "error")
+				return m, nil
+			}
+		}
+		return m.runMemoryMine(limit)
+	case "review":
+		return m.openMemoryReview()
+	case "edit":
+		scope := memory.ScopeUser
+		if scopeArg == "project" {
+			scope = memory.ScopeProject
+		} else if scopeArg != "" && scopeArg != "user" {
+			m.showBanner("usage: /memory edit [user|project]", "error")
+			return m, nil
+		}
+		path := store.Path(scope)
+		if path == "" {
+			m.showBanner("no "+string(scope)+" memory file available", "error")
+			return m, nil
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			m.showBanner("memory edit failed: "+err.Error(), "error")
+			return m, nil
+		}
+		editor := strings.TrimSpace(os.Getenv("EDITOR"))
+		if editor == "" {
+			editor = "vi"
+		}
+		parts := strings.Fields(editor)
+		parts = append(parts, path)
+		c := exec.Command(parts[0], parts[1:]...)
+		return m, tea.ExecProcess(c, func(err error) tea.Msg {
+			return memoryEditDoneMsg{err: err}
+		})
+	case "clear":
+		scopes := []memory.Scope{memory.ScopeUser, memory.ScopeProject}
+		switch scopeArg {
+		case "", "all":
+		case "user":
+			scopes = []memory.Scope{memory.ScopeUser}
+		case "project":
+			scopes = []memory.Scope{memory.ScopeProject}
+		default:
+			m.showBanner("usage: /memory clear [user|project|all]", "error")
+			return m, nil
+		}
+		for _, sc := range scopes {
+			if err := store.Clear(sc); err != nil {
+				m.showBanner("memory clear failed: "+err.Error(), "error")
+				return m, nil
+			}
+		}
+		m.showBanner("memory cleared — applies from the next session", "success")
+		return m, nil
+	}
+	m.showBanner("usage: /memory [show] | /memory edit [user|project] | /memory clear [user|project|all] | /memory mine [n] | /memory review", "error")
+	return m, nil
 }

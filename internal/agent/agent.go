@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"spettro/internal/config"
+	"spettro/internal/memory"
 	"spettro/internal/provider"
 	"spettro/internal/skills"
 )
@@ -177,6 +178,11 @@ type LLMAgent struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+
+	// Steering, when set, lets the host inject user guidance while the run is
+	// executing: the tool loop drains it at every step boundary and appends
+	// each message as a user turn (append-only, so prompt caching still hits).
+	Steering *SteeringQueue
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -185,6 +191,10 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("empty task")
 	}
 	systemPrompt := loadPromptOrFallback(a.CWD, a.Spec.PromptFile, a.Spec.Description)
+	// Persistent cross-session memory: the snapshot is loaded once per process
+	// and frozen (see memory.SessionContext), so appending it here keeps the
+	// system prompt byte-stable across every turn of the session.
+	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
 	logToolCalls := true
@@ -241,6 +251,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		MaxDepth:        maxDelegationDepth,
 		MaxToolCalls:    maxToolCallsPerStep,
 		SkillsCatalog:   catalog,
+		Steering:        a.Steering,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)

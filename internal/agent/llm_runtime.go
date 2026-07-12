@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -175,6 +176,10 @@ type toolLoopConfig struct {
 	MaxDepth        int
 	MaxToolCalls    int            // max tool calls per LLM step (0 → default 32)
 	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
+	// Steering, when set, is drained at every step boundary; each pending
+	// message is appended to the conversation as a user turn so the model sees
+	// it before its next step. Top-level runs only — sub-agents never get one.
+	Steering *SteeringQueue
 }
 
 type toolCall struct {
@@ -225,6 +230,11 @@ type toolRuntime struct {
 	goalComplete         bool
 	goalSummary          string
 	goalVerified         bool
+
+	// httpClient overrides the hardened SSRF-safe client used by web-fetch,
+	// web-search and download. Nil in production (the safe client is built per
+	// call); tests inject a plain client so httptest loopback servers work.
+	httpClient *http.Client
 
 	// Model fallback routing (manifest [runtime.fallback]). modelOverride is
 	// set once the user consents to a switch and pins the rest of the run to
@@ -510,6 +520,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	system := buildSystemString(cfg, useNativeTools)
 
 	for {
+		// Mid-run steering: deliver any guidance the user typed while the run
+		// was executing. Each message is appended as a user turn at this step
+		// boundary — the conversation only ever grows, so the cached prompt
+		// prefix stays valid. (Tool results from the previous step are already
+		// in convMsgs at this point, so a steering turn can never split an
+		// assistant tool-call message from its results.)
+		if cfg.Steering != nil {
+			for _, s := range cfg.Steering.Drain() {
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: steeringMessagePrefix + s})
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "steering delivered: " + truncate(s, 200)})
+				}
+			}
+		}
 		// In-loop compaction: summarize older turns when context pressure
 		// approaches the window. Fires for all runs (the loop is unbounded).
 		// On error, keep convMsgs as-is — never abort a run for compaction.
@@ -1164,10 +1188,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return strings.Join(lines, "\n"), nil
 	case "web-fetch":
-		if err := r.authorizeNetworkAccess(ctx, "web-fetch", "web-fetch"); err != nil {
-			return "", err
-		}
 		return r.runWebFetch(ctx, call.Args)
+	case "download":
+		return r.runDownload(ctx, call.Args)
 	case "web-search":
 		return r.runWebSearch(ctx, call.Args)
 	case "grok-image":
@@ -1188,6 +1211,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskUpdate(call.Args)
 	case "task-list":
 		return r.runTaskList(call.Args)
+	case "task-delete":
+		return r.runTaskDelete(call.Args)
 	case "task-stop":
 		return r.runTaskStop(call.Args)
 	case "goal-complete":
@@ -1212,6 +1237,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runMCPReadResource(ctx, call.Args)
 	case "mcp-auth":
 		return r.runMCPAuth(ctx, call.Args)
+	case "save-memory":
+		return r.runSaveMemory(call.Args)
 	case "todo-write":
 		var args struct {
 			Todos []interface{} `json:"todos"`
@@ -1260,20 +1287,11 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				UpdatedAt:    now,
 			})
 		}
-		raw, err := json.MarshalIndent(out, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("todo-write: marshal: %w", err)
-		}
-		todosPath := filepath.Join(r.sessionDir, "todos.json")
-		tasksPath := filepath.Join(r.sessionDir, "tasks.json")
-		if err := os.MkdirAll(filepath.Dir(todosPath), 0o700); err != nil {
-			return "", fmt.Errorf("todo-write: mkdir: %w", err)
-		}
-		if err := os.WriteFile(todosPath, raw, 0o644); err != nil {
-			return "", fmt.Errorf("todo-write: write: %w", err)
-		}
-		if err := os.WriteFile(tasksPath, raw, 0o644); err != nil {
-			return "", fmt.Errorf("todo-write: write tasks: %w", err)
+		// Route through the session store so the write is atomic and holds the
+		// same lock as the task tools; direct file writes here raced with them.
+		sid := filepath.Base(r.sessionDir)
+		if err := session.SaveTodos(filepath.Dir(filepath.Dir(r.sessionDir)), sid, out); err != nil {
+			return "", fmt.Errorf("todo-write: %w", err)
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":

@@ -72,6 +72,69 @@ func (m Model) updatePlanApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+var steerChoiceOptions = []string{
+	"Steer now  (inject guidance into the current run)",
+	"Queue for after the run",
+	"Discard",
+}
+
+// updateSteerChoice drives the "steer now or queue?" picker shown when the
+// user submits input while an agent run is active (mid-run model steering).
+func (m Model) updateSteerChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	n := len(steerChoiceOptions)
+	switch msg.String() {
+	case "up":
+		if m.steerCursor > 0 {
+			m.steerCursor--
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		if m.steerCursor < n-1 {
+			m.steerCursor++
+		}
+		return m, nil
+	case "enter":
+		choice := m.steerCursor
+		text := m.steerPending
+		m.showSteerChoice = false
+		m.steerCursor = 0
+		m.steerPending = ""
+		switch choice {
+		case 0: // steer the current run
+			if !m.thinking || m.steering == nil {
+				// The run finished while the picker was open — fall back to
+				// the normal prompt path (starts a fresh run).
+				return m.handlePrompt(text)
+			}
+			m.steering.Push(text)
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleUser,
+				Content: text,
+				At:      time.Now(),
+			})
+			m.pushSystemMsg("steering message will be delivered at the agent's next step")
+			m.showBanner("steering queued — delivered at the next step boundary", "info")
+			m.autoSave()
+			m.refreshViewport()
+			return m, nil
+		case 1: // queue for after the run
+			return m.handlePrompt(text)
+		}
+		// discard: restore the text so nothing typed is lost silently
+		m.ta.SetValue(text)
+		m.refreshViewport()
+		return m, nil
+	case "esc":
+		m.showSteerChoice = false
+		m.steerCursor = 0
+		m.ta.SetValue(m.steerPending)
+		m.steerPending = ""
+		m.refreshViewport()
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m Model) handlePlanEdit(editInstruction string) (tea.Model, tea.Cmd) {
 	if m.pendingPlan == "" {
 		m.showBanner("no pending plan to edit", "warn")
@@ -1677,6 +1740,11 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		Images:         append([]string(nil), images...),
 	}
 	m.startAgentActivity(spec.ID, input)
+	// Mid-run steering: reuse the Model's queue so a goal run's iterations all
+	// share it (guidance typed between iterations reaches the next one).
+	if m.steering == nil {
+		m.steering = agent.NewSteeringQueue()
+	}
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh
 	streamCh := make(chan agent.StreamChunk, 256)
@@ -1707,7 +1775,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	if len(convHistory) == 0 {
 		history = m.buildConversationHistory()
 	}
-	// Checkpointing (TODO 01): before any file-modifying tool executes, the
+	// Checkpointing: before any file-modifying tool executes, the
 	// runtime calls back so the working tree is committed to the shadow repo
 	// together with the conversation as it stood when this run started. The
 	// snapshot blob is captured now — the model value is immutable during the
@@ -1742,6 +1810,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		GoalMode:        m.activeGoal != nil,
 		ContextWindow:   resolveGoalContextWindow(m),
 		ShellTimeoutSec: m.cfg.GoalShellTimeoutSec,
+		Steering:        m.steering,
 		ToolCallback: func(t agent.ToolTrace) {
 			// Guard the send against a cancelled run: after stopAgent() the TUI
 			// stops draining toolCh, so an unguarded send from an in-flight
