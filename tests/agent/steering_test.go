@@ -1,6 +1,6 @@
 package agent_test
 
-// Mid-run model steering (TODO 12): a message pushed onto the SteeringQueue
+// Mid-run model steering: a message pushed onto the SteeringQueue
 // while the run executes must be appended to the conversation as a user turn
 // at the next step boundary — without restarting the run and without touching
 // any earlier message (prompt-cache prefix stability).
