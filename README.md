@@ -114,6 +114,7 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 - [Commands and keybindings](docs/commands.md)
 - [Custom slash commands](docs/custom-commands.md) — save reusable prompts as your own `/commands`
 - [Configuration and storage](docs/configuration.md)
+- [OS sandboxing](docs/sandbox.md)
 - [Architecture overview](docs/architecture.md)
 - [Remote control plane](docs/remote.md)
 - [Agent Client Protocol (editor integration)](docs/acp.md)
