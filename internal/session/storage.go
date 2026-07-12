@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,16 +41,11 @@ func Save(globalDir string, state State) error {
 	if err := writeJSON(filepath.Join(dir, messagesFilename), state.Messages); err != nil {
 		return err
 	}
-	tasks := state.Tasks
-	if len(tasks) == 0 {
-		tasks = state.Todos
-	}
-	if err := writeJSON(filepath.Join(dir, tasksFilename), tasks); err != nil {
-		return err
-	}
-	if err := writeJSON(filepath.Join(dir, todosFilename), tasks); err != nil {
-		return err
-	}
+	// The task files are owned exclusively by UpsertTodo/SaveTodos, which
+	// write them as tasks change mid-run. Save must never touch them: callers
+	// pass an in-memory snapshot (TUI m.todos, ACP transcript state) that can
+	// be stale or empty while tools are writing concurrently, and rewriting
+	// the files from that snapshot silently discards newer tasks.
 	// The agents event log is append-only and owned by AppendEvent. Only rewrite
 	// it when the caller actually supplies events; otherwise a routine Save
 	// (which carries no events) would truncate the log written during the run.
@@ -146,6 +142,13 @@ func LoadTodos(globalDir, sessionID string) ([]Todo, error) {
 }
 
 func SaveTodos(globalDir, sessionID string, todos []Todo) error {
+	todoMu.Lock()
+	defer todoMu.Unlock()
+	return saveTodosLocked(globalDir, sessionID, todos)
+}
+
+// saveTodosLocked writes the task files; the caller must hold todoMu.
+func saveTodosLocked(globalDir, sessionID string, todos []Todo) error {
 	if sessionID == "" {
 		return fmt.Errorf("session id is required")
 	}
@@ -159,14 +162,15 @@ func SaveTodos(globalDir, sessionID string, todos []Todo) error {
 	return writeJSON(filepath.Join(dir, todosFilename), todos)
 }
 
+// todoMu serializes read-modify-write cycles on the task store so parallel
+// task tool calls in one agent step do not overwrite each other's tasks.
+var todoMu sync.Mutex
+
 func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
 	if sessionID == "" {
 		return Todo{}, fmt.Errorf("session id is required")
 	}
 	t.ID = strings.TrimSpace(t.ID)
-	if t.ID == "" {
-		return Todo{}, fmt.Errorf("todo id is required")
-	}
 	t.Content = strings.TrimSpace(t.Content)
 	if t.Content == "" {
 		return Todo{}, fmt.Errorf("todo content is required")
@@ -181,9 +185,21 @@ func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
 	t.Dependencies = compactDependencies(t.Dependencies)
 	now := time.Now()
 	t.UpdatedAt = now
+	// Load, validate, and save under one lock: parallel tool calls otherwise
+	// each read the same base list and the last writer silently drops the
+	// others' tasks.
+	todoMu.Lock()
+	defer todoMu.Unlock()
 	todos, err := LoadTodos(globalDir, sessionID)
 	if err != nil {
 		return Todo{}, err
+	}
+	// An empty ID means "new task": mint one here, against the stored list and
+	// under the lock. Callers used to derive IDs from the wall clock, and two
+	// creates in the same millisecond collided — the second silently replaced
+	// the first instead of appending.
+	if t.ID == "" {
+		t.ID = nextTaskID(todos)
 	}
 	replaced := false
 	for i := range todos {
@@ -202,10 +218,111 @@ func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
 		}
 		todos = append(todos, t)
 	}
-	if err := SaveTodos(globalDir, sessionID, todos); err != nil {
+	// Graph invariants are enforced here, on the merged list, so every writer
+	// (task tools, /tasks command) sees the same rules atomically with the
+	// state it validated against.
+	if err := ValidateTaskGraph(todos); err != nil {
+		return Todo{}, err
+	}
+	if t.Status == TaskStatusInProgress || t.Status == TaskStatusCompleted {
+		if gating := IncompleteDeps(t, todos); len(gating) > 0 {
+			return Todo{}, fmt.Errorf("task %q cannot be %s: unmet dependencies: %s", t.ID, t.Status, strings.Join(gating, ", "))
+		}
+	}
+	if err := saveTodosLocked(globalDir, sessionID, todos); err != nil {
 		return Todo{}, err
 	}
 	return t, nil
+}
+
+// DeleteTodo removes a task by ID and strips it from every other task's
+// dependency list (a deleted task no longer gates anything). It reports
+// whether the task existed.
+func DeleteTodo(globalDir, sessionID, id string) (bool, error) {
+	if sessionID == "" {
+		return false, fmt.Errorf("session id is required")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, fmt.Errorf("todo id is required")
+	}
+	todoMu.Lock()
+	defer todoMu.Unlock()
+	todos, err := LoadTodos(globalDir, sessionID)
+	if err != nil {
+		return false, err
+	}
+	out := make([]Todo, 0, len(todos))
+	found := false
+	for _, t := range todos {
+		if t.ID == id {
+			found = true
+			continue
+		}
+		deps := t.Dependencies[:0:0]
+		for _, dep := range t.Dependencies {
+			if dep != id {
+				deps = append(deps, dep)
+			}
+		}
+		t.Dependencies = deps
+		out = append(out, t)
+	}
+	if !found {
+		return false, nil
+	}
+	return true, saveTodosLocked(globalDir, sessionID, out)
+}
+
+// ClearCompletedTodos removes every completed and cancelled task, keeping the
+// active part of the graph. Dependencies on removed tasks are stripped (they
+// were already satisfied). Returns the number of tasks removed.
+func ClearCompletedTodos(globalDir, sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("session id is required")
+	}
+	todoMu.Lock()
+	defer todoMu.Unlock()
+	todos, err := LoadTodos(globalDir, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	removed := map[string]struct{}{}
+	kept := make([]Todo, 0, len(todos))
+	for _, t := range todos {
+		if taskDone(t.Status) {
+			removed[t.ID] = struct{}{}
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if len(removed) == 0 {
+		return 0, nil
+	}
+	for i := range kept {
+		deps := kept[i].Dependencies[:0:0]
+		for _, dep := range kept[i].Dependencies {
+			if _, gone := removed[dep]; !gone {
+				deps = append(deps, dep)
+			}
+		}
+		kept[i].Dependencies = deps
+	}
+	return len(removed), saveTodosLocked(globalDir, sessionID, kept)
+}
+
+// nextTaskID returns the smallest unused "task-N" identifier.
+func nextTaskID(todos []Todo) string {
+	used := make(map[string]struct{}, len(todos))
+	for _, t := range todos {
+		used[t.ID] = struct{}{}
+	}
+	for n := 1; ; n++ {
+		id := fmt.Sprintf("task-%d", n)
+		if _, ok := used[id]; !ok {
+			return id
+		}
+	}
 }
 
 func GetTodo(globalDir, sessionID, id string) (Todo, bool, error) {
@@ -285,12 +402,20 @@ func rewriteEvents(path string, events []AgentEvent) error {
 	return nil
 }
 
+// writeJSON writes atomically (temp file + rename): session files are read
+// concurrently (task tools, TUI sync, ACP) while turns write them, and a
+// plain WriteFile lets readers observe a torn, half-written file ("unexpected
+// end of JSON input").
 func writeJSON(path string, value any) error {
 	raw, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func readJSON(path string, target any) error {

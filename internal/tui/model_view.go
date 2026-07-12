@@ -13,6 +13,7 @@ import (
 	"spettro/internal/compact"
 	"spettro/internal/diff"
 	"spettro/internal/jobs"
+	"spettro/internal/session"
 	"spettro/internal/version"
 )
 
@@ -608,9 +609,16 @@ func (m Model) renderParallelAgents() string {
 			lines = append(lines, "")
 		}
 		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  todos"))
+		blockedIDs := session.BlockedIDs(m.todos)
 		for _, td := range m.todos {
+			status := td.Status
+			// A pending task gated by incomplete dependencies renders as
+			// blocked so the graph state is visible at a glance.
+			if _, gated := blockedIDs[td.ID]; gated && status == "pending" {
+				status = "blocked"
+			}
 			var line string
-			switch td.Status {
+			switch status {
 			case "completed", "done":
 				label := td.Content
 				if len(label) > 56 {

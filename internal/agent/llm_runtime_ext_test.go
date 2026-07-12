@@ -176,3 +176,102 @@ func TestAuthorizeNetworkAccessAllowsWithoutApprovalInYolo(t *testing.T) {
 		t.Fatalf("expected no error in yolo mode, got %v", err)
 	}
 }
+
+func taskTestRuntime(t *testing.T) *toolRuntime {
+	t.Helper()
+	globalDir := t.TempDir()
+	return &toolRuntime{sessionDir: filepath.Join(globalDir, "sessions", "sess-1")}
+}
+
+func mustTaskCreate(t *testing.T, rt *toolRuntime, args map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(args)
+	if _, err := rt.runTaskCreate(raw); err != nil {
+		t.Fatalf("task-create %v: %v", args, err)
+	}
+}
+
+func TestTaskGraphDependencyEnforcement(t *testing.T) {
+	rt := taskTestRuntime(t)
+	mustTaskCreate(t, rt, map[string]any{"id": "a", "content": "first"})
+	mustTaskCreate(t, rt, map[string]any{"id": "b", "content": "second", "dependencies": []string{"a"}})
+
+	// Unknown dependency rejected.
+	raw, _ := json.Marshal(map[string]any{"id": "x", "content": "broken", "dependencies": []string{"ghost"}})
+	if _, err := rt.runTaskCreate(raw); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("expected unknown-dependency error, got %v", err)
+	}
+	// Cycle rejected: a cannot depend on b.
+	raw, _ = json.Marshal(map[string]any{"id": "a", "dependencies": []string{"b"}})
+	if _, err := rt.runTaskUpdate(raw); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected cycle error, got %v", err)
+	}
+	// Invalid status rejected.
+	raw, _ = json.Marshal(map[string]any{"id": "b", "status": "bogus"})
+	if _, err := rt.runTaskUpdate(raw); err == nil || !strings.Contains(err.Error(), "invalid task status") {
+		t.Fatalf("expected status error, got %v", err)
+	}
+	// Completing b while a is pending is refused.
+	raw, _ = json.Marshal(map[string]any{"id": "b", "status": "completed"})
+	if _, err := rt.runTaskUpdate(raw); err == nil || !strings.Contains(err.Error(), "unmet dependencies") {
+		t.Fatalf("expected unmet-dependencies error, got %v", err)
+	}
+	// Complete a, then b becomes ready and completable.
+	raw, _ = json.Marshal(map[string]any{"id": "a", "status": "done"})
+	if _, err := rt.runTaskUpdate(raw); err != nil {
+		t.Fatalf("complete a: %v", err)
+	}
+	raw, _ = json.Marshal(map[string]any{"status": "ready"})
+	out, err := rt.runTaskList(raw)
+	if err != nil {
+		t.Fatalf("task-list ready: %v", err)
+	}
+	var ready []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &ready); err != nil {
+		t.Fatalf("decode ready list: %v (%s)", err, out)
+	}
+	if len(ready) != 1 || ready[0].ID != "b" {
+		t.Fatalf("expected only b ready, got %s", out)
+	}
+	raw, _ = json.Marshal(map[string]any{"id": "b", "status": "completed"})
+	if _, err := rt.runTaskUpdate(raw); err != nil {
+		t.Fatalf("complete b after deps met: %v", err)
+	}
+}
+
+func TestTaskListBlockedByAndOrder(t *testing.T) {
+	rt := taskTestRuntime(t)
+	mustTaskCreate(t, rt, map[string]any{"id": "c", "content": "third", "dependencies": []string{}})
+	mustTaskCreate(t, rt, map[string]any{"id": "a", "content": "first"})
+	raw, _ := json.Marshal(map[string]any{"id": "c", "dependencies": []string{"a"}})
+	if _, err := rt.runTaskUpdate(raw); err != nil {
+		t.Fatalf("add dep: %v", err)
+	}
+	out, err := rt.runTaskList([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("task-list: %v", err)
+	}
+	var rows []struct {
+		ID        string   `json:"id"`
+		BlockedBy []string `json:"blocked_by"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("decode list: %v (%s)", err, out)
+	}
+	if len(rows) != 2 || rows[0].ID != "a" || rows[1].ID != "c" {
+		t.Fatalf("expected dependency order a,c; got %s", out)
+	}
+	if len(rows[1].BlockedBy) != 1 || rows[1].BlockedBy[0] != "a" {
+		t.Fatalf("expected c blocked_by [a], got %s", out)
+	}
+	// blocked pseudo-filter returns only c.
+	out, err = rt.runTaskList([]byte(`{"status":"blocked"}`))
+	if err != nil {
+		t.Fatalf("task-list blocked: %v", err)
+	}
+	if !strings.Contains(out, `"id":"c"`) || strings.Contains(out, `"id":"a"`) {
+		t.Fatalf("unexpected blocked filter result: %s", out)
+	}
+}

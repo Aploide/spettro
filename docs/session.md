@@ -31,9 +31,33 @@ project-specific hash combined with a timestamp:
 └── <session-id>/
     ├── metadata.json    — project hash, start time, goal state
     ├── messages.json    — chat messages (user, assistant, system)
-    ├── todos.json       — session tasks/todos
+    ├── tasks.json       — session task graph (todos.json kept as legacy alias)
     └── events.jsonl     — tool traces, approval decisions, agent spawns
 ```
+
+### Task graph
+
+Session tasks form a persistent dependency graph, not just a flat list. The
+agent manages it with the `task-create`, `task-update`, `task-get`,
+`task-list` and `task-delete` tools (the flat `todo-write` tool remains as an
+alias writing to the same store):
+
+- Each task has an `id`, `content`, `status` (`pending`, `in_progress`,
+  `completed`, `blocked`, `cancelled`) and optional `dependencies` (IDs of
+  tasks that must be completed first).
+- Dependencies are validated on every change: unknown IDs, self-references and
+  cycles are rejected, and a task cannot be moved to `in_progress` or
+  `completed` while any dependency is incomplete.
+- `task-list` returns tasks in dependency order with a derived `blocked_by`
+  field, and supports the pseudo-filters `ready` (pending, all dependencies
+  met) and `blocked`.
+- The TUI side panel and `/tasks list` render the graph live during runs;
+  pending tasks gated by incomplete dependencies show as blocked.
+- `task-delete` removes a task by id (or prunes all completed/cancelled
+  tasks with `clear_completed`); references to deleted tasks are stripped
+  from other tasks' dependencies so the graph stays valid.
+- The graph is persisted per session, so a `/resume` restores the plan
+  exactly where it was left.
 
 The session directory is created inside the project-local `.spettro/` directory
 when one exists, falling back to the global `~/.spettro/sessions/`.

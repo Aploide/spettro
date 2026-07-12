@@ -65,6 +65,11 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   every tool call is reported with kind, status, file locations, and output,
   so the editor can render progress and follow the agent across files. The
   final answer is sent when the turn completes.
+- **Plan** — whenever the agent updates its session task graph (`task-create`,
+  `task-update`, `task-delete`, or the legacy `todo-write`), the full task list is mirrored
+  to the client as an ACP `plan` update in dependency order, so editors with
+  plan support render the agent's live todo list; tasks gated by incomplete
+  dependencies are suffixed with "(blocked)".
 - **Permissions** — shell command approvals and agent questions are routed
   through `session/request_permission`, so the editor shows its native
   approval prompt. With `/permission yolo` set in Spettro's config, shell

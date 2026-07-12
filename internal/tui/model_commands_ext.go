@@ -30,9 +30,24 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 			m.pushSystemMsg("no tasks in this session")
 			return m, nil
 		}
-		var rows []string
+		// Render in dependency order with blocked derivation so the graph
+		// state is readable straight from /tasks.
+		byID := make(map[string]session.Todo, len(m.todos))
 		for _, t := range m.todos {
-			rows = append(rows, fmt.Sprintf("- [%s] %s (%s)", t.Status, t.Content, t.ID))
+			byID[t.ID] = t
+		}
+		blocked := session.BlockedIDs(m.todos)
+		var rows []string
+		for _, id := range session.TopoOrder(m.todos) {
+			t := byID[id]
+			row := fmt.Sprintf("- [%s] %s (%s)", t.Status, t.Content, t.ID)
+			if len(t.Dependencies) > 0 {
+				row += " deps: " + strings.Join(t.Dependencies, ", ")
+			}
+			if _, ok := blocked[t.ID]; ok && t.Status != "blocked" {
+				row += " [blocked]"
+			}
+			rows = append(rows, row)
 		}
 		m.pushSystemMsg("tasks:\n" + strings.Join(rows, "\n"))
 		return m, nil
@@ -45,8 +60,8 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 			m.showBanner("usage: /tasks add <content>", "error")
 			return m, nil
 		}
+		// ID is minted by UpsertTodo (collision-free against the stored list).
 		item := session.Todo{
-			ID:      fmt.Sprintf("task-%d", time.Now().UnixMilli()),
 			Content: content,
 			Status:  "pending",
 			Source:  "command",
@@ -84,7 +99,12 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 			m.showBanner("usage: /tasks set <id> <status>", "error")
 			return m, nil
 		}
-		id, st := strings.TrimSpace(fields[2]), strings.TrimSpace(fields[3])
+		id := strings.TrimSpace(fields[2])
+		st, err := session.NormalizeTaskStatus(fields[3])
+		if err != nil {
+			m.showBanner("tasks set failed: "+err.Error(), "error")
+			return m, nil
+		}
 		item, ok, err := session.GetTodo(globalDir, m.sessionID, id)
 		if err != nil {
 			m.showBanner("tasks set failed: "+err.Error(), "error")
@@ -118,8 +138,33 @@ func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
 		}
 		raw, _ := json.MarshalIndent(item, "", "  ")
 		m.pushSystemMsg(string(raw))
+	case "rm", "delete":
+		if len(fields) < 3 {
+			m.showBanner("usage: /tasks rm <id>", "error")
+			return m, nil
+		}
+		id := strings.TrimSpace(fields[2])
+		found, err := session.DeleteTodo(globalDir, m.sessionID, id)
+		if err != nil {
+			m.showBanner("tasks rm failed: "+err.Error(), "error")
+			return m, nil
+		}
+		if !found {
+			m.showBanner("task not found: "+id, "error")
+			return m, nil
+		}
+		m.syncTodosFromSession()
+		m.showBanner("task deleted", "success")
+	case "clear":
+		n, err := session.ClearCompletedTodos(globalDir, m.sessionID)
+		if err != nil {
+			m.showBanner("tasks clear failed: "+err.Error(), "error")
+			return m, nil
+		}
+		m.syncTodosFromSession()
+		m.showBanner(fmt.Sprintf("removed %d completed/cancelled tasks", n), "success")
 	default:
-		m.showBanner("usage: /tasks [list|add|done|set|show]", "info")
+		m.showBanner("usage: /tasks [list|add|done|set|show|rm|clear]", "info")
 	}
 	return m, nil
 }

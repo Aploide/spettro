@@ -1211,6 +1211,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskUpdate(call.Args)
 	case "task-list":
 		return r.runTaskList(call.Args)
+	case "task-delete":
+		return r.runTaskDelete(call.Args)
 	case "task-stop":
 		return r.runTaskStop(call.Args)
 	case "goal-complete":
@@ -1285,20 +1287,11 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				UpdatedAt:    now,
 			})
 		}
-		raw, err := json.MarshalIndent(out, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("todo-write: marshal: %w", err)
-		}
-		todosPath := filepath.Join(r.sessionDir, "todos.json")
-		tasksPath := filepath.Join(r.sessionDir, "tasks.json")
-		if err := os.MkdirAll(filepath.Dir(todosPath), 0o700); err != nil {
-			return "", fmt.Errorf("todo-write: mkdir: %w", err)
-		}
-		if err := os.WriteFile(todosPath, raw, 0o644); err != nil {
-			return "", fmt.Errorf("todo-write: write: %w", err)
-		}
-		if err := os.WriteFile(tasksPath, raw, 0o644); err != nil {
-			return "", fmt.Errorf("todo-write: write tasks: %w", err)
+		// Route through the session store so the write is atomic and holds the
+		// same lock as the task tools; direct file writes here raced with them.
+		sid := filepath.Base(r.sessionDir)
+		if err := session.SaveTodos(filepath.Dir(filepath.Dir(r.sessionDir)), sid, out); err != nil {
+			return "", fmt.Errorf("todo-write: %w", err)
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":

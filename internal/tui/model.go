@@ -1001,8 +1001,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vp.GotoBottom()
 				break
 			}
-			if t.Name == "todo-write" && t.Status != "running" {
-				m.syncTodosFromSession()
+			switch t.Name {
+			case "todo-write", "task-create", "task-update", "task-delete":
+				if t.Status != "running" {
+					m.syncTodosFromSession()
+				}
 			}
 			m.trackSessionEditFromTrace(t)
 			if t.Status != "running" {

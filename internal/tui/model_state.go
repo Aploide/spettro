@@ -1134,10 +1134,12 @@ func (m *Model) autoSave() {
 			Active:          true,
 		}
 	}
+	// Tasks are deliberately not part of the snapshot: the task files are
+	// owned by session.UpsertTodo/SaveTodos, and m.todos is a render cache
+	// that can lag behind tools writing mid-run.
 	_ = session.Save(m.store.GlobalDir, session.State{
 		Metadata: metadata,
 		Messages: msgs,
-		Todos:    m.todos,
 	})
 }
 

@@ -13,6 +13,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/agent"
+	"spettro/internal/session"
 )
 
 // turnState carries the per-prompt streaming/tool bookkeeping shared by the
@@ -117,6 +118,62 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 		acpsdk.WithUpdateContent(toolOutputContent(tr.Output)),
 		acpsdk.WithUpdateRawOutput(map[string]any{"output": tr.Output}),
 	))
+	if status == acpsdk.ToolCallStatusCompleted {
+		t.publishPlanIfTaskTool(tr.Name)
+	}
+}
+
+// publishPlanIfTaskTool mirrors the persistent session task graph to the ACP
+// client as a plan update whenever a task-mutating tool succeeds, so editors
+// render the agent's live task list.
+func (t *turnState) publishPlanIfTaskTool(toolName string) {
+	switch toolName {
+	case "todo-write", "task-create", "task-update", "task-delete":
+	default:
+		return
+	}
+	todos, err := session.LoadTodos(t.bridge.opts.GlobalDir, string(t.sessionID))
+	if err != nil {
+		return
+	}
+	// An empty list is still published: deleting the last task must clear the
+	// editor's plan view rather than leave it stale.
+	t.sessionUpdate(acpsdk.UpdatePlan(planEntriesFromTodos(todos)...))
+}
+
+// planEntriesFromTodos maps the session task graph onto ACP plan entries in
+// dependency order, folding the derived blocked state into the entry text
+// (ACP plans have no blocked status).
+func planEntriesFromTodos(todos []session.Todo) []acpsdk.PlanEntry {
+	byID := make(map[string]session.Todo, len(todos))
+	for _, td := range todos {
+		byID[td.ID] = td
+	}
+	blocked := session.BlockedIDs(todos)
+	entries := make([]acpsdk.PlanEntry, 0, len(todos))
+	for _, id := range session.TopoOrder(todos) {
+		td := byID[id]
+		st := acpsdk.PlanEntryStatusPending
+		switch td.Status {
+		case session.TaskStatusInProgress:
+			st = acpsdk.PlanEntryStatusInProgress
+		case session.TaskStatusCompleted, session.TaskStatusCancelled:
+			st = acpsdk.PlanEntryStatusCompleted
+		}
+		pr := acpsdk.PlanEntryPriorityMedium
+		switch strings.ToLower(td.Priority) {
+		case "high", "urgent":
+			pr = acpsdk.PlanEntryPriorityHigh
+		case "low":
+			pr = acpsdk.PlanEntryPriorityLow
+		}
+		content := td.Content
+		if _, gated := blocked[td.ID]; gated && st == acpsdk.PlanEntryStatusPending {
+			content += " (blocked)"
+		}
+		entries = append(entries, acpsdk.PlanEntry{Content: content, Priority: pr, Status: st})
+	}
+	return entries
 }
 
 func (t *turnState) nextToolCallID(prefix string) acpsdk.ToolCallId {

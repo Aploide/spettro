@@ -236,6 +236,14 @@ func formatToolLabel(name, argsJSON string) string {
 		return "Updated task"
 	case "task-list":
 		return "Listed tasks"
+	case "task-delete":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			return fmt.Sprintf("Deleted task %s", truncateLabel(args.ID, 40))
+		}
+		return "Deleted tasks"
 	case "ask-user":
 		var args struct {
 			Question string `json:"question"`
@@ -440,6 +448,8 @@ func formatRunningLabel(name, argsJSON string) string {
 		return "Updating task…"
 	case "task-list":
 		return "Listing tasks…"
+	case "task-delete":
+		return "Deleting task…"
 	case "ask-user":
 		return "Asking user…"
 	case "enter-plan-mode":
@@ -509,6 +519,8 @@ func toolActionVerb(name string) string {
 		return "Updated"
 	case "task-list":
 		return "Listed"
+	case "task-delete":
+		return "Deleted"
 	case "ask-user":
 		return "Asked"
 	case "enter-plan-mode":
@@ -575,7 +587,7 @@ func toolNounCount(name string, count int) string {
 			return "1 todo batch"
 		}
 		return fmt.Sprintf("%d todo batches", count)
-	case "task-create", "task-get", "task-update", "task-list":
+	case "task-create", "task-get", "task-update", "task-list", "task-delete":
 		if count == 1 {
 			return "1 task"
 		}
@@ -965,6 +977,11 @@ func formatRunningToolGroupLabel(name string, group []ToolItem) string {
 			return "Listing tasks…"
 		}
 		return fmt.Sprintf("Listing tasks %d times…", count)
+	case "task-delete":
+		if count == 1 {
+			return "Deleting 1 task…"
+		}
+		return fmt.Sprintf("Deleting %d tasks…", count)
 	case "ask-user":
 		if count == 1 {
 			return "Asking 1 question…"
@@ -1166,6 +1183,8 @@ func runningVerb(name string) string {
 		return "Updating"
 	case "task-list":
 		return "Listing"
+	case "task-delete":
+		return "Deleting"
 	case "ask-user":
 		return "Asking"
 	case "enter-plan-mode":

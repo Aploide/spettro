@@ -10,6 +10,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/provider"
+	"spettro/internal/session"
 )
 
 func TestPromptFromBlocks_TextAndResourceLink(t *testing.T) {
@@ -116,5 +117,27 @@ func TestSessionHistoryIsStructured(t *testing.T) {
 	}
 	if s.history[0].Content != msgs[0].Content || s.history[1].Content != msgs[1].Content {
 		t.Fatalf("carried history must be stored verbatim")
+	}
+}
+
+func TestPlanEntriesFromTodos(t *testing.T) {
+	todos := []session.Todo{
+		{ID: "c", Content: "ship", Status: "pending", Dependencies: []string{"b"}},
+		{ID: "a", Content: "design", Status: "completed", Priority: "high"},
+		{ID: "b", Content: "build", Status: "in_progress", Priority: "low", Dependencies: []string{"a"}},
+	}
+	entries := planEntriesFromTodos(todos)
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	// Dependency order: a, b, c.
+	if entries[0].Content != "design" || entries[0].Status != acpsdk.PlanEntryStatusCompleted || entries[0].Priority != acpsdk.PlanEntryPriorityHigh {
+		t.Fatalf("unexpected first entry: %#v", entries[0])
+	}
+	if entries[1].Content != "build" || entries[1].Status != acpsdk.PlanEntryStatusInProgress || entries[1].Priority != acpsdk.PlanEntryPriorityLow {
+		t.Fatalf("unexpected second entry: %#v", entries[1])
+	}
+	if entries[2].Content != "ship (blocked)" || entries[2].Status != acpsdk.PlanEntryStatusPending || entries[2].Priority != acpsdk.PlanEntryPriorityMedium {
+		t.Fatalf("unexpected third entry: %#v", entries[2])
 	}
 }

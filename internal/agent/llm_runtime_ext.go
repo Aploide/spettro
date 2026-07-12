@@ -99,26 +99,29 @@ func (r *toolRuntime) runTaskCreate(rawArgs []byte) (string, error) {
 	if strings.TrimSpace(r.sessionDir) == "" {
 		return "", fmt.Errorf("task-create requires an active session")
 	}
+	// An empty ID is minted by UpsertTodo under its lock; deriving one here
+	// from the wall clock collided when creates landed in the same millisecond.
 	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		id = fmt.Sprintf("task-%d", time.Now().UnixMilli())
+	status, err := session.NormalizeTaskStatus(args.Status)
+	if err != nil {
+		return "", fmt.Errorf("task-create: %w", err)
 	}
 	item := session.Todo{
 		ID:           id,
 		Content:      strings.TrimSpace(args.Content),
-		Status:       strings.TrimSpace(args.Status),
+		Status:       status,
 		Owner:        strings.TrimSpace(args.Owner),
 		Source:       strings.TrimSpace(args.Source),
 		Priority:     strings.TrimSpace(args.Priority),
 		Dependencies: append([]string(nil), args.Dependencies...),
 	}
-	if item.Status == "" {
-		item.Status = "pending"
-	}
 	sid := filepath.Base(r.sessionDir)
-	out, err := session.UpsertTodo(filepath.Dir(filepath.Dir(r.sessionDir)), sid, item)
+	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
+	// Graph validation (unknown deps, cycles, unmet-dependency status rules)
+	// happens inside UpsertTodo, atomically with the load-merge-save.
+	out, err := session.UpsertTodo(globalDir, sid, item)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("task-create: %w", err)
 	}
 	raw, _ := json.Marshal(out)
 	return string(raw), nil
@@ -183,7 +186,11 @@ func (r *toolRuntime) runTaskUpdate(rawArgs []byte) (string, error) {
 		prev.Content = strings.TrimSpace(args.Content)
 	}
 	if strings.TrimSpace(args.Status) != "" {
-		prev.Status = strings.TrimSpace(args.Status)
+		status, err := session.NormalizeTaskStatus(args.Status)
+		if err != nil {
+			return "", fmt.Errorf("task-update: %w", err)
+		}
+		prev.Status = status
 	}
 	if strings.TrimSpace(args.Owner) != "" {
 		prev.Owner = strings.TrimSpace(args.Owner)
@@ -199,10 +206,44 @@ func (r *toolRuntime) runTaskUpdate(rawArgs []byte) (string, error) {
 	}
 	out, err := session.UpsertTodo(globalDir, sid, prev)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("task-update: %w", err)
 	}
 	raw, _ := json.Marshal(out)
 	return string(raw), nil
+}
+
+func (r *toolRuntime) runTaskDelete(rawArgs []byte) (string, error) {
+	var args struct {
+		ID             string `json:"id"`
+		ClearCompleted bool   `json:"clear_completed"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("task-delete args: %w", err)
+	}
+	if strings.TrimSpace(r.sessionDir) == "" {
+		return "", fmt.Errorf("task-delete requires an active session")
+	}
+	sid := filepath.Base(r.sessionDir)
+	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
+	if args.ClearCompleted {
+		n, err := session.ClearCompletedTodos(globalDir, sid)
+		if err != nil {
+			return "", fmt.Errorf("task-delete: %w", err)
+		}
+		return fmt.Sprintf("removed %d completed/cancelled tasks", n), nil
+	}
+	id := strings.TrimSpace(args.ID)
+	if id == "" {
+		return "", fmt.Errorf("task-delete: id is required (or set clear_completed)")
+	}
+	found, err := session.DeleteTodo(globalDir, sid, id)
+	if err != nil {
+		return "", fmt.Errorf("task-delete: %w", err)
+	}
+	if !found {
+		return "", fmt.Errorf("task-delete: task %q not found", id)
+	}
+	return fmt.Sprintf("deleted task %s", id), nil
 }
 
 func (r *toolRuntime) runTaskList(rawArgs []byte) (string, error) {
@@ -220,8 +261,22 @@ func (r *toolRuntime) runTaskList(rawArgs []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	filter := strings.TrimSpace(args.Status)
-	if filter != "" {
+	all := append([]session.Todo(nil), items...)
+	filter := strings.ToLower(strings.TrimSpace(args.Status))
+	blocked := session.BlockedIDs(items)
+	switch filter {
+	case "":
+	case "ready":
+		items = session.ReadyTasks(items)
+	case "blocked":
+		out := make([]session.Todo, 0, len(items))
+		for _, t := range items {
+			if _, ok := blocked[t.ID]; ok {
+				out = append(out, t)
+			}
+		}
+		items = out
+	default:
 		out := make([]session.Todo, 0, len(items))
 		for _, t := range items {
 			if t.Status == filter {
@@ -230,7 +285,23 @@ func (r *toolRuntime) runTaskList(rawArgs []byte) (string, error) {
 		}
 		items = out
 	}
-	raw, _ := json.Marshal(items)
+	// Return tasks in dependency order, annotated with the incomplete
+	// dependencies currently gating each one, so the agent can pick the next
+	// ready task without re-deriving the graph.
+	type taskRow struct {
+		session.Todo
+		BlockedBy []string `json:"blocked_by,omitempty"`
+	}
+	pos := map[string]int{}
+	for i, id := range session.TopoOrder(items) {
+		pos[id] = i
+	}
+	sort.SliceStable(items, func(i, j int) bool { return pos[items[i].ID] < pos[items[j].ID] })
+	rows := make([]taskRow, 0, len(items))
+	for _, t := range items {
+		rows = append(rows, taskRow{Todo: t, BlockedBy: session.IncompleteDeps(t, all)})
+	}
+	raw, _ := json.Marshal(rows)
 	return string(raw), nil
 }
 
