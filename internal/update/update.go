@@ -14,7 +14,7 @@ import (
 )
 
 // Repo is the GitHub "owner/name" this CLI publishes releases to.
-const Repo = "cesp99/spettro"
+const Repo = "aploide/spettro"
 
 const apiLatestURL = "https://api.github.com/repos/" + Repo + "/releases/latest"
 

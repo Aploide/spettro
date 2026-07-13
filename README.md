@@ -5,14 +5,14 @@
 [![Providers](https://img.shields.io/badge/LLM-OpenAI%20Compatible%20%7C%20Anthropic-6f42c1)](#provider-setup)
 [![Status](https://img.shields.io/badge/status-experimental-orange)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-green)](LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cesp99/spettro)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/aploide/spettro)
 
 Spettro is a terminal-first multi-agent coding assistant written in Go.
 
 # Quick install
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/cesp99/spettro/main/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/aploide/spettro/main/install.sh | sh
 ```
 
 Installs to `~/.local/bin` by default (no `sudo` needed); set `INSTALL_DIR` to override. Self-updates (`/update` in the TUI, or the built-in update check) write in place to that same directory, so they never need `sudo` either.
@@ -38,7 +38,7 @@ Requirements:
 - Go `1.26.1+`
 
 ```bash
-git clone https://github.com/cesp99/spettro
+git clone https://github.com/aploide/spettro
 cd spettro
 make build
 ./bin/spettro

@@ -68,6 +68,10 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	}
 	models.RefreshBackground(pm.SetCatalog)
 
+	// Don't run with a model whose provider has no credentials (fresh install
+	// or removed key): fall back to the best connected model.
+	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
+
 	manifest, _ := config.LoadAgentManifestForProject(cwd)
 
 	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)

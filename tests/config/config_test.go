@@ -94,11 +94,13 @@ func TestLoadOrCreateNormalizesMissingCoreFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load/create: %v", err)
 	}
-	if cfg.ActiveProvider != config.Default().ActiveProvider {
-		t.Fatalf("expected default provider %q, got %q", config.Default().ActiveProvider, cfg.ActiveProvider)
+	// Active provider/model deliberately stay empty until real credentials
+	// exist; a hardcoded default would surface a model the user cannot run.
+	if cfg.ActiveProvider != "" {
+		t.Fatalf("expected empty provider, got %q", cfg.ActiveProvider)
 	}
-	if cfg.ActiveModel != config.Default().ActiveModel {
-		t.Fatalf("expected default model %q, got %q", config.Default().ActiveModel, cfg.ActiveModel)
+	if cfg.ActiveModel != "" {
+		t.Fatalf("expected empty model, got %q", cfg.ActiveModel)
 	}
 	if cfg.Permission != config.Default().Permission {
 		t.Fatalf("expected default permission %q, got %q", config.Default().Permission, cfg.Permission)
@@ -112,8 +114,11 @@ func TestLoadOrCreateNormalizesMissingCoreFields(t *testing.T) {
 	if err := json.Unmarshal(updatedRaw, &persisted); err != nil {
 		t.Fatalf("decode normalized config: %v", err)
 	}
-	if persisted["active_provider"] == "" || persisted["active_model"] == "" {
-		t.Fatalf("expected normalized provider/model in persisted config: %s", string(updatedRaw))
+	if prov, _ := persisted["active_provider"].(string); prov != "" {
+		t.Fatalf("expected empty active_provider in persisted config: %s", string(updatedRaw))
+	}
+	if mod, _ := persisted["active_model"].(string); mod != "" {
+		t.Fatalf("expected empty active_model in persisted config: %s", string(updatedRaw))
 	}
 	if got, _ := persisted["permission"].(string); got != string(config.Default().Permission) {
 		t.Fatalf("expected normalized permission %q, got %q", config.Default().Permission, got)

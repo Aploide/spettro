@@ -1,4 +1,6 @@
-// Package models fetches and caches the models.dev catalog.
+// Package models fetches and caches the Spettro provider catalog
+// (catalog.spettro.app), a curated build of models.dev plus
+// community-submitted providers.
 package models
 
 import (
@@ -11,55 +13,41 @@ import (
 	"time"
 )
 
-const apiURL = "https://models.dev/api.json"
+const apiURL = "https://catalog.spettro.app/providers.min.json"
 
-// DevModel is a single model entry from models.dev.
-type DevModel struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Family     string `json:"family"`
-	Reasoning  bool   `json:"reasoning"`
-	ToolCall   bool   `json:"tool_call"`
-	Attachment bool   `json:"attachment"`
-	Modalities *struct {
-		Input  []string `json:"input"`
-		Output []string `json:"output"`
-	} `json:"modalities"`
-	Limit *struct {
-		Context int `json:"context"`
-		Output  int `json:"output"`
-	} `json:"limit"`
-	Cost *struct {
-		Input  float64 `json:"input"`
-		Output float64 `json:"output"`
-	} `json:"cost"`
-	Status string `json:"status"` // "alpha" | "beta" | "deprecated"
+// APIKind is the wire protocol used to talk to a provider. Spettro's backend
+// supports exactly two: OpenAI-compatible and Anthropic-compatible.
+const (
+	APIOpenAI    = "openai"
+	APIAnthropic = "anthropic"
+)
+
+// CatalogModel is a single chat model entry. Boolean capability flags and
+// status are omitted from the JSON when false/empty.
+type CatalogModel struct {
+	Name      string `json:"name"`
+	Reasoning bool   `json:"reasoning,omitempty"`
+	ToolCall  bool   `json:"tool_call,omitempty"`
+	Vision    bool   `json:"vision,omitempty"`
+	Context   int    `json:"context,omitempty"`
+	Status    string `json:"status,omitempty"` // "alpha" | "beta"
 }
 
-// SupportsImage reports whether this model accepts image inputs.
-func (m DevModel) SupportsImage() bool {
-	if m.Modalities == nil {
-		return false
-	}
-	for _, in := range m.Modalities.Input {
-		if in == "image" {
-			return true
-		}
-	}
-	return false
+// CatalogProvider is one provider entry from the Spettro catalog.
+type CatalogProvider struct {
+	Name    string                  `json:"name"`
+	API     string                  `json:"api"` // APIOpenAI or APIAnthropic
+	BaseURL string                  `json:"base_url"`
+	Env     string                  `json:"env"`
+	Models  map[string]CatalogModel `json:"models"`
 }
 
-// DevProvider is a provider entry from models.dev.
-type DevProvider struct {
-	ID     string              `json:"id"`
-	Name   string              `json:"name"`
-	API    string              `json:"api"`
-	Env    []string            `json:"env"`
-	Models map[string]DevModel `json:"models"`
+// Catalog is the full document served by catalog.spettro.app.
+type Catalog struct {
+	Version   int                        `json:"version"`
+	Updated   string                     `json:"updated"`
+	Providers map[string]CatalogProvider `json:"providers"`
 }
-
-// Catalog is the full map returned by models.dev.
-type Catalog map[string]DevProvider
 
 // cacheFile returns the path to the local JSON cache.
 func cacheFile() (string, error) {
@@ -67,7 +55,7 @@ func cacheFile() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".spettro", "models.json"), nil
+	return filepath.Join(home, ".spettro", "catalog.json"), nil
 }
 
 // Load returns the catalog from disk cache, or fetches it if unavailable.
@@ -76,7 +64,7 @@ func Load() (Catalog, error) {
 	if err == nil {
 		if data, err := os.ReadFile(path); err == nil {
 			var cat Catalog
-			if json.Unmarshal(data, &cat) == nil && len(cat) > 0 {
+			if json.Unmarshal(data, &cat) == nil && len(cat.Providers) > 0 {
 				return cat, nil
 			}
 		}
@@ -84,23 +72,30 @@ func Load() (Catalog, error) {
 	return Fetch()
 }
 
-// Fetch downloads the catalog from models.dev and updates the disk cache.
+// Fetch downloads the catalog and updates the disk cache.
 func Fetch() (Catalog, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(apiURL)
 	if err != nil {
-		return nil, fmt.Errorf("models.dev fetch: %w", err)
+		return Catalog{}, fmt.Errorf("catalog fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return Catalog{}, fmt.Errorf("catalog fetch: status %d", resp.StatusCode)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("models.dev read: %w", err)
+		return Catalog{}, fmt.Errorf("catalog read: %w", err)
 	}
 
 	var cat Catalog
 	if err := json.Unmarshal(body, &cat); err != nil {
-		return nil, fmt.Errorf("models.dev parse: %w", err)
+		return Catalog{}, fmt.Errorf("catalog parse: %w", err)
+	}
+	if len(cat.Providers) == 0 {
+		return Catalog{}, fmt.Errorf("catalog parse: no providers")
 	}
 
 	if path, err := cacheFile(); err == nil {
@@ -112,7 +107,7 @@ func Fetch() (Catalog, error) {
 }
 
 // RefreshBackground starts a goroutine that refreshes the cache once now and
-// then every hour, exactly like opencode's ModelsDev.refresh() interval.
+// then every hour.
 func RefreshBackground(onRefresh func(Catalog)) {
 	go func() {
 		if cat, err := Fetch(); err == nil && onRefresh != nil {

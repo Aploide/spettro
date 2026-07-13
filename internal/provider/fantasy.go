@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"charm.land/fantasy"
@@ -10,11 +12,12 @@ import (
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	fantasyopenaicompat "charm.land/fantasy/providers/openaicompat"
 
+	"spettro/internal/models"
 	"spettro/internal/version"
 )
 
-func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKey, baseURL)
+func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
 	if err != nil {
 		return Response{}, err
 	}
@@ -54,8 +57,8 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 // forwards text and reasoning deltas to req.OnStream as they arrive while still
 // accumulating the full answer text (reasoning is delivered live but not folded
 // into Response.Content, matching the non-streaming path).
-func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKey, baseURL)
+func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
 	if err != nil {
 		return Response{}, err
 	}
@@ -136,7 +139,10 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 		if req.System != "" {
 			prompt = append(prompt, fantasy.NewSystemMessage(req.System))
 		}
-		for _, m := range req.Messages {
+		// Request-level images (legacy field) belong to the current turn — the
+		// last plain user message — alongside any message-level images.
+		imageIdx := lastUserIndex(req.Messages)
+		for i, m := range req.Messages {
 			switch m.Role {
 			case RoleUser:
 				if len(m.ToolResults) > 0 {
@@ -155,7 +161,11 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 						prompt = append(prompt, fantasy.NewUserMessage(m.Content))
 					}
 				} else {
-					prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+					imgs := m.Images
+					if i == imageIdx {
+						imgs = append(imgs[:len(imgs):len(imgs)], req.Images...)
+					}
+					prompt = append(prompt, fantasy.NewUserMessage(m.Content, fantasyImageParts(imgs)...))
 				}
 			case RoleAssistant:
 				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls))
@@ -194,7 +204,7 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 			}
 		}
 	} else {
-		prompt = fantasy.Prompt{fantasy.NewUserMessage(req.Prompt)}
+		prompt = fantasy.Prompt{fantasy.NewUserMessage(req.Prompt, fantasyImageParts(req.Images)...)}
 	}
 	call := fantasy.Call{
 		Prompt:    prompt,
@@ -243,29 +253,47 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 	return call
 }
 
-func newFantasyProvider(providerName, apiKey, baseURL string) (fantasy.Provider, error) {
-	switch providerName {
-	case "anthropic":
+// fantasyImageParts loads image files into fantasy FileParts. Unreadable
+// paths are skipped (matching the legacy adapters) so a vanished temp file
+// degrades to a text-only turn instead of failing the whole request.
+func fantasyImageParts(paths []string) []fantasy.FilePart {
+	var parts []fantasy.FilePart
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		parts = append(parts, fantasy.FilePart{
+			Filename:  filepath.Base(p),
+			Data:      data,
+			MediaType: mediaTypeFromPath(p),
+		})
+	}
+	return parts
+}
+
+func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.Provider, error) {
+	switch {
+	case providerName == "anthropic" || apiKind == models.APIAnthropic:
 		opts := []fantasyanthropic.Option{
 			fantasyanthropic.WithUserAgent(fantasyUserAgent()),
 		}
 		if apiKey != "" {
 			opts = append(opts, fantasyanthropic.WithAPIKey(apiKey))
 		}
-		if baseURL != "" {
+		// The official provider uses the SDK's default endpoint; only
+		// anthropic-compatible third parties need an explicit base URL.
+		if providerName != "anthropic" && baseURL != "" {
 			opts = append(opts, fantasyanthropic.WithBaseURL(baseURL))
 		}
 		return fantasyanthropic.New(opts...)
-	case "openai":
+	case providerName == "openai":
 		opts := []fantasyopenai.Option{
 			fantasyopenai.WithUserAgent(fantasyUserAgent()),
 			fantasyopenai.WithUseResponsesAPI(),
 		}
 		if apiKey != "" {
 			opts = append(opts, fantasyopenai.WithAPIKey(apiKey))
-		}
-		if baseURL != "" {
-			opts = append(opts, fantasyopenai.WithBaseURL(baseURL))
 		}
 		return fantasyopenai.New(opts...)
 	default:

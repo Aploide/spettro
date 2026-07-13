@@ -32,19 +32,19 @@ func (m Model) Tag() string {
 	return strings.Join(parts, "  ")
 }
 
+// fallbackModels covers first-run/offline before the catalog is available.
+// Only anthropic and openai are listed because they are the only providers
+// whose endpoints resolve without a catalog base_url.
 var fallbackModels = []Model{
 	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-opus-4", DisplayName: "Claude Opus 4", Vision: true, Reasoning: true, ToolCall: true, PromptCaching: true, EnvKey: "ANTHROPIC_API_KEY"},
 	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Vision: true, Reasoning: true, ToolCall: true, PromptCaching: true, EnvKey: "ANTHROPIC_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "gpt-4.1", DisplayName: "GPT-4.1", Vision: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "o3", DisplayName: "o3", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
-	{Provider: "google", ProviderName: "Google", Name: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
-	{Provider: "x-ai", ProviderName: "xAI", Name: "grok-3", DisplayName: "Grok 3", Vision: true, ToolCall: true, EnvKey: "XAI_API_KEY"},
-	{Provider: "groq", ProviderName: "Groq", Name: "llama-3.3-70b-versatile", DisplayName: "Llama 3.3 70B", ToolCall: true, EnvKey: "GROQ_API_KEY"},
 }
 
 func buildModels(cat models.Catalog) []Model {
-	providerIDs := make([]string, 0, len(cat))
-	for id := range cat {
+	providerIDs := make([]string, 0, len(cat.Providers))
+	for id := range cat.Providers {
 		providerIDs = append(providerIDs, id)
 	}
 	sort.Slice(providerIDs, func(i, j int) bool {
@@ -59,63 +59,29 @@ func buildModels(cat models.Catalog) []Model {
 
 	var out []Model
 	for _, pid := range providerIDs {
-		prov := cat[pid]
-		if prov.API == "" {
-			if _, ok := knownBaseURLs[pid]; !ok && pid != "anthropic" && pid != "openai" {
-				continue
-			}
-		}
+		prov := cat.Providers[pid]
 		modelIDs := make([]string, 0, len(prov.Models))
-		for id, mod := range prov.Models {
-			if mod.Status != "deprecated" {
-				modelIDs = append(modelIDs, id)
-			}
+		for id := range prov.Models {
+			modelIDs = append(modelIDs, id)
 		}
 		sort.Strings(modelIDs)
 
-		envKey := ""
-		if len(prov.Env) > 0 {
-			envKey = prov.Env[0]
-		}
-
 		for _, mid := range modelIDs {
 			mod := prov.Models[mid]
-			ctx := 0
-			if mod.Limit != nil {
-				ctx = mod.Limit.Context
-			}
 			out = append(out, Model{
 				Provider:      pid,
 				ProviderName:  prov.Name,
 				Name:          mid,
 				DisplayName:   mod.Name,
-				Vision:        mod.SupportsImage(),
+				Vision:        mod.Vision,
 				Reasoning:     mod.Reasoning,
 				ToolCall:      mod.ToolCall,
-				PromptCaching: pid == "anthropic",
-				Context:       ctx,
+				PromptCaching: prov.API == models.APIAnthropic,
+				Context:       mod.Context,
 				Status:        mod.Status,
-				EnvKey:        envKey,
+				EnvKey:        prov.Env,
 			})
 		}
 	}
 	return out
-}
-
-var knownBaseURLs = map[string]string{
-	"groq":         "https://api.groq.com/openai/v1",
-	"mistral":      "https://api.mistral.ai/v1",
-	"xai":          "https://api.x.ai/v1",
-	"x-ai":         "https://api.x.ai/v1",
-	"together":     "https://api.together.xyz/v1",
-	"togetherai":   "https://api.together.xyz/v1",
-	"fireworks":    "https://api.fireworks.ai/inference/v1",
-	"fireworks-ai": "https://api.fireworks.ai/inference/v1",
-	"openrouter":   "https://openrouter.ai/api/v1",
-	"google":       "https://generativelanguage.googleapis.com/v1beta/openai",
-	"cohere":       "https://api.cohere.com/compatibility/v1",
-	"deepseek":     "https://api.deepseek.com/v1",
-	"perplexity":   "https://api.perplexity.ai",
-	"zai":          "https://api.z.ai/v1",
-	"cerebras":     "https://api.cerebras.ai/v1",
 }

@@ -31,6 +31,7 @@ func spettroInfosToModels(infos []spettro.ModelInfo) []provider.Model {
 			Name:         mi.ID,
 			DisplayName:  mi.ID,
 			ToolCall:     true,
+			Vision:       mi.Vision,
 			Context:      mi.ContextWindow,
 		})
 	}
@@ -70,6 +71,10 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 		}
 	}
 	models.RefreshBackground(pm.SetCatalog)
+
+	// Don't run with a model whose provider has no credentials (fresh install
+	// or removed key): fall back to the best connected model.
+	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
 
 	manifest, _ := config.LoadAgentManifestForProject(cwd)
 	mode := manifest.DefaultAgent

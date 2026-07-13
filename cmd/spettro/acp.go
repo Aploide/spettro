@@ -56,6 +56,10 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	}
 	models.RefreshBackground(pm.SetCatalog)
 
+	// Don't run with a model whose provider has no credentials (fresh install
+	// or removed key): fall back to the best connected model.
+	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
+
 	manifest, err := config.LoadAgentManifestForProject(cwd)
 	if err != nil {
 		fatal("agent manifest error: %v", err)

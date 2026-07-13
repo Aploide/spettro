@@ -50,7 +50,7 @@ Every commit Spettro produces follows **Conventional Commits**:
 Reference symbols/files only when it adds clarity. Avoid restating the
 diff line-by-line.>
 
-[<optional issue/PR refs, e.g. `Fixes #123`, `Refs cesp99/spettro#42`>]
+[<optional issue/PR refs, e.g. `Fixes #123`, `Refs aploide/spettro#42`>]
 
 Co-Authored-By: Spettro <spettro@eyed.to>
 ```
@@ -73,7 +73,7 @@ Co-Authored-By: Spettro <spettro@eyed.to>
 - Use bullets (`- `) only when listing 3+ discrete items; otherwise prose reads better.
 - Mention file paths or symbols when they make the body locatable (`internal/agent/llm_runtime.go`, `EnforceCommitCoAuthor`).
 - Do not paraphrase the diff line by line — the diff is right there. Cover intent and consequences instead.
-- Cross-reference issues / PRs with `Fixes #N`, `Refs #N`, or full repo refs (`Refs cesp99/spettro#42`) when known.
+- Cross-reference issues / PRs with `Fixes #N`, `Refs #N`, or full repo refs (`Refs aploide/spettro#42`) when known.
 
 ## Type taxonomy (use the right one)
 
@@ -144,7 +144,7 @@ trailing whitespace, which collapsed `\n` separators in heredoc-style
 git commit messages. The rewriter now snaps to the position before any
 trailing whitespace so `--trailer` lands cleanly before the next operator.
 
-Refs cesp99/spettro#42
+Refs aploide/spettro#42
 
 Co-Authored-By: Spettro <spettro@eyed.to>
 ```
