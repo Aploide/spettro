@@ -52,8 +52,10 @@ type UserConfig struct {
 
 func Default() UserConfig {
 	return UserConfig{
-		ActiveProvider:          "openai-compatible",
-		ActiveModel:             "gpt-5-mini",
+		// ActiveProvider/ActiveModel intentionally start empty: hardcoding a
+		// model here surfaces one the user has no key for. The active model is
+		// resolved at startup from whichever credentials actually exist
+		// (Spettro sign-in, API key, local endpoint) and set by onboarding.
 		Permission:              PermissionAskFirst,
 		AutoCompactEnabled:      true,
 		AutoCompactThresholdPct: 85,
@@ -70,14 +72,6 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 	changed := false
 	legacyAutoCompactUnset := cfg.AutoCompactThresholdPct == 0 && cfg.AutoCompactMaxFailures == 0
 
-	if cfg.ActiveProvider == "" {
-		cfg.ActiveProvider = def.ActiveProvider
-		changed = true
-	}
-	if cfg.ActiveModel == "" {
-		cfg.ActiveModel = def.ActiveModel
-		changed = true
-	}
 	switch cfg.Permission {
 	case PermissionYOLO, PermissionRestricted, PermissionAskFirst:
 	default:
