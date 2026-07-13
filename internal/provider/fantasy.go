@@ -12,11 +12,12 @@ import (
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	fantasyopenaicompat "charm.land/fantasy/providers/openaicompat"
 
+	"spettro/internal/models"
 	"spettro/internal/version"
 )
 
-func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKey, baseURL)
+func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
 	if err != nil {
 		return Response{}, err
 	}
@@ -56,8 +57,8 @@ func sendWithFantasy(ctx context.Context, providerName, modelName, apiKey, baseU
 // forwards text and reasoning deltas to req.OnStream as they arrive while still
 // accumulating the full answer text (reasoning is delivered live but not folded
 // into Response.Content, matching the non-streaming path).
-func sendWithFantasyStream(ctx context.Context, providerName, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKey, baseURL)
+func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
 	if err != nil {
 		return Response{}, err
 	}
@@ -271,29 +272,28 @@ func fantasyImageParts(paths []string) []fantasy.FilePart {
 	return parts
 }
 
-func newFantasyProvider(providerName, apiKey, baseURL string) (fantasy.Provider, error) {
-	switch providerName {
-	case "anthropic":
+func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.Provider, error) {
+	switch {
+	case providerName == "anthropic" || apiKind == models.APIAnthropic:
 		opts := []fantasyanthropic.Option{
 			fantasyanthropic.WithUserAgent(fantasyUserAgent()),
 		}
 		if apiKey != "" {
 			opts = append(opts, fantasyanthropic.WithAPIKey(apiKey))
 		}
-		if baseURL != "" {
+		// The official provider uses the SDK's default endpoint; only
+		// anthropic-compatible third parties need an explicit base URL.
+		if providerName != "anthropic" && baseURL != "" {
 			opts = append(opts, fantasyanthropic.WithBaseURL(baseURL))
 		}
 		return fantasyanthropic.New(opts...)
-	case "openai":
+	case providerName == "openai":
 		opts := []fantasyopenai.Option{
 			fantasyopenai.WithUserAgent(fantasyUserAgent()),
 			fantasyopenai.WithUseResponsesAPI(),
 		}
 		if apiKey != "" {
 			opts = append(opts, fantasyopenai.WithAPIKey(apiKey))
-		}
-		if baseURL != "" {
-			opts = append(opts, fantasyopenai.WithBaseURL(baseURL))
 		}
 		return fantasyopenai.New(opts...)
 	default:

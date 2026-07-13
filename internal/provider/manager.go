@@ -32,13 +32,15 @@ type Manager struct {
 	spettroModels []Model
 	apiKeys       map[string]string
 	providerAPIs  map[string]string
+	providerKinds map[string]string // provider id -> models.APIOpenAI | models.APIAnthropic
 	usageRec      usageRecorder
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		apiKeys:      map[string]string{},
-		providerAPIs: map[string]string{},
+		apiKeys:       map[string]string{},
+		providerAPIs:  map[string]string{},
+		providerKinds: map[string]string{},
 	}
 }
 
@@ -53,14 +55,17 @@ func (m *Manager) SetAPIKeys(keys map[string]string) {
 
 func (m *Manager) SetCatalog(cat models.Catalog) {
 	built := buildModels(cat)
-	apis := make(map[string]string, len(cat))
-	for id, prov := range cat {
-		if prov.API != "" {
-			apis[id] = prov.API
+	apis := make(map[string]string, len(cat.Providers))
+	kinds := make(map[string]string, len(cat.Providers))
+	for id, prov := range cat.Providers {
+		if prov.BaseURL != "" {
+			apis[id] = prov.BaseURL
 		}
+		kinds[id] = prov.API
 	}
 	m.mu.Lock()
 	m.catalog = built
+	m.providerKinds = kinds
 	for k, v := range m.providerAPIs {
 		if strings.HasPrefix(k, "http://") || strings.HasPrefix(k, "https://") {
 			apis[k] = v
@@ -154,6 +159,49 @@ func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
 		}
 	}
 	return out
+}
+
+// HasCredentials reports whether providerID is usable with the given keys.
+// Local endpoint providers (identified by an http(s) URL) need no key.
+func HasCredentials(apiKeys map[string]string, providerID string) bool {
+	if providerID == "" {
+		return false
+	}
+	if strings.HasPrefix(providerID, "http://") || strings.HasPrefix(providerID, "https://") {
+		return true
+	}
+	return strings.TrimSpace(apiKeys[providerID]) != ""
+}
+
+// PreferredModel picks the model to activate when none is configured or the
+// configured one has no credentials: the first tool-capable connected model in
+// display order — Spettro Subscription models first (the backend lists its
+// default fast model first), then catalog providers with a key, then local
+// endpoints.
+func (m *Manager) PreferredModel(apiKeys map[string]string) (Model, bool) {
+	connected := m.ConnectedModels(apiKeys)
+	for _, mod := range connected {
+		if mod.ToolCall {
+			return mod, true
+		}
+	}
+	if len(connected) > 0 {
+		return connected[0], true
+	}
+	return Model{}, false
+}
+
+// ResolveActive keeps providerID/model when that provider has credentials and
+// otherwise substitutes the preferred connected model. It returns empty
+// strings when nothing at all is usable.
+func (m *Manager) ResolveActive(providerID, model string, apiKeys map[string]string) (string, string) {
+	if HasCredentials(apiKeys, providerID) {
+		return providerID, model
+	}
+	if pref, ok := m.PreferredModel(apiKeys); ok {
+		return pref.Provider, pref.Name
+	}
+	return "", ""
 }
 
 func (m *Manager) AllProviderInfos() []ProviderInfo {
@@ -299,7 +347,11 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	m.mu.RLock()
 	apiKey := m.apiKeys[providerName]
 	baseURL := m.providerAPIs[providerName]
+	apiKind := m.providerKinds[providerName]
 	m.mu.RUnlock()
+	if providerName == "anthropic" {
+		apiKind = models.APIAnthropic
+	}
 
 	hasImages := len(req.Images) > 0
 	for _, msg := range req.Messages {
@@ -331,7 +383,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	// legacy adapters below are only the fallback, and they drop native tool
 	// definitions, so detouring there would break tool use mid-run.
 	if req.OnStream != nil {
-		resp, err := sendWithFantasyStream(ctx, providerName, modelName, apiKey, baseURL, req)
+		resp, err := sendWithFantasyStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
 			return finalizeResponse(resp, providerName, modelName, allParts), nil
 		}
@@ -342,13 +394,13 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 			// because live tokens were unavailable.
 			noStream := req
 			noStream.OnStream = nil
-			if resp, rerr := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, noStream); rerr == nil {
+			if resp, rerr := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, noStream); rerr == nil {
 				return finalizeResponse(resp, providerName, modelName, allParts), nil
 			}
 			return Response{}, err
 		}
 	} else {
-		resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
+		resp, err := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
 			return finalizeResponse(resp, providerName, modelName, allParts), nil
 		}
@@ -357,7 +409,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		}
 	}
 
-	adapter, err := legacyAdapterFor(providerName, apiKey, baseURL)
+	adapter, err := legacyAdapterFor(providerName, apiKind, apiKey, baseURL)
 	if err != nil {
 		return Response{}, err
 	}
@@ -427,9 +479,12 @@ func retryAfterDuration(header http.Header) time.Duration {
 	return defaultRateLimitRetryAfter
 }
 
-func legacyAdapterFor(providerName, apiKey, baseURL string) (Adapter, error) {
-	if providerName == "anthropic" {
-		return AnthropicAdapter{APIKey: apiKey}, nil
+func legacyAdapterFor(providerName, apiKind, apiKey, baseURL string) (Adapter, error) {
+	if apiKind == models.APIAnthropic || providerName == "anthropic" {
+		if providerName == "anthropic" {
+			baseURL = "" // official endpoint, let the SDK use its default
+		}
+		return AnthropicAdapter{APIKey: apiKey, BaseURL: baseURL}, nil
 	}
 	resolvedBaseURL, err := resolveOpenAICompatibleBaseURL(providerName, baseURL)
 	if err != nil {
@@ -442,9 +497,6 @@ func legacyAdapterFor(providerName, apiKey, baseURL string) (Adapter, error) {
 }
 
 func resolveOpenAICompatibleBaseURL(providerName, baseURL string) (string, error) {
-	if known, ok := knownBaseURLs[providerName]; ok {
-		return known, nil
-	}
 	if baseURL != "" {
 		return baseURL, nil
 	}
@@ -472,12 +524,11 @@ func finalizeResponse(resp Response, providerName, modelName string, allParts []
 func (m *Manager) VerifyKey(ctx context.Context, providerID, apiKey string) error {
 	m.mu.RLock()
 	baseURL := m.providerAPIs[providerID]
+	apiKind := m.providerKinds[providerID]
 	m.mu.RUnlock()
 
 	if baseURL == "" {
-		if known, ok := knownBaseURLs[providerID]; ok {
-			baseURL = known
-		} else if strings.HasPrefix(providerID, "http://") || strings.HasPrefix(providerID, "https://") {
+		if strings.HasPrefix(providerID, "http://") || strings.HasPrefix(providerID, "https://") {
 			baseURL = strings.TrimRight(providerID, "/") + "/v1"
 		} else {
 			baseURL = "https://api.openai.com/v1"
@@ -489,22 +540,26 @@ func (m *Manager) VerifyKey(ctx context.Context, providerID, apiKey string) erro
 	headers := map[string]string{}
 	lenient := false // when true, only 401 counts as failure
 
-	switch providerID {
-	case "anthropic":
-		testURL = "https://api.anthropic.com/v1/models"
+	switch {
+	case providerID == "anthropic" || apiKind == models.APIAnthropic:
+		root := "https://api.anthropic.com"
+		if providerID != "anthropic" && baseURL != "" {
+			root = strings.TrimRight(baseURL, "/")
+		}
+		testURL = root + "/v1/models"
 		headers["x-api-key"] = apiKey
 		headers["anthropic-version"] = "2023-06-01"
 
-	case "google":
+	case providerID == "google":
 		// Google's native endpoint uses a query-param key, not a Bearer header.
 		testURL = "https://generativelanguage.googleapis.com/v1beta/models?key=" + url.QueryEscape(apiKey)
 
-	case "openrouter":
+	case providerID == "openrouter":
 		// OpenRouter exposes /credits for validation instead of /models.
 		testURL = base + "/credits"
 		headers["Authorization"] = "Bearer " + apiKey
 
-	case "zai":
+	case providerID == "zai":
 		// ZAI returns non-200 for unauthenticated requests but not a clean 401,
 		// so only treat 401 as a hard failure.
 		testURL = base + "/models"

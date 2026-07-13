@@ -161,11 +161,16 @@ func (a OpenAICompatibleAdapter) sendLegacyCompletion(ctx context.Context, clien
 }
 
 type AnthropicAdapter struct {
-	APIKey string
+	APIKey  string
+	BaseURL string // empty means the official Anthropic endpoint
 }
 
 func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
-	client := anthropic.NewClient(anthropicOption.WithAPIKey(a.APIKey))
+	opts := []anthropicOption.RequestOption{anthropicOption.WithAPIKey(a.APIKey)}
+	if a.BaseURL != "" {
+		opts = append(opts, anthropicOption.WithBaseURL(a.BaseURL))
+	}
+	client := anthropic.NewClient(opts...)
 
 	const defaultMaxTokens = int64(16384)
 	maxTokens := defaultMaxTokens
