@@ -534,6 +534,22 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		}
 	}
 
+	// Never start with a model the user can't run (fresh install, key removed
+	// since last run): keep the configured model only if its provider has
+	// credentials, otherwise switch to the best connected model. Persist the
+	// switch so headless/ACP runs agree with what the TUI shows.
+	if resolvedProv, resolvedModel := pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys); resolvedProv != cfg.ActiveProvider || resolvedModel != cfg.ActiveModel {
+		cfg.ActiveProvider = resolvedProv
+		cfg.ActiveModel = resolvedModel
+		if updated, err := config.Update(func(c *config.UserConfig) error {
+			c.ActiveProvider = resolvedProv
+			c.ActiveModel = resolvedModel
+			return nil
+		}); err == nil {
+			cfg = updated
+		}
+	}
+
 	m := Model{
 		mode:          defaultMode,
 		cfg:           cfg,
@@ -576,7 +592,11 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	if hasSpettro {
 		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
 		spettroKey := cfg.APIKeys[spettro.ProviderID]
-		m.startupCmds = append(m.startupCmds, loadSpettroCmd(spettroKey, false, false))
+		// Spettro models arrive async; if no usable model is active yet (e.g.
+		// signed in but no other provider connected), activate the first
+		// subscription model once the list lands.
+		activateOnLoad := !provider.HasCredentials(cfg.APIKeys, cfg.ActiveProvider)
+		m.startupCmds = append(m.startupCmds, loadSpettroCmd(spettroKey, activateOnLoad, false))
 	}
 	if len(pm.ConnectedModels(cfg.APIKeys)) == 0 && len(cfg.LocalEndpoints) == 0 && !hasSpettro {
 		m.showOnboarding = true
@@ -1336,6 +1356,24 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+	case tea.PasteMsg:
+		// Bracketed paste is not a KeyPressMsg, so it bypasses the modal key
+		// routing below. Forward it to the textarea when the active modal is
+		// in a text-entry step (API key / endpoint / setup input); otherwise
+		// swallow it so pasted text can't leak into list filters. With no
+		// modal active it falls through to the passthrough guard below.
+		if modal := m.activeModal(); modal != modalNone {
+			inTextEntry := (modal == modalConnect && m.connectStep == 1) ||
+				(modal == modalOnboarding && m.onboarding.step == 1) ||
+				modal == modalSetup
+			if !inTextEntry {
+				return m, tea.Batch(cmds...)
+			}
+			var taCmd tea.Cmd
+			m.ta, taCmd = m.ta.Update(msg)
+			cmds = append(cmds, taCmd)
+			return m, tea.Batch(cmds...)
+		}
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+t" {
 			// View() reads mouseCaptureOff to pick the view's MouseMode; no

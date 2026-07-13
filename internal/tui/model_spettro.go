@@ -249,8 +249,7 @@ func (m Model) handleLogout() (tea.Model, tea.Cmd) {
 		cfg.SpettroPlan = ""
 		cfg.SpettroPlanStatus = ""
 		if cfg.ActiveProvider == spettro.ProviderID {
-			cfg.ActiveProvider = "openai-compatible"
-			cfg.ActiveModel = ""
+			cfg.ActiveProvider, cfg.ActiveModel = m.providers.ResolveActive("", "", cfg.APIKeys)
 		}
 		return nil
 	})
