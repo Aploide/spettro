@@ -135,6 +135,11 @@ type Message struct {
 	ToolCalls []NativeTool
 	// ToolResults is set on user turns that return native tool results.
 	ToolResults []ToolResult
+	// Images holds file paths of images attached to this user turn. Keeping
+	// them on the message (rather than only request-level) means they are
+	// re-sent with every step of a tool loop and survive into carried history,
+	// so the model still sees them when composing its final answer.
+	Images []string
 }
 
 type Request struct {

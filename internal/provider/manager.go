@@ -301,7 +301,14 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	baseURL := m.providerAPIs[providerName]
 	m.mu.RUnlock()
 
-	if len(req.Images) > 0 && !m.SupportsVision(providerName, modelName) {
+	hasImages := len(req.Images) > 0
+	for _, msg := range req.Messages {
+		if len(msg.Images) > 0 {
+			hasImages = true
+			break
+		}
+	}
+	if hasImages && !m.SupportsVision(providerName, modelName) {
 		return Response{}, fmt.Errorf("model does not support vision: %s/%s", providerName, modelName)
 	}
 
@@ -319,32 +326,34 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		return Response{}, err
 	}
 
-	if len(req.Images) == 0 {
-		if req.OnStream != nil {
-			resp, err := sendWithFantasyStream(ctx, providerName, modelName, apiKey, baseURL, req)
-			if err == nil {
+	// The fantasy path handles images natively (FilePart on user messages), so
+	// vision requests take the same primary path as everything else — the
+	// legacy adapters below are only the fallback, and they drop native tool
+	// definitions, so detouring there would break tool use mid-run.
+	if req.OnStream != nil {
+		resp, err := sendWithFantasyStream(ctx, providerName, modelName, apiKey, baseURL, req)
+		if err == nil {
+			return finalizeResponse(resp, providerName, modelName, allParts), nil
+		}
+		if !shouldFallbackToLegacy(err) {
+			// Streaming failed for a non-fallback reason (e.g. the provider
+			// does not support the stream endpoint). Retry once without
+			// streaming before surfacing the error so a run never dies just
+			// because live tokens were unavailable.
+			noStream := req
+			noStream.OnStream = nil
+			if resp, rerr := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, noStream); rerr == nil {
 				return finalizeResponse(resp, providerName, modelName, allParts), nil
 			}
-			if !shouldFallbackToLegacy(err) {
-				// Streaming failed for a non-fallback reason (e.g. the provider
-				// does not support the stream endpoint). Retry once without
-				// streaming before surfacing the error so a run never dies just
-				// because live tokens were unavailable.
-				noStream := req
-				noStream.OnStream = nil
-				if resp, rerr := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, noStream); rerr == nil {
-					return finalizeResponse(resp, providerName, modelName, allParts), nil
-				}
-				return Response{}, err
-			}
-		} else {
-			resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
-			if err == nil {
-				return finalizeResponse(resp, providerName, modelName, allParts), nil
-			}
-			if !shouldFallbackToLegacy(err) {
-				return Response{}, err
-			}
+			return Response{}, err
+		}
+	} else {
+		resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
+		if err == nil {
+			return finalizeResponse(resp, providerName, modelName, allParts), nil
+		}
+		if !shouldFallbackToLegacy(err) {
+			return Response{}, err
 		}
 	}
 

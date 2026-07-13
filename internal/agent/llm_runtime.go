@@ -154,7 +154,7 @@ type toolLoopConfig struct {
 	MaxTokens       int                    // max tokens per request; 0 = unlimited
 	Thinking        provider.ThinkingLevel // forwarded to provider.Request.Thinking
 	RequiredReads   []string
-	Images          []string        // only used on first LLM call (chat use case)
+	Images          []string        // attached to this turn's user message (re-sent every step)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
@@ -466,7 +466,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 	}
 	usedTool := false
-	imagesSent := false
 	var traces []ToolTrace
 
 	// Detect whether the selected model supports native tool calling and build
@@ -488,10 +487,10 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	if len(cfg.Messages) > 0 {
 		convMsgs = make([]provider.Message, 0, len(cfg.Messages)+8)
 		convMsgs = append(convMsgs, cfg.Messages...)
-		convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: buildTurnUserMessage(cfg)})
+		convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: buildTurnUserMessage(cfg), Images: cfg.Images})
 	} else {
 		convMsgs = []provider.Message{
-			{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg)},
+			{Role: provider.RoleUser, Content: buildInitialUserMessage(cfg), Images: cfg.Images},
 		}
 	}
 
@@ -560,10 +559,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		if useNativeTools {
 			req.Tools = nativeToolSpecs
-		}
-		if !imagesSent && len(cfg.Images) > 0 {
-			req.Images = cfg.Images
-			imagesSent = true
 		}
 		if cfg.ToolCallback != nil {
 			req.OnRateLimit = func(d time.Duration) {

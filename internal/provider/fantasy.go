@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"charm.land/fantasy"
@@ -136,7 +138,10 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 		if req.System != "" {
 			prompt = append(prompt, fantasy.NewSystemMessage(req.System))
 		}
-		for _, m := range req.Messages {
+		// Request-level images (legacy field) belong to the current turn — the
+		// last plain user message — alongside any message-level images.
+		imageIdx := lastUserIndex(req.Messages)
+		for i, m := range req.Messages {
 			switch m.Role {
 			case RoleUser:
 				if len(m.ToolResults) > 0 {
@@ -155,7 +160,11 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 						prompt = append(prompt, fantasy.NewUserMessage(m.Content))
 					}
 				} else {
-					prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+					imgs := m.Images
+					if i == imageIdx {
+						imgs = append(imgs[:len(imgs):len(imgs)], req.Images...)
+					}
+					prompt = append(prompt, fantasy.NewUserMessage(m.Content, fantasyImageParts(imgs)...))
 				}
 			case RoleAssistant:
 				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls))
@@ -194,7 +203,7 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 			}
 		}
 	} else {
-		prompt = fantasy.Prompt{fantasy.NewUserMessage(req.Prompt)}
+		prompt = fantasy.Prompt{fantasy.NewUserMessage(req.Prompt, fantasyImageParts(req.Images)...)}
 	}
 	call := fantasy.Call{
 		Prompt:    prompt,
@@ -241,6 +250,25 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 		}
 	}
 	return call
+}
+
+// fantasyImageParts loads image files into fantasy FileParts. Unreadable
+// paths are skipped (matching the legacy adapters) so a vanished temp file
+// degrades to a text-only turn instead of failing the whole request.
+func fantasyImageParts(paths []string) []fantasy.FilePart {
+	var parts []fantasy.FilePart
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		parts = append(parts, fantasy.FilePart{
+			Filename:  filepath.Base(p),
+			Data:      data,
+			MediaType: mediaTypeFromPath(p),
+		})
+	}
+	return parts
 }
 
 func newFantasyProvider(providerName, apiKey, baseURL string) (fantasy.Provider, error) {

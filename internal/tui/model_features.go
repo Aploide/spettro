@@ -61,8 +61,19 @@ func (m *Model) addAttachment(rawPath string) {
 			return
 		}
 	}
+	// Image files go through the provider's vision channel, not inlined into
+	// the prompt as (binary) text like ordinary file attachments.
+	kind := "file"
+	switch strings.ToLower(filepath.Ext(abs)) {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+		if !m.providers.SupportsVision(m.cfg.ActiveProvider, m.cfg.ActiveModel) {
+			m.showBanner("current model does not support vision", "error")
+			return
+		}
+		kind = "image"
+	}
 	m.attachments = append(m.attachments, attachmentItem{
-		Kind:    "file",
+		Kind:    kind,
 		Path:    abs,
 		RelPath: filepath.ToSlash(rel),
 	})

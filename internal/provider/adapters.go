@@ -62,9 +62,13 @@ func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Req
 		for i, m := range req.Messages {
 			switch m.Role {
 			case RoleUser:
-				if i == imageIdx && len(req.Images) > 0 {
+				imgs := m.Images
+				if i == imageIdx {
+					imgs = append(imgs[:len(imgs):len(imgs)], req.Images...)
+				}
+				if len(imgs) > 0 {
 					var parts []openai.ChatCompletionContentPartUnionParam
-					for _, imgPath := range req.Images {
+					for _, imgPath := range imgs {
 						data, err := os.ReadFile(imgPath)
 						if err != nil {
 							continue
@@ -189,15 +193,17 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 			switch m.Role {
 			case RoleUser:
 				var blocks []anthropic.ContentBlockParamUnion
-				if i == imageIdx && len(req.Images) > 0 {
-					for _, imgPath := range req.Images {
-						data, err := os.ReadFile(imgPath)
-						if err != nil {
-							continue
-						}
-						mt := mediaTypeFromPath(imgPath)
-						blocks = append(blocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
+				imgs := m.Images
+				if i == imageIdx {
+					imgs = append(imgs[:len(imgs):len(imgs)], req.Images...)
+				}
+				for _, imgPath := range imgs {
+					data, err := os.ReadFile(imgPath)
+					if err != nil {
+						continue
 					}
+					mt := mediaTypeFromPath(imgPath)
+					blocks = append(blocks, anthropic.NewImageBlockBase64(mt, base64.StdEncoding.EncodeToString(data)))
 				}
 				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
 				msgs = append(msgs, anthropic.NewUserMessage(blocks...))

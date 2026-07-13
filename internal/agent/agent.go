@@ -145,7 +145,7 @@ type LLMAgent struct {
 	MaxTokens       int
 	Thinking        provider.ThinkingLevel
 	RequiredReads   []string
-	Images          []string // only used on first LLM call (chat use case)
+	Images          []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,
 	// surfaced to the model as a "Conversation so far" section so follow-up
 	// turns have memory. Only consulted when Messages is empty — the degraded
