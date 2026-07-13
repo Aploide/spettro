@@ -2,14 +2,14 @@
 # install.sh — install spettro on macOS or Linux
 #
 # Usage:
-#   curl -sSfL https://raw.githubusercontent.com/cesp99/spettro/main/install.sh | sh
+#   curl -sSfL https://raw.githubusercontent.com/aploide/spettro/main/install.sh | sh
 #
 # Or pin to a specific version:
 #   VERSION=v1.2.3 curl -sSfL ... | sh
 
 set -euo pipefail
 
-REPO="cesp99/spettro"
+REPO="aploide/spettro"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── detect OS ───────────────────────────────────────────────────────────────
