@@ -94,7 +94,6 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
@@ -144,7 +143,6 @@ type toolLoopConfig struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
-	RequireToolCall bool
 	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
 	LogToolCalls    bool
@@ -465,7 +463,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			runtime.requiredReads[p] = struct{}{}
 		}
 	}
-	usedTool := false
 	var traces []ToolTrace
 
 	// Detect whether the selected model supports native tool calling and build
@@ -614,7 +611,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 
 		// Native tool-calling path: model returned structured tool calls.
 		if len(resp.ToolCalls) > 0 {
-			usedTool = true
+			emitNarration(cfg, main)
 			internalCalls := make([]toolCall, len(resp.ToolCalls))
 			for i, tc := range resp.ToolCalls {
 				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
@@ -670,13 +667,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// Native-tool path final answer: model returned text with no tool calls.
 		if useNativeTools {
 			if next, ok := runtime.nextRequiredRead(); ok {
+				emitNarration(cfg, main)
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
-				continue
-			}
-			if cfg.RequireToolCall && !usedTool {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
 				continue
 			}
 			return finish(strings.TrimSpace(main), false, "")
@@ -686,7 +679,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		calls, parseErrs := parseAllToolCalls(main)
 		if len(calls) > 0 || len(parseErrs) > 0 {
 			if len(calls) > 0 {
-				usedTool = true
+				emitNarration(cfg, main)
 			}
 			loopAct := runtime.loopDetect.observe(calls, main)
 			if loopAct == loopAbort {
@@ -733,28 +726,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before FINAL.", next)})
 				continue
 			}
-			if cfg.RequireToolCall && !usedTool {
-				// LLM tried to finalize without using any tools: nudge it and retry.
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
-				continue
-			}
 			return finish(strings.TrimSpace(final), false, "")
 		}
 
-		// Plain text without FINAL prefix and without a tool call.
-		if cfg.RequireToolCall {
+		// Plain text without FINAL prefix and without a tool call: the model is
+		// narrating. Surface the text as a comment (it IS the model's output)
+		// and keep the loop alive so it can continue working or finalize.
+		if len(allowed) > 0 {
 			// Identical text emitted step after step is also a loop (e.g. the
 			// model keeps restating a plan instead of acting).
 			loopAct := runtime.loopDetect.observe(nil, main)
 			if loopAct == loopAbort {
 				return finish(loopStopMessage, false, "")
 			}
+			emitNarration(cfg, main)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			feedback := "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."
-			if !usedTool {
-				feedback = "system: use TOOL_CALL before providing the final answer."
-			}
+			feedback := "system: your text was shown to the user as a progress comment. Continue with TOOL_CALL, or output FINAL on its own line followed by your final answer when done. Do not write TOOL_CALL as text."
 			if loopAct == loopNudge {
 				feedback += "\n" + loopNudgeMessage
 			}
@@ -763,6 +750,21 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		return finish(main, false, "")
 	}
+}
+
+// emitNarration surfaces mid-run assistant prose as a persistent comment. The
+// live stream draft is discarded when the next step resets it, so without this
+// any text the model writes alongside (or instead of) tool calls would flash
+// on screen and then vanish.
+func emitNarration(cfg toolLoopConfig, text string) {
+	if cfg.ToolCallback == nil {
+		return
+	}
+	text = stripLeakedToolCalls(text)
+	if text == "" {
+		return
+	}
+	cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
 }
 
 // maybeCompactConv summarizes the older portion of convMsgs into a single

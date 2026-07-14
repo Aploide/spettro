@@ -134,7 +134,7 @@ func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
 			if nativeTools {
 				commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
 			} else {
-				commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
+				commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
 			}
 			break
 		}

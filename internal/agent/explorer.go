@@ -33,7 +33,6 @@ func (e LLMExplorer) Explore(ctx context.Context, task string) (RunResult, error
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		CWD:             e.CWD,
-		RequireToolCall: true,
 		AllowedTools:    []string{"glob", "grep", "file-read"},
 		LogToolCalls:    true,
 		ProviderManager: e.ProviderManager,

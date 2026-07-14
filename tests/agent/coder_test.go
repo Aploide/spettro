@@ -152,20 +152,18 @@ func TestCoder_ReadOutsideWorkspace_ToolErrors(t *testing.T) {
 
 // ── nudge behaviour ────────────────────────────────────────────────────────────
 
-func TestCoder_NudgesWhenNoToolUsed(t *testing.T) {
+func TestCoder_AcceptsFinalWithoutTool(t *testing.T) {
 	dir := t.TempDir()
 
-	// First response: FINAL without any tool → nudge → tool → FINAL.
+	// FINAL without any tool is accepted as the answer (no forced tool use).
 	srv := scriptedServer(t, []string{
 		"FINAL\nSkipped tools.",
-		`TOOL_CALL {"tool":"repo-search","args":{"query":""}}`,
-		"FINAL\nDone after tool.",
 	})
 	result, err := coder(srv, dir).Execute(context.Background(), "Do something.", config.PermissionYOLO, true)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if result.Content != "Done after tool." {
+	if result.Content != "Skipped tools." {
 		t.Errorf("unexpected content: %q", result.Content)
 	}
 }

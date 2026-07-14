@@ -196,7 +196,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	// system prompt byte-stable across every turn of the session.
 	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
-	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
@@ -222,7 +221,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Messages:        a.Messages,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
-		RequireToolCall: requireToolCall,
 		AllowedTools:    allowedTools,
 		ToolPolicies:    policies,
 		LogToolCalls:    logToolCalls,
