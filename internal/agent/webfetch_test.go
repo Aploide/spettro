@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,44 @@ func TestConvertHTMLPageBasics(t *testing.T) {
 	for _, banned := range []string{"alert(1)", "color:red", "<p>", "javascript:"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("unexpected %q in output:\n%s", banned, out)
+		}
+	}
+}
+
+func TestResolveURLSanitizesSchemes(t *testing.T) {
+	base, _ := url.Parse("https://example.com/base/")
+	r := &mdRenderer{base: base}
+
+	// Dangerous schemes are rejected, including obfuscated variants that use
+	// control characters browsers would strip before interpreting the scheme.
+	for _, raw := range []string{
+		"javascript:alert(1)",
+		"JavaScript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"vbscript:msgbox(1)",
+		"VBScript:msgbox(1)",
+		"java\tscript:alert(1)",
+		"java\nscript:alert(1)",
+		"  javascript:alert(1)  ",
+		"file:///etc/passwd",
+	} {
+		if got := r.resolveURL(raw); got != "" {
+			t.Errorf("resolveURL(%q) = %q, want empty", raw, got)
+		}
+	}
+
+	// Safe absolute and relative URLs are preserved and resolved against base.
+	cases := map[string]string{
+		"https://other.com/x":  "https://other.com/x",
+		"http://other.com/x":   "http://other.com/x",
+		"mailto:a@example.com": "mailto:a@example.com",
+		"/doc":                 "https://example.com/doc",
+		"page.html":            "https://example.com/base/page.html",
+		"#frag":                "https://example.com/base/#frag",
+	}
+	for raw, want := range cases {
+		if got := r.resolveURL(raw); got != want {
+			t.Errorf("resolveURL(%q) = %q, want %q", raw, got, want)
 		}
 	}
 }
