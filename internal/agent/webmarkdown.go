@@ -310,21 +310,51 @@ type mdState struct {
 	suppressBlk bool // inside inline context (e.g. table cell): no newlines
 }
 
+// safeURLSchemes is the allowlist of URL schemes permitted in rendered output.
+// Anything else (javascript, data, vbscript, file, etc.) is rejected. Relative
+// URLs carry no scheme and are handled separately.
+var safeURLSchemes = map[string]bool{
+	"http":   true,
+	"https":  true,
+	"mailto": true,
+	"tel":    true,
+	"ftp":    true,
+}
+
 func (r *mdRenderer) resolveURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	low := strings.ToLower(raw)
-	if strings.HasPrefix(low, "javascript:") || strings.HasPrefix(low, "data:") {
+	// Browsers strip TAB, LF and CR from URLs before interpreting the scheme,
+	// so attackers use them to hide payloads (e.g. "java\tscript:alert(1)").
+	// Remove them before validating so obfuscated schemes can't slip through.
+	raw = strings.Map(func(rn rune) rune {
+		if rn == '\t' || rn == '\n' || rn == '\r' {
+			return -1
+		}
+		return rn
+	}, raw)
+	if raw == "" {
 		return ""
 	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	// A non-empty scheme must be on the allowlist. An empty scheme means a
+	// relative reference (path, query or fragment), which is safe to resolve.
+	if u.Scheme != "" && !safeURLSchemes[strings.ToLower(u.Scheme)] {
+		return ""
+	}
+
 	if r.base != nil {
-		if u, err := r.base.Parse(raw); err == nil {
-			return u.String()
+		if resolved := r.base.ResolveReference(u); resolved != nil {
+			return resolved.String()
 		}
 	}
-	return raw
+	return u.String()
 }
 
 // blockBreak opens a new block, respecting quote prefixes.
