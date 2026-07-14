@@ -158,7 +158,12 @@ type toolLoopConfig struct {
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
 	StreamCallback StreamCallback
 	Permission     config.PermissionLevel
-	ShellApproval  ShellApprovalCallback
+	// PermissionFn, when set, is consulted on every approval decision instead
+	// of the static Permission snapshot, so the user can change the permission
+	// level (e.g. to yolo) while a run is in flight and have it take effect
+	// immediately. An empty return falls back to Permission.
+	PermissionFn  func() config.PermissionLevel
+	ShellApproval ShellApprovalCallback
 	AskUser        AskUserCallback
 	// Checkpoint, when set, is invoked synchronously right before any
 	// file-modifying tool executes (file-write, file-edit, shell), so the host
@@ -193,6 +198,7 @@ type toolRuntime struct {
 	requiredReads map[string]struct{}
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
+	permissionFn  func() config.PermissionLevel
 	shellApproval ShellApprovalCallback
 	askUser       AskUserCallback
 	allowedShell  map[string]struct{}
@@ -247,6 +253,18 @@ type toolRuntime struct {
 	// loopDetect spots the agent repeating itself (manifest
 	// [runtime.loop_detection]); nil when disabled.
 	loopDetect *loopDetector
+}
+
+// perm returns the permission level to enforce right now: the host's live
+// selection when a PermissionFn is wired (so mid-run /permission changes take
+// effect immediately), otherwise the level captured at run start.
+func (r *toolRuntime) perm() config.PermissionLevel {
+	if r.permissionFn != nil {
+		if p := r.permissionFn(); p != "" {
+			return p
+		}
+	}
+	return r.permission
 }
 
 // effectiveModel returns the model the main loop should call: the consented
@@ -374,6 +392,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		readSet:         map[string]struct{}{},
 		requiredReads:   map[string]struct{}{},
 		permission:      cfg.Permission,
+		permissionFn:    cfg.PermissionFn,
 		shellApproval:   cfg.ShellApproval,
 		askUser:         cfg.AskUser,
 		allowedShell:    map[string]struct{}{},
@@ -1394,11 +1413,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		subSpec := *spec
 		// The parent's effective permission cascades to sub-agents so that a
 		// user-level setting (e.g. yolo) is honoured across the entire tree.
-		if r.permission != "" {
-			subSpec.Permission = r.permission
+		if p := r.perm(); p != "" {
+			subSpec.Permission = p
 		}
 		subAgent := LLMAgent{
 			Spec:            subSpec,
+			PermissionFn:    r.permissionFn,
 			ProviderManager: r.providerMgr,
 			ProviderName:    r.providerName,
 			ModelName:       r.modelName,

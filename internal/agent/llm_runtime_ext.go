@@ -1147,7 +1147,7 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath,
 		}
 	}
 	spec, ok := r.toolPolicies[toolID]
-	if !ok || !spec.RequiresApproval || r.permission == config.PermissionYOLO {
+	if !ok || !spec.RequiresApproval || r.perm() == config.PermissionYOLO {
 		return nil
 	}
 	if r.shellApproval == nil {
@@ -1175,7 +1175,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 	if target == "" {
 		target = "(network)"
 	}
-	needsApproval := r.permission != config.PermissionYOLO
+	needsApproval := r.perm() != config.PermissionYOLO
 	if spec, ok := r.toolPolicies[toolID]; ok && !spec.RequiresApproval {
 		needsApproval = false
 	}

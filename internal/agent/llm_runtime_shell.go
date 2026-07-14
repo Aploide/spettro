@@ -160,7 +160,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 	if len(segments) == 0 {
 		segments = []string{normalized}
 	}
-	needsApproval := r.permission != config.PermissionYOLO
+	needsApproval := r.perm() != config.PermissionYOLO
 	if spec, ok := r.toolPolicies[toolID]; ok && !spec.RequiresApproval {
 		needsApproval = false
 	}
@@ -177,14 +177,14 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		if segNorm == "" {
 			continue
 		}
-		if r.permission != config.PermissionYOLO && isBlockedCommand(seg) {
+		if r.perm() != config.PermissionYOLO && isBlockedCommand(seg) {
 			return fmt.Errorf("blocked dangerous command")
 		}
 		if isAlwaysAllowedCommand(seg) {
 			continue
 		}
 		// YOLO mode bypasses all permission rules — every command is allowed.
-		if r.permission != config.PermissionYOLO {
+		if r.perm() != config.PermissionYOLO {
 			switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
 			case config.RuleDeny:
 				r.emitApprovalTrace("denied", "policy", toolID, segNorm, "blocked by permission rules")

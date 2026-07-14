@@ -124,6 +124,10 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 			return "error: " + err.Error(), false, true
 		}
 		cfg.Permission = level
+		// Live update: the caller holds b.mu, and an in-flight run reads
+		// s.permission before every approval decision, so the new level
+		// applies to the current turn, not just the next one.
+		s.permission = level
 		return "permission set to " + string(level), false, true
 
 	case "/budget":

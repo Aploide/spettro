@@ -72,6 +72,10 @@ type acpSession struct {
 	// turns, so a message the run never reached is delivered at the start of
 	// the next one instead of being lost.
 	steering *agent.SteeringQueue
+	// permission is the live permission level the in-flight run consults on
+	// every approval decision. Updated by /permission and the permission
+	// config option so a mid-run change (e.g. to yolo) applies immediately.
+	permission config.PermissionLevel
 }
 
 var _ acpsdk.Agent = (*bridge)(nil)
@@ -378,6 +382,10 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	agentID := s.agentID
 	manifest := s.manifest
 	steering := s.steering
+	// Seed the session's live permission from the freshly loaded config; a
+	// mid-run /permission or config-option change overwrites it and the
+	// running agent picks it up on its next approval decision.
+	s.permission = cfg.Permission
 	history := s.history
 	// First turn after session/load: no structured history exists yet, so
 	// fall back to the flattened stored transcript (mirrors the TUI's resume).
@@ -392,6 +400,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return acpsdk.PromptResponse{}, fmt.Errorf("agent not found: %s", agentID)
 	}
 	spec.Permission = cfg.Permission
+	livePermission := func() config.PermissionLevel {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return s.permission
+	}
 
 	thinking := provider.ThinkingLevel("")
 	if b.opts.Providers.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
@@ -417,8 +430,9 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		Steering:        steering,
 		StreamCallback:  turn.onStream,
 		ToolCallback:    turn.onTool,
+		PermissionFn:    livePermission,
 		ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
-			if cfg.Permission == config.PermissionYOLO {
+			if livePermission() == config.PermissionYOLO {
 				return agent.ShellApprovalAllowOnce, nil
 			}
 			return turn.requestShellApproval(sctx, ar)

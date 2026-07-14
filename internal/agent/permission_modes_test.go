@@ -223,6 +223,59 @@ func TestRestricted_RespectsPermissionRuleDeny(t *testing.T) {
 	}
 }
 
+// --- live permission switching (permissionFn) ---
+
+func TestPermissionFn_MidRunSwitchToYOLO_SkipsApproval(t *testing.T) {
+	level := config.PermissionRestricted
+	rt := newPermRuntime(config.PermissionRestricted, nil, nil)
+	rt.permissionFn = func() config.PermissionLevel { return level }
+
+	// Restricted with no callback: non-whitelisted command is blocked.
+	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+		t.Fatal("restricted should block non-whitelisted command")
+	}
+	// The user switches to yolo mid-run: the same command now passes without
+	// any approval callback.
+	level = config.PermissionYOLO
+	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+		t.Errorf("after live switch to yolo the command should be allowed: %v", err)
+	}
+}
+
+func TestPermissionFn_MidRunSwitchAwayFromYOLO_RequiresApproval(t *testing.T) {
+	level := config.PermissionYOLO
+	called := false
+	callback := func(_ context.Context, _ ShellApprovalRequest) (ShellApprovalDecision, error) {
+		called = true
+		return ShellApprovalAllowOnce, nil
+	}
+	// Static snapshot says yolo — the live fn must win over it.
+	rt := newPermRuntime(config.PermissionYOLO, callback, nil)
+	rt.permissionFn = func() config.PermissionLevel { return level }
+
+	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+		t.Fatalf("yolo should allow: %v", err)
+	}
+	if called {
+		t.Fatal("yolo should not invoke the approval callback")
+	}
+	level = config.PermissionRestricted
+	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run deploy"); err != nil {
+		t.Errorf("callback allows, so the command should succeed: %v", err)
+	}
+	if !called {
+		t.Error("after live switch away from yolo the approval callback must be invoked")
+	}
+}
+
+func TestPermissionFn_EmptyFallsBackToSnapshot(t *testing.T) {
+	rt := newPermRuntime(config.PermissionYOLO, nil, nil)
+	rt.permissionFn = func() config.PermissionLevel { return "" }
+	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+		t.Errorf("empty live level should fall back to the yolo snapshot: %v", err)
+	}
+}
+
 // --- top-level Execute pre-approval distinction ---
 
 func TestCoder_AskFirst_RequiresPreApproval(t *testing.T) {

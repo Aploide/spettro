@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -97,7 +98,25 @@ func (m *Model) updateConfig(mut func(*config.UserConfig) error) error {
 	if m.providers != nil {
 		m.providers.SetAPIKeys(cfg.APIKeys)
 	}
+	if m.livePerm != nil {
+		m.livePerm.set(cfg.Permission)
+	}
 	return nil
+}
+
+// livePermission is a concurrency-safe holder for the user's current
+// permission level, shared between the TUI event loop (which writes it on
+// every config change) and in-flight agent goroutines (which read it before
+// each approval decision). It is what makes /permission apply mid-run.
+type livePermission struct{ v atomic.Value }
+
+func (l *livePermission) set(p config.PermissionLevel) { l.v.Store(p) }
+
+func (l *livePermission) get() config.PermissionLevel {
+	if p, ok := l.v.Load().(config.PermissionLevel); ok {
+		return p
+	}
+	return ""
 }
 
 func (m *Model) setProgressNote(text string) {
