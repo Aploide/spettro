@@ -60,8 +60,18 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 	// threads each iteration's RunResult.Messages into the next, so every
 	// iteration extends a byte-stable prompt prefix (cache hits) instead of
 	// rediscovering the workspace from scratch.
+	// Seed the live permission for this turn; /permission or a config-option
+	// change while the goal runs overwrites it and takes effect at the next
+	// approval decision.
+	s.permission = cfg.Permission
 	history := s.history
 	b.mu.Unlock()
+
+	livePermission := func() config.PermissionLevel {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return s.permission
+	}
 
 	spec, ok := manifest.AgentByID("coding")
 	if !ok {
@@ -142,8 +152,9 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			Steering:        steering,
 			StreamCallback:  turn.onStream,
 			ToolCallback:    turn.onTool,
+			PermissionFn:    livePermission,
 			ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
-				if cfg.Permission == config.PermissionYOLO {
+				if livePermission() == config.PermissionYOLO {
 					return agent.ShellApprovalAllowOnce, nil
 				}
 				return turn.requestShellApproval(sctx, ar)

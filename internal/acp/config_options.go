@@ -238,6 +238,9 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 			return err
 		}
 		cfg.Permission = level
+		// Also update the session's live level so an in-flight run switches
+		// enforcement immediately (caller holds b.mu).
+		s.permission = level
 		return nil
 
 	case configIDThinking:

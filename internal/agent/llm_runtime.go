@@ -94,7 +94,6 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
@@ -144,7 +143,6 @@ type toolLoopConfig struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
-	RequireToolCall bool
 	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
 	LogToolCalls    bool
@@ -160,7 +158,12 @@ type toolLoopConfig struct {
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
 	StreamCallback StreamCallback
 	Permission     config.PermissionLevel
-	ShellApproval  ShellApprovalCallback
+	// PermissionFn, when set, is consulted on every approval decision instead
+	// of the static Permission snapshot, so the user can change the permission
+	// level (e.g. to yolo) while a run is in flight and have it take effect
+	// immediately. An empty return falls back to Permission.
+	PermissionFn  func() config.PermissionLevel
+	ShellApproval ShellApprovalCallback
 	AskUser        AskUserCallback
 	// Checkpoint, when set, is invoked synchronously right before any
 	// file-modifying tool executes (file-write, file-edit, shell), so the host
@@ -195,6 +198,7 @@ type toolRuntime struct {
 	requiredReads map[string]struct{}
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
+	permissionFn  func() config.PermissionLevel
 	shellApproval ShellApprovalCallback
 	askUser       AskUserCallback
 	allowedShell  map[string]struct{}
@@ -249,6 +253,18 @@ type toolRuntime struct {
 	// loopDetect spots the agent repeating itself (manifest
 	// [runtime.loop_detection]); nil when disabled.
 	loopDetect *loopDetector
+}
+
+// perm returns the permission level to enforce right now: the host's live
+// selection when a PermissionFn is wired (so mid-run /permission changes take
+// effect immediately), otherwise the level captured at run start.
+func (r *toolRuntime) perm() config.PermissionLevel {
+	if r.permissionFn != nil {
+		if p := r.permissionFn(); p != "" {
+			return p
+		}
+	}
+	return r.permission
 }
 
 // effectiveModel returns the model the main loop should call: the consented
@@ -376,6 +392,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		readSet:         map[string]struct{}{},
 		requiredReads:   map[string]struct{}{},
 		permission:      cfg.Permission,
+		permissionFn:    cfg.PermissionFn,
 		shellApproval:   cfg.ShellApproval,
 		askUser:         cfg.AskUser,
 		allowedShell:    map[string]struct{}{},
@@ -465,7 +482,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			runtime.requiredReads[p] = struct{}{}
 		}
 	}
-	usedTool := false
 	var traces []ToolTrace
 
 	// Detect whether the selected model supports native tool calling and build
@@ -614,7 +630,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 
 		// Native tool-calling path: model returned structured tool calls.
 		if len(resp.ToolCalls) > 0 {
-			usedTool = true
+			emitNarration(cfg, main)
 			internalCalls := make([]toolCall, len(resp.ToolCalls))
 			for i, tc := range resp.ToolCalls {
 				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
@@ -670,13 +686,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// Native-tool path final answer: model returned text with no tool calls.
 		if useNativeTools {
 			if next, ok := runtime.nextRequiredRead(); ok {
+				emitNarration(cfg, main)
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
-				continue
-			}
-			if cfg.RequireToolCall && !usedTool {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before providing the final answer."})
 				continue
 			}
 			return finish(strings.TrimSpace(main), false, "")
@@ -686,7 +698,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		calls, parseErrs := parseAllToolCalls(main)
 		if len(calls) > 0 || len(parseErrs) > 0 {
 			if len(calls) > 0 {
-				usedTool = true
+				emitNarration(cfg, main)
 			}
 			loopAct := runtime.loopDetect.observe(calls, main)
 			if loopAct == loopAbort {
@@ -733,28 +745,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before FINAL.", next)})
 				continue
 			}
-			if cfg.RequireToolCall && !usedTool {
-				// LLM tried to finalize without using any tools: nudge it and retry.
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: "system: you must use at least one tool before writing FINAL."})
-				continue
-			}
 			return finish(strings.TrimSpace(final), false, "")
 		}
 
-		// Plain text without FINAL prefix and without a tool call.
-		if cfg.RequireToolCall {
+		// Plain text without FINAL prefix and without a tool call: the model is
+		// narrating. Surface the text as a comment (it IS the model's output)
+		// and keep the loop alive so it can continue working or finalize.
+		if len(allowed) > 0 {
 			// Identical text emitted step after step is also a loop (e.g. the
 			// model keeps restating a plan instead of acting).
 			loopAct := runtime.loopDetect.observe(nil, main)
 			if loopAct == loopAbort {
 				return finish(loopStopMessage, false, "")
 			}
+			emitNarration(cfg, main)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			feedback := "system: output FINAL on its own line followed by your final answer. Do not write TOOL_CALL as text."
-			if !usedTool {
-				feedback = "system: use TOOL_CALL before providing the final answer."
-			}
+			feedback := "system: your text was shown to the user as a progress comment. Continue with TOOL_CALL, or output FINAL on its own line followed by your final answer when done. Do not write TOOL_CALL as text."
 			if loopAct == loopNudge {
 				feedback += "\n" + loopNudgeMessage
 			}
@@ -763,6 +769,21 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		return finish(main, false, "")
 	}
+}
+
+// emitNarration surfaces mid-run assistant prose as a persistent comment. The
+// live stream draft is discarded when the next step resets it, so without this
+// any text the model writes alongside (or instead of) tool calls would flash
+// on screen and then vanish.
+func emitNarration(cfg toolLoopConfig, text string) {
+	if cfg.ToolCallback == nil {
+		return
+	}
+	text = stripLeakedToolCalls(text)
+	if text == "" {
+		return
+	}
+	cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
 }
 
 // maybeCompactConv summarizes the older portion of convMsgs into a single
@@ -1392,11 +1413,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		subSpec := *spec
 		// The parent's effective permission cascades to sub-agents so that a
 		// user-level setting (e.g. yolo) is honoured across the entire tree.
-		if r.permission != "" {
-			subSpec.Permission = r.permission
+		if p := r.perm(); p != "" {
+			subSpec.Permission = p
 		}
 		subAgent := LLMAgent{
 			Spec:            subSpec,
+			PermissionFn:    r.permissionFn,
 			ProviderManager: r.providerMgr,
 			ProviderName:    r.providerName,
 			ModelName:       r.modelName,

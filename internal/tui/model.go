@@ -486,6 +486,11 @@ type Model struct {
 	// (tests).
 	sandboxState *agent.SandboxState
 
+	// livePerm shares the user's current permission level with agent runs
+	// already in flight, so a mid-run /permission change (e.g. to yolo)
+	// applies to the rest of the run instead of only the next one.
+	livePerm *livePermission
+
 	// activeGoal is non-nil while a /goal run is in progress. The goal persists
 	// across agent runs (resetRunState does NOT clear it); it is cleared by the
 	// orchestration loop (step 04) on completion / stall / interrupt.
@@ -570,7 +575,9 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		searcher:     agent.RepoSearcher{},
 		sandboxState: sb,
 		historyIndex: -1,
+		livePerm:     &livePermission{},
 	}
+	m.livePerm.set(cfg.Permission)
 	m.customCommands, _ = commands.Discover(cwd)
 	m.refreshModifiedFiles()
 	// Scan the working directory in the background: walking a large tree

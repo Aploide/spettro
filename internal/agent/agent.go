@@ -159,8 +159,13 @@ type LLMAgent struct {
 	// StreamCallback, when set, receives live thinking/answer chunks as the
 	// model streams. Set only on the top-level run (chat/coding/plan/ask).
 	StreamCallback StreamCallback
-	ShellApproval  ShellApprovalCallback
-	AskUser        AskUserCallback
+	// PermissionFn, when set, supplies the live permission level for every
+	// approval decision (instead of the Spec.Permission snapshot), so a
+	// mid-run /permission change by the user applies to the rest of the run.
+	// An empty return falls back to Spec.Permission.
+	PermissionFn  func() config.PermissionLevel
+	ShellApproval ShellApprovalCallback
+	AskUser       AskUserCallback
 	// Checkpoint, when set, is called synchronously before every
 	// file-modifying tool executes (including in sub-agents) so the host can
 	// snapshot files + conversation for /rewind.
@@ -196,7 +201,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	// system prompt byte-stable across every turn of the session.
 	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
-	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
@@ -222,7 +226,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Messages:        a.Messages,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
-		RequireToolCall: requireToolCall,
 		AllowedTools:    allowedTools,
 		ToolPolicies:    policies,
 		LogToolCalls:    logToolCalls,
@@ -236,6 +239,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ToolCallback:    a.ToolCallback,
 		StreamCallback:  a.StreamCallback,
 		Permission:      a.Spec.Permission,
+		PermissionFn:    a.PermissionFn,
 		ShellApproval:   a.ShellApproval,
 		AskUser:         a.AskUser,
 		Checkpoint:      a.Checkpoint,

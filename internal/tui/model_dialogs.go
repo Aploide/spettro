@@ -1788,6 +1788,20 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			_, _ = cp.Snapshot(tool, prompt, convSnapshot)
 		}
 	}
+	// Live permission: consulted before every approval decision so a
+	// /permission change while this run executes applies immediately. It
+	// mirrors the run-start rule below: a user level other than ask-first
+	// overrides the agent spec's own permission, ask-first defers to it.
+	var permissionFn func() config.PermissionLevel
+	if live := m.livePerm; live != nil {
+		specPerm := spec.Permission
+		permissionFn = func() config.PermissionLevel {
+			if p := live.get(); p != "" && p != config.PermissionAskFirst {
+				return p
+			}
+			return specPerm
+		}
+	}
 	a := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: pm,
@@ -1811,6 +1825,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		ContextWindow:   resolveGoalContextWindow(m),
 		ShellTimeoutSec: m.cfg.GoalShellTimeoutSec,
 		Steering:        m.steering,
+		PermissionFn:    permissionFn,
 		ToolCallback: func(t agent.ToolTrace) {
 			// Guard the send against a cancelled run: after stopAgent() the TUI
 			// stops draining toolCh, so an unguarded send from an in-flight
