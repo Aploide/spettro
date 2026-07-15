@@ -83,7 +83,9 @@ Conversion is a three-stage pipeline (`internal/agent/webmarkdown.go`):
   (`text/*`, JSON, XML, YAML, `+json`/`+xml` suffixes) are accepted; a
   missing `Content-Type` is treated as text.
 - Pages that render their content client-side with JavaScript come back
-  mostly empty: the tool performs a plain HTTP GET, not a browser render.
+  mostly empty: the tool performs a plain HTTP GET, not a browser render. For
+  those, the agent can drive a headless browser itself via the shell tools and
+  *look* at the rendered page with `view-image` — see [vision.md](vision.md).
 
 ## download
 
@@ -141,12 +143,13 @@ All three tools are registered in the default agent manifest with the
 By default the `coding` and `code` agents get `web-fetch` and `download`; the
 read-only `ask` agent gets `web-search` and `web-fetch` (no `download`).
 
-Projects with an existing `spettro.agents.toml` do **not** gain new tools
-automatically — there is no migration that appends tool specs. To enable the
-tools in such a project, copy the `[[tools]]` entries for `web-fetch` and
-`download` from a freshly generated manifest (or this repository's own
-`spettro.agents.toml`) and add the IDs to the relevant agents'
-`allowed_tools`.
+Projects with an existing `spettro.agents.toml` do **not** gain these three
+tools automatically — no migration appends them. To enable the tools in such
+a project, copy the `[[tools]]` entries for `web-fetch` and `download` from a
+freshly generated manifest (or this repository's own `spettro.agents.toml`)
+and add the IDs to the relevant agents' `allowed_tools`. (The `view-image`
+vision tool is the exception: the manifest v5 migration does retrofit it —
+see [vision.md](vision.md).)
 
 ## Testing the markdown rendering
 

@@ -91,6 +91,13 @@ func summarizeLoopToolArgs(name, args string) string {
 				return "pattern=" + truncate(payload.Pattern, 120)
 			}
 		}
+	case "view-image":
+		var payload struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil && payload.Path != "" {
+			return "path=" + truncate(payload.Path, 120)
+		}
 	case "grok-image", "grok-video":
 		var payload struct {
 			Prompt string `json:"prompt"`
@@ -252,6 +259,7 @@ var builtinToolSchemas = map[string]string{
 	"web-fetch":          `{"url": string, "max_length"?: int}`,
 	"download":           `{"url": string, "path": string, "max_bytes"?: int}`,
 	"web-search":         `{"query": string, "max_results"?: int}`,
+	"view-image":         `{"path": string}`,
 	"grok-image":         `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
 	"grok-video":         `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
 	"ask-user":           `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
@@ -335,6 +343,7 @@ var builtinNativeToolDescs = map[string]string{
 	"mcp-auth":           "Authenticate with an MCP server.",
 	"grok-image":         "Generate an image.",
 	"grok-video":         "Generate a video.",
+	"view-image":         "Attach an image file from the workspace so you can SEE it (vision models). Combine with the shell tools to inspect anything visually: capture a page yourself (e.g. `chromium --headless --screenshot=shot.png <url>` or `npx playwright screenshot <url> shot.png`), then view the file — no need to ask the user for screenshots.",
 }
 
 var builtinNativeToolSchemas = map[string]json.RawMessage{
@@ -386,6 +395,7 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"mcp-auth":           json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"},"token":{"type":"string"},"scope":{"type":"string"},"expires_at":{"type":"string"},"description":{"type":"string"}},"required":["server_id"]}`),
 	"grok-image":         json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"},"path":{"type":"string"},"model":{"type":"string"},"n":{"type":"integer"},"aspect_ratio":{"type":"string"},"resolution":{"type":"string","enum":["1k","2k"]},"response_format":{"type":"string","enum":["url","b64_json"]}},"required":["prompt"]}`),
 	"grok-video":         json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"},"path":{"type":"string"},"model":{"type":"string"},"duration":{"type":"integer"},"aspect_ratio":{"type":"string"},"resolution":{"type":"string"},"image_url":{"type":"string"},"reference_image_urls":{"type":"array","items":{"type":"string"}}},"required":["prompt"]}`),
+	"view-image":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"image file inside the workspace (png, jpg, webp, gif)"}},"required":["path"]}`),
 }
 
 // buildToolSpecs returns provider.ToolSpec entries for each allowed tool that has

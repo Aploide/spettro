@@ -125,6 +125,13 @@ type ToolResult struct {
 	Name   string
 	Output string
 	IsErr  bool
+	// Images holds file paths of images produced by the tool (screenshot,
+	// view-image) that the model should SEE, not just hear about. Anthropic
+	// receives them as image blocks inside the tool_result; providers whose
+	// tool results are text-only receive them as an immediately following
+	// user turn with image parts. Only populated when the active model
+	// supports vision (the tool runtime gates attachment).
+	Images []string
 }
 
 // Message is one turn in a structured conversation.
