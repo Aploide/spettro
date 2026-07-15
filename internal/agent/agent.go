@@ -42,6 +42,10 @@ type ToolTrace struct {
 	Status  string
 	Args    string
 	Output  string
+	// Images holds file paths of images the tool produced and attached for the
+	// model (screenshot, view-image). Hosts that can render images (ACP
+	// editors) show them; text-only hosts ignore the field.
+	Images []string
 }
 
 type RunResult struct {

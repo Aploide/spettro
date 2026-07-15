@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -149,16 +150,35 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 					// Tool results must use MessageRoleTool so the Anthropic provider
 					// routes them through the tool_result content block path.
 					parts := make([]fantasy.MessagePart, 0, len(m.ToolResults))
+					// Images produced by tools (screenshot, view-image) ride inside
+					// the tool_result as media on Anthropic; other providers only
+					// accept text tool results, so their images are re-attached as
+					// an immediately following user turn instead.
+					var spillImages []string
 					for _, tr := range m.ToolResults {
+						if providerName == "anthropic" && len(tr.Images) > 0 {
+							if media, ok := loadToolResultMedia(tr.Images[0], tr.Output); ok {
+								parts = append(parts, fantasy.ToolResultPart{
+									ToolCallID: tr.ID,
+									Output:     media,
+								})
+								spillImages = append(spillImages, tr.Images[1:]...)
+								continue
+							}
+						}
 						parts = append(parts, fantasy.ToolResultPart{
 							ToolCallID: tr.ID,
 							Output:     fantasy.ToolResultOutputContentText{Text: tr.Output},
 						})
+						spillImages = append(spillImages, tr.Images...)
 					}
 					prompt = append(prompt, fantasy.Message{Role: fantasy.MessageRoleTool, Content: parts})
 					// If there is accompanying text, append it as a separate user turn.
 					if m.Content != "" {
 						prompt = append(prompt, fantasy.NewUserMessage(m.Content))
+					}
+					if imgs := fantasyImageParts(spillImages); len(imgs) > 0 {
+						prompt = append(prompt, fantasy.NewUserMessage("[image attached from the tool result above]", imgs...))
 					}
 				} else {
 					imgs := m.Images
@@ -251,6 +271,21 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 		}
 	}
 	return call
+}
+
+// loadToolResultMedia reads an image file into a media tool-result output
+// (base64 + mime), keeping the tool's text output alongside it. Returns false
+// when the file cannot be read so the caller falls back to a text-only result.
+func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedia, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fantasy.ToolResultOutputContentMedia{}, false
+	}
+	return fantasy.ToolResultOutputContentMedia{
+		Data:      base64.StdEncoding.EncodeToString(data),
+		MediaType: mediaTypeFromPath(path),
+		Text:      text,
+	}, true
 }
 
 // fantasyImageParts loads image files into fantasy FileParts. Unreadable

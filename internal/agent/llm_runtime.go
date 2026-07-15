@@ -164,7 +164,7 @@ type toolLoopConfig struct {
 	// immediately. An empty return falls back to Permission.
 	PermissionFn  func() config.PermissionLevel
 	ShellApproval ShellApprovalCallback
-	AskUser        AskUserCallback
+	AskUser       AskUserCallback
 	// Checkpoint, when set, is invoked synchronously right before any
 	// file-modifying tool executes (file-write, file-edit, shell), so the host
 	// can snapshot the working tree and conversation for /rewind.
@@ -253,6 +253,10 @@ type toolRuntime struct {
 	// loopDetect spots the agent repeating itself (manifest
 	// [runtime.loop_detection]); nil when disabled.
 	loopDetect *loopDetector
+
+	// visionCheck overrides the provider manager's SupportsVision lookup for
+	// the view-image tool. Nil in production (test seam).
+	visionCheck func() bool
 }
 
 // perm returns the permission level to enforce right now: the host's live
@@ -335,6 +339,9 @@ type parallelResult struct {
 	args    string
 	output  string
 	status  string
+	// images are file paths attached by the tool for the model to see
+	// (collected via the per-call image sink; see view_image.go).
+	images []string
 }
 
 // toolLoopResult carries everything a run produces.
@@ -651,12 +658,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			})
 			toolResults := make([]provider.ToolResult, len(results))
 			for i, res := range results {
-				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)})
+				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images})
 				toolResults[i] = provider.ToolResult{
 					ID:     resp.ToolCalls[i].ID,
 					Name:   res.name,
 					Output: res.output,
 					IsErr:  res.status == "error",
+					Images: res.images,
 				}
 			}
 			// Tool results are appended before any exit check: an assistant
@@ -707,9 +715,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
 			var toolFeedback strings.Builder
+			// The text protocol has no tool_result channel, so tool-produced
+			// images ride on the feedback user message itself (message-level
+			// images work on every provider path).
+			var feedbackImages []string
 			for _, res := range results {
-				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
+				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images}
 				traces = append(traces, trace)
+				feedbackImages = append(feedbackImages, res.images...)
 				// The LLM must always receive tool outcomes in the next step, even when
 				// human-facing tool logging is disabled in the manifest.
 				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
@@ -725,7 +738,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 			// Feedback lands in the history before any exit check so the carried
 			// conversation never ends on an unanswered tool request.
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n")})
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n"), Images: feedbackImages})
 			if runtime.shouldStop() {
 				return finish(runtime.stopMessage(), false, "")
 			}
@@ -949,7 +962,8 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			if callback != nil {
 				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Args: callArgs, Status: "running"})
 			}
-			output, err := r.executeWithTimeout(ctx, c, allowed)
+			cctx, sink := withImageSink(ctx)
+			output, err := r.executeWithTimeout(cctx, c, allowed)
 			status := "success"
 			if err != nil {
 				status = "error"
@@ -961,9 +975,10 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				args:    callArgs,
 				output:  output,
 				status:  status,
+				images:  sink.list(),
 			}
 			if callback != nil {
-				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600)})
+				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
 				if isMajorOperationTool(c.Tool) {
 					msg := fmt.Sprintf("Completed %s.", c.Tool)
 					if err != nil {
@@ -1213,6 +1228,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runGrokImage(ctx, call.Args)
 	case "grok-video":
 		return r.runGrokVideo(ctx, call.Args)
+	case "view-image":
+		return r.runViewImage(ctx, call.Args)
 	case "ask-user":
 		return r.runAskUser(ctx, call.Args)
 	case "enter-plan-mode":
