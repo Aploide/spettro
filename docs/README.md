@@ -10,6 +10,7 @@
 - [Agent Skills](skills.md)
 - [Runtime Hooks](hooks.md) — custom bash middleware for tool events
 - [Web Tools](web-tools.md) — web-search, web-fetch markdown engine, download
+- [Vision](vision.md) — view-image tool, agent-driven screenshots
 - [Persistent Memory](memory.md) — save-memory tool, `/memory`, cross-session context
 - [Clipboard and Attachments](clipboard.md) — image paste, file attach, text select
 - [First-Launch Onboarding](onboarding.md)

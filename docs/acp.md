@@ -84,6 +84,11 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `/resume`, ...) is not available over ACP yet.
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
   context, and images are accepted in prompts.
+- **Tool-call images** — when a tool attaches an image for the model (the
+  `view-image` vision tool, see [vision.md](vision.md)), the corresponding
+  `tool_call`/`tool_call_update` carries an image content block (base64 +
+  mime) next to the text output, so editors render the screenshot inline in
+  the tool-call card.
 - **Cancellation** — `session/cancel` interrupts the running turn; the turn
   ends with the `cancelled` stop reason. `/goal stop` sent as a new prompt
   also cancels a running goal turn.
