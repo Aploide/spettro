@@ -82,12 +82,46 @@ func TestToolKindClassification(t *testing.T) {
 		"repo-search": acpsdk.ToolKindSearch,
 		"grep":        acpsdk.ToolKindSearch,
 		"http-fetch":  acpsdk.ToolKindFetch,
+		"view-image":  acpsdk.ToolKindRead,
 		"mystery":     acpsdk.ToolKindOther,
 	}
 	for name, want := range cases {
 		if got := toolKind(name); got != want {
 			t.Errorf("toolKind(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// Tool-attached images (screenshot, view-image) must reach ACP clients as
+// image content blocks alongside the tool's text output; unreadable paths are
+// skipped rather than failing the update.
+func TestToolOutputContentWithImages(t *testing.T) {
+	payload := []byte{0x89, 0x50, 0x4e, 0x47}
+	img := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(img, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blocks := toolOutputContent(`{"file":"shot.png"}`, []string{img, "/no/such/file.png"})
+	if len(blocks) != 2 {
+		t.Fatalf("expected text+image blocks, got %d", len(blocks))
+	}
+	if blocks[0].Content == nil || blocks[0].Content.Content.Text == nil {
+		t.Fatal("first block should be the text output")
+	}
+	if blocks[1].Content == nil || blocks[1].Content.Content.Image == nil {
+		t.Fatal("second block should be an image")
+	}
+	imgBlock := blocks[1].Content.Content.Image
+	if imgBlock.MimeType != "image/png" {
+		t.Fatalf("mime = %q", imgBlock.MimeType)
+	}
+	if imgBlock.Data != base64.StdEncoding.EncodeToString(payload) {
+		t.Fatal("image data does not round-trip the file")
+	}
+
+	if blocks := toolOutputContent("", nil); blocks != nil {
+		t.Fatalf("empty output should produce no blocks, got %v", blocks)
 	}
 }
 

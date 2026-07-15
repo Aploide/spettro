@@ -108,14 +108,14 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 			acpsdk.WithStartStatus(status),
 			acpsdk.WithStartLocations(toolLocations(tr.Args)),
 			acpsdk.WithStartRawInput(rawJSON(tr.Args)),
-			acpsdk.WithStartContent(toolOutputContent(tr.Output)),
+			acpsdk.WithStartContent(toolOutputContent(tr.Output, tr.Images)),
 		))
 		return
 	}
 	t.sessionUpdate(acpsdk.UpdateToolCall(
 		id,
 		acpsdk.WithUpdateStatus(status),
-		acpsdk.WithUpdateContent(toolOutputContent(tr.Output)),
+		acpsdk.WithUpdateContent(toolOutputContent(tr.Output, tr.Images)),
 		acpsdk.WithUpdateRawOutput(map[string]any{"output": tr.Output}),
 	))
 	if status == acpsdk.ToolCallStatusCompleted {
@@ -219,6 +219,8 @@ func toolCallTitle(tr agent.ToolTrace) string {
 func toolKind(name string) acpsdk.ToolKind {
 	n := strings.ToLower(name)
 	switch {
+	case n == "view-image":
+		return acpsdk.ToolKindRead
 	case strings.Contains(n, "edit"), strings.Contains(n, "write"), strings.Contains(n, "patch"):
 		return acpsdk.ToolKindEdit
 	case strings.Contains(n, "read"):
@@ -264,11 +266,38 @@ func rawJSON(args string) any {
 	return v
 }
 
-func toolOutputContent(output string) []acpsdk.ToolCallContent {
-	if output == "" {
-		return nil
+// toolOutputContent renders a tool's text output plus any images it attached
+// (screenshot, view-image) as ACP content blocks, so capable editors show the
+// captured image inline with the tool call. Unreadable image files are
+// skipped — the text output still names the path.
+func toolOutputContent(output string, images []string) []acpsdk.ToolCallContent {
+	var out []acpsdk.ToolCallContent
+	if output != "" {
+		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(output)))
 	}
-	return []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(output))}
+	for _, p := range images {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		out = append(out, acpsdk.ToolContent(acpsdk.ImageBlock(base64.StdEncoding.EncodeToString(data), imageMime(p))))
+	}
+	return out
+}
+
+// imageMime is the inverse of imageExt: extension → MIME type for tool-attached
+// image files.
+func imageMime(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/png"
+	}
 }
 
 // promptFromBlocks flattens the ACP prompt content into the single task
