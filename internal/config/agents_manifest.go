@@ -204,8 +204,19 @@ type AgentSpec struct {
 	Enabled  bool     `toml:"enabled"`
 }
 
+// visionToolViewImage is shared between the default manifest and the v5
+// migration that retrofits it into existing manifests. It is the generic
+// "let the model see an image" tool: the agent produces images however it
+// likes (its own headless-browser screenshot via shell, a generated chart,
+// an existing asset) and views the file.
+var visionToolViewImage = ToolSpec{ID: "view-image", Name: "View Image", Description: "Attach an image file from the workspace so the model can see it (vision models only).", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
+
 func DefaultAgentManifest() AgentManifest {
 	m := AgentManifest{
+		// Version starts below the latest migration on purpose: the
+		// normalizeFromVersion call below runs the same upgrades a loaded
+		// manifest gets (v5 fills agent allow-lists with the vision tools),
+		// keeping fresh defaults and migrated manifests identical.
 		Version:      3,
 		DefaultAgent: "plan",
 		Metadata: AgentMetadata{
@@ -256,6 +267,7 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "web-fetch", Name: "Web Fetch", Description: "Fetch a URL and return readable text/markdown content.", Kind: "builtin", Enabled: true, TimeoutSec: 45, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
 			{ID: "download", Name: "Download", Description: "Download a URL to a file inside the workspace (size-limited).", Kind: "builtin", Enabled: true, TimeoutSec: 180, RequiresApproval: true, PermittedActions: []string{"write", "network"}, RiskLevel: "high"},
 			{ID: "grok-image", Name: "Grok Image", Description: "Generate images via xAI Grok Imagine and save them to the workspace (defaults to assets/ or Next.js public/).", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: false, PermittedActions: []string{"write", "network"}, RiskLevel: "medium"},
+			visionToolViewImage,
 			{ID: "grok-video", Name: "Grok Video", Description: "Generate videos via xAI Grok Imagine (polled until ready) and save them to the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 900, RequiresApproval: false, PermittedActions: []string{"write", "network"}, RiskLevel: "medium"},
 			{ID: "mcp-list-resources", Name: "MCP List Resources", Description: "List resources exposed by MCP servers.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
 			{ID: "mcp-read-resource", Name: "MCP Read Resource", Description: "Read one MCP resource.", Kind: "builtin", Enabled: true, TimeoutSec: 45, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
@@ -450,7 +462,41 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 3
 		changed = true
 	}
+	if m.Version < 5 {
+		// v5 introduces the view-image vision tool. Existing manifests get the
+		// tool definition, and agents already trusted with workspace reads
+		// (file-read) get it allowed.
+		m.ensureVisionTools()
+		m.Version = 5
+		changed = true
+	}
 	return changed
+}
+
+// ensureVisionTools retrofits the view-image tool into a manifest that
+// predates it. The definition is added when absent; each agent's allow-list
+// grows the tool only when it already holds file-read, so an operator's
+// deliberate restrictions are preserved.
+func (m *AgentManifest) ensureVisionTools() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == visionToolViewImage.ID {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, visionToolViewImage)
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["file-read"] && !allowed["view-image"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "view-image")
+		}
+	}
 }
 
 func (m AgentManifest) Validate() error {
