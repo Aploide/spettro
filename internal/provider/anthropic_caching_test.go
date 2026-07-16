@@ -5,6 +5,8 @@ import (
 
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
 	anthropic "github.com/anthropics/anthropic-sdk-go"
+
+	"spettro/internal/models"
 )
 
 func TestAnthropicPromptCachingSystem(t *testing.T) {
@@ -73,7 +75,7 @@ func TestFantasyAnthropicCacheControlPlacement(t *testing.T) {
 			{Role: RoleUser, Content: "turn2"},
 		},
 	}
-	call := buildFantasyCall("anthropic", req)
+	call := buildFantasyCall("anthropic", models.APIAnthropic, req)
 	if len(call.Prompt) < 2 {
 		t.Fatalf("expected >=2 prompt messages, got %d", len(call.Prompt))
 	}
@@ -99,7 +101,7 @@ func TestNonAnthropicNoCache(t *testing.T) {
 			{Role: RoleUser, Content: "turn2"},
 		},
 	}
-	call := buildFantasyCall("openai", req)
+	call := buildFantasyCall("openai", models.APIOpenAI, req)
 	for _, msg := range call.Prompt {
 		cc := fantasyanthropic.GetCacheControl(msg.ProviderOptions)
 		if cc != nil {

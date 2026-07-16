@@ -168,7 +168,11 @@ type AnthropicAdapter struct {
 func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
 	opts := []anthropicOption.RequestOption{anthropicOption.WithAPIKey(a.APIKey)}
 	if a.BaseURL != "" {
-		opts = append(opts, anthropicOption.WithBaseURL(a.BaseURL))
+		// The Anthropic SDK appends /v1/messages to the base URL, so we
+		// must strip any trailing /v1 from the catalog's base URL to
+		// avoid doubling it (e.g. /v1/v1/messages).
+		stripped := strings.TrimSuffix(a.BaseURL, "/v1")
+		opts = append(opts, anthropicOption.WithBaseURL(stripped))
 	}
 	client := anthropic.NewClient(opts...)
 
