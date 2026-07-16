@@ -76,6 +76,10 @@ type acpSession struct {
 	// every approval decision. Updated by /permission and the permission
 	// config option so a mid-run change (e.g. to yolo) applies immediately.
 	permission config.PermissionLevel
+	// autoCompactFailures counts consecutive failed auto-compactions; past
+	// the configured maximum, auto compaction pauses (mirrors the TUI) and
+	// the pre-turn guard falls back to asking the user instead.
+	autoCompactFailures int
 }
 
 var _ acpsdk.Agent = (*bridge)(nil)
@@ -338,7 +342,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			}
 			defer finish()
 			turn.ctx = runCtx
+			b.ensureContextHeadroom(runCtx, s, &cfg, turn)
 			return b.runGoalCommand(runCtx, s, &cfg, turn, trimmedTask)
+		}
+		if fields := strings.Fields(trimmedTask); fields[0] == "/compact" {
+			return b.handleCompactCommand(ctx, s, &cfg, turn, trimmedTask)
 		}
 		b.mu.Lock()
 		reply, _, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
@@ -377,6 +385,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	}
 	defer finish()
 	turn.ctx = runCtx
+
+	// Pre-turn context guard: the carried history must never enter a run so
+	// large that compaction itself can no longer fit in the window. Compact
+	// automatically when enabled, or ask the user before the window fills.
+	b.ensureContextHeadroom(runCtx, s, &cfg, turn)
 
 	b.mu.Lock()
 	agentID := s.agentID

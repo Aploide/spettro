@@ -30,6 +30,7 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "thinking", Description: "set extended-thinking level", Input: hintInput("off|low|medium|high|x-high|max")},
 	{Name: "goal", Description: "work autonomously toward an objective", Input: hintInput("<objective> | status")},
 	{Name: "memory", Description: "show, add to, or clear persistent memory", Input: hintInput("[show | add [user|project] <fact> | clear [user|project|all]]")},
+	{Name: "compact", Description: "summarize older history to free context", Input: hintInput("[auto <status|on|off>]")},
 	{Name: "clear", Description: "clear conversation history"},
 }
 
@@ -294,4 +295,6 @@ const acpHelpText = `commands:
   /memory [show]        show persistent memory (user + project)
   /memory add [user|project] <fact>   save one fact to persistent memory
   /memory clear [user|project|all]    erase saved memory
+  /compact              summarize older history to free context window space
+  /compact auto <status|on|off>       manage automatic compaction
   /clear                clear conversation history`
