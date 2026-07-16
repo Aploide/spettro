@@ -801,75 +801,10 @@ func emitNarration(cfg toolLoopConfig, text string) {
 
 // maybeCompactConv summarizes the older portion of convMsgs into a single
 // synthetic message when the estimated request size approaches the context
-// window. Preserves the first user turn (the task) and the most recent turns
-// verbatim, replacing the middle with a model-produced summary. Returns the
-// (possibly shortened) slice, whether it compacted, and any error.
+// window. The cut/summarize core lives in compactpkg.CompactHistory (shared
+// with the ACP bridge's between-turn compaction); this wrapper supplies the
+// runtime's summarizer routing.
 func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs []provider.Message, window int) ([]provider.Message, bool, error) {
-	if len(msgs) <= 5 {
-		return msgs, false, nil
-	}
-	if window <= 0 {
-		window = 128000 // sane default so compaction always has a threshold
-	}
-	allContent := make([]string, 0, 1+len(msgs))
-	allContent = append(allContent, system)
-	for _, m := range msgs {
-		allContent = append(allContent, m.Content)
-		for _, tc := range m.ToolCalls {
-			allContent = append(allContent, tc.Name, string(tc.Args))
-		}
-		for _, tr := range m.ToolResults {
-			allContent = append(allContent, tr.Output)
-		}
-	}
-	estimate := budget.EstimateTokens(allContent...)
-	eval := compactpkg.Evaluate(window, compactpkg.Config{AutoEnabled: true, AutoThresholdPct: 0, MaxFailures: 3}, compactpkg.State{TokensUsed: estimate})
-	if !eval.ShouldAutoCompact && !eval.IsError {
-		return msgs, false, nil
-	}
-
-	// Keep the first user turn (task) and the last K turns verbatim.
-	const keepLast = 4
-	cutEnd := len(msgs) - keepLast
-	if cutEnd <= 1 {
-		return msgs, false, nil
-	}
-	// Never split an assistant ToolCalls message from its following user
-	// ToolResults message. Move the boundary forward (into the kept tail)
-	// until it lands on a safe cut point.
-	for cutEnd > 1 {
-		if len(msgs[cutEnd-1].ToolCalls) > 0 && cutEnd < len(msgs) {
-			cutEnd++
-			continue
-		}
-		break
-	}
-	if cutEnd <= 1 {
-		return msgs, false, nil
-	}
-	middle := msgs[1:cutEnd]
-	if len(middle) == 0 {
-		return msgs, false, nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString("Summarize this portion of an autonomous coding session. Preserve every decision, file changed, command run and its result, and all remaining work. Output only the summary.\n\n")
-	for _, m := range middle {
-		sb.WriteString("--- turn ---\n")
-		sb.WriteString(fmt.Sprintf("role: %s\n", m.Role))
-		if m.Content != "" {
-			sb.WriteString("content:\n")
-			sb.WriteString(m.Content)
-			sb.WriteString("\n")
-		}
-		for _, tc := range m.ToolCalls {
-			sb.WriteString(fmt.Sprintf("tool_call: %s args=%s\n", tc.Name, truncate(string(tc.Args), 200)))
-		}
-		for _, tr := range m.ToolResults {
-			sb.WriteString(fmt.Sprintf("tool_result[%s]: %s\n", tr.Name, truncate(tr.Output, 500)))
-		}
-	}
-
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
 	}
@@ -877,35 +812,22 @@ func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs 
 	// small/cheap model when configured and fall back silently through the
 	// chain on availability failures — the main conversation model (and its
 	// prompt cache) is unaffected either way.
-	primary := r.internalModelRef
-	if primary.IsZero() || !r.providerMgr.HasModel(primary.Provider, primary.Model) {
-		primary = provider.ModelRef{Provider: r.providerName(), Model: r.modelName()}
+	send := func(ctx context.Context, req provider.Request) (provider.Response, error) {
+		primary := r.internalModelRef
+		if primary.IsZero() || !r.providerMgr.HasModel(primary.Provider, primary.Model) {
+			primary = provider.ModelRef{Provider: r.providerName(), Model: r.modelName()}
+		}
+		chain := r.fallbackChain
+		if r.fallbackMode == config.FallbackOff {
+			chain = nil
+		}
+		return provider.SendWithFallback(ctx,
+			func(ctx context.Context, ref provider.ModelRef, req provider.Request) (provider.Response, error) {
+				return r.providerMgr.Send(ctx, ref.Provider, ref.Model, req)
+			},
+			primary, chain, req, nil)
 	}
-	chain := r.fallbackChain
-	if r.fallbackMode == config.FallbackOff {
-		chain = nil
-	}
-	resp, err := provider.SendWithFallback(ctx,
-		func(ctx context.Context, ref provider.ModelRef, req provider.Request) (provider.Response, error) {
-			return r.providerMgr.Send(ctx, ref.Provider, ref.Model, req)
-		},
-		primary, chain,
-		provider.Request{Prompt: sb.String(), MaxTokens: 0}, nil)
-	if err != nil {
-		return msgs, false, fmt.Errorf("compaction summarizer: %w", err)
-	}
-	summary := strings.TrimSpace(resp.Content)
-	if summary == "" {
-		return msgs, false, fmt.Errorf("compaction: empty summary")
-	}
-	out := make([]provider.Message, 0, 2+keepLast)
-	out = append(out, msgs[0])
-	out = append(out, provider.Message{
-		Role:    provider.RoleUser,
-		Content: "[earlier progress summarized]\n" + summary,
-	})
-	out = append(out, msgs[cutEnd:]...)
-	return out, true, nil
+	return compactpkg.CompactHistory(ctx, send, system, msgs, window, false)
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
