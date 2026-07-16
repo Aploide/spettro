@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+
+	"spettro/internal/models"
 )
 
 func toolResultConversation(images ...string) Request {
@@ -27,7 +29,7 @@ func TestToolResultImagesAnthropicMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	call := buildFantasyCall("anthropic", toolResultConversation(img))
+	call := buildFantasyCall("anthropic", models.APIAnthropic, toolResultConversation(img))
 	if len(call.Prompt) != 3 {
 		t.Fatalf("expected 3 prompt messages (user, assistant, tool), got %d", len(call.Prompt))
 	}
@@ -59,7 +61,7 @@ func TestToolResultImagesAnthropicMedia(t *testing.T) {
 func TestToolResultImagesNonAnthropicSpillToUserTurn(t *testing.T) {
 	img := writeTestImage(t)
 	for _, providerName := range []string{"openai", "ollama"} {
-		call := buildFantasyCall(providerName, toolResultConversation(img))
+		call := buildFantasyCall(providerName, models.APIOpenAI, toolResultConversation(img))
 		if len(call.Prompt) != 4 {
 			t.Fatalf("%s: expected 4 prompt messages (spill user turn appended), got %d", providerName, len(call.Prompt))
 		}
@@ -85,7 +87,7 @@ func TestToolResultImagesNonAnthropicSpillToUserTurn(t *testing.T) {
 func TestToolResultExtraImagesSpillOnAnthropic(t *testing.T) {
 	img1 := writeTestImage(t)
 	img2 := writeTestImage(t)
-	call := buildFantasyCall("anthropic", toolResultConversation(img1, img2))
+	call := buildFantasyCall("anthropic", models.APIAnthropic, toolResultConversation(img1, img2))
 	if len(call.Prompt) != 4 {
 		t.Fatalf("expected 4 prompt messages, got %d", len(call.Prompt))
 	}
@@ -98,7 +100,11 @@ func TestToolResultExtraImagesSpillOnAnthropic(t *testing.T) {
 // instead of failing the request or appending an empty image turn.
 func TestToolResultImagesUnreadableFileDegradesToText(t *testing.T) {
 	for _, providerName := range []string{"anthropic", "openai"} {
-		call := buildFantasyCall(providerName, toolResultConversation("/no/such/image.png"))
+		apiKind := models.APIOpenAI
+		if providerName == "anthropic" {
+			apiKind = models.APIAnthropic
+		}
+		call := buildFantasyCall(providerName, apiKind, toolResultConversation("/no/such/image.png"))
 		if len(call.Prompt) != 3 {
 			t.Fatalf("%s: expected 3 prompt messages (no spill turn), got %d", providerName, len(call.Prompt))
 		}

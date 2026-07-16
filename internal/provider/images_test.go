@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+"spettro/internal/models"
 )
 
 func writeTestImage(t *testing.T) string {
@@ -38,7 +39,7 @@ func TestFantasyCallCarriesMessageImages(t *testing.T) {
 			{Role: RoleUser, ToolResults: []ToolResult{{ID: "1", Name: "file-read", Output: "data"}}},
 		},
 	}
-	call := buildFantasyCall("anthropic", req)
+	call := buildFantasyCall("anthropic", models.APIAnthropic, req)
 	if len(call.Prompt) == 0 {
 		t.Fatal("empty prompt")
 	}
@@ -58,7 +59,7 @@ func TestFantasyCallAttachesRequestImagesToLastUserTurn(t *testing.T) {
 			{Role: RoleUser, Content: "current turn"},
 		},
 	}
-	call := buildFantasyCall("openai", req)
+	call := buildFantasyCall("openai", models.APIOpenAI, req)
 	last := call.Prompt[len(call.Prompt)-1]
 	if got := imagePartsOf(last); got != 1 {
 		t.Fatalf("expected 1 image part on last user turn, got %d", got)
@@ -71,7 +72,7 @@ func TestFantasyCallAttachesRequestImagesToLastUserTurn(t *testing.T) {
 // Prompt-only requests (Chatter.Reply) still carry images.
 func TestFantasyCallPromptPathImages(t *testing.T) {
 	img := writeTestImage(t)
-	call := buildFantasyCall("anthropic", Request{Prompt: "what is this", Images: []string{img}})
+	call := buildFantasyCall("anthropic", models.APIAnthropic, Request{Prompt: "what is this", Images: []string{img}})
 	if got := imagePartsOf(call.Prompt[0]); got != 1 {
 		t.Fatalf("expected 1 image part, got %d", got)
 	}

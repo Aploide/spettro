@@ -4,6 +4,7 @@
 - [Commands and keybindings](commands.md)
 - [Custom slash commands](custom-commands.md) — reusable prompts as your own `/commands`
 - [Configuration and storage](configuration.md)
+- [OS sandboxing](sandbox.md) — kernel-level confinement for agent shell commands
 - [Architecture overview](architecture.md)
 - [Session Lifecycle](session.md) — auto-save, resume, compact, clear, auto-compact
 - [Goal Mode](goal.md) — autonomous `/goal` runs

@@ -544,7 +544,9 @@ func (m *Manager) VerifyKey(ctx context.Context, providerID, apiKey string) erro
 	case providerID == "anthropic" || apiKind == models.APIAnthropic:
 		root := "https://api.anthropic.com"
 		if providerID != "anthropic" && baseURL != "" {
-			root = strings.TrimRight(baseURL, "/")
+			// Strip trailing /v1 if present (the Anthropic SDK path
+			// already includes it; we only need the API root).
+			root = strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/v1")
 		}
 		testURL = root + "/v1/models"
 		headers["x-api-key"] = apiKey

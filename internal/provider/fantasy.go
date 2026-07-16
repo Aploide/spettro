@@ -28,7 +28,7 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		return Response{}, err
 	}
 
-	resp, err := model.Generate(ctx, buildFantasyCall(providerName, req))
+	resp, err := model.Generate(ctx, buildFantasyCall(providerName, apiKind, req))
 	if err != nil {
 		return Response{}, err
 	}
@@ -69,7 +69,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		return Response{}, err
 	}
 
-	stream, err := model.Stream(ctx, buildFantasyCall(providerName, req))
+	stream, err := model.Stream(ctx, buildFantasyCall(providerName, apiKind, req))
 	if err != nil {
 		return Response{}, err
 	}
@@ -132,9 +132,16 @@ func usageFromFantasy(u fantasy.Usage) Usage {
 	}
 }
 
+// isAnthropicAPI reports whether the provider uses the Anthropic wire
+// protocol, either because it IS the built-in anthropic provider or because
+// the catalog marks it as api: "anthropic".
+func isAnthropicAPI(providerName, apiKind string) bool {
+	return providerName == "anthropic" || apiKind == models.APIAnthropic
+}
+
 // buildFantasyCall assembles the shared fantasy.Call used by both the streaming
 // and non-streaming paths.
-func buildFantasyCall(providerName string, req Request) fantasy.Call {
+func buildFantasyCall(providerName, apiKind string, req Request) fantasy.Call {
 	var prompt fantasy.Prompt
 	if len(req.Messages) > 0 {
 		if req.System != "" {
@@ -156,7 +163,7 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 					// an immediately following user turn instead.
 					var spillImages []string
 					for _, tr := range m.ToolResults {
-						if providerName == "anthropic" && len(tr.Images) > 0 {
+						if isAnthropicAPI(providerName, apiKind) && len(tr.Images) > 0 {
 							if media, ok := loadToolResultMedia(tr.Images[0], tr.Output); ok {
 								parts = append(parts, fantasy.ToolResultPart{
 									ToolCallID: tr.ID,
@@ -209,7 +216,7 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 				prompt = append(prompt, fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: parts})
 			}
 		}
-		if providerName == "anthropic" {
+		if isAnthropicAPI(providerName, apiKind) {
 			// Two cache breakpoints: the system prompt and the final message.
 			// Marking the FINAL message caches the whole request — including
 			// the newest tool results, which are often the largest blocks — so
@@ -257,7 +264,7 @@ func buildFantasyCall(providerName string, req Request) fantasy.Call {
 		// won't include reasoning. This matches Spettro's documented
 		// behaviour: thinking levels are honoured by Anthropic, ignored
 		// elsewhere.
-		if providerName == "anthropic" {
+		if isAnthropicAPI(providerName, apiKind) {
 			budgetInt := int64(budget)
 			call.ProviderOptions = fantasy.ProviderOptions{
 				"anthropic": &fantasyanthropic.ProviderOptions{
@@ -318,8 +325,12 @@ func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.
 		}
 		// The official provider uses the SDK's default endpoint; only
 		// anthropic-compatible third parties need an explicit base URL.
+		// The Anthropic SDK appends /v1/messages to the base URL, so we
+		// must strip any trailing /v1 from the catalog's base URL to
+		// avoid doubling it (e.g. /v1/v1/messages).
 		if providerName != "anthropic" && baseURL != "" {
-			opts = append(opts, fantasyanthropic.WithBaseURL(baseURL))
+			stripped := strings.TrimSuffix(baseURL, "/v1")
+			opts = append(opts, fantasyanthropic.WithBaseURL(stripped))
 		}
 		return fantasyanthropic.New(opts...)
 	case providerName == "openai":
