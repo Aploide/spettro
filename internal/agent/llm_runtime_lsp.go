@@ -40,7 +40,7 @@ func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (st
 	}
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp servers configured (add .spettro/lsp.json with a servers entry)")
+		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
 	}
 	if strings.TrimSpace(args.Path) == "" {
 		out := m.WorkspaceDiagnostics()
@@ -87,7 +87,7 @@ func (r *toolRuntime) runLSPReferences(ctx context.Context, rawArgs []byte) (str
 	}
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp servers configured (add .spettro/lsp.json with a servers entry)")
+		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
 	}
 	abs, _, err := r.resolvePath(args.Path)
 	if err != nil {
@@ -109,7 +109,7 @@ func (r *toolRuntime) runLSPRestart(rawArgs []byte) (string, error) {
 	}
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp servers configured (add .spettro/lsp.json with a servers entry)")
+		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
 	}
 	return m.Restart(strings.TrimSpace(args.Server)), nil
 }

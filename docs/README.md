@@ -11,6 +11,7 @@
 - [Agent Skills](skills.md)
 - [Runtime Hooks](hooks.md) — custom bash middleware for tool events
 - [Checkpointing and Rewind](checkpointing.md) — auto-snapshots before file edits, `/rewind`
+- [Language Server (LSP) Integration](lsp.md) — zero-config diagnostics, references, go-to-definition
 - [Web Tools](web-tools.md) — web-search, web-fetch markdown engine, download
 - [Vision](vision.md) — view-image tool, agent-driven screenshots
 - [Persistent Memory](memory.md) — save-memory tool, `/memory`, cross-session context
