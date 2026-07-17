@@ -64,7 +64,9 @@ Then open the Agent Panel and pick *Spettro* as the agent.
 - **Streaming** — the model's reasoning streams live as thought chunks and
   every tool call is reported with kind, status, file locations, and output,
   so the editor can render progress and follow the agent across files. The
-  final answer is sent when the turn completes.
+  final answer is sent as a single `agent_message` block when the turn
+  completes (the internal stream has draft-reset semantics, so the answer is
+  flushed from the authoritative final content rather than chunked).
 - **Plan** — whenever the agent updates its session task graph (`task-create`,
   `task-update`, `task-delete`, or the legacy `todo-write`), the full task list is mirrored
   to the client as an ACP `plan` update in dependency order, so editors with
@@ -75,13 +77,19 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   approval prompt. With `/permission yolo` set in Spettro's config, shell
   commands run without asking.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
-  `/thinking`, `/goal`, and `/clear` are advertised to the client
-  (`available_commands_update`). Config commands resolve in one turn without
-  invoking the model; `/models` with no argument lists the connected models,
-  and `/models provider:model [api_key]` switches the active one. `/goal
-  <objective>` runs the autonomous goal loop inside the prompt turn — cancel
-  the turn to stop it. Anything needing a TUI dialog (`/skill`, `/mcp`,
-  `/resume`, ...) is not available over ACP yet.
+  `/thinking`, `/goal`, `/memory`, `/compact`, and `/clear` are advertised to
+  the client (`available_commands_update`). Config commands resolve in one
+  turn without invoking the model; `/models` with no argument lists the
+  connected models, and `/models provider:model [api_key]` switches the
+  active one. `/memory show|add|clear` edits the persistent memory store
+  (the same one the TUI's `/memory` command uses); the dialog-only `edit`,
+  `review`, and `mine` sub-commands remain TUI-only. `/compact [auto
+  <status|on|off>]` summarizes older history to free context window space.
+  `/goal <objective>` runs the autonomous goal loop inside the prompt turn
+  — cancel the turn to stop it. Anything else needing a TUI dialog
+  (`/skill`, `/mcp`, ...) is not available over ACP yet. `/resume` is
+  intentionally not advertised: the editor's own session picker drives
+  `session/load` instead (see below).
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
   context, and images are accepted in prompts.
 - **Tool-call images** — when a tool attaches an image for the model (the
@@ -103,6 +111,27 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   keep it: sending `session/cancel` first stops the run, and the next prompt
   starts a fresh turn. A steering message the run never reached is held and
   delivered at the start of the session's next turn.
+- **Session persistence** — `session/load`, `session/resume`, and
+  `session/list` are fully supported (the agent advertises `LoadSession:
+  true`, plus `SessionCapabilities.List` and `SessionCapabilities.Resume` at
+  `initialize`). All three are backed by Spettro's on-disk session store, so
+  conversations started in either the TUI or the ACP client are visible to
+  both:
+  - `session/load` — restores the stored session under its original ID and
+    **replays** the transcript to the client as `user_message`,
+    `agent_thought`, and `agent_message` session updates in order, so the
+    editor rebuilds its conversation view from scratch. The first prompt
+    after a load also gets a flattened copy of the transcript as bounded
+    `role: line` history (capped at 32 KiB) so the model has the prior
+    context before any new messages are added.
+  - `session/resume` — restores the session under its original ID and
+    re-announces config options, but skips the replay (the client already
+    holds the transcript).
+  - `session/list` — enumerates the on-disk store, optionally filtered to
+    the request's `cwd`, newest first. Each entry carries the session id,
+    project path, title (first user prompt preview), and `updatedAt`.
 
-Session persistence (`session/load`) and ACP-provided MCP servers are not
-supported yet; Spettro's own MCP configuration applies as usual.
+  Sessions persist automatically after every prompt turn, so the editor's
+  session picker stays current without any explicit save action. MCP
+  servers provided by the editor in `session/new` are still ignored;
+  Spettro's own MCP configuration applies as usual.
