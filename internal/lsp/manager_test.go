@@ -24,43 +24,104 @@ func TestPositionOfSymbol(t *testing.T) {
 	}
 }
 
-func TestLoadConfig(t *testing.T) {
-	root := t.TempDir()
-	if _, ok := loadConfig(root); ok {
-		t.Fatal("no config file should mean disabled")
+// stubLookPath makes only the named commands "installed" for the test.
+func stubLookPath(t *testing.T, found ...string) {
+	t.Helper()
+	orig := lookPath
+	lookPath = func(cmd string) (string, error) {
+		for _, f := range found {
+			if cmd == f {
+				return "/usr/bin/" + cmd, nil
+			}
+		}
+		return "", os.ErrNotExist
 	}
+	t.Cleanup(func() { lookPath = orig })
+}
+
+func writeLspJSON(t *testing.T, root string, cfg Config) {
+	t.Helper()
 	dir := filepath.Join(root, ".spettro")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Servers: map[string]ServerConfig{"go": {Command: "gopls", Enabled: true}}}
 	raw, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(dir, "lsp.json"), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestLoadConfigZeroConfig(t *testing.T) {
+	root := t.TempDir()
+
+	// nothing on PATH, no config file → disabled
+	stubLookPath(t)
+	if _, ok := loadConfig(root); ok {
+		t.Fatal("no servers on PATH should mean disabled")
+	}
+
+	// gopls on PATH → enabled with no config file at all
+	stubLookPath(t, "gopls")
+	got, ok := loadConfig(root)
+	if !ok {
+		t.Fatal("gopls on PATH should enable lsp with zero config")
+	}
+	sc := got.Servers["go"]
+	if sc.Command != "gopls" || !sc.enabled() || len(sc.Filetypes) != 1 || sc.Filetypes[0] != ".go" {
+		t.Fatalf("unexpected auto-detected go server: %+v", sc)
+	}
+
+	// candidate fallback: pylsp is picked when pyright is absent
+	stubLookPath(t, "pylsp")
+	got, ok = loadConfig(root)
+	if !ok || got.Servers["python"].Command != "pylsp" {
+		t.Fatalf("expected pylsp fallback, got %+v ok=%v", got.Servers["python"], ok)
+	}
+}
+
+func TestLoadConfigOverride(t *testing.T) {
+	root := t.TempDir()
+	stubLookPath(t, "gopls")
+
+	// override command for a key not on PATH
+	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{
+		"zig": {Command: "zls", Filetypes: []string{".zig"}},
+	}})
 	got, ok := loadConfig(root)
 	if !ok {
 		t.Fatal("expected enabled config")
 	}
-	if fts := got.Servers["go"].Filetypes; len(fts) != 1 || fts[0] != ".go" {
-		t.Fatalf("expected default .go filetypes, got %v", fts)
+	if got.Servers["go"].Command != "gopls" || got.Servers["zig"].Command != "zls" {
+		t.Fatalf("expected detected go plus user zig, got %+v", got.Servers)
 	}
 
-	// disabled server → treated as no LSP
-	cfg.Servers["go"] = ServerConfig{Command: "gopls", Enabled: false}
-	raw, _ = json.Marshal(cfg)
-	if err := os.WriteFile(filepath.Join(dir, "lsp.json"), raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// commandless entry with enabled:false disables the detected server
+	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{
+		"go": {Enabled: boolPtr(false)},
+	}})
 	if _, ok := loadConfig(root); ok {
-		t.Fatal("disabled server should mean disabled")
+		t.Fatal("disabling the only detected server should mean disabled")
+	}
+
+	// explicit command override still gets default filetypes for known keys
+	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{
+		"go": {Command: "custom-gopls"},
+	}})
+	got, ok = loadConfig(root)
+	if !ok || got.Servers["go"].Command != "custom-gopls" {
+		t.Fatalf("expected command override, got %+v ok=%v", got.Servers["go"], ok)
+	}
+	if fts := got.Servers["go"].Filetypes; len(fts) != 1 || fts[0] != ".go" {
+		t.Fatalf("expected default .go filetypes, got %v", fts)
 	}
 }
 
 func TestServerKeyFor(t *testing.T) {
 	m := &Manager{cfg: Config{Servers: map[string]ServerConfig{
-		"go":         {Command: "gopls", Enabled: true, Filetypes: []string{".go"}},
-		"typescript": {Command: "tsserver", Enabled: true, Filetypes: []string{".ts", ".tsx"}},
+		"go":         {Command: "gopls", Filetypes: []string{".go"}},
+		"typescript": {Command: "tsserver", Filetypes: []string{".ts", ".tsx"}},
 	}}, clients: map[string]*Client{}, broken: map[string]string{}}
 	if key, ok := m.serverKeyFor("/x/main.go"); !ok || key != "go" {
 		t.Fatalf("got %q ok=%v", key, ok)

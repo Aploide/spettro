@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -12,36 +13,69 @@ import (
 	"time"
 )
 
-// ServerConfig describes one language server. Users configure `command` and
-// `enabled` in .spettro/lsp.json; args/filetypes/language ids fall back to
-// built-in defaults for well-known server keys (go, typescript, python, rust).
+// ServerConfig describes one language server. LSP works with zero config:
+// well-known servers are auto-detected on PATH for the built-in server keys
+// (go, typescript, python, rust, c, cpp, csharp, swift). .spettro/lsp.json is
+// an optional override: entries replace the built-in defaults per key, and
+// `"enabled": false` turns a server off. A missing `enabled` means enabled.
 type ServerConfig struct {
 	Command   string   `json:"command"`
 	Args      []string `json:"args,omitempty"`
-	Enabled   bool     `json:"enabled"`
+	Enabled   *bool    `json:"enabled,omitempty"`
 	Filetypes []string `json:"filetypes,omitempty"` // extensions like ".go"
 }
+
+func (sc ServerConfig) enabled() bool { return sc.Enabled == nil || *sc.Enabled }
 
 // Config is the on-disk shape of .spettro/lsp.json.
 type Config struct {
 	Servers map[string]ServerConfig `json:"servers"`
 }
 
-var defaultFiletypes = map[string][]string{
-	"go":         {".go"},
-	"typescript": {".ts", ".tsx", ".js", ".jsx"},
-	"python":     {".py"},
-	"rust":       {".rs"},
+// builtinServer lists candidate commands for a server key; the first one found
+// on PATH wins, so e.g. python works with either pyright or pylsp installed.
+type builtinServer struct {
+	candidates []ServerConfig
+	filetypes  []string
 }
 
+var builtinServers = map[string]builtinServer{
+	"go":         {candidates: []ServerConfig{{Command: "gopls"}}, filetypes: []string{".go"}},
+	"typescript": {candidates: []ServerConfig{{Command: "typescript-language-server", Args: []string{"--stdio"}}}, filetypes: []string{".ts", ".tsx", ".js", ".jsx"}},
+	"python":     {candidates: []ServerConfig{{Command: "pyright-langserver", Args: []string{"--stdio"}}, {Command: "pylsp"}}, filetypes: []string{".py"}},
+	"rust":       {candidates: []ServerConfig{{Command: "rust-analyzer"}}, filetypes: []string{".rs"}},
+	"c":          {candidates: []ServerConfig{{Command: "clangd"}}, filetypes: []string{".c", ".h"}},
+	"cpp":        {candidates: []ServerConfig{{Command: "clangd"}}, filetypes: []string{".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"}},
+	"csharp":     {candidates: []ServerConfig{{Command: "csharp-ls"}, {Command: "OmniSharp", Args: []string{"-lsp"}}, {Command: "omnisharp", Args: []string{"-lsp"}}}, filetypes: []string{".cs"}},
+	"swift":      {candidates: []ServerConfig{{Command: "sourcekit-lsp"}}, filetypes: []string{".swift"}},
+}
+
+var defaultFiletypes = func() map[string][]string {
+	m := make(map[string][]string, len(builtinServers))
+	for k, b := range builtinServers {
+		m[k] = b.filetypes
+	}
+	return m
+}()
+
 var extLanguageID = map[string]string{
-	".go":  "go",
-	".ts":  "typescript",
-	".tsx": "typescriptreact",
-	".js":  "javascript",
-	".jsx": "javascriptreact",
-	".py":  "python",
-	".rs":  "rust",
+	".go":    "go",
+	".ts":    "typescript",
+	".tsx":   "typescriptreact",
+	".js":    "javascript",
+	".jsx":   "javascriptreact",
+	".py":    "python",
+	".rs":    "rust",
+	".c":     "c",
+	".h":     "c",
+	".cpp":   "cpp",
+	".cc":    "cpp",
+	".cxx":   "cpp",
+	".hpp":   "cpp",
+	".hh":    "cpp",
+	".hxx":   "cpp",
+	".cs":    "csharp",
+	".swift": "swift",
 }
 
 func languageIDForPath(path, serverKey string) string {
@@ -51,37 +85,70 @@ func languageIDForPath(path, serverKey string) string {
 	return serverKey
 }
 
-// loadConfig reads the project config, falling back to the user-global one.
-// A missing config means LSP is disabled for the workspace.
+// lookPath is exec.LookPath, swappable in tests.
+var lookPath = exec.LookPath
+
+// detectBuiltinServers returns the built-in servers whose binary is on PATH.
+func detectBuiltinServers() map[string]ServerConfig {
+	servers := map[string]ServerConfig{}
+	for key, b := range builtinServers {
+		for _, cand := range b.candidates {
+			if _, err := lookPath(cand.Command); err == nil {
+				cand.Filetypes = b.filetypes
+				servers[key] = cand
+				break
+			}
+		}
+	}
+	return servers
+}
+
+// loadConfig builds the effective config: built-in servers auto-detected on
+// PATH, overlaid by the optional user configs (~/.spettro/lsp.json first, then
+// the project's .spettro/lsp.json, so the project wins per server key). false
+// means no usable server, and LSP silently degrades for the workspace.
 func loadConfig(root string) (Config, bool) {
-	paths := []string{filepath.Join(root, ".spettro", "lsp.json")}
+	cfg := Config{Servers: detectBuiltinServers()}
+	var paths []string
 	if home, err := os.UserHomeDir(); err == nil {
 		paths = append(paths, filepath.Join(home, ".spettro", "lsp.json"))
 	}
+	paths = append(paths, filepath.Join(root, ".spettro", "lsp.json"))
 	for _, p := range paths {
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		var cfg Config
-		if json.Unmarshal(raw, &cfg) != nil {
+		var user Config
+		if json.Unmarshal(raw, &user) != nil {
 			continue
 		}
-		enabled := false
-		for key, sc := range cfg.Servers {
+		for key, sc := range user.Servers {
+			if strings.TrimSpace(sc.Command) == "" {
+				// no command in the override: keep the detected one, but let
+				// the entry toggle it (e.g. {"enabled": false})
+				if base, ok := cfg.Servers[key]; ok {
+					base.Enabled = sc.Enabled
+					if len(sc.Filetypes) > 0 {
+						base.Filetypes = sc.Filetypes
+					}
+					cfg.Servers[key] = base
+				}
+				continue
+			}
 			if len(sc.Filetypes) == 0 {
 				sc.Filetypes = defaultFiletypes[key]
-				cfg.Servers[key] = sc
 			}
-			if sc.Enabled && strings.TrimSpace(sc.Command) != "" && len(sc.Filetypes) > 0 {
-				enabled = true
-			}
-		}
-		if enabled {
-			return cfg, true
+			cfg.Servers[key] = sc
 		}
 	}
-	return Config{}, false
+	enabled := false
+	for _, sc := range cfg.Servers {
+		if sc.enabled() && strings.TrimSpace(sc.Command) != "" && len(sc.Filetypes) > 0 {
+			enabled = true
+		}
+	}
+	return cfg, enabled
 }
 
 // Manager owns the lazily started language servers for one workspace root.
@@ -132,7 +199,7 @@ func (m *Manager) serverKeyFor(path string) (string, bool) {
 	sort.Strings(keys) // deterministic pick if two servers claim an extension
 	for _, key := range keys {
 		sc := m.cfg.Servers[key]
-		if !sc.Enabled || strings.TrimSpace(sc.Command) == "" {
+		if !sc.enabled() || strings.TrimSpace(sc.Command) == "" {
 			continue
 		}
 		for _, ft := range sc.Filetypes {
@@ -361,7 +428,7 @@ func (m *Manager) ServerKeys() []string {
 	defer m.mu.Unlock()
 	keys := make([]string, 0, len(m.cfg.Servers))
 	for k, sc := range m.cfg.Servers {
-		if sc.Enabled {
+		if sc.enabled() {
 			keys = append(keys, k)
 		}
 	}

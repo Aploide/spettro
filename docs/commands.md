@@ -31,7 +31,9 @@
 | `/skill enable <name>` / `disable <name>` | Toggle whether a skill is exposed to agents. |
 | `/skill uninstall <name>` | Remove a previously installed skill. |
 | `/skill where` | Show the discovery roots being scanned. |
+| `/skill reload` | Re-scan skill directories (after manual install/remove). |
 | `/skills` | Alias of `/skill`. |
+| `/stats` | Show session token usage and prompt-cache metrics. |
 | `/hooks` | Show effective runtime hooks (project + global). |
 | `/memory [show]` | Show persistent cross-session memory (user + project). See [Persistent Memory](memory.md). |
 | `/memory edit [user\|project]` | Edit a memory file in `$EDITOR`. |
@@ -42,8 +44,12 @@
 | `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
 | `/compact policy` | Show compact thresholds and failure counters. |
 | `/clear` | Save and clear the current conversation. |
+| `/diff [path...]` | Show diffs of files modified this session (all, or given paths). |
 | `/resume` | Open saved conversation picker. |
+| `/rewind` | Restore files and/or conversation to a pre-edit checkpoint. See [Checkpointing](checkpointing.md). |
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
+| `/jobs [list]` | List background shell jobs started by the agent. |
+| `/jobs kill <id\|all>` | Terminate a background job (or all of them). |
 | `/remote` | Start the local HTTP/SSE control plane on `127.0.0.1` (default port `7878`). |
 | `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
 | `/remote local` | Start the LAN HTTP/SSE control plane on `0.0.0.0` (default port `7878`). |
@@ -81,6 +87,7 @@
 | `Up` / `Down` | Navigate command suggestions and dialogs. |
 | `Tab` | Move selection in dialogs/palettes. |
 | `Esc` | Interrupt the current agent run (stops and abandons goals). |
+| `Esc Esc` | Open the rewind checkpoint picker (when idle). See [Checkpointing](checkpointing.md). |
 
 ## Notes
 

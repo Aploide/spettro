@@ -36,7 +36,7 @@ func TestGoplsDiagnosticsAndReferences(t *testing.T) {
 	}
 	write("go.mod", "module scratch\n\ngo 1.22\n")
 	write("main.go", "package main\n\nfunc greet() string { return \"hi\" }\n\nfunc main() {\n\tprintln(greet())\n}\n")
-	raw, _ := json.Marshal(Config{Servers: map[string]ServerConfig{"go": {Command: gopls, Enabled: true}}})
+	raw, _ := json.Marshal(Config{Servers: map[string]ServerConfig{"go": {Command: gopls}}})
 	write(".spettro/lsp.json", string(raw))
 
 	m := ForWorkspace(root)

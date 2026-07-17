@@ -222,3 +222,57 @@ rm -rf ~/.spettro/sessions/<session-id>
 ```
 
 There is no built-in session manager or retention policy yet.
+
+## Background jobs
+
+Spettro tracks detached shell processes started by the agent with `run_in_background`
+(e.g., dev servers, watch builds, long-running scripts). Jobs are **process-wide**
+session state: they outlive individual agent turns and are killed when the session
+ends.
+
+### Listing jobs
+
+```text
+/jobs
+```
+
+or
+
+```text
+/jobs list
+```
+
+Prints every tracked job with its ID, status, command, and elapsed time:
+
+```
+background jobs:
+- job-1 [running] npx vite --port 5173 (started 5m23s ago)
+- job-2 [exited] go run ./cmd/server (started 2m10s ago)
+
+kill with /jobs kill <id> or /jobs kill all
+```
+
+### Killing a job
+
+```text
+/jobs kill job-1
+```
+
+Kills the job's entire process group. Accepts any job ID shown in the listing.
+
+```text
+/jobs kill all
+```
+
+Terminates every running job at once.
+
+### Lifecycle
+
+- Jobs are created when the agent calls `bash` or `shell-exec` with
+  `run_in_background: true`.
+- Output is captured in a per-job ring buffer (up to 1 MiB of combined
+  stdout/stderr, oldest bytes dropped when exceeded).
+- When the session ends (TUI exit, `/exit`), all remaining jobs are killed
+  automatically.
+- Jobs survive `/clear` (which only resets the conversation). Use `/jobs kill all`
+  to clean up explicitly.

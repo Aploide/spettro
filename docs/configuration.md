@@ -11,9 +11,11 @@ Spettro uses both project-local and user-global storage.
 | `trusted.json` | Permanently trusted project paths. |
 | `models.json` | Cached `models.dev` catalog. |
 | `hooks.json` | Global runtime hooks fallback/default. |
+| `lsp.json` | Optional [LSP](lsp.md) overrides; servers are auto-detected on PATH with zero config. |
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
 | `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
+| `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created, never pruned). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
 
@@ -24,6 +26,7 @@ Spettro uses both project-local and user-global storage.
 | `PLAN.md` | Last generated implementation plan. |
 | `allowed_commands.json` | Commands approved with “allow always” for this project. |
 | `hooks.json` | Project runtime hooks (overrides global by `(event, matcher, id)`). |
+| `lsp.json` | Optional project [LSP](lsp.md) overrides (wins over the global file per server key). |
 | `memory.md` | [Persistent memory](memory.md): project-scope facts loaded into agent context each session. |
 | `commands/` | Project [custom slash commands](custom-commands.md); override global commands on name conflict. |
 | `index.json` | Optional project snapshot when indexer-style flow is used. |
