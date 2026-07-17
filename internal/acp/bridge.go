@@ -424,6 +424,12 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		thinking = provider.ThinkingLevel(cfg.ThinkingLevel)
 	}
 
+	contextWindow := b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel)
+	// Turn-level usage accumulation for the final PromptResponse. The
+	// callback runs on the agent goroutine and the final read happens after
+	// Run returns, so no locking is needed.
+	var turnUsage provider.Usage
+
 	ag := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: b.opts.Providers,
@@ -439,10 +445,17 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		Manifest:        &manifest,
 		SandboxState:    b.opts.SandboxState,
 		SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
-		ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
+		ContextWindow:   contextWindow,
 		Steering:        steering,
 		StreamCallback:  turn.onStream,
 		ToolCallback:    turn.onTool,
+		UsageCallback: func(ev agent.UsageEvent) {
+			turnUsage.InputTokens += ev.Usage.InputTokens
+			turnUsage.OutputTokens += ev.Usage.OutputTokens
+			turnUsage.CacheReadTokens += ev.Usage.CacheReadTokens
+			turnUsage.CacheWriteTokens += ev.Usage.CacheWriteTokens
+			turn.onUsage(ev, contextWindow)
+		},
 		PermissionFn:    livePermission,
 		ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			if livePermission() == config.PermissionYOLO {
@@ -484,8 +497,34 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 
 	return acpsdk.PromptResponse{
 		StopReason: acpsdk.StopReasonEndTurn,
+		Usage:      turnUsageResponse(turnUsage, result.TokensUsed),
 		Meta:       map[string]any{"spettro.dev/tokensUsed": result.TokensUsed},
 	}, nil
+}
+
+// turnUsageResponse converts the turn's accumulated provider usage into the
+// ACP PromptResponse usage block. When the provider reported no accounting at
+// all, only the local estimate (total) is meaningful.
+func turnUsageResponse(u provider.Usage, estimatedTotal int) *acpsdk.Usage {
+	total := u.TotalInput() + u.OutputTokens
+	if total == 0 {
+		total = estimatedTotal
+	}
+	if total == 0 {
+		return nil
+	}
+	out := &acpsdk.Usage{
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+		TotalTokens:  total,
+	}
+	if u.CacheReadTokens > 0 {
+		out.CachedReadTokens = acpsdk.Ptr(u.CacheReadTokens)
+	}
+	if u.CacheWriteTokens > 0 {
+		out.CachedWriteTokens = acpsdk.Ptr(u.CacheWriteTokens)
+	}
+	return out
 }
 
 // requestShellApproval bridges Spettro's shell approval flow to ACP's

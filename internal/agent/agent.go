@@ -163,6 +163,10 @@ type LLMAgent struct {
 	// StreamCallback, when set, receives live thinking/answer chunks as the
 	// model streams. Set only on the top-level run (chat/coding/plan/ask).
 	StreamCallback StreamCallback
+	// UsageCallback, when set, receives per-request token accounting as each
+	// LLM call inside the run completes, so hosts can update cost/context
+	// displays live instead of waiting for RunResult.
+	UsageCallback UsageCallback
 	// PermissionFn, when set, supplies the live permission level for every
 	// approval decision (instead of the Spec.Permission snapshot), so a
 	// mid-run /permission change by the user applies to the rest of the run.
@@ -242,6 +246,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Images:          a.Images,
 		ToolCallback:    a.ToolCallback,
 		StreamCallback:  a.StreamCallback,
+		UsageCallback:   a.UsageCallback,
 		Permission:      a.Spec.Permission,
 		PermissionFn:    a.PermissionFn,
 		ShellApproval:   a.ShellApproval,

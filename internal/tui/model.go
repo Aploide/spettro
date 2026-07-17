@@ -144,6 +144,13 @@ type streamChunkMsg struct {
 	chunk agent.StreamChunk
 }
 
+// usageEventMsg delivers per-request token accounting from the running agent
+// so the footer token counter and context gauge update after every LLM call
+// instead of only when the run finishes.
+type usageEventMsg struct {
+	event agent.UsageEvent
+}
+
 // modifiedFilesMsg delivers the result of an asynchronous git query for the
 // side-panel branch + modified-file list (see refreshModifiedFilesCmd).
 type modifiedFilesMsg struct {
@@ -346,6 +353,7 @@ type Model struct {
 	currentTool     *ToolItem
 	toolCh          chan agent.ToolTrace
 	streamCh        chan agent.StreamChunk
+	usageCh         chan agent.UsageEvent
 	approvalCh      chan shellApprovalRequestMsg
 	askUserCh       chan askUserRequestMsg
 	cancelAgent     context.CancelFunc
@@ -402,6 +410,10 @@ type Model struct {
 	// run's prompt+completion). It drives the goodbye stats and remote status
 	// — NOT the context gauge.
 	totalTokensUsed int
+	// liveRunTokens is the portion of the current run's cost already applied
+	// to totalTokensUsed by live usageEventMsg updates, so the done handler
+	// only adds the remainder instead of double-counting the whole run.
+	liveRunTokens int
 	// contextTokens is the approximate current context-window OCCUPANCY: the
 	// largest single LLM request of the most recent run. The compaction gauge
 	// and auto-compaction read this so a multi-step run no longer inflates the
@@ -660,6 +672,7 @@ func (m *Model) resetRunState() {
 	m.thinking = false
 	m.cancelAgent = nil
 	m.toolCh = nil
+	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
 	m.liveTools = nil
@@ -759,9 +772,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.resetRunState()
-		if msg.tokensUsed > 0 {
-			m.totalTokensUsed += msg.tokensUsed
+		// Live usage events already applied part (usually all) of this run's
+		// cost; only the remainder is added here.
+		if msg.tokensUsed > m.liveRunTokens {
+			m.totalTokensUsed += msg.tokensUsed - m.liveRunTokens
 		}
+		m.liveRunTokens = 0
 		if msg.contextTokens > 0 {
 			m.contextTokens = msg.contextTokens
 		}
@@ -856,9 +872,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Plans run through the same streaming path; drop any live draft blocks
 		// before rendering the plan card.
 		m.clearStreamMessages()
-		if msg.tokensUsed > 0 {
-			m.totalTokensUsed += msg.tokensUsed
+		if msg.tokensUsed > m.liveRunTokens {
+			m.totalTokensUsed += msg.tokensUsed - m.liveRunTokens
 		}
+		m.liveRunTokens = 0
 		if msg.contextTokens > 0 {
 			m.contextTokens = msg.contextTokens
 		}
@@ -1093,6 +1110,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.vp.SetContent(m.renderMessages())
 			m.vp.GotoBottom()
+		}
+	case usageEventMsg:
+		if m.thinking {
+			if msg.event.StepTokens > 0 {
+				m.totalTokensUsed += msg.event.StepTokens
+				m.liveRunTokens += msg.event.StepTokens
+			}
+			if msg.event.ContextTokens > m.contextTokens {
+				m.contextTokens = msg.event.ContextTokens
+			}
+			m.updateCompactWarningState()
+			if m.usageCh != nil {
+				cmds = append(cmds, waitForUsage(m.usageCh))
+			}
 		}
 	case modifiedFilesMsg:
 		m.gitBranch = msg.branch

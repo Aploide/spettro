@@ -56,6 +56,16 @@ func waitForStream(ch chan agent.StreamChunk) tea.Cmd {
 	}
 }
 
+func waitForUsage(ch chan agent.UsageEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return usageEventMsg{event: ev}
+	}
+}
+
 func waitForShellApproval(ch chan shellApprovalRequestMsg) tea.Cmd {
 	return func() tea.Msg {
 		req, ok := <-ch

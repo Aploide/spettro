@@ -55,6 +55,24 @@ func (t *turnState) onStream(c agent.StreamChunk) {
 	}
 }
 
+// onUsage forwards per-request token accounting as an ACP usage_update
+// notification so the client can render a live context gauge while the run is
+// still executing. Used carries the context occupancy (largest single
+// request), matching what the size-relative gauge needs; the cumulative turn
+// cost travels in the final PromptResponse.Usage instead.
+func (t *turnState) onUsage(ev agent.UsageEvent, contextWindow int) {
+	if contextWindow <= 0 {
+		contextWindow = 128000 // same fallback the in-loop compactor assumes
+	}
+	t.sessionUpdate(acpsdk.SessionUpdate{
+		UsageUpdate: &acpsdk.SessionUsageUpdate{
+			Size: contextWindow,
+			Used: ev.ContextTokens,
+			Meta: map[string]any{"spettro.dev/tokensUsed": ev.TotalTokens},
+		},
+	})
+}
+
 // onTool translates ToolTrace events into ACP tool_call / tool_call_update
 // notifications. "comment" traces are transient progress notes already
 // covered by the tool updates themselves, so they are dropped.

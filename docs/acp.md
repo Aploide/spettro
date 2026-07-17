@@ -67,6 +67,14 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   final answer is sent as a single `agent_message` block when the turn
   completes (the internal stream has draft-reset semantics, so the answer is
   flushed from the authoritative final content rather than chunked).
+- **Token usage** — after every LLM request inside a turn (not just at the
+  end), Spettro sends a `usage_update` session notification with the current
+  context occupancy (`used`) against the model's context window (`size`), so
+  editors that support it render a live context gauge while the agent is
+  still working. The cumulative turn cost travels in `_meta`
+  (`spettro.dev/tokensUsed`) on each update, and the completed turn's
+  aggregated accounting (input/output plus cache read/write tokens) is
+  returned in the `session/prompt` response's `usage` field.
 - **Plan** — whenever the agent updates its session task graph (`task-create`,
   `task-update`, `task-delete`, or the legacy `todo-write`), the full task list is mirrored
   to the client as an ACP `plan` update in dependency order, so editors with

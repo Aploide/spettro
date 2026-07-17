@@ -1749,6 +1749,9 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.toolCh = toolCh
 	streamCh := make(chan agent.StreamChunk, 256)
 	m.streamCh = streamCh
+	usageCh := make(chan agent.UsageEvent, 16)
+	m.usageCh = usageCh
+	m.liveRunTokens = 0
 	approvalCh := make(chan shellApprovalRequestMsg, 8)
 	m.approvalCh = approvalCh
 	askUserCh := make(chan askUserRequestMsg, 4)
@@ -1844,6 +1847,12 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			case <-ctx.Done():
 			}
 		},
+		UsageCallback: func(ev agent.UsageEvent) {
+			select {
+			case usageCh <- ev:
+			case <-ctx.Done():
+			}
+		},
 		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			respCh := make(chan shellApprovalResponse, 1)
 			select {
@@ -1881,6 +1890,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		m.spin.Tick,
 		waitForTool(toolCh),
 		waitForStream(streamCh),
+		waitForUsage(usageCh),
 		waitForShellApproval(approvalCh),
 		waitForAskUser(askUserCh),
 		func() tea.Msg {
@@ -1894,6 +1904,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			result, err := a.Run(ctx, input)
 			close(toolCh)
 			close(streamCh)
+			close(usageCh)
 			close(approvalCh)
 			close(askUserCh)
 			if err != nil {

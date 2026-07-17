@@ -45,6 +45,7 @@ func (m *Model) stopAgent() {
 	m.thinking = false
 	m.toolCh = nil
 	m.streamCh = nil
+	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
 	m.liveTools = nil

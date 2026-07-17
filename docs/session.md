@@ -183,6 +183,34 @@ failures:        0 / 3
 
 The context gauge in the status bar turns yellow at ≥75 % and red at ≥90 %.
 
+### Live updates during a run
+
+Both the context gauge and the session cost counters update **after every
+LLM request inside a turn**, not only when the agent finishes. Multi-step
+runs (tool loops, goal iterations) therefore show rising occupancy and cost
+while the agent is still working, so you can interrupt early if a run is
+burning more context or budget than expected.
+
+Two counters are kept deliberately separate:
+
+| Counter | What it measures | Status-bar role |
+| --- | --- | --- |
+| **Context occupancy** (`contextTokens`) | Largest single LLM request of the current/most recent run — how full the window is | Drives the `N / M ctx` gauge and auto-compact |
+| **Session cost** (`totalTokensUsed`) | Sum of every prompt+completion token across the whole session | Goodbye stats, remote status, `/stats` |
+
+A multi-step run that re-embeds the same history on every step does **not**
+inflate the gauge: only the largest request counts as occupancy, while each
+step still adds its cost. When the run ends, the final totals only add any
+remainder that live updates missed (for example a dropped event), so cost is
+never double-counted.
+
+`/stats` still shows the full provider-reported breakdown (input, output,
+cache read/write, per-model) once you want the detailed accounting.
+
+In [ACP mode](acp.md) the same live path emits a `usage_update` session
+notification after every request, and the completed turn's aggregated usage
+is returned on the `session/prompt` response.
+
 ## Clear (`/clear`)
 
 ```text
