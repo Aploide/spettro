@@ -157,6 +157,10 @@ type toolLoopConfig struct {
 	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
 	StreamCallback StreamCallback
+	// UsageCallback, when set, receives per-request token accounting as each
+	// LLM call completes. Only the top-level run sets it; sub-agents stay
+	// silent (their cost surfaces through the parent's tool results).
+	UsageCallback UsageCallback
 	Permission     config.PermissionLevel
 	// PermissionFn, when set, is consulted on every approval decision instead
 	// of the static Permission snapshot, so the user can change the permission
@@ -626,6 +630,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// max is robust even if the final completion is short.
 		if resp.EstimatedTokens > contextTokens {
 			contextTokens = resp.EstimatedTokens
+		}
+		if cfg.UsageCallback != nil {
+			cfg.UsageCallback(UsageEvent{
+				StepTokens:    resp.EstimatedTokens,
+				TotalTokens:   totalTokens,
+				ContextTokens: contextTokens,
+				Usage:         resp.Usage,
+			})
 		}
 
 		content := strings.TrimSpace(resp.Content)

@@ -188,8 +188,11 @@ the loop (see [ACP mode → Mid-run steering](acp.md)).
   10 minutes is usually sufficient). The headless mode applies the timeout
   from config; the TUI applies it per shell/bash tool call.
 - **Expensive models**: goal mode can accumulate many iterations (and many
-  LLM calls per iteration). Keep an eye on your token usage. The `tokens_used`
-  line in the status bar tracks cumulative session cost.
+  LLM calls per iteration). Keep an eye on your token usage. The status bar
+  context gauge and session cost counters update after every LLM request
+  (not only when a goal iteration finishes), so you can interrupt early if a
+  run is burning more budget than expected. See
+  [Session Lifecycle → Live updates during a run](session.md#live-updates-during-a-run).
 - **No undo**: goal mode makes real changes to your workspace. Use the sandbox
   (`--sandbox workspace-write` or `read-only`) as a safety net, and `git` to
   review what changed before committing.
