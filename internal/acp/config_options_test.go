@@ -76,6 +76,25 @@ func TestBuildConfigOptions_PermissionCurrentValue(t *testing.T) {
 	t.Fatal("no permission config option was produced")
 }
 
+// TestBuildConfigOptions_ThinkingAlwaysPresent pins that the thinking
+// selector is offered even when the active model is unknown or not
+// reasoning-capable: the client toolbar must never lose the control, and it
+// shows "off" as the current value when no level is set.
+func TestBuildConfigOptions_ThinkingAlwaysPresent(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{ActiveProvider: "openai", ActiveModel: "gpt-4o"}
+	opts := buildConfigOptions(s, &cfg, provider.NewManager())
+	for _, o := range opts {
+		if o.Select != nil && o.Select.Id == configIDThinking {
+			if o.Select.CurrentValue != "off" {
+				t.Fatalf("expected thinking currentValue off, got %q", o.Select.CurrentValue)
+			}
+			return
+		}
+	}
+	t.Fatal("no thinking config option was produced")
+}
+
 func TestApplyConfigOption_Mode(t *testing.T) {
 	s := configTestSession(t)
 	cfg := config.UserConfig{}

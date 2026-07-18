@@ -854,7 +854,7 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 			m.mentionCursor = 0
 			return nil
 		}
-		if strings.HasPrefix(val, "/thinking") && len(val) > len("/thinking") {
+		if strings.HasPrefix(val, "/thinking") && len(val) > len("/thinking") && m.activeModelSupportsReasoning() {
 			filter := strings.TrimPrefix(val, "/thinking")
 			filter = strings.TrimPrefix(filter, " ")
 			var items []commandDef
@@ -871,7 +871,7 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 			m.mentionCursor = 0
 			return nil
 		}
-		if strings.HasPrefix(val, "/think") && !strings.HasPrefix(val, "/thinking") && len(val) > len("/think") {
+		if strings.HasPrefix(val, "/think") && !strings.HasPrefix(val, "/thinking") && len(val) > len("/think") && m.activeModelSupportsReasoning() {
 			filter := strings.TrimPrefix(val, "/think")
 			filter = strings.TrimPrefix(filter, " ")
 			var items []commandDef

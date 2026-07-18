@@ -27,17 +27,18 @@ const (
 // Order matters: the array is the agent's preferred priority, so mode and
 // model come first. Caller holds the bridge mutex (reads s.manifest/agentID).
 func buildConfigOptions(s *acpSession, cfg *config.UserConfig, pm *provider.Manager) []acpsdk.SessionConfigOption {
-	opts := []acpsdk.SessionConfigOption{
+	// The thinking selector is ALWAYS present (showing "Off" when disabled):
+	// clients build their toolbar from this list once per config update, and
+	// the model selector lives in the same UI — hiding thinking based on the
+	// active model would make the control flicker in and out (and race model
+	// lists that load after the session starts). Non-reasoning models simply
+	// never receive the parameter (see internal/provider).
+	return []acpsdk.SessionConfigOption{
 		modeConfigOption(s),
 		modelConfigOption(cfg, pm),
 		permissionConfigOption(cfg),
+		thinkingConfigOption(cfg),
 	}
-	// Extended thinking only affects reasoning-capable models, so only surface
-	// the selector when the active model actually supports it (mirrors Prompt).
-	if pm.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		opts = append(opts, thinkingConfigOption(cfg))
-	}
-	return opts
 }
 
 // userFacingModes returns the enabled orchestrator agents — the ones a user

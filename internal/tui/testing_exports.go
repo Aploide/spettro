@@ -52,6 +52,10 @@ func NewModelForTesting() Model {
 	ta.Focus()
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
 	cfg := config.Default()
+	// Point at a reasoning-capable catalog model so thinking-level commands
+	// (which are hidden/refused for non-reasoning models) stay testable.
+	cfg.ActiveProvider = "anthropic"
+	cfg.ActiveModel = "claude-sonnet-4-5"
 	pm := provider.NewManager()
 	return Model{
 		ta:        ta,

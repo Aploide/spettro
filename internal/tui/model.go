@@ -1887,9 +1887,15 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "/thinking", "/think":
-		// /think [off|low|medium|high|x-high|max] toggles the extended-thinking
-		// budget passed to providers that support it (Anthropic Claude Opus
-		// and Sonnet). Without an argument we report the current setting.
+		// /think [off|low|medium|high|x-high|max] sets the normalized thinking
+		// level: Anthropic gets a thinking token budget, OpenAI and
+		// OpenAI-compatible backends get reasoning_effort. Without an argument
+		// we report the current setting. Hidden (and refused) for models the
+		// catalog does not flag as reasoning-capable.
+		if !m.activeModelSupportsReasoning() {
+			m.showBanner("the active model does not support reasoning — thinking levels are unavailable", "info")
+			break
+		}
 		current := strings.TrimSpace(m.cfg.ThinkingLevel)
 		if current == "" {
 			current = "off"

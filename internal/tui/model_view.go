@@ -198,7 +198,8 @@ func (m Model) viewHeader() string {
 	}
 	permText := string(m.cfg.Permission)
 	thinkingTag := ""
-	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" {
+	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" &&
+		m.activeModelSupportsReasoning() {
 		thinkingTag = "thinking:" + level
 	}
 	sandboxTag := ""

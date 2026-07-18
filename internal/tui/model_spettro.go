@@ -103,6 +103,7 @@ func spettroModelsToProvider(infos []spettro.ModelInfo) []provider.Model {
 			DisplayName:  mi.ID,
 			ToolCall:     true,
 			Vision:       mi.Vision,
+			Reasoning:    mi.Reasoning,
 			Context:      mi.ContextWindow,
 		})
 	}
