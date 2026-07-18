@@ -1813,6 +1813,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		CWD:             cwd,
 		MaxTokens:       m.cfg.TokenBudget,
 		Thinking:        provider.ThinkingLevel(m.cfg.ThinkingLevel),
+		Ultra:           m.cfg.UltraActive(),
 		RequiredReads:   mentionedFiles,
 		Images:          images,
 		History:         history,

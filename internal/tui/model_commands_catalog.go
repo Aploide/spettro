@@ -42,6 +42,7 @@ var allCommands = []commandDef{
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
+	{"/ultra", "toggle Ultra: fan hard tasks out across a swarm of parallel sub-agents"},
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/stats", "show session token usage and prompt-cache metrics"},
@@ -193,6 +194,7 @@ func isInstantCommand(input string) bool {
 		"/permission", "/permissions",
 		"/budget",
 		"/thinking", "/think",
+		"/ultra",
 		"/login",
 		"/logout",
 		"/connect",
@@ -246,6 +248,7 @@ const helpText = `commands:
   /budget [n|0]  set token budget per request (0 = unlimited)
   /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
   /thinking <l>  alias of /think
+  /ultra [on|off] toggle Ultra: swarm of parallel sub-agents for hard tasks (any model)
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /goal <obj>   run autonomously until the objective is met

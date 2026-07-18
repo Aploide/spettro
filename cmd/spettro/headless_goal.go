@@ -159,6 +159,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
+			Ultra:           cfg.UltraActive(),
 			Messages:        history,
 			Manifest:        &manifest,
 			SandboxState:    sb,

@@ -202,6 +202,10 @@ func (m Model) viewHeader() string {
 		m.activeModelSupportsReasoning() {
 		thinkingTag = "thinking:" + level
 	}
+	ultraTag := ""
+	if m.cfg.UltraActive() {
+		ultraTag = "ultra"
+	}
 	sandboxTag := ""
 	if m.sandboxState != nil {
 		if p := m.sandboxState.Policy(); p.Enabled() {
@@ -221,6 +225,9 @@ func (m Model) viewHeader() string {
 	}
 	if thinkingTag != "" {
 		right = styleMuted.Render(thinkingTag) + "  " + right
+	}
+	if ultraTag != "" {
+		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
 	}
 	if sandboxTag != "" {
 		right = styleMuted.Render(sandboxTag) + "  " + right
