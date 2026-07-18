@@ -999,6 +999,11 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
 	}
+	if call.Tool == "ultra" {
+		// A swarm runs many full sub-agent turns; the per-tool default (and any
+		// manifest value tuned for single tools) would kill it mid-flight.
+		timeoutSec = 7200
+	}
 	if r.goalMode {
 		switch call.Tool {
 		case "shell-exec", "bash", "bash-output":
@@ -1435,6 +1440,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("agent %s: %w", target, err)
 		}
 		return marshalSubagentResult(target, result), nil
+	case "ultra":
+		return r.runUltra(ctx, call.Args)
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}
