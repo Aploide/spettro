@@ -53,8 +53,9 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   - **Model** — the connected models, grouped by provider, switch the active
     model for the session (persisted to your config).
   - **Permission** — `ask-first`, `restricted`, or `yolo`.
-  - **Thinking** — the extended-thinking level, shown only for
-    reasoning-capable models.
+  - **Thinking** — the reasoning/thinking level. Always shown (as `Off`
+    when disabled) so the control never disappears from the toolbar;
+    non-reasoning models simply ignore the setting.
 
   Changing a selector calls `session/set_config_option`; the equivalent slash
   commands (`/mode`, `/models`, `/permission`, `/thinking`) push a
