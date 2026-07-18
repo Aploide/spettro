@@ -169,7 +169,18 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			}
 			retries++
 			if retries > maxGoalRetries {
-				return finish(fmt.Sprintf("⏹ goal stopped after %d consecutive errors: %v", retries, err))
+				// Don't kill the goal on repeated errors: log, count a
+				// no-progress strike, and move to the next iteration. The
+				// stall guard is the final backstop for persistent failures.
+				retries = 0
+				state.NoProgress++
+				if state.NoProgress >= state.NoProgressLimit {
+					return finish(fmt.Sprintf("⏹ goal stopped: %d iterations failed with no progress. Last error: %v", state.NoProgress, err))
+				}
+				turn.sessionUpdate(acpsdk.UpdateAgentMessageText(fmt.Sprintf(
+					"⚠ goal iteration %d kept failing (%v) — logged and moving to the next iteration (%d/%d strikes)\n",
+					state.Iteration, err, state.NoProgress, state.NoProgressLimit)))
+				continue
 			}
 			turn.sessionUpdate(acpsdk.UpdateAgentMessageText(fmt.Sprintf(
 				"⚠ goal iteration %d failed (retry %d/%d): %v\n", state.Iteration, retries, maxGoalRetries, err)))
