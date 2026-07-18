@@ -16,6 +16,7 @@ const (
 	configIDModel      = "model"
 	configIDPermission = "permission"
 	configIDThinking   = "thinking"
+	configIDUltra      = "ultra"
 )
 
 // buildConfigOptions renders Spettro's live state (agent mode, model,
@@ -38,6 +39,7 @@ func buildConfigOptions(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		modelConfigOption(cfg, pm),
 		permissionConfigOption(cfg),
 		thinkingConfigOption(cfg),
+		ultraConfigOption(cfg),
 	}
 }
 
@@ -191,6 +193,18 @@ func thinkingConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	}}
 }
 
+func ultraConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
+	// Ultra is a boolean config option so clients render an on/off toggle
+	// instead of a two-entry dropdown.
+	return acpsdk.SessionConfigOption{Boolean: &acpsdk.SessionConfigOptionBoolean{
+		Id:           configIDUltra,
+		Name:         "Ultra",
+		Description:  acpsdk.Ptr("Swarm of parallel sub-agents for hard tasks (works with any model)"),
+		CurrentValue: cfg.Ultra,
+		Type:         "boolean",
+	}}
+}
+
 // applyConfigOption mutates session/config state in response to a
 // session/set_config_option request, mirroring the equivalent slash commands.
 // Persistent settings (model, permission, thinking) are written to the user
@@ -259,6 +273,32 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 			return err
 		}
 		cfg.ThinkingLevel = level
+		return nil
+
+	case configIDUltra:
+		var enabled bool
+		// Accept the boolean wire value ("true"/"false") plus the legacy
+		// select values ("on"/"off") so older clients still work.
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "on", "true":
+			enabled = true
+		case "off", "false":
+			enabled = false
+		default:
+			return acpsdk.NewInvalidParams(map[string]any{"error": "invalid ultra value: " + value})
+		}
+		// A swarm runs many sub-agents concurrently; per-action approval
+		// prompts would flood the client, so Ultra requires restricted or yolo.
+		if enabled && cfg.Permission == config.PermissionAskFirst {
+			return acpsdk.NewInvalidParams(map[string]any{"error": "ultra requires the Restricted or YOLO permission level — change Permission first"})
+		}
+		if _, err := config.Update(func(c *config.UserConfig) error {
+			c.Ultra = enabled
+			return nil
+		}); err != nil {
+			return err
+		}
+		cfg.Ultra = enabled
 		return nil
 	}
 	return acpsdk.NewInvalidParams(map[string]any{"error": "unknown config option: " + configID})

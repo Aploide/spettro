@@ -167,3 +167,62 @@ func TestApplyConfigOption_UnknownID(t *testing.T) {
 		t.Fatal("expected error for unknown config option id")
 	}
 }
+
+// TestBuildConfigOptions_UltraIsBoolean pins that Ultra renders as an on/off
+// toggle (boolean variant), not a dropdown: clients draw a select as a menu,
+// which was the reported rendering bug.
+func TestBuildConfigOptions_UltraIsBoolean(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{Ultra: true}
+	opts := buildConfigOptions(s, &cfg, provider.NewManager())
+	for _, o := range opts {
+		if o.Select != nil && o.Select.Id == configIDUltra {
+			t.Fatal("ultra must not be a select option; clients render it as a dropdown")
+		}
+		if o.Boolean != nil && o.Boolean.Id == configIDUltra {
+			if !o.Boolean.CurrentValue {
+				t.Fatal("expected ultra currentValue true")
+			}
+			return
+		}
+	}
+	t.Fatal("no ultra boolean config option was produced")
+}
+
+func TestApplyConfigOption_Ultra(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{Permission: config.PermissionRestricted}
+	b := &bridge{opts: Options{Providers: provider.NewManager()}}
+
+	// Boolean wire values.
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err != nil {
+		t.Fatalf("apply ultra=true: %v", err)
+	}
+	if !cfg.Ultra {
+		t.Fatal("expected cfg.Ultra true")
+	}
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "false"); err != nil {
+		t.Fatalf("apply ultra=false: %v", err)
+	}
+	if cfg.Ultra {
+		t.Fatal("expected cfg.Ultra false")
+	}
+
+	// Legacy select values still work.
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "on"); err != nil {
+		t.Fatalf("apply ultra=on: %v", err)
+	}
+	if !cfg.Ultra {
+		t.Fatal("expected cfg.Ultra true after on")
+	}
+
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "bogus"); err == nil {
+		t.Fatal("expected error for invalid ultra value")
+	}
+
+	// Ask-first permission must reject enabling (approval prompts would flood).
+	cfg.Permission = config.PermissionAskFirst
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err == nil {
+		t.Fatal("expected error enabling ultra under ask-first permission")
+	}
+}
