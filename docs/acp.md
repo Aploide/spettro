@@ -56,6 +56,11 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   - **Thinking** — the reasoning/thinking level. Always shown (as `Off`
     when disabled) so the control never disappears from the toolbar;
     non-reasoning models simply ignore the setting.
+  - **Ultra** — On/Off toggle for [Ultra mode](ultra.md) (swarm of
+    parallel sub-agents for hard tasks). Turning it on requires the
+    Restricted or YOLO permission level; under Ask-first the change is
+    rejected, and dropping back to Ask-first suspends Ultra until the
+    level is raised again.
 
   Changing a selector calls `session/set_config_option`; the equivalent slash
   commands (`/mode`, `/models`, `/permission`, `/thinking`) push a

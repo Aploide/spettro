@@ -22,6 +22,7 @@
 - [Agent Client Protocol (editor integration)](acp.md)
 - [Telegram relay](telegram.md)
 - [Extended thinking levels](thinking.md)
+- [Ultra mode (agent swarm)](ultra.md) — `/ultra`, parallel sub-agent fan-out for hard tasks
 - [Troubleshooting](troubleshooting.md)
 - [Agent Manifest](../AGENTS.md)
 - [Agent Prompts](../agents/README.md)
