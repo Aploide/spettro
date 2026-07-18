@@ -28,7 +28,7 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		return Response{}, err
 	}
 
-	resp, err := model.Generate(ctx, buildFantasyCall(providerName, apiKind, req))
+	resp, err := model.Generate(ctx, buildFantasyCall(providerName, apiKind, modelName, req))
 	if err != nil {
 		return Response{}, err
 	}
@@ -69,7 +69,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		return Response{}, err
 	}
 
-	stream, err := model.Stream(ctx, buildFantasyCall(providerName, apiKind, req))
+	stream, err := model.Stream(ctx, buildFantasyCall(providerName, apiKind, modelName, req))
 	if err != nil {
 		return Response{}, err
 	}
@@ -141,7 +141,7 @@ func isAnthropicAPI(providerName, apiKind string) bool {
 
 // buildFantasyCall assembles the shared fantasy.Call used by both the streaming
 // and non-streaming paths.
-func buildFantasyCall(providerName, apiKind string, req Request) fantasy.Call {
+func buildFantasyCall(providerName, apiKind, modelName string, req Request) fantasy.Call {
 	var prompt fantasy.Prompt
 	if len(req.Messages) > 0 {
 		if req.System != "" {
@@ -257,14 +257,14 @@ func buildFantasyCall(providerName, apiKind string, req Request) fantasy.Call {
 		maxTokens := int64(req.MaxTokens)
 		call.MaxOutputTokens = &maxTokens
 	}
-	if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
-		// Fantasy threads thinking config via per-provider ProviderOptions.
-		// Currently we only know how to express it for Anthropic; other
-		// providers ignore the field and the fantasy fallback path simply
-		// won't include reasoning. This matches Spettro's documented
-		// behaviour: thinking levels are honoured by Anthropic, ignored
-		// elsewhere.
-		if isAnthropicAPI(providerName, apiKind) {
+	// Fantasy threads thinking config via per-provider ProviderOptions.
+	// Anthropic takes a token budget (thinking.budget_tokens); OpenAI and
+	// every OpenAI-compatible backend take a reasoning_effort enum. "off" and
+	// empty send nothing: Anthropic then defaults to no extended thinking,
+	// while OpenAI-style reasoning models keep their provider default (most
+	// of them cannot fully disable reasoning).
+	if isAnthropicAPI(providerName, apiKind) {
+		if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
 			budgetInt := int64(budget)
 			call.ProviderOptions = fantasy.ProviderOptions{
 				"anthropic": &fantasyanthropic.ProviderOptions{
@@ -274,6 +274,32 @@ func buildFantasyCall(providerName, apiKind string, req Request) fantasy.Call {
 			needed := budgetInt + 4096
 			if call.MaxOutputTokens == nil || *call.MaxOutputTokens < needed {
 				call.MaxOutputTokens = &needed
+			}
+		}
+	} else if effort := ReasoningEffort(ThinkingLevel(req.Thinking)); effort != "" {
+		e := fantasyopenai.ReasoningEffort(effort)
+		if providerName == "openai" {
+			// The official provider routes Responses-capable models through the
+			// Responses API, which reads a different options type than the chat
+			// path — and the chat path hard-errors on a type mismatch, so the
+			// choice must follow fantasy's own routing. Either way the provider
+			// only forwards the effort to models it knows are reasoning-capable,
+			// so this is safe for gpt-4o etc.
+			if fantasyopenai.IsResponsesModel(modelName) {
+				call.ProviderOptions = fantasy.ProviderOptions{
+					fantasyopenai.Name: &fantasyopenai.ResponsesProviderOptions{ReasoningEffort: &e},
+				}
+			} else {
+				call.ProviderOptions = fantasy.ProviderOptions{
+					fantasyopenai.Name: &fantasyopenai.ProviderOptions{ReasoningEffort: &e},
+				}
+			}
+		} else {
+			// OpenAI-compatible backends (Groq, xAI, DeepSeek, Spettro
+			// Subscription, local servers, …) take reasoning_effort on the chat
+			// completions path. Servers that don't know the parameter ignore it.
+			call.ProviderOptions = fantasy.ProviderOptions{
+				fantasyopenaicompat.Name: &fantasyopenaicompat.ProviderOptions{ReasoningEffort: &e},
 			}
 		}
 	}

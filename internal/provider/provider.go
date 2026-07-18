@@ -17,9 +17,11 @@ import (
 //
 // Not every provider supports every level. Adapters map ThinkingLevel to their
 // native parameter — for Anthropic Claude Opus/Sonnet that's `thinking.type`
-// (enabled vs disabled) plus `thinking.budget_tokens`. Levels the underlying
-// model does not support fall back to the closest supported one (e.g. Claude
-// only has off and high).
+// (enabled vs disabled) plus `thinking.budget_tokens`; for OpenAI and
+// OpenAI-compatible backends (Groq, xAI, DeepSeek, Google's compat endpoint,
+// local servers, …) it's `reasoning_effort`. Levels the underlying model does
+// not support fall back to the closest supported one (e.g. Claude only has
+// off and high).
 type ThinkingLevel string
 
 const (
@@ -58,6 +60,44 @@ func ThinkingBudgetTokens(level ThinkingLevel) int {
 		return 100000
 	}
 	return 0
+}
+
+// ReasoningEffort maps a ThinkingLevel to the OpenAI-style `reasoning_effort`
+// value used by OpenAI and OpenAI-compatible backends. Returns "" for
+// off/empty so callers can skip the parameter entirely: most reasoning models
+// cannot fully disable reasoning, so omitting the field keeps the provider's
+// default instead of sending a value the model may reject. x-high and max
+// both map to "xhigh" — effort is an enum, not a token budget, and "xhigh" is
+// the highest value the wire format defines.
+func ReasoningEffort(level ThinkingLevel) string {
+	switch level {
+	case ThinkingLow:
+		return "low"
+	case ThinkingMedium:
+		return "medium"
+	case ThinkingHigh:
+		return "high"
+	case ThinkingXHigh, ThinkingMax:
+		return "xhigh"
+	}
+	return ""
+}
+
+// NextLowerThinking returns the next level down the ladder, ending at "" (no
+// thinking parameter sent at all). Used to degrade gracefully when a model
+// rejects the requested level instead of surfacing the error to the user.
+func NextLowerThinking(level ThinkingLevel) ThinkingLevel {
+	switch level {
+	case ThinkingMax:
+		return ThinkingXHigh
+	case ThinkingXHigh:
+		return ThinkingHigh
+	case ThinkingHigh:
+		return ThinkingMedium
+	case ThinkingMedium:
+		return ThinkingLow
+	}
+	return ""
 }
 
 type Model struct {

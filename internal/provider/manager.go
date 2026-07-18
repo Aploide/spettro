@@ -328,6 +328,14 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 			m.usageRec.record(providerName, modelName, resp.Usage)
 			return resp, nil
 		}
+		// A model may reject the requested thinking level (e.g. an effort enum
+		// value it doesn't define, or a thinking budget above its cap). Rather
+		// than aborting the run, step the level down and retry so the user
+		// keeps continuity; at "" no thinking parameter is sent at all.
+		if next, ok := m.downgradedThinking(providerName, req.Thinking, err); ok {
+			req.Thinking = next
+			continue
+		}
 		retryAfter, ok := rateLimitRetryAfter(providerName, err)
 		if !ok {
 			return Response{}, err
@@ -418,6 +426,45 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		return Response{}, err
 	}
 	return finalizeResponse(resp, providerName, modelName, allParts), nil
+}
+
+// downgradedThinking decides whether err is worth retrying at a lower
+// thinking level and returns that level. Only errors that plausibly complain
+// about the reasoning/thinking parameter qualify — anything else must surface
+// unchanged. For providers on the reasoning_effort wire format the level is
+// stepped down until the wire value actually changes (max and x-high both
+// serialize to "xhigh", so retrying between them would waste a request).
+func (m *Manager) downgradedThinking(providerName string, level ThinkingLevel, err error) (ThinkingLevel, bool) {
+	if level == "" || level == ThinkingOff || !isThinkingLevelError(err) {
+		return "", false
+	}
+	m.mu.RLock()
+	apiKind := m.providerKinds[providerName]
+	m.mu.RUnlock()
+	next := NextLowerThinking(level)
+	if !isAnthropicAPI(providerName, apiKind) {
+		for next != "" && ReasoningEffort(next) == ReasoningEffort(level) {
+			next = NextLowerThinking(next)
+		}
+	}
+	return next, true
+}
+
+// isThinkingLevelError reports whether err looks like a provider rejecting
+// the reasoning/thinking configuration (as opposed to auth, rate limit, or
+// any other failure).
+func isThinkingLevelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "reasoning_effort") || strings.Contains(msg, "reasoning.effort") || strings.Contains(msg, "reasoning effort") {
+		return true
+	}
+	if strings.Contains(msg, "budget_tokens") || strings.Contains(msg, "thinking.enabled") || strings.Contains(msg, "extended thinking") {
+		return true
+	}
+	return false
 }
 
 // defaultRateLimitRetryAfter is used when a 429 carries no (or an
