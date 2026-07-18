@@ -230,6 +230,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					ProviderName:    func() string { return cfg.ActiveProvider },
 					ModelName:       func() string { return cfg.ActiveModel },
 					CWD:             cwd,
+					Ultra:           cfg.UltraActive(),
 					Manifest:        &manifest,
 					SandboxState:    sb,
 					SessionDir:      sessionDir,

@@ -129,6 +129,10 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	// bounds its growth.
 	var history []provider.Message
 
+	// errorStrikes counts consecutive failed iterations; kept separate from
+	// state.NoProgress so the workspace-signature stall guard stays intact.
+	errorStrikes := 0
+
 	// Outer loop
 	for {
 		select {
@@ -155,6 +159,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
+			Ultra:           cfg.UltraActive(),
 			Messages:        history,
 			Manifest:        &manifest,
 			SandboxState:    sb,
@@ -187,10 +192,18 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 				fmt.Fprintf(os.Stderr, "\nInterrupted during execution\n")
 				os.Exit(1)
 			}
-			fmt.Fprintf(os.Stderr, "Agent error: %v\n", err)
-			// Continue to next iteration on transient errors
+			// Continue to next iteration on transient errors, but count a
+			// strike so a persistently failing provider still terminates
+			// instead of looping forever.
+			errorStrikes++
+			if errorStrikes >= state.NoProgressLimit {
+				fmt.Fprintf(os.Stderr, "\n✗ Goal stopped: %d consecutive iterations failed. Last error: %v\n", errorStrikes, err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Agent error: %v — continuing (%d/%d strikes)\n", err, errorStrikes, state.NoProgressLimit)
 			continue
 		}
+		errorStrikes = 0
 
 		if len(result.Messages) > 0 {
 			history = result.Messages

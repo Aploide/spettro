@@ -42,6 +42,7 @@ var allCommands = []commandDef{
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
+	{"/ultra", "toggle Ultra: fan hard tasks out across a swarm of parallel sub-agents"},
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/stats", "show session token usage and prompt-cache metrics"},
@@ -72,20 +73,20 @@ var permissionCommands = []commandDef{
 
 var thinkingCommands = []commandDef{
 	{"/thinking off", "no extended thinking (default)"},
-	{"/thinking low", "short reasoning budget (~2k thinking tokens)"},
-	{"/thinking medium", "medium reasoning budget (~5k thinking tokens)"},
-	{"/thinking high", "long reasoning budget (~16k thinking tokens)"},
-	{"/thinking x-high", "extended reasoning budget (~32k thinking tokens)"},
-	{"/thinking max", "maximum reasoning budget (~100k thinking tokens)"},
+	{"/thinking low", "low reasoning effort (~2k thinking tokens on Anthropic)"},
+	{"/thinking medium", "medium reasoning effort (~5k thinking tokens on Anthropic)"},
+	{"/thinking high", "high reasoning effort (~16k thinking tokens on Anthropic)"},
+	{"/thinking x-high", "extra-high reasoning effort (~32k thinking tokens on Anthropic)"},
+	{"/thinking max", "maximum reasoning effort (~100k thinking tokens on Anthropic)"},
 }
 
 var thinkCommands = []commandDef{
 	{"/think off", "no extended thinking (default)"},
-	{"/think low", "short reasoning budget (~2k thinking tokens)"},
-	{"/think medium", "medium reasoning budget (~5k thinking tokens)"},
-	{"/think high", "long reasoning budget (~16k thinking tokens)"},
-	{"/think x-high", "extended reasoning budget (~32k thinking tokens)"},
-	{"/think max", "maximum reasoning budget (~100k thinking tokens)"},
+	{"/think low", "low reasoning effort (~2k thinking tokens on Anthropic)"},
+	{"/think medium", "medium reasoning effort (~5k thinking tokens on Anthropic)"},
+	{"/think high", "high reasoning effort (~16k thinking tokens on Anthropic)"},
+	{"/think x-high", "extra-high reasoning effort (~32k thinking tokens on Anthropic)"},
+	{"/think max", "maximum reasoning effort (~100k thinking tokens on Anthropic)"},
 }
 
 // requiresParam reports whether the slash command must be followed by a
@@ -102,10 +103,25 @@ func requiresParam(cmd string) bool {
 	return false
 }
 
+// activeModelSupportsReasoning reports whether the active model is flagged
+// reasoning-capable in the catalog. Thinking commands and status tags are
+// hidden for models that would ignore the setting anyway.
+func (m Model) activeModelSupportsReasoning() bool {
+	return m.providers.SupportsReasoning(m.cfg.ActiveProvider, m.cfg.ActiveModel)
+}
+
 // filterCommands matches query against the built-in catalog plus any
 // user-defined custom commands discovered at startup.
 func (m Model) filterCommands(query string) []commandDef {
-	catalog := append([]commandDef(nil), allCommands...)
+	catalog := make([]commandDef, 0, len(allCommands)+len(m.customCommands))
+	for _, c := range allCommands {
+		// Thinking levels only apply to reasoning-capable models (per the
+		// catalog's `reasoning` flag), so hide the commands entirely otherwise.
+		if (c.name == "/thinking" || c.name == "/think") && !m.activeModelSupportsReasoning() {
+			continue
+		}
+		catalog = append(catalog, c)
+	}
 	for _, c := range m.customCommands {
 		desc := c.Description
 		if desc == "" {
@@ -178,6 +194,7 @@ func isInstantCommand(input string) bool {
 		"/permission", "/permissions",
 		"/budget",
 		"/thinking", "/think",
+		"/ultra",
 		"/login",
 		"/logout",
 		"/connect",
@@ -231,6 +248,7 @@ const helpText = `commands:
   /budget [n|0]  set token budget per request (0 = unlimited)
   /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
   /thinking <l>  alias of /think
+  /ultra [on|off] toggle Ultra: swarm of parallel sub-agents for hard tasks (any model)
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /goal <obj>   run autonomously until the objective is met

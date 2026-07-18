@@ -1887,9 +1887,15 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "/thinking", "/think":
-		// /think [off|low|medium|high|x-high|max] toggles the extended-thinking
-		// budget passed to providers that support it (Anthropic Claude Opus
-		// and Sonnet). Without an argument we report the current setting.
+		// /think [off|low|medium|high|x-high|max] sets the normalized thinking
+		// level: Anthropic gets a thinking token budget, OpenAI and
+		// OpenAI-compatible backends get reasoning_effort. Without an argument
+		// we report the current setting. Hidden (and refused) for models the
+		// catalog does not flag as reasoning-capable.
+		if !m.activeModelSupportsReasoning() {
+			m.showBanner("the active model does not support reasoning — thinking levels are unavailable", "info")
+			break
+		}
 		current := strings.TrimSpace(m.cfg.ThinkingLevel)
 		if current == "" {
 			current = "off"
@@ -1914,6 +1920,38 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				}
 				m.showBanner("thinking level set to "+display, "success")
 			}
+		}
+	case "/ultra":
+		// /ultra [on|off] toggles the Ultra swarm mode: the top-level agent
+		// gains the ultra fan-out tool and guidance to decompose hard tasks
+		// across many parallel sub-agents. Works with any model; takes effect
+		// on the next run.
+		next := !m.cfg.Ultra
+		if len(fields) >= 2 {
+			switch strings.ToLower(strings.TrimSpace(fields[1])) {
+			case "on":
+				next = true
+			case "off":
+				next = false
+			default:
+				m.showBanner("usage: /ultra [on|off]", "error")
+				return m, nil
+			}
+		}
+		// A swarm runs many sub-agents concurrently; per-action approval
+		// prompts would flood the user, so Ultra requires restricted or yolo.
+		if next && m.cfg.Permission == config.PermissionAskFirst {
+			m.showBanner("ultra needs restricted or yolo permission — switch first with /permission", "error")
+			return m, nil
+		}
+		_ = m.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.Ultra = next
+			return nil
+		})
+		if next {
+			m.showBanner("ultra on — hard tasks fan out across a swarm of parallel sub-agents", "success")
+		} else {
+			m.showBanner("ultra off", "success")
 		}
 	case "/approve":
 		if m.pendingPlan == "" {

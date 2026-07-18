@@ -75,7 +75,7 @@ func TestFantasyAnthropicCacheControlPlacement(t *testing.T) {
 			{Role: RoleUser, Content: "turn2"},
 		},
 	}
-	call := buildFantasyCall("anthropic", models.APIAnthropic, req)
+	call := buildFantasyCall("anthropic", models.APIAnthropic, "claude-sonnet-4-5", req)
 	if len(call.Prompt) < 2 {
 		t.Fatalf("expected >=2 prompt messages, got %d", len(call.Prompt))
 	}
@@ -101,7 +101,7 @@ func TestNonAnthropicNoCache(t *testing.T) {
 			{Role: RoleUser, Content: "turn2"},
 		},
 	}
-	call := buildFantasyCall("openai", models.APIOpenAI, req)
+	call := buildFantasyCall("openai", models.APIOpenAI, "gpt-4o", req)
 	for _, msg := range call.Prompt {
 		cc := fantasyanthropic.GetCacheControl(msg.ProviderOptions)
 		if cc != nil {

@@ -43,6 +43,8 @@ func toolOutputHistoryLimit(name string) int {
 		return 8000
 	case "agent":
 		return 8000
+	case "ultra":
+		return 32000
 	default:
 		return 2000
 	}
@@ -264,6 +266,7 @@ var builtinToolSchemas = map[string]string{
 	"grok-video":         `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
 	"ask-user":           `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
 	"agent":              `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
+	"ultra":              `{"description": string, "prompt_template": string, "items": [string], "subagent_type"?: string}`,
 	"save-memory":        `{"fact": string, "scope"?: "user"|"project"}`,
 	"todo-write":         `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
 	"task-create":        `{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
@@ -314,6 +317,7 @@ var builtinNativeToolDescs = map[string]string{
 	"web-search":         "Search the web.",
 	"ask-user":           "Ask the user a question and wait for their answer.",
 	"agent":              "Delegate a task to a named sub-agent.",
+	"ultra":              "Fan a task out across many parallel sub-agents (2-32). prompt_template must contain {{item}}; each item fills the template into one self-contained sub-agent task. Sub-agents cannot see your context or each other, so include file paths, constraints, and expected output in the template. Give every item a distinct, non-overlapping scope; never let two agents touch the same file. Results are returned in input order.",
 	"save-memory":        "Save one short durable fact or user preference to persistent memory; it is loaded into context in future sessions. Use scope \"project\" for facts specific to this repository.",
 	"todo-write":         "Persist the session todo list (flat alias of the task tools; prefer task-create/task-update for dependent tasks).",
 	"task-create":        "Create a task in the persistent session task graph. dependencies lists task IDs that must be completed first; cycles and unknown IDs are rejected.",
@@ -366,6 +370,7 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"web-search":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`),
 	"ask-user":           json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"context":{"type":"string"},"default_option":{"type":"string"},"allow_free_response":{"type":"boolean"}},"required":["question"]}`),
 	"agent":              json.RawMessage(`{"type":"object","properties":{"agent":{"type":"string"},"task":{"type":"string"},"constraints":{"type":"string"},"expected_output":{"type":"string"},"parent_agent_id":{"type":"string"}},"required":["agent","task"]}`),
+	"ultra":              json.RawMessage(`{"type":"object","properties":{"description":{"type":"string","description":"short summary of the overall fan-out"},"prompt_template":{"type":"string","description":"task template containing the {{item}} placeholder"},"items":{"type":"array","minItems":2,"maxItems":32,"items":{"type":"string"}},"subagent_type":{"type":"string","description":"worker agent id to run (default: code)"}},"required":["description","prompt_template","items"]}`),
 	"save-memory":        json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"scope":{"type":"string","enum":["user","project"]}},"required":["fact"]}`),
 	"todo-write":         json.RawMessage(`{"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["content"]}}},"required":["todos"]}`),
 	"task-create":        json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["content"]}`),

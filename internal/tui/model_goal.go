@@ -165,6 +165,10 @@ func (m *Model) advanceGoal(msg agentDoneMsg) tea.Cmd {
 		return nil
 	}
 
+	// A completed run clears the consecutive-error counter so occasional
+	// failures spread across a long goal never accumulate into a stop.
+	g.Retries = 0
+
 	// 2. Iteration cap (safety; 0 = unlimited).
 	if g.MaxIterations > 0 && g.Iteration >= g.MaxIterations {
 		m.pushSystemMsg(fmt.Sprintf("⏹ goal stopped: reached max iterations (%d). Run /goal again to keep going.", g.MaxIterations))
@@ -211,11 +215,24 @@ func (m *Model) advanceGoalOnError(msg agentDoneMsg) tea.Cmd {
 	}
 	g.Retries++
 	if g.Retries > maxGoalRetries {
-		m.pushSystemMsg(fmt.Sprintf("⏹ goal stopped after %d consecutive errors: %s", g.Retries, msg.err.Error()))
-		m.showBanner("goal stopped — repeated errors", "error")
-		m.publishRemoteState("goal_error")
-		m.activeGoal = nil
-		return nil
+		// Don't kill the goal on repeated errors: convert them into a
+		// no-progress strike and move on to the next iteration. The stall
+		// guard (NoProgressLimit consecutive strikes) is the final backstop,
+		// so a persistently failing provider still terminates — but a run of
+		// transient failures no longer ends the loop.
+		g.Retries = 0
+		g.NoProgress++
+		if g.NoProgress >= g.NoProgressLimit {
+			m.pushSystemMsg(fmt.Sprintf("⏹ goal stopped: %d iterations failed with no progress. Last error: %s", g.NoProgress, msg.err.Error()))
+			m.showBanner("goal stopped — repeated errors", "error")
+			m.publishRemoteState("goal_error")
+			m.activeGoal = nil
+			return nil
+		}
+		m.pushSystemMsg(fmt.Sprintf("⚠ goal iteration %d kept failing (%s) — logged and moving to the next iteration (%d/%d strikes)",
+			g.Iteration, msg.err.Error(), g.NoProgress, g.NoProgressLimit))
+		_, cmd := m.dispatchGoalIteration()
+		return cmd
 	}
 	m.pushSystemMsg(fmt.Sprintf("⚠ goal iteration %d failed (retry %d/%d): %s",
 		g.Iteration, g.Retries, maxGoalRetries, msg.err.Error()))

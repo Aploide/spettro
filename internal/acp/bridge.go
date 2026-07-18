@@ -438,6 +438,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		CWD:             s.cwd,
 		MaxTokens:       cfg.TokenBudget,
 		Thinking:        thinking,
+		Ultra:           cfg.UltraActive(),
 		RequiredReads:   mentioned,
 		Images:          images,
 		History:         flatHistory,

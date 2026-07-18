@@ -148,6 +148,11 @@ type LLMAgent struct {
 	CWD             string
 	MaxTokens       int
 	Thinking        provider.ThinkingLevel
+	// Ultra, when true on a top-level run, injects the ultra fan-out tool and
+	// swarm guidance so the agent decomposes hard tasks across many parallel
+	// sub-agents. Read once at run construction (the system prompt must stay
+	// byte-stable per run); ignored on sub-agents.
+	Ultra bool
 	RequiredReads   []string
 	Images          []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,
@@ -209,6 +214,21 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	// system prompt byte-stable across every turn of the session.
 	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
+	if a.Ultra && a.DelegationDepth == 0 {
+		// Ultra bypasses role/handoff gating by design: any top-level agent on
+		// any model can fan out. Sub-agents never inherit the tool.
+		hasUltra := false
+		for _, t := range allowedTools {
+			if t == ultraToolID {
+				hasUltra = true
+				break
+			}
+		}
+		if !hasUltra {
+			allowedTools = append(allowedTools, ultraToolID)
+		}
+		systemPrompt += ultraPromptSection
+	}
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2

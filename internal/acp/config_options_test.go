@@ -76,6 +76,25 @@ func TestBuildConfigOptions_PermissionCurrentValue(t *testing.T) {
 	t.Fatal("no permission config option was produced")
 }
 
+// TestBuildConfigOptions_ThinkingAlwaysPresent pins that the thinking
+// selector is offered even when the active model is unknown or not
+// reasoning-capable: the client toolbar must never lose the control, and it
+// shows "off" as the current value when no level is set.
+func TestBuildConfigOptions_ThinkingAlwaysPresent(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{ActiveProvider: "openai", ActiveModel: "gpt-4o"}
+	opts := buildConfigOptions(s, &cfg, provider.NewManager())
+	for _, o := range opts {
+		if o.Select != nil && o.Select.Id == configIDThinking {
+			if o.Select.CurrentValue != "off" {
+				t.Fatalf("expected thinking currentValue off, got %q", o.Select.CurrentValue)
+			}
+			return
+		}
+	}
+	t.Fatal("no thinking config option was produced")
+}
+
 func TestApplyConfigOption_Mode(t *testing.T) {
 	s := configTestSession(t)
 	cfg := config.UserConfig{}
@@ -146,5 +165,64 @@ func TestApplyConfigOption_UnknownID(t *testing.T) {
 	b := &bridge{opts: Options{Providers: provider.NewManager()}}
 	if err := b.applyConfigOption(s, &cfg, "nope", "x"); err == nil {
 		t.Fatal("expected error for unknown config option id")
+	}
+}
+
+// TestBuildConfigOptions_UltraIsBoolean pins that Ultra renders as an on/off
+// toggle (boolean variant), not a dropdown: clients draw a select as a menu,
+// which was the reported rendering bug.
+func TestBuildConfigOptions_UltraIsBoolean(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{Ultra: true}
+	opts := buildConfigOptions(s, &cfg, provider.NewManager())
+	for _, o := range opts {
+		if o.Select != nil && o.Select.Id == configIDUltra {
+			t.Fatal("ultra must not be a select option; clients render it as a dropdown")
+		}
+		if o.Boolean != nil && o.Boolean.Id == configIDUltra {
+			if !o.Boolean.CurrentValue {
+				t.Fatal("expected ultra currentValue true")
+			}
+			return
+		}
+	}
+	t.Fatal("no ultra boolean config option was produced")
+}
+
+func TestApplyConfigOption_Ultra(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{Permission: config.PermissionRestricted}
+	b := &bridge{opts: Options{Providers: provider.NewManager()}}
+
+	// Boolean wire values.
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err != nil {
+		t.Fatalf("apply ultra=true: %v", err)
+	}
+	if !cfg.Ultra {
+		t.Fatal("expected cfg.Ultra true")
+	}
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "false"); err != nil {
+		t.Fatalf("apply ultra=false: %v", err)
+	}
+	if cfg.Ultra {
+		t.Fatal("expected cfg.Ultra false")
+	}
+
+	// Legacy select values still work.
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "on"); err != nil {
+		t.Fatalf("apply ultra=on: %v", err)
+	}
+	if !cfg.Ultra {
+		t.Fatal("expected cfg.Ultra true after on")
+	}
+
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "bogus"); err == nil {
+		t.Fatal("expected error for invalid ultra value")
+	}
+
+	// Ask-first permission must reject enabling (approval prompts would flood).
+	cfg.Permission = config.PermissionAskFirst
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err == nil {
+		t.Fatal("expected error enabling ultra under ask-first permission")
 	}
 }

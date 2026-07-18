@@ -120,6 +120,7 @@ type ModelInfo struct {
 	OwnedBy       string `json:"owned_by"`
 	ContextWindow int    `json:"context_window"`
 	Vision        bool   `json:"vision"`
+	Reasoning     bool   `json:"reasoning"`
 }
 
 // ListModels returns the models available on the authenticated user's plan.

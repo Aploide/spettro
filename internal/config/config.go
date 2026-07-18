@@ -36,6 +36,11 @@ type UserConfig struct {
 	// /thinking command and honoured by the Anthropic adapter; other
 	// providers ignore it.
 	ThinkingLevel string `json:"thinking_level,omitempty"`
+	// Ultra, when true, injects the ultra fan-out tool and swarm guidance into
+	// the top-level agent so it decomposes hard tasks across many parallel
+	// sub-agents. Works with any model (sub-agents inherit the active model).
+	// Toggleable at runtime via /ultra (TUI) or the "ultra" ACP config option.
+	Ultra bool `json:"ultra,omitempty"`
 
 	// Spettro Subscription state. The ep_ API key itself lives in the encrypted
 	// keys store under the "spettro" provider; these fields cache the last-known
@@ -48,6 +53,14 @@ type UserConfig struct {
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited
 	GoalNoProgressLimit int `json:"goal_no_progress_limit,omitempty"` // consecutive no-progress iterations before stalling; 0 → default (3)
+}
+
+// UltraActive reports whether Ultra mode should actually engage: the toggle is
+// on AND the permission level allows unattended sub-agents. A swarm under
+// ask-first would flood the user with per-action approval prompts, so Ultra is
+// suspended (not cleared) while ask-first is selected.
+func (c UserConfig) UltraActive() bool {
+	return c.Ultra && c.Permission != PermissionAskFirst
 }
 
 func Default() UserConfig {

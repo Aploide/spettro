@@ -198,8 +198,13 @@ func (m Model) viewHeader() string {
 	}
 	permText := string(m.cfg.Permission)
 	thinkingTag := ""
-	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" {
+	if level := strings.TrimSpace(m.cfg.ThinkingLevel); level != "" && level != "off" &&
+		m.activeModelSupportsReasoning() {
 		thinkingTag = "thinking:" + level
+	}
+	ultraTag := ""
+	if m.cfg.UltraActive() {
+		ultraTag = "ultra"
 	}
 	sandboxTag := ""
 	if m.sandboxState != nil {
@@ -220,6 +225,9 @@ func (m Model) viewHeader() string {
 	}
 	if thinkingTag != "" {
 		right = styleMuted.Render(thinkingTag) + "  " + right
+	}
+	if ultraTag != "" {
+		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
 	}
 	if sandboxTag != "" {
 		right = styleMuted.Render(sandboxTag) + "  " + right

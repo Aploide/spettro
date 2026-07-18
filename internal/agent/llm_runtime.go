@@ -545,6 +545,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// steps or the provider-side prompt cache misses on every call.
 	system := buildSystemString(cfg, useNativeTools)
 
+	// Resilience state: transient provider failures are retried in-loop and an
+	// over-budget context gets one forced compaction attempt, so a single bad
+	// step (huge tool output, provider hiccup) doesn't kill the whole run.
+	const maxSendRetries = 2
+	sendRetries := 0
+	budgetCompacted := false
+
 	for {
 		// Mid-run steering: deliver any guidance the user typed while the run
 		// was executing. Each message is appended as a user turn at this step
@@ -563,7 +570,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// In-loop compaction: summarize older turns when context pressure
 		// approaches the window. Fires for all runs (the loop is unbounded).
 		// On error, keep convMsgs as-is — never abort a run for compaction.
-		if compacted, did, err := runtime.maybeCompactConv(ctx, system, convMsgs, cfg.ContextWindow); err == nil {
+		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err == nil {
 			convMsgs = compacted
 			if did && cfg.ToolCallback != nil {
 				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "compacted working context to stay within the window"})
@@ -576,8 +583,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			allContent = append(allContent, m.Content)
 		}
 		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
+			// Over budget (e.g. an oversized tool result blew up the history):
+			// force-compact once instead of failing the run. Only if forced
+			// compaction doesn't help either does the run error out.
+			if !budgetCompacted {
+				budgetCompacted = true
+				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, true); cerr == nil && did {
+					convMsgs = compacted
+					if cfg.ToolCallback != nil {
+						cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
+					}
+					continue
+				}
+			}
 			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, err
 		}
+		budgetCompacted = false
 		req := provider.Request{
 			System:    system,
 			Messages:  convMsgs,
@@ -612,11 +633,31 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			demux.flush()
 		}
 		if err != nil {
+			// User cancellation is not retryable — surface it immediately.
+			if ctx.Err() != nil {
+				return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
+			}
+			// Transient failure (5xx/timeout/network): retry the same request a
+			// bounded number of times before considering a fallback model, so a
+			// single provider hiccup doesn't kill the whole run.
+			if sendRetries < maxSendRetries {
+				sendRetries++
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
+				}
+				select {
+				case <-time.After(time.Duration(sendRetries) * 2 * time.Second):
+				case <-ctx.Done():
+					return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, ctx.Err()
+				}
+				continue
+			}
 			// Availability failure (quota/5xx/timeout): offer the configured
 			// fallback model instead of failing the turn. The switch requires
 			// user consent on interactive runs and pins the rest of the run.
 			if next, ok := runtime.offerFallback(ctx, model, err); ok {
 				runtime.modelOverride = &next
+				sendRetries = 0
 				if cfg.ToolCallback != nil {
 					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
 				}
@@ -624,6 +665,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
 		}
+		sendRetries = 0
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
 		// last step usually has the most accumulated history, but using the
@@ -811,12 +853,14 @@ func emitNarration(cfg toolLoopConfig, text string) {
 	cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
 }
 
-// maybeCompactConv summarizes the older portion of convMsgs into a single
+// compactConv summarizes the older portion of convMsgs into a single
 // synthetic message when the estimated request size approaches the context
-// window. The cut/summarize core lives in compactpkg.CompactHistory (shared
-// with the ACP bridge's between-turn compaction); this wrapper supplies the
-// runtime's summarizer routing.
-func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs []provider.Message, window int) ([]provider.Message, bool, error) {
+// window (or unconditionally when force is set — used to recover from an
+// over-budget context instead of failing the run). The cut/summarize core
+// lives in compactpkg.CompactHistory (shared with the ACP bridge's
+// between-turn compaction); this wrapper supplies the runtime's summarizer
+// routing.
+func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []provider.Message, window int, force bool) ([]provider.Message, bool, error) {
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
 	}
@@ -839,7 +883,7 @@ func (r *toolRuntime) maybeCompactConv(ctx context.Context, system string, msgs 
 			},
 			primary, chain, req, nil)
 	}
-	return compactpkg.CompactHistory(ctx, send, system, msgs, window, false)
+	return compactpkg.CompactHistory(ctx, send, system, msgs, window, force)
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
@@ -954,6 +998,11 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
+	}
+	if call.Tool == "ultra" {
+		// A swarm runs many full sub-agent turns; the per-tool default (and any
+		// manifest value tuned for single tools) would kill it mid-flight.
+		timeoutSec = 7200
 	}
 	if r.goalMode {
 		switch call.Tool {
@@ -1391,6 +1440,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("agent %s: %w", target, err)
 		}
 		return marshalSubagentResult(target, result), nil
+	case "ultra":
+		return r.runUltra(ctx, call.Args)
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}

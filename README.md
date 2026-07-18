@@ -27,7 +27,8 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Live tool traces in planning/coding runs
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
-- Anthropic [extended-thinking levels](docs/thinking.md) (`/thinking off|low|medium|high|x-high|max`)
+- Normalized [thinking/reasoning levels](docs/thinking.md) across providers (`/thinking off|low|medium|high|x-high|max`)
+- [Ultra mode](docs/ultra.md) — fan hard tasks out across a swarm of parallel sub-agents (`/ultra`, any model)
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
 
@@ -72,7 +73,8 @@ Spettro commands are entered with a leading `/`.
 - `/permissions [ask-first|restricted|yolo]` show/set permission policy
 - `/permissions debug <on|off>` toggle permission diagnostics
 - `/budget <n|0>` set request token budget (`0` = unlimited)
-- `/thinking <off|low|medium|high|x-high|max>` set extended-thinking budget (Anthropic Claude Opus/Sonnet; ignored by providers without thinking)
+- `/thinking <off|low|medium|high|x-high|max>` set the reasoning level (Anthropic thinking budget, OpenAI-style `reasoning_effort`; hidden for non-reasoning models, auto-falls back if a level is rejected)
+- `/ultra [on|off]` toggle Ultra swarm mode (requires `restricted` or `yolo` permission)
 - `/plan [prompt]` switch to plan mode or run plan prompt
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
@@ -120,6 +122,7 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 - [Agent Client Protocol (editor integration)](docs/acp.md)
 - [Telegram relay](docs/telegram.md)
 - [Extended thinking levels](docs/thinking.md)
+- [Ultra mode (agent swarm)](docs/ultra.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Documentation Index](docs/README.md)
 
