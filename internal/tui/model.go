@@ -168,10 +168,11 @@ type toolDiffMsg struct {
 type parallelAgentEntry struct {
 	ID       string
 	Label    string
-	Kind     string
+	Kind     string // "worker", "microagent", or "swarm" (Ultra fan-out member)
 	Instance int
 	Task     string
 	Status   string
+	At       time.Time // when the agent started running
 }
 
 type modifiedFileEntry struct {
@@ -378,8 +379,8 @@ type Model struct {
 	showSteerChoice bool
 	steerCursor     int
 	steerPending    string
-	activePrompt         *queuedPrompt
-	activeAgentID        string
+	activePrompt    *queuedPrompt
+	activeAgentID   string
 
 	showPlanApproval   bool
 	planApprovalCursor int
@@ -1298,8 +1299,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if onSidePanel {
 			items := m.sidePanelItems()
 			innerHeight := m.sidePanelInnerHeight()
-			_, gitRows := m.sidePanelGitSummary(sideW)
-			_, _, rows := m.sidePanelWindow(items, innerHeight, gitRows)
+			reserved := m.sidePanelReservedRows(sideW)
+			_, _, rows := m.sidePanelWindow(items, innerHeight, reserved)
 			maxStart := max(0, len(items)-rows)
 			switch mouse.Button {
 			case tea.MouseWheelUp:
@@ -1333,7 +1334,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				startY, _ := m.sideListGeometry()
 				row := mouse.Y - startY
 				if row >= 0 {
-					cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
+					cursor, start, rows := m.sidePanelWindow(items, innerHeight, reserved)
 					_, rowToItem := m.sidePanelLines(items, sideW, cursor, start, rows)
 					if row >= 0 && row < len(rowToItem) {
 						idx := rowToItem[row]
