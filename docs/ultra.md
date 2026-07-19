@@ -75,6 +75,29 @@ Execution details:
 - Sub-agents never get the `ultra` tool themselves (no recursive
   swarms), and the normal delegation depth limits still apply.
 
+## Observability: watching the swarm
+
+Every swarm member gets a **distinct instance name** — `code#1`,
+`code#2`, … in item order — and every tool trace it emits carries that
+name, so its activity is attributable end to end:
+
+- **TUI transcript** — running members appear under the `agents` block
+  with their instance name and assigned item.
+- **`ctrl+b` activity panel** — a dedicated **swarm** section lists every
+  member with a live status (`▶` running, `✓` done, `✗` failed), a
+  `N running · N done · N failed` header, and what each agent is doing
+  right now (its latest tool call, falling back to its assigned item).
+  Completed and failed members stay listed until the next turn, so you
+  always see the whole fan-out. The activity list below groups tool
+  calls per instance name. A banner reminds you of `ctrl+b` when a
+  swarm starts with the panel hidden.
+- **ACP editors** — each member's lifecycle arrives as an
+  `agent code#3: <item>` tool call, and its individual tool calls are
+  prefixed `[code#3] …`, so editors show which agent is doing what.
+- **Results** — the `<ultra_result>` block names each sub-agent
+  (`name="code#3"`), so the orchestrator can refer to and re-dispatch a
+  specific member.
+
 ## When to use it
 
 Ultra shines on wide, parallelizable work: sweeping refactors, adding
