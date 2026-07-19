@@ -583,7 +583,7 @@ func (m Model) renderParallelAgents() string {
 	}
 	for _, a := range active {
 		agentColor := modeColor("")
-		if spec, ok := m.manifest.AgentByID(a.ID); ok {
+		if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
 			agentColor = modeColor(spec.Color)
 		}
 		label := a.ID
@@ -892,9 +892,9 @@ func (m Model) sidePanelGitSummary(width int) (string, int) {
 }
 
 func (m Model) sideListGeometry() (startY, rows int) {
-	_, gitRows := m.sidePanelGitSummary(m.sidePanelWidth())
-	_, _, rows = m.sidePanelWindow(m.sidePanelItems(), m.sidePanelInnerHeight(), gitRows)
-	return 5 + gitRows, rows
+	reserved := m.sidePanelReservedRows(m.sidePanelWidth())
+	_, _, rows = m.sidePanelWindow(m.sidePanelItems(), m.sidePanelInnerHeight(), reserved)
+	return 5 + reserved, rows
 }
 
 func (m Model) sidePanelInnerHeight() int {
@@ -933,6 +933,95 @@ func (m Model) sidePanelWindow(items []sidePanelItem, innerHeight, gitRows int) 
 		start = cursor - rows + 1
 	}
 	return cursor, start, rows
+}
+
+// swarmSpecID strips the per-instance suffix from a swarm member name
+// ("code#3" → "code") so manifest lookups (color, spec) keep working for
+// uniquely-named Ultra sub-agents.
+func swarmSpecID(id string) string {
+	if i := strings.IndexByte(id, '#'); i > 0 {
+		return id[:i]
+	}
+	return id
+}
+
+// latestAgentActivity returns the most recent tool-activity title recorded for
+// the given agent instance — "what this agent is doing right now".
+func (m Model) latestAgentActivity(agentID string) string {
+	for i := len(m.activityFeed) - 1; i >= 0; i-- {
+		it := m.activityFeed[i]
+		if it.AgentID == agentID && it.Kind == "tool" && it.ID != "agent" {
+			return it.Title
+		}
+	}
+	return ""
+}
+
+// sidePanelSwarmLines renders the swarm section of the side panel: one row per
+// Ultra sub-agent with its status, instance name, and live activity (falling
+// back to its assigned task). Empty when no swarm ran this turn.
+func (m Model) sidePanelSwarmLines(width int) []string {
+	var members []parallelAgentEntry
+	running, done, failed := 0, 0, 0
+	for _, a := range m.parallelAgents {
+		if a.Kind != "swarm" {
+			continue
+		}
+		members = append(members, a)
+		switch a.Status {
+		case "running":
+			running++
+		case "failed", "error":
+			failed++
+		default:
+			done++
+		}
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	rowBudget := max(12, width-2)
+	header := lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("swarm") + " " +
+		styleMuted.Render(fmt.Sprintf("%d running · %d done · %d failed", running, done, failed))
+	lines := []string{header}
+	for _, a := range members {
+		agentColor := modeColor("")
+		if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
+			agentColor = modeColor(spec.Color)
+		}
+		doing := m.latestAgentActivity(a.ID)
+		if doing == "" {
+			doing = a.Task
+		}
+		var icon string
+		style := lipgloss.NewStyle().Foreground(agentColor)
+		switch a.Status {
+		case "running":
+			icon = "▶"
+		case "failed", "error":
+			icon = "✗"
+			style = lipgloss.NewStyle().Foreground(colorError)
+		default:
+			icon = "✓"
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E"))
+		}
+		name := truncateLabel(a.ID, max(6, rowBudget/3))
+		line := style.Render(icon+" "+name) + " " +
+			styleMuted.Render(truncateLabel(strings.ReplaceAll(doing, "\n", " "), max(6, rowBudget-lipgloss.Width(icon+" "+name)-1)))
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// sidePanelReservedRows is the vertical space the git summary and swarm
+// sections occupy above the activity list (each block includes its leading
+// separator line).
+func (m Model) sidePanelReservedRows(width int) int {
+	_, gitRows := m.sidePanelGitSummary(width)
+	if lines := m.sidePanelSwarmLines(width); len(lines) > 0 {
+		gitRows += len(lines) + 1
+	}
+	return gitRows
 }
 
 func activityAgentLabel(agent string) string {
@@ -1118,11 +1207,11 @@ func (m Model) sidePanelDetailMaxScroll(width int) int {
 		return 0
 	}
 	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
-	_, gitRows := m.sidePanelGitSummary(width)
-	cursor, _, _ := m.sidePanelWindow(items, innerHeight, gitRows)
+	reserved := m.sidePanelReservedRows(width)
+	cursor, _, _ := m.sidePanelWindow(items, innerHeight, reserved)
 	selected := items[cursor]
 	meta := m.sidePanelDetailMeta(selected)
-	_, detailBodyRows := m.sidePanelBudgets(innerHeight, gitRows, len(meta))
+	_, detailBodyRows := m.sidePanelBudgets(innerHeight, reserved, len(meta))
 	body := m.sidePanelDetailBody(selected, width)
 	_, _, maxOffset := scrollBlock(body, detailBodyRows, m.sideDetailScroll)
 	return maxOffset
@@ -1130,16 +1219,26 @@ func (m Model) sidePanelDetailMaxScroll(width int) int {
 
 func (m Model) viewSidePanel(width int) string {
 	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
-	gitSummary, gitRows := m.sidePanelGitSummary(width)
+	gitSummary, _ := m.sidePanelGitSummary(width)
+	swarmLines := m.sidePanelSwarmLines(width)
+	reserved := m.sidePanelReservedRows(width)
 	items := m.sidePanelItems()
 	hints := m.sidePanelHintsView()
+	subtitle := "Operational tool activity"
+	if m.cfg.UltraActive() {
+		subtitle = "Ultra swarm · per-agent activity"
+	}
 	if len(items) == 0 {
 		parts := []string{
 			lipgloss.NewStyle().Bold(true).Render("Activity"),
-			styleMuted.Render("Operational tool activity"),
+			styleMuted.Render(subtitle),
 		}
 		if gitSummary != "" {
 			parts = append(parts, "", gitSummary)
+		}
+		if len(swarmLines) > 0 {
+			parts = append(parts, "")
+			parts = append(parts, swarmLines...)
 		}
 		parts = append(parts, "", styleMuted.Render("Observability is on. Commands, edits, and other tool activity will appear here."))
 		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -1153,11 +1252,11 @@ func (m Model) viewSidePanel(width int) string {
 		return lipgloss.JoinVertical(lipgloss.Left, box, hints)
 	}
 
-	cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
+	cursor, start, rows := m.sidePanelWindow(items, innerHeight, reserved)
 	lines, _ := m.sidePanelLines(items, width, cursor, start, rows)
 	selected := items[cursor]
 	detailMeta := m.sidePanelDetailMeta(selected)
-	listLinesBudget, detailBodyRows := m.sidePanelBudgets(innerHeight, gitRows, len(detailMeta))
+	listLinesBudget, detailBodyRows := m.sidePanelBudgets(innerHeight, reserved, len(detailMeta))
 
 	listBlock := clampLines(strings.Join(lines, "\n"), listLinesBudget)
 
@@ -1178,10 +1277,14 @@ func (m Model) viewSidePanel(width int) string {
 
 	contentParts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
-		styleMuted.Render("Operational tool activity"),
+		styleMuted.Render(subtitle),
 	}
 	if gitSummary != "" {
 		contentParts = append(contentParts, "", gitSummary)
+	}
+	if len(swarmLines) > 0 {
+		contentParts = append(contentParts, "")
+		contentParts = append(contentParts, swarmLines...)
 	}
 	contentParts = append(contentParts, "", listBlock, "", detailsBlock)
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)

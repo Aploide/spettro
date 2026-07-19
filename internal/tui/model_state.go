@@ -752,6 +752,15 @@ func (m Model) handleDiffCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) hasSwarmAgents() bool {
+	for _, a := range m.parallelAgents {
+		if a.Kind == "swarm" {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return
@@ -770,6 +779,7 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		ID            string `json:"id"`
 		Task          string `json:"task"`
 		ParentAgentID string `json:"parent_agent_id"`
+		Swarm         bool   `json:"swarm"`
 	}
 	_ = json.Unmarshal([]byte(t.Args), &args)
 	agentID := args.Agent
@@ -791,7 +801,12 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 			}
 		}
 		kind := "worker"
-		if parent, ok := m.manifest.AgentByID(args.ParentAgentID); ok && parent.Mode == "worker" {
+		if args.Swarm {
+			kind = "swarm"
+			if !m.showSidePanel && !m.hasSwarmAgents() {
+				m.showBanner("ultra swarm started — press ctrl+b to watch each agent", "info")
+			}
+		} else if parent, ok := m.manifest.AgentByID(args.ParentAgentID); ok && parent.Mode == "worker" {
 			kind = "microagent"
 		}
 		entry := parallelAgentEntry{
@@ -801,6 +816,7 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 			Instance: instance + 1,
 			Task:     task,
 			Status:   "running",
+			At:       time.Now(),
 		}
 		m.parallelAgents = append(m.parallelAgents, entry)
 		m.ensureSession()
@@ -814,21 +830,29 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		})
 		return
 	}
-	for i, a := range m.parallelAgents {
-		if a.ID == agentID && a.Status == "running" {
-			m.parallelAgents = append(m.parallelAgents[:i], m.parallelAgents[i+1:]...)
-			break
-		}
-	}
-	m.ensureSession()
 	status := "done"
 	if t.Status == "error" {
 		status = "failed"
 	}
+	agentType := "worker"
+	for i, a := range m.parallelAgents {
+		if a.ID == agentID && a.Status == "running" {
+			if a.Kind == "swarm" {
+				// Swarm members stay listed with their outcome so the side
+				// panel shows the whole fan-out, not just what's still running.
+				m.parallelAgents[i].Status = status
+				agentType = "swarm"
+			} else {
+				m.parallelAgents = append(m.parallelAgents[:i], m.parallelAgents[i+1:]...)
+			}
+			break
+		}
+	}
+	m.ensureSession()
 	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
 		Kind:          "agent",
 		AgentID:       agentID,
-		AgentType:     "worker",
+		AgentType:     agentType,
 		ParentAgentID: args.ParentAgentID,
 		Task:          task,
 		Status:        status,

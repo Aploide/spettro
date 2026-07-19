@@ -60,8 +60,32 @@ type ultraArgs struct {
 
 type ultraResult struct {
 	item    string
+	name    string // instance name, e.g. "code#3"
 	content string
 	err     error
+}
+
+// emitSwarmTrace publishes a swarm member's lifecycle as an "agent" ToolTrace
+// — the same shape the agent delegation tool produces — so hosts (TUI side
+// panel, ACP clients, session log) track Ultra sub-agents with the machinery
+// they already have. The swarm flag lets hosts render these as swarm members.
+func (r *toolRuntime) emitSwarmTrace(name, item, status, output string) {
+	if r.toolCallback == nil {
+		return
+	}
+	args, _ := json.Marshal(map[string]any{
+		"agent":           name,
+		"task":            item,
+		"parent_agent_id": r.traceID(),
+		"swarm":           true,
+	})
+	r.toolCallback(ToolTrace{
+		AgentID: name,
+		Name:    "agent",
+		Status:  status,
+		Args:    string(args),
+		Output:  truncate(output, 600),
+	})
 }
 
 // resolveUltraTarget picks the sub-agent spec an ultra call runs: the explicit
@@ -184,7 +208,11 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			res := ultraResult{item: strings.TrimSpace(args.Items[idx])}
+			// Every swarm member gets a distinct instance name ("code#3") so
+			// its tool traces — and the lifecycle events below — are
+			// attributable in the TUI side panel and ACP clients.
+			name := fmt.Sprintf("%s#%d", subSpec.ID, idx+1)
+			res := ultraResult{item: strings.TrimSpace(args.Items[idx]), name: name}
 			// Launch ramp: everything past the initial batch is staggered.
 			if idx >= ultraInitialLaunch {
 				delay := time.Duration(idx-ultraInitialLaunch+1) * ultraLaunchInterval
@@ -204,7 +232,13 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 					return
 				}
 			}
-			res.content, res.err = r.runUltraSubagent(ctx, subSpec, prompts[idx])
+			r.emitSwarmTrace(name, res.item, "running", "")
+			res.content, res.err = r.runUltraSubagent(ctx, subSpec, name, prompts[idx])
+			if res.err != nil {
+				r.emitSwarmTrace(name, res.item, "error", res.err.Error())
+			} else {
+				r.emitSwarmTrace(name, res.item, "success", res.content)
+			}
 			results[idx] = res
 		}(i)
 	}
@@ -217,9 +251,10 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 
 // runUltraSubagent runs one sub-agent to completion, retrying transient
 // provider failures (rate limits, availability) with exponential backoff.
-func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpec, task string) (string, error) {
+func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpec, instanceID, task string) (string, error) {
 	sub := LLMAgent{
 		Spec:            spec,
+		InstanceID:      instanceID,
 		PermissionFn:    r.permissionFn,
 		ProviderManager: r.providerMgr,
 		ProviderName:    r.providerName,
@@ -284,8 +319,12 @@ func renderUltraResults(subagentType string, results []ultraResult) string {
 		} else {
 			completed++
 		}
-		fmt.Fprintf(&body, "<subagent index=%q type=%q item=%q outcome=%q>\n%s\n</subagent>\n",
-			strconv.Itoa(i+1), subagentType, truncate(res.item, 200), outcome, text)
+		name := res.name
+		if name == "" {
+			name = fmt.Sprintf("%s#%d", subagentType, i+1)
+		}
+		fmt.Fprintf(&body, "<subagent index=%q name=%q type=%q item=%q outcome=%q>\n%s\n</subagent>\n",
+			strconv.Itoa(i+1), name, subagentType, truncate(res.item, 200), outcome, text)
 	}
 	out := fmt.Sprintf("<ultra_result>\n<summary>completed: %d, failed: %d</summary>\n%s</ultra_result>", completed, failed, body.String())
 	if failed > 0 {

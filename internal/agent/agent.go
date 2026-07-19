@@ -152,9 +152,9 @@ type LLMAgent struct {
 	// swarm guidance so the agent decomposes hard tasks across many parallel
 	// sub-agents. Read once at run construction (the system prompt must stay
 	// byte-stable per run); ignored on sub-agents.
-	Ultra bool
-	RequiredReads   []string
-	Images          []string // attached to this turn's user message (re-sent every step)
+	Ultra         bool
+	RequiredReads []string
+	Images        []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,
 	// surfaced to the model as a "Conversation so far" section so follow-up
 	// turns have memory. Only consulted when Messages is empty — the degraded
@@ -190,6 +190,11 @@ type LLMAgent struct {
 	SessionDir      string
 	DelegationDepth int
 	ParentAgentID   string
+	// InstanceID, when set, replaces Spec.ID as the agent identity on emitted
+	// ToolTraces (e.g. "code#3" for the third member of an Ultra swarm) so
+	// hosts can tell concurrent same-type sub-agents apart. Prompt, tool, and
+	// handoff resolution still use Spec.ID.
+	InstanceID string
 
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
@@ -254,6 +259,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Messages:        a.Messages,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
+		InstanceID:      a.InstanceID,
 		AllowedTools:    allowedTools,
 		ToolPolicies:    policies,
 		LogToolCalls:    logToolCalls,
