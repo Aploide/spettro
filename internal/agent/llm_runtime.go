@@ -138,6 +138,11 @@ type toolLoopConfig struct {
 	Messages []provider.Message
 	CWD      string
 	AgentID  string
+	// InstanceID, when set, is the per-instance display name (e.g. "code#3")
+	// stamped on every ToolTrace this run emits, so hosts can tell apart
+	// concurrent sub-agents of the same type. AgentID keeps the manifest spec
+	// ID for prompt/handoff resolution; InstanceID only affects observability.
+	InstanceID string
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
@@ -161,7 +166,7 @@ type toolLoopConfig struct {
 	// LLM call completes. Only the top-level run sets it; sub-agents stay
 	// silent (their cost surfaces through the parent's tool results).
 	UsageCallback UsageCallback
-	Permission     config.PermissionLevel
+	Permission    config.PermissionLevel
 	// PermissionFn, when set, is consulted on every approval decision instead
 	// of the static Permission snapshot, so the user can change the permission
 	// level (e.g. to yolo) while a run is in flight and have it take effect
@@ -187,6 +192,15 @@ type toolLoopConfig struct {
 	// message is appended to the conversation as a user turn so the model sees
 	// it before its next step. Top-level runs only — sub-agents never get one.
 	Steering *SteeringQueue
+}
+
+// traceID is the agent identity stamped on emitted ToolTraces: the unique
+// per-instance name when one was assigned (swarm members), else the spec ID.
+func (r *toolRuntime) traceID() string {
+	if r.instanceID != "" {
+		return r.instanceID
+	}
+	return r.agentID
 }
 
 type toolCall struct {
@@ -222,6 +236,7 @@ type toolRuntime struct {
 	checkpoint    func(tool string)
 	sessionDir    string
 	agentID       string
+	instanceID    string
 	parentID      string
 
 	delegationDepth      int
@@ -419,6 +434,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		checkpoint:      cfg.Checkpoint,
 		sessionDir:      cfg.SessionDir,
 		agentID:         cfg.AgentID,
+		instanceID:      cfg.InstanceID,
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
@@ -563,7 +579,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for _, s := range cfg.Steering.Drain() {
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: steeringMessagePrefix + s})
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "steering delivered: " + truncate(s, 200)})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "steering delivered: " + truncate(s, 200)})
 				}
 			}
 		}
@@ -573,7 +589,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err == nil {
 			convMsgs = compacted
 			if did && cfg.ToolCallback != nil {
-				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "compacted working context to stay within the window"})
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "compacted working context to stay within the window"})
 			}
 		}
 		// Budget validation: sum system + all messages.
@@ -591,7 +607,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, true); cerr == nil && did {
 					convMsgs = compacted
 					if cfg.ToolCallback != nil {
-						cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
+						cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
 					}
 					continue
 				}
@@ -610,7 +626,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		if cfg.ToolCallback != nil {
 			req.OnRateLimit = func(d time.Duration) {
-				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
 			}
 		}
 		var demux *streamDemux
@@ -643,7 +659,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if sendRetries < maxSendRetries {
 				sendRetries++
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
 				}
 				select {
 				case <-time.After(time.Duration(sendRetries) * 2 * time.Second):
@@ -659,7 +675,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				runtime.modelOverride = &next
 				sendRetries = 0
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
 				}
 				continue
 			}
@@ -728,7 +744,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if loopAct == loopNudge {
 				resultsMsg.Content = loopNudgeMessage
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
 				}
 			}
 			convMsgs = append(convMsgs, resultsMsg)
@@ -787,7 +803,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if loopAct == loopNudge {
 				toolFeedback.WriteString(loopNudgeMessage + "\n")
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
 				}
 			}
 			// Feedback lands in the history before any exit check so the carried
@@ -850,7 +866,11 @@ func emitNarration(cfg toolLoopConfig, text string) {
 	if text == "" {
 		return
 	}
-	cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
+	id := cfg.InstanceID
+	if id == "" {
+		id = cfg.AgentID
+	}
+	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
 }
 
 // compactConv summarizes the older portion of convMsgs into a single
@@ -908,7 +928,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	for i, call := range calls {
 		if toolCap > 0 && i >= toolCap {
 			results[i] = parallelResult{
-				agentID: r.agentID,
+				agentID: r.traceID(),
 				name:    call.Tool,
 				args:    singleLine(string(call.Args)),
 				output:  fmt.Sprintf("error: too many tool calls in one step (limit %d, batch %d); this call was skipped — emit a smaller batch", toolCap, len(calls)),
@@ -920,7 +940,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			agentCalls++
 			if agentCalls > agentBudget {
 				results[i] = parallelResult{
-					agentID: r.agentID,
+					agentID: r.traceID(),
 					name:    call.Tool,
 					args:    singleLine(string(call.Args)),
 					output:  fmt.Sprintf("error: delegation limit reached (max %d in parallel)", agentBudget),
@@ -935,10 +955,10 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			callArgs := singleLine(string(c.Args))
 			if callback != nil && isMajorOperationTool(c.Tool) {
 				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
-				callback(ToolTrace{AgentID: r.agentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 			}
 			if callback != nil {
-				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Args: callArgs, Status: "running"})
+				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
 			}
 			cctx, sink := withImageSink(ctx)
 			output, err := r.executeWithTimeout(cctx, c, allowed)
@@ -948,7 +968,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				output = "error: " + err.Error()
 			}
 			results[idx] = parallelResult{
-				agentID: r.agentID,
+				agentID: r.traceID(),
 				name:    c.Tool,
 				args:    callArgs,
 				output:  output,
@@ -956,13 +976,13 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				images:  sink.list(),
 			}
 			if callback != nil {
-				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
+				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
 				if isMajorOperationTool(c.Tool) {
 					msg := fmt.Sprintf("Completed %s.", c.Tool)
 					if err != nil {
 						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
 					}
-					callback(ToolTrace{AgentID: r.agentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+					callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 				}
 			}
 		}(i, call)

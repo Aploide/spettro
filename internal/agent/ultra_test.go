@@ -140,3 +140,39 @@ func TestLLMAgentRun_UltraInjectsToolOnlyAtTopLevel(t *testing.T) {
 		t.Fatal("ultra must not be present without the toggle")
 	}
 }
+
+func TestEmitSwarmTrace_NamesAndShape(t *testing.T) {
+	var traces []ToolTrace
+	r := &toolRuntime{
+		agentID:      "coding",
+		toolCallback: func(tr ToolTrace) { traces = append(traces, tr) },
+	}
+	r.emitSwarmTrace("code#2", "b.go", "running", "")
+	r.emitSwarmTrace("code#2", "b.go", "success", "done")
+	if len(traces) != 2 {
+		t.Fatalf("want 2 traces, got %d", len(traces))
+	}
+	for _, tr := range traces {
+		if tr.AgentID != "code#2" || tr.Name != "agent" {
+			t.Fatalf("bad trace identity: %+v", tr)
+		}
+		if !strings.Contains(tr.Args, `"swarm":true`) || !strings.Contains(tr.Args, `"agent":"code#2"`) || !strings.Contains(tr.Args, `"task":"b.go"`) {
+			t.Fatalf("bad trace args: %s", tr.Args)
+		}
+	}
+	if traces[0].Status != "running" || traces[1].Status != "success" {
+		t.Fatalf("bad statuses: %s, %s", traces[0].Status, traces[1].Status)
+	}
+	// nil callback must be a no-op, not a panic.
+	(&toolRuntime{}).emitSwarmTrace("code#1", "a", "running", "")
+}
+
+func TestRenderUltraResults_IncludesInstanceNames(t *testing.T) {
+	out := renderUltraResults("code", []ultraResult{
+		{item: "a.go", name: "code#1", content: "done a"},
+		{item: "b.go", content: "done b"}, // no name → derived from index
+	})
+	if !strings.Contains(out, `name="code#1"`) || !strings.Contains(out, `name="code#2"`) {
+		t.Fatalf("missing instance names: %s", out)
+	}
+}

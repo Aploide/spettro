@@ -220,6 +220,26 @@ func (t *turnState) openToolCallID(toolName string) acpsdk.ToolCallId {
 }
 
 func toolCallTitle(tr agent.ToolTrace) string {
+	// Sub-agent lifecycle traces get a human title ("agent code#3: fix auth
+	// tests") so editors show which swarm/delegation member is doing what
+	// instead of a raw JSON blob.
+	if tr.Name == "agent" {
+		var args struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+		}
+		if json.Unmarshal([]byte(tr.Args), &args) == nil && args.Agent != "" {
+			title := "agent " + args.Agent
+			if args.Task != "" {
+				task := args.Task
+				if len(task) > 120 {
+					task = task[:120] + "…"
+				}
+				title += ": " + task
+			}
+			return title
+		}
+	}
 	title := tr.Name
 	if tr.Args != "" {
 		args := tr.Args
@@ -228,6 +248,11 @@ func toolCallTitle(tr agent.ToolTrace) string {
 			args = args[:maxArgs] + "…"
 		}
 		title += " " + args
+	}
+	// Swarm members carry instance names like "code#3"; prefixing them keeps
+	// every tool call attributable when dozens of agents interleave.
+	if strings.ContainsRune(tr.AgentID, '#') {
+		title = "[" + tr.AgentID + "] " + title
 	}
 	return title
 }
