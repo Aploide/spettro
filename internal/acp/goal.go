@@ -163,6 +163,13 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 
 		result, err := ag.Run(ctx, task)
+		// Adopt the run's structured conversation even when it failed or was
+		// cancelled: the partial history (this iteration's tool calls and
+		// results) is valid context for the retry / next iteration, and
+		// dropping it would restart the goal's context from scratch.
+		if len(result.Messages) > 0 {
+			history = result.Messages
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
@@ -189,9 +196,6 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 		retries = 0
 		totalTokens += result.TokensUsed
-		if len(result.Messages) > 0 {
-			history = result.Messages
-		}
 		if result.Content != "" {
 			turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content + "\n"))
 		}

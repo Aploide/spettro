@@ -787,6 +787,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.clearStreamMessages()
+			// Adopt the run's partial conversation as the carried history: the
+			// turn failed or was cancelled, but its tool calls and results are
+			// still valid context for the next prompt.
+			if len(msg.messages) > 0 {
+				m.convHistory = msg.messages
+			}
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("error: "+msg.err.Error(), "error")
 			m.publishRemote("assistant_error", map[string]interface{}{"error": msg.err.Error()})

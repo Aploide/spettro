@@ -468,6 +468,31 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	}
 
 	result, runErr := ag.Run(runCtx, task)
+
+	// Preserve whatever context the run produced — even on failure or
+	// cancellation. Losing s.history/s.transcript here is what made a failed
+	// or interrupted turn restart the conversation from scratch.
+	b.mu.Lock()
+	if len(result.Messages) > 0 {
+		s.history = result.Messages
+	}
+	now := time.Now()
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
+	if content := strings.TrimSpace(result.Content); content != "" {
+		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
+	} else if runErr != nil {
+		note := "turn interrupted"
+		if runCtx.Err() == nil {
+			note = "turn failed: " + runErr.Error()
+		}
+		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: "[" + note + "]", At: now})
+	}
+	state := s.persistState()
+	b.mu.Unlock()
+	// Persist so the TUI's /resume and future session/load calls see this
+	// conversation; a save failure must not fail the prompt turn.
+	_ = session.Save(b.opts.GlobalDir, state)
+
 	if runErr != nil {
 		if runCtx.Err() != nil {
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
@@ -480,21 +505,6 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	if result.Content != "" {
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content))
 	}
-
-	b.mu.Lock()
-	if len(result.Messages) > 0 {
-		s.history = result.Messages
-	}
-	now := time.Now()
-	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
-	if result.Content != "" {
-		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
-	}
-	state := s.persistState()
-	b.mu.Unlock()
-	// Persist so the TUI's /resume and future session/load calls see this
-	// conversation; a save failure must not fail the prompt turn.
-	_ = session.Save(b.opts.GlobalDir, state)
 
 	return acpsdk.PromptResponse{
 		StopReason: acpsdk.StopReasonEndTurn,
