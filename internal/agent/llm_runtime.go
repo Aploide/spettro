@@ -557,6 +557,21 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}, nil
 	}
 
+	// fail is the error-path counterpart of finish: it returns the error
+	// together with the conversation accumulated so far, so hosts can keep
+	// the partial history (user task, tool calls and results) as the next
+	// turn's carried prefix instead of losing the whole turn's context.
+	// convMsgs is append-only up to any error point, so it is always a valid
+	// provider prefix (tool calls are never left without their results).
+	fail := func(err error) (toolLoopResult, error) {
+		return toolLoopResult{
+			traces:        traces,
+			tokens:        totalTokens,
+			contextTokens: contextTokens,
+			messages:      convMsgs,
+		}, err
+	}
+
 	// The system prompt is intentionally built once: it must not vary between
 	// steps or the provider-side prompt cache misses on every call.
 	system := buildSystemString(cfg, useNativeTools)
@@ -612,7 +627,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 					continue
 				}
 			}
-			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, err
+			return fail(err)
 		}
 		budgetCompacted = false
 		req := provider.Request{
@@ -651,7 +666,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		if err != nil {
 			// User cancellation is not retryable — surface it immediately.
 			if ctx.Err() != nil {
-				return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
+				return fail(fmt.Errorf("agent call failed: %w", err))
 			}
 			// Transient failure (5xx/timeout/network): retry the same request a
 			// bounded number of times before considering a fallback model, so a
@@ -664,7 +679,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				select {
 				case <-time.After(time.Duration(sendRetries) * 2 * time.Second):
 				case <-ctx.Done():
-					return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, ctx.Err()
+					return fail(ctx.Err())
 				}
 				continue
 			}
@@ -679,7 +694,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				}
 				continue
 			}
-			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
+			return fail(fmt.Errorf("agent call failed: %w", err))
 		}
 		sendRetries = 0
 		totalTokens += resp.EstimatedTokens

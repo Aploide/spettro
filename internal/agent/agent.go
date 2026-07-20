@@ -69,7 +69,10 @@ type RunResult struct {
 	// and the final assistant answer. Callers hand it back as the next run's
 	// LLMAgent.Messages so the provider request keeps a byte-stable, growing
 	// prefix — that stability is what makes prompt caching hit and stops
-	// generated tokens from being thrown away between turns.
+	// generated tokens from being thrown away between turns. On a failed or
+	// cancelled run Messages still carries the conversation accumulated up to
+	// the error (the final assistant answer may be missing), so hosts can
+	// preserve context across failed turns.
 	Messages []provider.Message
 }
 
@@ -293,7 +296,10 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Steering:        a.Steering,
 	})
 	if err != nil {
-		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
+		// Preserve the partial conversation so hosts can carry it into the
+		// next turn: a failed or cancelled run must not wipe the context the
+		// user already built up (tool results, steering, prior steps).
+		return RunResult{Messages: res.messages}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
 	}
 	out := strings.TrimSpace(res.content)
 	out = stripLeakedToolCalls(out)
