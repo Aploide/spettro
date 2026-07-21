@@ -401,9 +401,9 @@ func stripImages(req Request) Request {
 	// Request-level images attach to the last user message in multi-turn mode;
 	// note the omission there.
 	if n := len(req.Images); n > 0 {
-		for _, v := range slices.Backward(out.Messages) {
+		for i, v := range slices.Backward(out.Messages) {
 			if v.Role == RoleUser && len(v.ToolResults) == 0 {
-				v.Content = strings.TrimSpace(v.Content + "\n\n" + imageOmittedText(n))
+				out.Messages[i].Content = strings.TrimSpace(v.Content + "\n\n" + imageOmittedText(n))
 				break
 			}
 		}
