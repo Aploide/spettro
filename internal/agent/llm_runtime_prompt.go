@@ -37,7 +37,7 @@ func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
 		return 40000
-	case "repo-search", "grep", "glob", "ls", "diagnostics", "references":
+	case "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover":
 		return 16000
 	case "shell-exec", "bash", "bash-output", "job-output":
 		return 8000
@@ -289,6 +289,8 @@ var builtinToolSchemas = map[string]string{
 	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
 	"diagnostics":        `{"path"?: string}`,
 	"references":         `{"path": string, "symbol"?: string, "kind"?: "references"|"definition", "line"?: int, "character"?: int}`,
+	"hover":              `{"path": string, "symbol"?: string, "line"?: int, "character"?: int}`,
+	"rename-symbol":      `{"path": string, "new_name": string, "symbol"?: string, "line"?: int, "character"?: int}`,
 	"lsp-restart":        `{"server"?: string}`,
 	"enter-plan-mode":    `{"reason"?: string}`,
 	"exit-plan-mode":     `{"reason"?: string}`,
@@ -337,6 +339,8 @@ var builtinNativeToolDescs = map[string]string{
 	"config":             "Get or set configuration values.",
 	"diagnostics":        "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
 	"references":         "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+	"hover":              "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
+	"rename-symbol":      "Language-server rename: rename a symbol across the workspace and apply the edits. Position by symbol name or 1-based line/character; reports the files changed.",
 	"lsp-restart":        "Restart a wedged language server (all servers when none named).",
 	"enter-plan-mode":    "Enter plan mode.",
 	"exit-plan-mode":     "Exit plan mode.",
@@ -390,6 +394,8 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
 	"diagnostics":        json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	"references":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"hover":              json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"rename-symbol":      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"new_name":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path","new_name"]}`),
 	"lsp-restart":        json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
 	"enter-plan-mode":    json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"exit-plan-mode":     json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),

@@ -28,13 +28,20 @@ workspace. A server that fails to start is not retried on every edit; the
 
 ## What the agent gets
 
-- **Post-edit diagnostics** — after `file-write` / `file-edit`, fresh
-  diagnostics for the changed file are appended to the tool result
-  (bounded to ~3s so edits never feel slow).
+- **Post-edit diagnostics** — after `file-write` / `file-edit` / `multi-edit`,
+  fresh diagnostics for the changed file are appended to the tool result
+  (bounded to ~3s so edits never feel slow), so the agent sees its own type
+  errors immediately instead of at build time.
 - **`diagnostics` tool** — diagnostics for one file, or everything published
   so far across the workspace when called without a path.
 - **`references` tool** — references or definition for a symbol
   (by name or by line/character position).
+- **`hover` tool** — type signature and documentation for a symbol
+  (by name or by line/character position).
+- **`rename-symbol` tool** — rename a symbol across the workspace. The
+  combined multi-file diff goes through the same approval flow as
+  `file-write`, a checkpoint is taken first (so `/rewind` covers it), and the
+  result lists every file changed.
 - **`lsp-restart` tool** — restart one or all servers and reload the config.
 
 ## Optional overrides: `.spettro/lsp.json`

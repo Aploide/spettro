@@ -1,4 +1,4 @@
-version = 5
+version = 6
 default_agent = 'plan'
 
 [metadata]
@@ -13,19 +13,13 @@ sandbox_mode = 'full-access'
 permission_rules = []
 allow_network_tools = false
 
-[runtime.fallback]
-# mode: 'prompt' (ask before switching the main conversation), 'silent', or 'off'.
-mode = 'prompt'
-# Ordered 'provider/model' refs tried when the selected model hits quota/5xx/timeouts.
-chain = []
-# Optional small/cheap 'provider/model' for internal calls (compaction, titling);
-# these fall back silently through the chain, independent of the UI-selected model.
-internal_model = ''
-
 [runtime.delegation]
 max_parallel_workers = 4
 max_depth = 2
 max_tool_calls_per_step = 32
+
+[runtime.fallback]
+mode = 'prompt'
 
 [[tools]]
 id = 'glob'
@@ -687,6 +681,35 @@ risk_level = 'low'
 primary_only = false
 permission_rules = []
 
+[[tools]]
+id = 'hover'
+name = 'LSP Hover'
+description = 'Type signature and documentation for a symbol via the language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read', 'search']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'rename-symbol'
+name = 'LSP Rename'
+description = 'Rename a symbol across the workspace via the language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 60
+requires_approval = true
+permitted_actions = ['write']
+aliases = []
+risk_level = 'high'
+primary_only = false
+permission_rules = []
 
 [[agents]]
 id = 'plan'
@@ -706,6 +729,7 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
+max_steps = 0
 handoffs = ['explore', 'review', 'docs']
 enabled = true
 
@@ -721,12 +745,13 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/coding.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'job-output', 'job-kill', 'ls', 'tool-search', 'task-create', 'task-get', 'task-update', 'task-list', 'task-delete', 'task-stop', 'config', 'send-message', 'todo-write', 'comment', 'skill-read', 'skill-list', 'save-memory', 'grok-image', 'grok-video', 'web-fetch', 'download', 'view-image']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'job-output', 'job-kill', 'ls', 'tool-search', 'task-create', 'task-get', 'task-update', 'task-list', 'task-delete', 'task-stop', 'config', 'send-message', 'todo-write', 'comment', 'skill-read', 'skill-list', 'save-memory', 'grok-image', 'grok-video', 'web-fetch', 'download', 'view-image', 'hover', 'rename-symbol']
 permitted_actions = ['read', 'search', 'plan', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 8192
+max_steps = 0
 handoffs = ['code', 'git', 'test', 'review', 'docs', 'explore']
 enabled = true
 
@@ -748,6 +773,7 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.4
 max_tokens = 8192
+max_steps = 0
 handoffs = ['explore', 'docs']
 enabled = true
 
@@ -769,6 +795,7 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
+max_steps = 0
 handoffs = ['explore', 'review', 'docs']
 enabled = true
 
@@ -784,12 +811,13 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/code.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'job-output', 'job-kill', 'ls', 'task-create', 'task-get', 'task-update', 'task-list', 'task-delete', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'todo-write', 'comment', 'skill-read', 'skill-list', 'save-memory', 'grok-image', 'grok-video', 'web-fetch', 'download', 'view-image']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'shell-exec', 'bash', 'job-output', 'job-kill', 'ls', 'task-create', 'task-get', 'task-update', 'task-list', 'task-delete', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'todo-write', 'comment', 'skill-read', 'skill-list', 'save-memory', 'grok-image', 'grok-video', 'web-fetch', 'download', 'view-image', 'hover', 'rename-symbol']
 permitted_actions = ['read', 'search', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 8192
+max_steps = 0
 handoffs = ['explore', 'review', 'test', 'docs']
 enabled = true
 
@@ -811,6 +839,7 @@ permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 4096
+max_steps = 0
 handoffs = ['review', 'docs']
 enabled = true
 
@@ -832,6 +861,7 @@ permission = 'restricted'
 permission_rules = []
 temperature = 0.1
 max_tokens = 4096
+max_steps = 0
 handoffs = ['review', 'explore']
 enabled = true
 
@@ -853,6 +883,7 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
+max_steps = 0
 handoffs = ['explore', 'docs']
 enabled = true
 
@@ -874,5 +905,6 @@ permission = 'ask-first'
 permission_rules = []
 temperature = 0.2
 max_tokens = 4096
+max_steps = 0
 handoffs = ['explore']
 enabled = true

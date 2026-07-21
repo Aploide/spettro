@@ -37,6 +37,16 @@ type Location struct {
 	} `json:"range"`
 }
 
+// TextEdit is one replacement inside a document, as produced by a rename's
+// WorkspaceEdit.
+type TextEdit struct {
+	Range struct {
+		Start Position `json:"start"`
+		End   Position `json:"end"`
+	} `json:"range"`
+	NewText string `json:"newText"`
+}
+
 func severityLabel(s int) string {
 	switch s {
 	case 1:
@@ -152,6 +162,8 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 			"textDocument": map[string]any{
 				"publishDiagnostics": map[string]any{},
 				"synchronization":    map[string]any{"didSave": true},
+				"hover":              map[string]any{"contentFormat": []string{"plaintext", "markdown"}},
+				"rename":             map[string]any{},
 			},
 			"workspace": map[string]any{},
 		},
@@ -421,6 +433,92 @@ func (c *Client) references(ctx context.Context, uri string, pos Position) ([]Lo
 		"context":      map[string]any{"includeDeclaration": true},
 	}, &locs)
 	return locs, err
+}
+
+// hover runs textDocument/hover and flattens the contents to plain text.
+// The contents field varies by server: MarkupContent, a MarkedString, or an
+// array of MarkedStrings; all shapes collapse to their value strings.
+func (c *Client) hover(ctx context.Context, uri string, pos Position) (string, error) {
+	var raw struct {
+		Contents json.RawMessage `json:"contents"`
+	}
+	if err := c.call(ctx, "textDocument/hover", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     pos,
+	}, &raw); err != nil {
+		return "", err
+	}
+	return flattenHoverContents(raw.Contents), nil
+}
+
+func flattenHoverContents(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	type marked struct {
+		Language string `json:"language"`
+		Value    string `json:"value"`
+	}
+	var m marked // MarkupContent has the same value field
+	if json.Unmarshal(raw, &m) == nil && m.Value != "" {
+		return m.Value
+	}
+	var parts []json.RawMessage
+	if json.Unmarshal(raw, &parts) == nil {
+		var out []string
+		for _, p := range parts {
+			if v := flattenHoverContents(p); strings.TrimSpace(v) != "" {
+				out = append(out, v)
+			}
+		}
+		return strings.Join(out, "\n\n")
+	}
+	return ""
+}
+
+// rename runs textDocument/rename and returns the workspace edit collapsed to
+// a uri → edits map (both the `changes` and `documentChanges` shapes are
+// handled). Servers that answer with file create/rename/delete operations are
+// rejected: applying those safely is out of scope for the tool.
+func (c *Client) rename(ctx context.Context, uri string, pos Position, newName string) (map[string][]TextEdit, error) {
+	var raw struct {
+		Changes         map[string][]TextEdit `json:"changes"`
+		DocumentChanges []json.RawMessage     `json:"documentChanges"`
+	}
+	if err := c.call(ctx, "textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     pos,
+		"newName":      newName,
+	}, &raw); err != nil {
+		return nil, err
+	}
+	edits := map[string][]TextEdit{}
+	for u, es := range raw.Changes {
+		edits[u] = append(edits[u], es...)
+	}
+	for _, dc := range raw.DocumentChanges {
+		var op struct {
+			Kind         string `json:"kind"`
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Edits []TextEdit `json:"edits"`
+		}
+		if json.Unmarshal(dc, &op) != nil {
+			continue
+		}
+		if op.Kind != "" {
+			return nil, fmt.Errorf("rename requires a file %s operation, which is not supported", op.Kind)
+		}
+		if op.TextDocument.URI != "" {
+			edits[op.TextDocument.URI] = append(edits[op.TextDocument.URI], op.Edits...)
+		}
+	}
+	return edits, nil
 }
 
 // definition runs textDocument/definition at the given position. The result

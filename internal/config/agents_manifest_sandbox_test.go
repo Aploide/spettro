@@ -51,8 +51,8 @@ func TestMigrationRewritesInertWorkspaceWrite(t *testing.T) {
 	if !changed {
 		t.Fatal("v2 manifest must be marked changed by the v3 migration")
 	}
-	if m.Version != 5 {
-		t.Fatalf("version = %d, want 5 (v5 vision-tools migration)", m.Version)
+	if m.Version != 6 {
+		t.Fatalf("version = %d, want 6 (latest migration)", m.Version)
 	}
 	if m.Runtime.SandboxMode != SandboxFullAccess {
 		t.Fatalf("sandbox_mode = %q, want %q (inert pre-v3 value must be neutralized)", m.Runtime.SandboxMode, SandboxFullAccess)
@@ -110,8 +110,8 @@ func TestDefaultManifestSandboxSetup(t *testing.T) {
 	if m.Runtime.SandboxMode != SandboxFullAccess {
 		t.Fatalf("default sandbox_mode = %q, want full-access (opt-in feature)", m.Runtime.SandboxMode)
 	}
-	if m.Version != 5 {
-		t.Fatalf("default manifest version = %d, want 5", m.Version)
+	if m.Version != 6 {
+		t.Fatalf("default manifest version = %d, want 6", m.Version)
 	}
 	// The OS sandbox is enforced transparently; it must not surface as a tool
 	// the model can see or call.

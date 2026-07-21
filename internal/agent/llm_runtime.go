@@ -94,7 +94,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -1326,6 +1326,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runLSPDiagnostics(ctx, call.Args)
 	case "references":
 		return r.runLSPReferences(ctx, call.Args)
+	case "hover":
+		return r.runLSPHover(ctx, call.Args)
+	case "rename-symbol":
+		return r.runLSPRename(ctx, call.Args)
 	case "lsp-restart":
 		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
@@ -1543,7 +1547,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // spurious checkpoint is cheap while a missed one is unrecoverable.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "multi-edit", "shell-exec", "bash":
+	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash":
 		return true
 	}
 	return false
