@@ -12,6 +12,7 @@
 - [Runtime Hooks](hooks.md) — custom bash middleware for tool events
 - [Checkpointing and Rewind](checkpointing.md) — auto-snapshots before file edits, `/rewind`
 - [Language Server (LSP) Integration](lsp.md) — zero-config diagnostics, references, go-to-definition
+- [Symbol-aware repo search](symbol-index.md) — ranked definitions in `repo-search`, cached symbol index
 - [Web Tools](web-tools.md) — web-search, web-fetch markdown engine, download
 - [Vision](vision.md) — view-image tool, agent-driven screenshots
 - [Persistent Memory](memory.md) — save-memory tool, `/memory`, cross-session context

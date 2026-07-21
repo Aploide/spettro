@@ -585,7 +585,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 		},
-		searcher:     agent.RepoSearcher{},
+		searcher:     agent.NewRepoSearcher(cwd),
 		sandboxState: sb,
 		historyIndex: -1,
 		livePerm:     &livePermission{},
@@ -597,6 +597,15 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	// synchronously here would block the first paint (seen: ~56s from $HOME).
 	m.lastRepoScanAt = time.Now()
 	m.startupCmds = append(m.startupCmds, scanRepoFilesCmd(cwd))
+	// Warm the repo symbol index off the UI thread so the first symbol-aware
+	// repo-search answers from cache instead of paying the initial scan.
+	if rs, ok := m.searcher.(agent.RepoSearcher); ok && rs.Index != nil {
+		idx := rs.Index
+		m.startupCmds = append(m.startupCmds, func() tea.Msg {
+			idx.Warm(context.Background())
+			return nil
+		})
+	}
 	// Skip the update check entirely for from-source ("dev") builds — there
 	// is no meaningful version to compare, and self-replacing a dev binary
 	// with an official release would surprise a developer.

@@ -487,7 +487,41 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 6
 		changed = true
 	}
+	if m.Version < 7 {
+		// v7 backs repo-search with the symbol index (ranked definitions).
+		// Grant it to agents already trusted with grep — same read/search
+		// surface — so they can use the cheaper symbol lookup.
+		m.ensureRepoSearchTool()
+		m.Version = 7
+		changed = true
+	}
 	return changed
+}
+
+// ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool
+// into a manifest that predates v7: the definition is added when absent, and
+// any agent already holding grep gets repo-search allowed (identical
+// read/search trust level, so deliberate restrictions are preserved).
+func (m *AgentManifest) ensureRepoSearchTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == "repo-search" {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, ToolSpec{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"})
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["grep"] && !allowed["repo-search"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "repo-search")
+		}
+	}
 }
 
 // ensureLSPDeepTools retrofits hover and rename-symbol into a manifest that

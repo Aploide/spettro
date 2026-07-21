@@ -310,7 +310,7 @@ var builtinNativeToolDescs = map[string]string{
 	"multi-edit":         "Apply an ordered list of find/replace edits to one file atomically: each edit sees the result of the previous one, and if any edit fails to match uniquely the whole call fails and the file is untouched.",
 	"glob":               "Find files matching a glob pattern (** for recursive search).",
 	"grep":               "Search files with a regular expression.",
-	"repo-search":        "Semantic full-text search across the repository.",
+	"repo-search":        "Full-text search across the repository. For a symbol name (function, type, class, const) it lists ranked definitions first, then usages.",
 	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
 	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
 	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",

@@ -425,6 +425,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 	runtime := toolRuntime{
 		cwd:             cfg.CWD,
+		searcher:        NewRepoSearcher(cfg.CWD),
 		readSet:         map[string]struct{}{},
 		requiredReads:   map[string]struct{}{},
 		permission:      cfg.Permission,
@@ -1224,6 +1225,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
+		r.invalidateSymbolIndex(rel)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
@@ -1946,6 +1948,15 @@ func realPathEscapes(dir, abs string) bool {
 // searchLineNumberRE matches ":<digits>" segments in repo-search output, used
 // by markReadFromSearch to detect ripgrep-style "path:lineno:..." rows.
 var searchLineNumberRE = regexp.MustCompile(`^\d+$`)
+
+// invalidateSymbolIndex drops rel from the repo symbol index after one of the
+// agent's own write tools touched it, so the next repo-search re-parses it
+// even if the filesystem mtime didn't visibly change.
+func (r *toolRuntime) invalidateSymbolIndex(rel string) {
+	if r.searcher.Index != nil {
+		r.searcher.Index.Invalidate(rel)
+	}
+}
 
 func (r *toolRuntime) markReadFromSearch(out string) {
 	lines := strings.Split(out, "\n")
