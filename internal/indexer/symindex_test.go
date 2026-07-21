@@ -154,7 +154,7 @@ func TestCachePersistsAcrossInstances(t *testing.T) {
 // a ~1k-file repo (steady state, after the first lazy build).
 func BenchmarkLookup1kFiles(b *testing.B) {
 	root := b.TempDir()
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		writeFile(b, root, fmt.Sprintf("pkg%d/file%d.go", i%50, i),
 			fmt.Sprintf("package pkg%d\n\nfunc Handler%d() {}\n\ntype Widget%d struct{}\n", i%50, i, i))
 	}

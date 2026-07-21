@@ -76,7 +76,7 @@ func (b *bridge) askCompactPermission(ctx context.Context, turn *turnState, toke
 		SessionId: turn.sessionID,
 		ToolCall: acpsdk.ToolCallUpdate{
 			ToolCallId: turn.nextToolCallID("compact"),
-			Title:      acpsdk.Ptr(fmt.Sprintf("Context nearly full (~%d/%d tokens). Compact conversation history now?", tokens, window)),
+			Title:      new(fmt.Sprintf("Context nearly full (~%d/%d tokens). Compact conversation history now?", tokens, window)),
 			Kind:       acpsdk.Ptr(acpsdk.ToolKindThink),
 			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
 		},

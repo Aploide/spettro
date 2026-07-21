@@ -174,7 +174,7 @@ func (m Model) handleRemoteCommand(input string) (tea.Model, tea.Cmd) {
 		"  auth:   Authorization: Bearer <token>  (or ?token=<token>)",
 	}, "\n"))
 
-	server.Publish("remote_started", map[string]interface{}{
+	server.Publish("remote_started", map[string]any{
 		"port":         port,
 		"requested":    preferredPort,
 		"fell_back":    fellBack,
@@ -196,7 +196,7 @@ func (m Model) stopRemote() (tea.Model, tea.Cmd) {
 	addr := m.remoteAddress()
 	// Publish before tearing down so any subscribed client sees the
 	// shutdown notice in the same SSE response stream.
-	m.remoteServer.Publish("remote_stopped", map[string]interface{}{"address": addr})
+	m.remoteServer.Publish("remote_stopped", map[string]any{"address": addr})
 	_ = m.remoteServer.Stop()
 	m.remoteServer = nil
 	m.remoteRequestedPort = 0
@@ -304,14 +304,14 @@ func (m Model) handleRemoteSubmission(req remote.SubmitRequest) (tea.Model, tea.
 			})
 			return m, nil
 		}
-		m.publishRemote("remote_command", map[string]interface{}{"command": text})
+		m.publishRemote("remote_command", map[string]any{"command": text})
 		sendRemoteReply(reply, remote.SubmitResponse{Accepted: true, Note: "command dispatched"})
 		return m.handleCommand(text)
 	}
 
 	// Plain prompt: synthesise a user-message echo and forward through the
 	// regular routing.
-	m.publishRemote("remote_prompt", map[string]interface{}{"prompt": text})
+	m.publishRemote("remote_prompt", map[string]any{"prompt": text})
 
 	if m.thinking {
 		mentionedFiles := m.extractMentionedFiles(text)
@@ -355,9 +355,9 @@ func (m Model) remoteStatusSnapshot() remote.Status {
 // publishRemote forwards an event to the optional remote server AND the
 // optional Telegram relay. It is the single funnel through which all
 // observability events leave the TUI.
-func (m *Model) publishRemote(kind string, data map[string]interface{}) {
+func (m *Model) publishRemote(kind string, data map[string]any) {
 	if data == nil {
-		data = map[string]interface{}{}
+		data = map[string]any{}
 	}
 	if _, ok := data["mode"]; !ok && m.mode != "" {
 		data["mode"] = m.mode
@@ -374,7 +374,7 @@ func (m *Model) publishRemoteState(reason string) {
 	}
 	st := m.remoteStatusSnapshot()
 	m.remoteServer.SetStatus(st)
-	data := map[string]interface{}{
+	data := map[string]any{
 		"thinking":       st.Thinking,
 		"mode":           st.Mode,
 		"active_agent":   st.ActiveAgent,
@@ -392,7 +392,7 @@ func (m *Model) publishRemoteToolTrace(t agent.ToolTrace) {
 	if m.remoteServer == nil {
 		return
 	}
-	data := map[string]interface{}{
+	data := map[string]any{
 		"name":   t.Name,
 		"status": t.Status,
 		"agent":  t.AgentID,

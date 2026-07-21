@@ -17,10 +17,10 @@ func TestTailTrimHistory_NoOpWhenUnderCap(t *testing.T) {
 
 func TestTailTrimHistory_DropsHeadAndPrependsMarker(t *testing.T) {
 	var b strings.Builder
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		b.WriteString("assistant(1): some old line that we'll drop very fast indeed\n")
 	}
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		b.WriteString("assistant(2): RECENT_LINE_TO_KEEP\n")
 	}
 	got := agent.TailTrimHistoryForTesting(b.String(), 512)

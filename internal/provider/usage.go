@@ -1,5 +1,7 @@
 package provider
 
+import "maps"
+
 import "sync"
 
 // Usage is the token accounting one provider request reported. Cache fields
@@ -56,9 +58,7 @@ func (s SessionUsage) clone() SessionUsage {
 	out := s
 	if s.ByModel != nil {
 		out.ByModel = make(map[string]UsageTotals, len(s.ByModel))
-		for k, v := range s.ByModel {
-			out.ByModel[k] = v
-		}
+		maps.Copy(out.ByModel, s.ByModel)
 	}
 	return out
 }

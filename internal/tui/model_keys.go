@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,9 +53,9 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "ctrl+y":
-		for i := len(m.messages) - 1; i >= 0; i-- {
-			if m.messages[i].Role == RoleAssistant {
-				if err := clipboard.WriteAll(m.messages[i].Content); err != nil {
+		for _, v := range slices.Backward(m.messages) {
+			if v.Role == RoleAssistant {
+				if err := clipboard.WriteAll(v.Content); err != nil {
 					m.showBanner("clipboard error: "+err.Error(), "error")
 				} else {
 					m.showBanner("last response copied to clipboard", "success")

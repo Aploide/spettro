@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,12 +29,7 @@ func (m Model) openConnect() Model {
 var suggestedProviderIDs = []string{localConnectProviderID, "anthropic", "openai", "mistral", "x-ai", "zai"}
 
 func isSuggested(id string) bool {
-	for _, s := range suggestedProviderIDs {
-		if s == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(suggestedProviderIDs, id)
 }
 
 func (m Model) filterProviders(filter string) []provider.ProviderInfo {
@@ -83,12 +79,7 @@ func (m Model) localEndpointConnected() bool {
 }
 
 func (m Model) hasLocalEndpoint(endpoint string) bool {
-	for _, existing := range m.cfg.LocalEndpoints {
-		if existing == endpoint {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.cfg.LocalEndpoints, endpoint)
 }
 
 // localProbeDoneMsg delivers the result of an asynchronous ProbeLocalServer
@@ -126,10 +117,8 @@ func (m Model) handleLocalProbeDone(msg localProbeDoneMsg) (tea.Model, tea.Cmd) 
 	m.providers.AddLocalModels(msg.models)
 	normalized := msg.models[0].Provider
 	_ = m.updateConfig(func(cfg *config.UserConfig) error {
-		for _, endpoint := range cfg.LocalEndpoints {
-			if endpoint == normalized {
-				return nil
-			}
+		if slices.Contains(cfg.LocalEndpoints, normalized) {
+			return nil
 		}
 		cfg.LocalEndpoints = append(cfg.LocalEndpoints, normalized)
 		return nil
@@ -518,16 +507,10 @@ func (m Model) viewConnect() string {
 	}
 
 	hint := styleMuted.Render("↑↓ navigate  enter connect  esc close")
-	maxRows := m.height - 12
-	if maxRows < 4 {
-		maxRows = 4
-	}
+	maxRows := max(m.height-12, 4)
 	start := 0
 	if len(rows) > maxRows {
-		start = selectedRow - maxRows/2
-		if start < 0 {
-			start = 0
-		}
+		start = max(selectedRow-maxRows/2, 0)
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}

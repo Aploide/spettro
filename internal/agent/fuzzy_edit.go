@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -80,7 +81,7 @@ func fuzzyLineSpans(contentLines, oldLines []string, norm func(string) string) [
 	var spans []int
 	for i := 0; i+k <= len(contentLines); i++ {
 		ok := true
-		for j := 0; j < k; j++ {
+		for j := range k {
 			if norm(contentLines[i+j]) != normOld[j] {
 				ok = false
 				break
@@ -153,8 +154,8 @@ func replaceWithFallback(content, oldStr, newStr string, replaceAll, exactUnique
 		}
 		k := len(oldLines)
 		// Apply back-to-front so earlier span indices stay valid.
-		for i := len(spans) - 1; i >= 0; i-- {
-			s := spans[i]
+		for _, s := range slices.Backward(spans) {
+
 			adjusted := reindentNewString(newStr, leadingWS(oldLines[0]), leadingWS(contentLines[s]))
 			repl := strings.Split(adjusted, "\n")
 			contentLines = append(contentLines[:s], append(repl, contentLines[s+k:]...)...)

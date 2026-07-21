@@ -85,7 +85,7 @@ func (in Inbox) Add(cands []Candidate, existingMemory string) (int, error) {
 	for _, c := range current {
 		seen[normalizeFact(c.Fact)] = struct{}{}
 	}
-	for _, line := range strings.Split(existingMemory, "\n") {
+	for line := range strings.SplitSeq(existingMemory, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "-"))
 		if line != "" {
 			seen[normalizeFact(line)] = struct{}{}

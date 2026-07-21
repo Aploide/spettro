@@ -17,7 +17,7 @@ import (
 )
 
 func parseNumstat(text string, totals map[string][2]int) {
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -130,7 +130,7 @@ func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
 	}
 
 	stat := make(map[string]modifiedFileEntry)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if len(line) < 4 {
 			continue

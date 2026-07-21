@@ -251,16 +251,10 @@ func (m Model) viewSelector() string {
 
 	hint := styleMuted.Render("↑↓ navigate  enter select  f favorite  c connect  esc close")
 
-	maxRows := m.height - 12
-	if maxRows < 4 {
-		maxRows = 4
-	}
+	maxRows := max(m.height-12, 4)
 	start := 0
 	if len(rows) > maxRows {
-		start = selectedRow - maxRows/2
-		if start < 0 {
-			start = 0
-		}
+		start = max(selectedRow-maxRows/2, 0)
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}

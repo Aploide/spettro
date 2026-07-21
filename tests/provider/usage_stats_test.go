@@ -41,7 +41,7 @@ func TestManagerSend_AccumulatesUsage(t *testing.T) {
 	pm := provider.NewManager()
 	pm.AddLocalModels([]provider.Model{{Provider: server.URL, Name: "test-model", Local: true}})
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := pm.Send(context.Background(), server.URL, "test-model", provider.Request{Prompt: "hello"}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}

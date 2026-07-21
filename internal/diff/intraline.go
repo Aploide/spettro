@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -61,9 +62,9 @@ func intralineSpans(oldText, newText string) (oldSpans, newSpans []span) {
 	for i := range lcs {
 		lcs[i] = make([]int, len(b)+1)
 	}
-	for i := len(a) - 1; i >= 0; i-- {
+	for i, v := range slices.Backward(a) {
 		for j := len(b) - 1; j >= 0; j-- {
-			if a[i].text == b[j].text {
+			if v.text == b[j].text {
 				lcs[i][j] = lcs[i+1][j+1] + 1
 			} else if lcs[i+1][j] >= lcs[i][j+1] {
 				lcs[i][j] = lcs[i+1][j]

@@ -34,7 +34,7 @@ type Todo struct {
 	Source       string    `json:"source,omitempty"`
 	Priority     string    `json:"priority,omitempty"`
 	Dependencies []string  `json:"dependencies,omitempty"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 

@@ -58,14 +58,14 @@ func (m *Model) pushSystemMsg(content string) {
 		At:      time.Now(),
 	})
 	m.autoSaveDebounced()
-	m.publishRemote("system_message", map[string]interface{}{"content": content})
+	m.publishRemote("system_message", map[string]any{"content": content})
 }
 
 func (m *Model) showBanner(text, kind string) {
 	m.banner = text
 	m.bannerKind = kind
 	m.bannerClearAt = time.Now().Add(3 * time.Second)
-	m.publishRemote("banner", map[string]interface{}{"text": text, "level": kind})
+	m.publishRemote("banner", map[string]any{"text": text, "level": kind})
 }
 
 func (m *Model) persistUIState() {
@@ -120,7 +120,7 @@ func (m *Model) setProgressNote(text string) {
 		At:      time.Now(),
 	})
 	m.autoSaveDebounced()
-	m.publishRemote("comment", map[string]interface{}{"message": text})
+	m.publishRemote("comment", map[string]any{"message": text})
 }
 
 // streamKinds are the transient, in-place message kinds used to render live

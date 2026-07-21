@@ -18,7 +18,7 @@ func TestViewResume_IsHeightBoundedAndPreviewsDoNotWrap(t *testing.T) {
 	m.SetShowResumeForTesting(true)
 
 	items := make([]session.Summary, 0, 24)
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		items = append(items, session.Summary{
 			ID:        "s",
 			StartedAt: time.Date(2026, 3, 16, 3, i%60, 0, 0, time.UTC),

@@ -57,10 +57,7 @@ func (r *toolRuntime) runJobOutput(rawArgs []byte) (string, error) {
 // size is capped by the job-output history budget, leaving room for the header
 // so history truncation never cuts the paging hint.
 func (r *toolRuntime) readSpoolOutput(spoolID string, offset int) (string, error) {
-	maxChunk := r.historyLimit("job-output") - 200
-	if maxChunk < 1000 {
-		maxChunk = 1000
-	}
+	maxChunk := max(r.historyLimit("job-output")-200, 1000)
 	chunk, next, size, err := jobs.Spool().Read(spoolID, offset, maxChunk)
 	if err != nil {
 		return "", fmt.Errorf("job-output: %w", err)

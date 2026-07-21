@@ -91,10 +91,7 @@ func (m Model) viewContent() string {
 	var parts []string
 	if len(m.cmdItems) > 0 {
 		// Overlay spans the full inner area. Fixed costs: header(1)+input(6)+status(1)=8.
-		innerH := m.height - 8
-		if innerH < 4 {
-			innerH = 4
-		}
+		innerH := max(m.height-8, 4)
 		overlay := m.viewCmdOverlay(m.vp.Width(), innerH)
 		parts = []string{overlay, inputArea, statusBar}
 	} else {
@@ -198,10 +195,7 @@ func (m Model) viewHeader() string {
 	}
 	logoW := lipgloss.Width(logo)
 	permW := lipgloss.Width(permText)
-	maxMetaWidth := m.width - logoW - permW - 8
-	if maxMetaWidth < 0 {
-		maxMetaWidth = 0
-	}
+	maxMetaWidth := max(m.width-logoW-permW-8, 0)
 	metaText := truncateLabel(modelLabel+"  "+provLabel, maxMetaWidth)
 	right := lipgloss.NewStyle().Foreground(mc).Render(permText)
 	if metaText != "" {
@@ -217,10 +211,7 @@ func (m Model) viewHeader() string {
 		right = styleMuted.Render(sandboxTag) + "  " + right
 	}
 	rightW := lipgloss.Width(right)
-	availableCenter := m.width - logoW - rightW - 2
-	if availableCenter < 0 {
-		availableCenter = 0
-	}
+	availableCenter := max(m.width-logoW-rightW-2, 0)
 	if availableCenter > 0 && lipgloss.Width(center) > availableCenter {
 		center = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(m.mode)
 	}
@@ -265,12 +256,12 @@ func renderPlanLabel(plan string, frame int) string {
 			lipgloss.Color("#FF6B6B"), lipgloss.Color("#FF9E4F"), lipgloss.Color("#FFD93D"),
 			lipgloss.Color("#6BCB77"), lipgloss.Color("#4D96FF"), lipgloss.Color("#C77DFF"),
 		}
-		var out string
+		var out strings.Builder
 		for i, ch := range label {
 			c := rainbow[(i+frame)%len(rainbow)]
-			out += lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch))
+			out.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch)))
 		}
-		return out
+		return out.String()
 	default:
 		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9CA3AF")).Render(label)
 	}
@@ -279,10 +270,7 @@ func renderPlanLabel(plan string, frame int) string {
 // dialogInnerWidth returns the usable content width for a dialog of dialogWidth,
 // accounting for 2-char padding on each side.
 func dialogInnerWidth(dialogWidth int) int {
-	w := dialogWidth - 4
-	if w < 4 {
-		w = 4
-	}
+	w := max(dialogWidth-4, 4)
 	return w
 }
 
@@ -291,10 +279,7 @@ func dialogInnerWidth(dialogWidth int) int {
 func (m Model) viewCmdOverlay(width, height int) string {
 	mc := m.currentColor()
 
-	dialogWidth := width - 4
-	if dialogWidth > 68 {
-		dialogWidth = 68
-	}
+	dialogWidth := min(width-4, 68)
 	if dialogWidth < 32 {
 		dialogWidth = 32
 	}
@@ -305,10 +290,7 @@ func (m Model) viewCmdOverlay(width, height int) string {
 
 	// Descriptions must fit on one line to prevent the dialog from growing taller
 	// than the height passed to lipgloss.Place (which doesn't clip overflow).
-	maxDescW := innerW - 18
-	if maxDescW < 8 {
-		maxDescW = 8
-	}
+	maxDescW := max(innerW-18, 8)
 
 	var rows []string
 	for i, cmd := range m.cmdItems {
@@ -342,10 +324,7 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	}
 	start := 0
 	if len(rows) > maxRows {
-		start = m.cmdCursor - maxRows/2
-		if start < 0 {
-			start = 0
-		}
+		start = max(m.cmdCursor-maxRows/2, 0)
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}
@@ -746,10 +725,7 @@ func (m Model) viewStatusBar(width int) string {
 		right = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(label) + "  " + right
 	}
 
-	leftWidth := width - lipgloss.Width(right) - 2
-	if leftWidth < 0 {
-		leftWidth = 0
-	}
+	leftWidth := max(width-lipgloss.Width(right)-2, 0)
 	leftPadded := lipgloss.NewStyle().Width(leftWidth).Render(left)
 
 	bar := leftPadded + right + " "

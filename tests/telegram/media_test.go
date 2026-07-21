@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,10 +39,8 @@ func bindAuthedChat(t *testing.T, fb *fakeBot, r *telegram.Relay, chatID int64, 
 	// Wait for the bound bookkeeping to flush.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, b := range r.BoundChats() {
-			if b == chatID {
-				return
-			}
+		if slices.Contains(r.BoundChats(), chatID) {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -75,7 +74,6 @@ func TestSendMediaFile_RoutesByExtensionAndSize(t *testing.T) {
 		{"explicit document forces sendDocument", docPath, telegram.MediaKindDocument, "log.txt", "document", "sendDocument"},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(fb.sentMediaCalls())
 			if _, err := c.SendMediaFile(context.Background(), 4242, tc.kind, tc.path, tc.caption); err != nil {
@@ -146,7 +144,6 @@ func TestSendMediaFile_RejectsMissingAndDirectories(t *testing.T) {
 		{"directory", dir},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := c.SendMediaFile(context.Background(), 1, telegram.MediaKindImage, tc.path, "")
 			if err == nil {

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -15,10 +16,7 @@ func (m Model) sidePanelWidth() int {
 	if m.width < 110 {
 		return 0
 	}
-	w := m.width / 3
-	if w < 34 {
-		w = 34
-	}
+	w := max(m.width/3, 34)
 	if w > 54 {
 		w = 54
 	}
@@ -39,8 +37,8 @@ func (m Model) paneWidth() int {
 
 func (m Model) sidePanelItems() []sidePanelItem {
 	items := make([]sidePanelItem, 0, len(m.activityFeed))
-	for i := len(m.activityFeed) - 1; i >= 0; i-- {
-		entry := m.activityFeed[i]
+	for _, entry := range slices.Backward(m.activityFeed) {
+
 		if entry.Kind != "tool" && entry.Kind != "command" {
 			continue
 		}
@@ -92,10 +90,7 @@ func (m Model) sideListGeometry() (startY, rows int) {
 }
 
 func (m Model) sidePanelInnerHeight() int {
-	h := m.height - 4
-	if h < 12 {
-		h = 12
-	}
+	h := max(m.height-4, 12)
 	return h
 }
 
@@ -103,17 +98,11 @@ func (m Model) sidePanelWindow(items []sidePanelItem, innerHeight, gitRows int) 
 	if len(items) == 0 {
 		return 0, 0, 4
 	}
-	cursor = m.sideCursor
-	if cursor < 0 {
-		cursor = 0
-	}
+	cursor = max(m.sideCursor, 0)
 	if cursor >= len(items) {
 		cursor = len(items) - 1
 	}
-	availableRows := innerHeight - 10 - gitRows
-	if availableRows < 6 {
-		availableRows = 6
-	}
+	availableRows := max(innerHeight-10-gitRows, 6)
 	rows = min(max(4, availableRows/2), max(4, len(items)))
 	start = m.sideScroll
 	maxStart := max(0, len(items)-rows)
@@ -142,8 +131,8 @@ func swarmSpecID(id string) string {
 // latestAgentActivity returns the most recent tool-activity title recorded for
 // the given agent instance — "what this agent is doing right now".
 func (m Model) latestAgentActivity(agentID string) string {
-	for i := len(m.activityFeed) - 1; i >= 0; i-- {
-		it := m.activityFeed[i]
+	for _, it := range slices.Backward(m.activityFeed) {
+
 		if it.AgentID == agentID && it.Kind == "tool" && it.ID != "agent" {
 			return it.Title
 		}
@@ -365,10 +354,7 @@ func (m Model) sidePanelBudgets(innerHeight, gitRows, detailMetaLines int) (list
 	// activity title/subtitle (2), optional git block (2), section separators (2),
 	// details metadata, metadata/body separator (1), scroll footer (1).
 	reserved := 2 + 2 + detailMetaLines + 1 + 1 + gitRows
-	available := innerHeight - reserved
-	if available < 7 {
-		available = 7
-	}
+	available := max(innerHeight-reserved, 7)
 	listLines = max(4, min(12, available/2))
 	detailBodyRows = max(3, available-listLines)
 	return listLines, detailBodyRows

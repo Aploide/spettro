@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,12 +59,12 @@ func (m Model) buildConversationHistory() string {
 	// Keep the most recent turns within the byte cap (oldest dropped first).
 	kept := make([]string, 0, len(lines))
 	total := 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		size := len(lines[i]) + 1 // +1 for the joining newline
+	for _, line := range slices.Backward(lines) {
+		size := len(line) + 1 // +1 for the joining newline
 		if total+size > maxConversationHistoryBytes && len(kept) > 0 {
 			break
 		}
-		kept = append(kept, lines[i])
+		kept = append(kept, line)
 		total += size
 	}
 	// kept is most-recent-first; reverse to oldest-first for the prompt.

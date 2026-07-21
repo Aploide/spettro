@@ -241,10 +241,7 @@ func (m *Model) ensureResumeWindow() {
 }
 
 func (m Model) resumeMaxRows() int {
-	maxRows := m.height - 12
-	if maxRows < 4 {
-		maxRows = 4
-	}
+	maxRows := max(m.height-12, 4)
 	return maxRows
 }
 
@@ -291,10 +288,7 @@ func (m Model) viewResume() string {
 	hint := styleMuted.Render("↑↓ navigate  pgup/pgdn jump  enter load  esc close")
 	maxRows := m.resumeMaxRows()
 	if len(rows) > maxRows {
-		start := m.resumeScroll
-		if start < 0 {
-			start = 0
-		}
+		start := max(m.resumeScroll, 0)
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}

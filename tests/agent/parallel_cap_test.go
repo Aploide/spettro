@@ -23,7 +23,7 @@ func TestLLMAgent_ParallelToolCallsAreCapped(t *testing.T) {
 	const batch = 8
 
 	var firstResponse strings.Builder
-	for i := 0; i < batch; i++ {
+	for i := range batch {
 		firstResponse.WriteString(`TOOL_CALL {"name":"comment","arguments":{"message":"step ` + itoa(i) + `"}}` + "\n")
 	}
 
@@ -117,7 +117,7 @@ func TestLLMAgent_ParallelToolCallsCapDefault(t *testing.T) {
 	const batch = 40 // > default cap of 32
 
 	var firstResponse strings.Builder
-	for i := 0; i < batch; i++ {
+	for i := range batch {
 		firstResponse.WriteString(`TOOL_CALL {"name":"comment","arguments":{"message":"call ` + itoa(i) + `"}}` + "\n")
 	}
 

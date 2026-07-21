@@ -458,7 +458,7 @@ func (m Model) handleTelegramSubmission(req telegram.SubmitRequest) (tea.Model, 
 		sendTelegramReply(reply, telegram.SubmitResponse{Accepted: false, Error: "empty message"})
 		return m, nil
 	}
-	m.publishRemote("telegram_inbound", map[string]interface{}{
+	m.publishRemote("telegram_inbound", map[string]any{
 		"chat_id": req.ChatID,
 		"user_id": req.UserID,
 		"kind":    string(req.Kind),

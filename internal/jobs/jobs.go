@@ -51,10 +51,7 @@ func (j *Job) Output(offset int) (out string, next int, running bool, exitInfo s
 	if offset < j.dropped {
 		offset = j.dropped
 	}
-	rel := offset - j.dropped
-	if rel > len(j.buf) {
-		rel = len(j.buf)
-	}
+	rel := min(offset-j.dropped, len(j.buf))
 	return string(j.buf[rel:]), j.dropped + len(j.buf), !j.done, j.exitInfo
 }
 

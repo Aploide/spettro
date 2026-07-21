@@ -375,7 +375,6 @@ func TestParseChatTarget_Variants(t *testing.T) {
 		{"0", "", 0, true},
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.in, func(t *testing.T) {
 			u, id, err := telegram.ParseChatTarget(c.in)
 			if (err != nil) != c.wantErr {
@@ -417,7 +416,7 @@ func TestSplitForTelegram_Chunking(t *testing.T) {
 // available.
 func TestSplitForTelegram_HonoursBoundaries(t *testing.T) {
 	var sb strings.Builder
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		_, _ = fmt.Fprintf(&sb, "line %d aaaaaaaaaaaaaaaaaa\n", i)
 	}
 	chunks := telegram.SplitForTelegram(sb.String())

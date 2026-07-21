@@ -106,10 +106,7 @@ func (m *Model) refreshViewport() {
 }
 
 func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
-	innerW := m.paneWidth() - 8
-	if innerW < 10 {
-		innerW = 10
-	}
+	innerW := max(m.paneWidth()-8, 10)
 
 	header := lipgloss.NewStyle().
 		Foreground(mc).Bold(true).
@@ -194,7 +191,7 @@ type renderCacheState struct {
 	showTools  bool
 	fullOutput bool
 	color      string
-	blocks    map[uint64]string
+	blocks     map[uint64]string
 }
 
 // renderMessageBlock renders a single chat message to its display string. It is
@@ -204,12 +201,13 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
 		text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
-		entry := renderUserTextBlock(text, m.paneWidth()-8, prefix)
+		var entry strings.Builder
+		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
 			imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
-			entry += "\n" + imgLabel
+			entry.WriteString("\n" + imgLabel)
 		}
-		return entry
+		return entry.String()
 	case RoleAssistant:
 		if msg.Kind == "plan" {
 			return m.renderPlanMessage(msg, mc)
@@ -351,14 +349,8 @@ func (m Model) recalcLayout() Model {
 	}
 
 	fixed := headerH + eyesH + sepH + inputH + statusH + parallelH
-	contentH := m.height - fixed
-	if contentH < 3 {
-		contentH = 3
-	}
-	vpW := m.paneWidth() - 2
-	if vpW < 10 {
-		vpW = 10
-	}
+	contentH := max(m.height-fixed, 3)
+	vpW := max(m.paneWidth()-2, 10)
 
 	m.vp.SetWidth(vpW)
 	m.vp.SetHeight(contentH)

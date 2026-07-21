@@ -14,9 +14,9 @@ import (
 // OpenAI-compatible chat completion responses, one per request.
 func scriptedServer(t *testing.T, responses []string) *httptest.Server {
 	t.Helper()
-	var idx int32
+	var idx atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		i := int(atomic.AddInt32(&idx, 1)) - 1
+		i := int(idx.Add(1)) - 1
 		if i >= len(responses) {
 			t.Errorf("unexpected extra request #%d (only %d scripted)", i+1, len(responses))
 			http.Error(w, "no more scripted responses", http.StatusInternalServerError)

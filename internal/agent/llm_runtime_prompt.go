@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -140,14 +141,11 @@ func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
 		base = base + catalog
 	}
 	commentGuidance := ""
-	for _, tool := range cfg.AllowedTools {
-		if tool == "comment" {
-			if nativeTools {
-				commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
-			} else {
-				commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
-			}
-			break
+	if slices.Contains(cfg.AllowedTools, "comment") {
+		if nativeTools {
+			commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
+		} else {
+			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
 		}
 	}
 	if nativeTools {

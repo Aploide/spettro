@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -152,8 +153,8 @@ type toolLoopConfig struct {
 	// settings: off switch, threshold percent, failure pause). The zero value
 	// means defaults (enabled at 85%), so hosts that don't wire user config
 	// keep auto-compaction on.
-	Compact      compactpkg.Config
-	AllowedTools []string
+	Compact         compactpkg.Config
+	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
 	LogToolCalls    bool
 	ProviderManager *provider.Manager
@@ -260,9 +261,9 @@ type toolRuntime struct {
 	// pauses after MaxFailures instead of burning a failing call every step.
 	compactCfg      compactpkg.Config
 	compactFailures int
-	goalComplete         bool
-	goalSummary          string
-	goalVerified         bool
+	goalComplete    bool
+	goalSummary     string
+	goalVerified    bool
 
 	// httpClient overrides the hardened SSRF-safe client used by web-fetch,
 	// web-search and download. Nil in production (the safe client is built per
@@ -1344,7 +1345,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSaveMemory(call.Args)
 	case "todo-write":
 		var args struct {
-			Todos []interface{} `json:"todos"`
+			Todos []any `json:"todos"`
 		}
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("todo-write args: %w", err)
@@ -1355,7 +1356,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		out := make([]session.Todo, 0, len(args.Todos))
 		now := time.Now()
 		for i, item := range args.Todos {
-			m, ok := item.(map[string]interface{})
+			m, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -1372,7 +1373,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			source, _ := m["source"].(string)
 			priority, _ := m["priority"].(string)
 			var deps []string
-			if rawDeps, ok := m["dependencies"].([]interface{}); ok {
+			if rawDeps, ok := m["dependencies"].([]any); ok {
 				for _, d := range rawDeps {
 					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
 						deps = append(deps, strings.TrimSpace(s))
@@ -1476,13 +1477,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		if strings.TrimSpace(r.agentID) != "" {
 			if caller, ok := r.manifest.AgentByID(r.agentID); ok {
-				allowedHandoff := false
-				for _, id := range caller.Handoffs {
-					if id == target {
-						allowedHandoff = true
-						break
-					}
-				}
+				allowedHandoff := slices.Contains(caller.Handoffs, target)
 				if !allowedHandoff {
 					return "", fmt.Errorf("agent: %q cannot delegate to %q (allowed handoffs: %s)", r.agentID, target, strings.Join(caller.Handoffs, ", "))
 				}
@@ -1738,13 +1733,7 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 		// Filter by type
 		if len(exts) > 0 {
 			ext := strings.ToLower(filepath.Ext(d.Name()))
-			found := false
-			for _, e := range exts {
-				if ext == e {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(exts, ext)
 			if !found {
 				return nil
 			}
@@ -1789,10 +1778,7 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 			// Build context blocks
 			included := make([]bool, len(lines))
 			for _, mi := range matchLines {
-				start := mi - args.Context
-				if start < 0 {
-					start = 0
-				}
+				start := max(mi-args.Context, 0)
 				end := mi + args.Context
 				if end >= len(lines) {
 					end = len(lines) - 1
@@ -1959,8 +1945,8 @@ func (r *toolRuntime) invalidateSymbolIndex(rel string) {
 }
 
 func (r *toolRuntime) markReadFromSearch(out string) {
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(out, "\n")
+	for line := range lines {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) < 2 {
 			continue

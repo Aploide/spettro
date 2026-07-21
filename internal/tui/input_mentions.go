@@ -266,7 +266,7 @@ func scanRepoFilesCmd(root string) tea.Cmd {
 
 func (m Model) extractMentionedFiles(input string) []string {
 	seen := map[string]struct{}{}
-	for _, part := range strings.Fields(input) {
+	for part := range strings.FieldsSeq(input) {
 		if !strings.HasPrefix(part, "@") {
 			continue
 		}

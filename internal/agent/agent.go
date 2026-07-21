@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -229,13 +230,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	if a.Ultra && a.DelegationDepth == 0 {
 		// Ultra bypasses role/handoff gating by design: any top-level agent on
 		// any model can fan out. Sub-agents never inherit the tool.
-		hasUltra := false
-		for _, t := range allowedTools {
-			if t == ultraToolID {
-				hasUltra = true
-				break
-			}
-		}
+		hasUltra := slices.Contains(allowedTools, ultraToolID)
 		if !hasUltra {
 			allowedTools = append(allowedTools, ultraToolID)
 		}

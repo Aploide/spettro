@@ -225,7 +225,7 @@ func looksLikeEnvAssignment(t string) bool {
 	if eq <= 0 {
 		return false
 	}
-	for i := 0; i < eq; i++ {
+	for i := range eq {
 		ch := t[i]
 		switch {
 		case ch >= 'A' && ch <= 'Z':

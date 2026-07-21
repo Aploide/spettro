@@ -56,7 +56,7 @@ func parseUnified(diffText string) []parsedLine {
 	var out []parsedLine
 	oldNo, newNo := 0, 0
 	inHunk := false
-	for _, line := range strings.Split(strings.TrimRight(diffText, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(diffText, "\n"), "\n") {
 		switch {
 		case strings.HasPrefix(line, "@@"):
 			oldNo, newNo = parseHunkHeader(line)
@@ -87,8 +87,8 @@ func parseUnified(diffText string) []parsedLine {
 
 func parseHunkHeader(line string) (oldStart, newStart int) {
 	// "@@ -12,7 +12,9 @@ optional context"
-	fields := strings.Fields(line)
-	for _, f := range fields {
+	fields := strings.FieldsSeq(line)
+	for f := range fields {
 		if strings.HasPrefix(f, "-") {
 			oldStart = leadingInt(f[1:])
 		} else if strings.HasPrefix(f, "+") {
@@ -197,10 +197,9 @@ func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
 	w := numWidth(parsed)
 	textW := 0
 	if maxW > 0 {
-		textW = maxW - (2*w + 1) - 3 // line numbers + space + sign + space
-		if textW < 8 {
-			textW = 8
-		}
+		textW = max(
+			// line numbers + space + sign + space
+			maxW-(2*w+1)-3, 8)
 	}
 	var out []string
 	i := 0
@@ -329,10 +328,7 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 			adds = append(adds, parsed[i])
 			i++
 		}
-		rows := len(dels)
-		if len(adds) > rows {
-			rows = len(adds)
-		}
+		rows := max(len(adds), len(dels))
 		for r := 0; r < rows; r++ {
 			left, right := emptyCell, emptyCell
 			var delSp, addSp []span

@@ -305,7 +305,7 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 		At:      time.Now(),
 	})
 	m.awaitingInstead = false
-	m.publishRemote("user_message", map[string]interface{}{
+	m.publishRemote("user_message", map[string]any{
 		"content":         req.Input,
 		"mentioned_files": req.MentionedFiles,
 	})

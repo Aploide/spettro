@@ -71,7 +71,7 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 				}
 			} else if showTools && item.Status != "running" {
 				if out := trimToolOutput(item.Output, singleCap); out != "" {
-					for _, ol := range strings.Split(out, "\n") {
+					for ol := range strings.SplitSeq(out, "\n") {
 						lines = append(lines, outputStyle.Render("       "+ol))
 					}
 				}
@@ -106,7 +106,7 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 					lines = append(lines, styleMuted.Render(detail))
 					if gt.Status != "running" {
 						if out := trimToolOutput(gt.Output, groupCap); out != "" {
-							for _, ol := range strings.Split(out, "\n") {
+							for ol := range strings.SplitSeq(out, "\n") {
 								lines = append(lines, outputStyle.Render("       "+ol))
 							}
 						}
@@ -284,10 +284,7 @@ func formatDetailedGroupLabel(name string, running bool, group []ToolItem) strin
 	if running {
 		verb = runningVerb(name)
 	}
-	maxShown := len(group)
-	if maxShown > 3 {
-		maxShown = 3
-	}
+	maxShown := min(len(group), 3)
 	labels := make([]string, 0, maxShown)
 	for i := 0; i < maxShown; i++ {
 		if d := toolDescriptor(name, group[i].Args); d != "" {

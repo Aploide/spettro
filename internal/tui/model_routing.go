@@ -104,7 +104,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("error: "+msg.err.Error(), "error")
-			m.publishRemote("assistant_error", map[string]interface{}{"error": msg.err.Error()})
+			m.publishRemote("assistant_error", map[string]any{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
 			// Adopt the run's structured conversation as the next turn's carried
@@ -131,7 +131,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:       time.Now(),
 			})
 			m.finishAgentActivity(m.mode, "done", main, thinking)
-			m.publishRemote("assistant_message", map[string]interface{}{
+			m.publishRemote("assistant_message", map[string]any{
 				"content":     main,
 				"thinking":    thinking,
 				"meta":        msg.meta,
@@ -201,7 +201,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("plan error: "+msg.err.Error(), "error")
-			m.publishRemote("plan_error", map[string]interface{}{"error": msg.err.Error()})
+			m.publishRemote("plan_error", map[string]any{"error": msg.err.Error()})
 		} else {
 			m.syncTodosFromSession()
 			if len(msg.messages) > 0 {
@@ -218,7 +218,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.finishAgentActivity(m.mode, "done", msg.plan, "")
 			m.showPlanApproval = true
 			m.planApprovalCursor = 0
-			m.publishRemote("plan", map[string]interface{}{
+			m.publishRemote("plan", map[string]any{
 				"plan":        msg.plan,
 				"tools_count": len(msg.tools),
 				"tokens_used": msg.tokensUsed,
@@ -240,14 +240,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		if msg.err != nil {
 			m.showBanner("commit error: "+msg.err.Error(), "error")
-			m.publishRemote("commit_error", map[string]interface{}{"error": msg.err.Error()})
+			m.publishRemote("commit_error", map[string]any{"error": msg.err.Error()})
 		} else {
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleSystem,
 				Content: fmt.Sprintf("committed: %s\n\n%s", msg.commitMsg, coAuthorInfo),
 				At:      time.Now(),
 			})
-			m.publishRemote("commit", map[string]interface{}{"message": msg.commitMsg})
+			m.publishRemote("commit", map[string]any{"message": msg.commitMsg})
 		}
 		m.publishRemoteState("commit_done")
 		m.autoSave()
@@ -260,14 +260,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelAgent = nil
 		if msg.err != nil {
 			m.showBanner("search error: "+msg.err.Error(), "error")
-			m.publishRemote("search_error", map[string]interface{}{"error": msg.err.Error()})
+			m.publishRemote("search_error", map[string]any{"error": msg.err.Error()})
 		} else {
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleSystem,
 				Content: msg.result,
 				At:      time.Now(),
 			})
-			m.publishRemote("search", map[string]interface{}{"result": msg.result})
+			m.publishRemote("search", map[string]any{"result": msg.result})
 		}
 		m.publishRemoteState("search_done")
 		m.autoSave()
@@ -455,7 +455,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.approvalCursor = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
-			m.publishRemote("approval_request", map[string]interface{}{
+			m.publishRemote("approval_request", map[string]any{
 				"command":  msg.request.Command,
 				"tool_id":  msg.request.ToolID,
 				"segments": msg.request.Segments,
@@ -473,7 +473,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionFreeform = len(msg.request.Options) == 0
 			m.ta.Reset()
 			m.showBanner("agent is waiting for your answer", "info")
-			m.publishRemote("ask_user", map[string]interface{}{
+			m.publishRemote("ask_user", map[string]any{
 				"question":            msg.request.Question,
 				"options":             msg.request.Options,
 				"context":             msg.request.Context,
@@ -542,10 +542,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case remoteInterruptMsg:
 		if m.thinking {
 			m.interruptRun("Interrupted by remote client.", false)
-			m.publishRemote("remote_interrupt", map[string]interface{}{"thinking": true})
+			m.publishRemote("remote_interrupt", map[string]any{"thinking": true})
 			m.refreshViewport()
 		} else {
-			m.publishRemote("remote_interrupt", map[string]interface{}{"thinking": false})
+			m.publishRemote("remote_interrupt", map[string]any{"thinking": false})
 		}
 		if m.remoteServer != nil {
 			cmds = append(cmds, waitForRemoteInterrupt(m.remoteServer))
@@ -565,10 +565,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case telegramInterruptMsg:
 		if m.thinking {
 			m.interruptRun("Interrupted via Telegram.", false)
-			m.publishRemote("telegram_interrupt", map[string]interface{}{"thinking": true})
+			m.publishRemote("telegram_interrupt", map[string]any{"thinking": true})
 			m.refreshViewport()
 		} else {
-			m.publishRemote("telegram_interrupt", map[string]interface{}{"thinking": false})
+			m.publishRemote("telegram_interrupt", map[string]any{"thinking": false})
 		}
 		if m.telegramRelay != nil {
 			cmds = append(cmds, waitForTelegramInterrupt(m.telegramRelay))

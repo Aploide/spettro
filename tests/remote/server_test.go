@@ -245,7 +245,7 @@ func TestServer_EventsStreamReceivesPublishedEvents(t *testing.T) {
 	// the live subscription rather than the replay buffer.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		srv.Publish("test", map[string]interface{}{"hello": "world"})
+		srv.Publish("test", map[string]any{"hello": "world"})
 	}()
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -256,8 +256,8 @@ func TestServer_EventsStreamReceivesPublishedEvents(t *testing.T) {
 	go func() {
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				done <- strings.TrimPrefix(line, "data: ")
+			if after, ok := strings.CutPrefix(line, "data: "); ok {
+				done <- after
 				return
 			}
 		}
@@ -323,7 +323,7 @@ func TestServer_StopIsIdempotent(t *testing.T) {
 func TestServer_PublishRaceWithDisconnect(t *testing.T) {
 	srv, base := startTestServer(t)
 
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		ctx, cancel := context.WithCancel(context.Background())
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/events", nil)
 		if err != nil {
@@ -346,8 +346,8 @@ func TestServer_PublishRaceWithDisconnect(t *testing.T) {
 		// publish below.
 		cancel()
 		_ = resp.Body.Close()
-		for j := 0; j < 100; j++ {
-			srv.Publish("test", map[string]interface{}{"i": i, "j": j})
+		for j := range 100 {
+			srv.Publish("test", map[string]any{"i": i, "j": j})
 		}
 	}
 }
@@ -389,8 +389,7 @@ func TestServer_QueryTokenOnlyAllowedOnEvents(t *testing.T) {
 	}
 
 	// The SSE stream may still authenticate via query parameter.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	evReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/events?token=test-token", nil)
 	if err != nil {
 		t.Fatalf("new events req: %v", err)

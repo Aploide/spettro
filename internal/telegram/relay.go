@@ -87,7 +87,7 @@ type Relay struct {
 	// Observer callback: every interesting event is also forwarded here so
 	// the TUI can publish it on the SSE control plane and log it inside
 	// the chat. Optional.
-	observer func(kind string, data map[string]interface{})
+	observer func(kind string, data map[string]any)
 }
 
 // Options controls relay construction.
@@ -140,7 +140,7 @@ func NewRelay(opts Options) (*Relay, error) {
 // SetObserver installs an optional callback that receives the same event
 // stream the relay sends to Telegram, for cross-publication on the SSE
 // control plane.
-func (r *Relay) SetObserver(fn func(kind string, data map[string]interface{})) {
+func (r *Relay) SetObserver(fn func(kind string, data map[string]any)) {
 	r.observer = fn
 }
 
@@ -311,7 +311,7 @@ func (r *Relay) runPollLoop(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
-	r.publishObs("telegram_started", map[string]interface{}{
+	r.publishObs("telegram_started", map[string]any{
 		"bot_username": r.BotUsername(),
 	})
 
@@ -322,7 +322,7 @@ func (r *Relay) runPollLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			r.publishObs("telegram_stopped", map[string]interface{}{
+			r.publishObs("telegram_stopped", map[string]any{
 				"bot_username": r.BotUsername(),
 			})
 			return
@@ -338,7 +338,7 @@ func (r *Relay) runPollLoop(ctx context.Context) {
 			r.mu.Lock()
 			r.pollErr = err
 			r.mu.Unlock()
-			r.publishObs("telegram_error", map[string]interface{}{
+			r.publishObs("telegram_error", map[string]any{
 				"error": err.Error(),
 			})
 			select {
@@ -393,7 +393,7 @@ func (r *Relay) processUpdate(ctx context.Context, u Update) {
 	chatID := msg.Chat.ID
 
 	if !IsAllowed(r.Config(), username, userID, chatID) {
-		r.publishObs("telegram_denied", map[string]interface{}{
+		r.publishObs("telegram_denied", map[string]any{
 			"chat_id":  chatID,
 			"username": username,
 		})
@@ -428,7 +428,7 @@ func (r *Relay) processUpdate(ctx context.Context, u Update) {
 		From:    formatFromName(msg.From),
 		Reply:   reply,
 	}
-	r.publishObs("telegram_submission", map[string]interface{}{
+	r.publishObs("telegram_submission", map[string]any{
 		"chat_id":  chatID,
 		"username": username,
 		"kind":     string(kind),
@@ -670,7 +670,7 @@ func (r *Relay) recordSendErr(chatID int64, err error) {
 	r.sendMu.Lock()
 	r.lastSendErr = err
 	r.sendMu.Unlock()
-	r.publishObs("telegram_send_error", map[string]interface{}{
+	r.publishObs("telegram_send_error", map[string]any{
 		"chat_id": chatID,
 		"error":   err.Error(),
 	})
@@ -683,13 +683,13 @@ func (r *Relay) LastSendError() error {
 	return r.lastSendErr
 }
 
-func (r *Relay) publishObs(kind string, data map[string]interface{}) {
+func (r *Relay) publishObs(kind string, data map[string]any) {
 	fn := r.observer
 	if fn == nil {
 		return
 	}
 	if data == nil {
-		data = map[string]interface{}{}
+		data = map[string]any{}
 	}
 	fn(kind, data)
 }

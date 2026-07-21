@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,9 +49,7 @@ func NewManager() *Manager {
 func (m *Manager) SetAPIKeys(keys map[string]string) {
 	m.mu.Lock()
 	m.apiKeys = make(map[string]string, len(keys))
-	for k, v := range keys {
-		m.apiKeys[k] = v
-	}
+	maps.Copy(m.apiKeys, keys)
 	m.mu.Unlock()
 }
 
@@ -401,9 +401,9 @@ func stripImages(req Request) Request {
 	// Request-level images attach to the last user message in multi-turn mode;
 	// note the omission there.
 	if n := len(req.Images); n > 0 {
-		for i := len(out.Messages) - 1; i >= 0; i-- {
-			if out.Messages[i].Role == RoleUser && len(out.Messages[i].ToolResults) == 0 {
-				out.Messages[i].Content = strings.TrimSpace(out.Messages[i].Content + "\n\n" + imageOmittedText(n))
+		for _, v := range slices.Backward(out.Messages) {
+			if v.Role == RoleUser && len(v.ToolResults) == 0 {
+				v.Content = strings.TrimSpace(v.Content + "\n\n" + imageOmittedText(n))
 				break
 			}
 		}
@@ -565,8 +565,7 @@ func rateLimitRetryAfter(providerName string, err error) (time.Duration, bool) {
 // (used by the streaming/non-streaming Spettro path) and the raw openai-go
 // error (used by the legacy adapter path, e.g. when images are attached).
 func httpErrorDetails(err error) (statusCode int, header http.Header, ok bool) {
-	var providerErr *fantasy.ProviderError
-	if errors.As(err, &providerErr) {
+	if providerErr, ok := errors.AsType[*fantasy.ProviderError](err); ok {
 		h := make(http.Header, len(providerErr.ResponseHeaders))
 		for k, v := range providerErr.ResponseHeaders {
 			h.Set(k, v)

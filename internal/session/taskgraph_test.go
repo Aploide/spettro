@@ -137,7 +137,7 @@ func TestConcurrentUpsertTodoKeepsAllTasks(t *testing.T) {
 	const n = 16
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -166,7 +166,7 @@ func TestUpsertTodoMintsUniqueIDs(t *testing.T) {
 	sid := "sess-1"
 	// Rapid creates without explicit IDs must never collide (the old
 	// wall-clock IDs did within one millisecond).
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := UpsertTodo(globalDir, sid, Todo{Content: fmt.Sprintf("task %d", i)}); err != nil {
 			t.Fatalf("upsert %d: %v", i, err)
 		}
@@ -206,9 +206,7 @@ func TestConcurrentReadersNeverSeeTornTaskFile(t *testing.T) {
 	}
 	done := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -221,10 +219,10 @@ func TestConcurrentReadersNeverSeeTornTaskFile(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 	// Readers hammer the file while it is rewritten; with non-atomic writes
 	// they used to observe truncated JSON ("unexpected end of JSON input").
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		if _, err := LoadTodos(globalDir, sid); err != nil {
 			close(done)
 			wg.Wait()

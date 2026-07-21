@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -96,10 +97,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	contextWindow := resolveContextWindow(pm, cfg.ActiveProvider, cfg.ActiveModel)
 
 	// Resolve shell timeout from config
-	shellTimeoutSec := 0
-	if cfg.GoalShellTimeoutSec > 0 {
-		shellTimeoutSec = cfg.GoalShellTimeoutSec
-	}
+	shellTimeoutSec := max(cfg.GoalShellTimeoutSec, 0)
 
 	// Get coding agent spec
 	spec, ok := manifest.AgentByID("coding")
@@ -263,10 +261,8 @@ func resolveGoalNoProgressLimit(cfg config.UserConfig) int {
 
 // appendUnique appends a string to a slice only if it's not already present.
 func appendUnique(slice []string, s string) []string {
-	for _, v := range slice {
-		if v == s {
-			return slice
-		}
+	if slices.Contains(slice, s) {
+		return slice
 	}
 	return append(slice, s)
 }

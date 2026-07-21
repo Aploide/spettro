@@ -59,7 +59,7 @@ func TestJobOutputPaginationNeverSkipsBytes(t *testing.T) {
 	r := &toolRuntime{}
 	var got strings.Builder
 	offset := 0
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		out, err := r.runJobOutput(fmt.Appendf(nil, `{"job_id":"job-test","offset":%d}`, offset))
 		if err != nil {
 			t.Fatal(err)

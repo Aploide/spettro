@@ -863,10 +863,8 @@ func (m AgentManifest) ToolByID(id string) (ToolSpec, bool) {
 		if t.ID == id {
 			return t, true
 		}
-		for _, alias := range t.Aliases {
-			if alias == id {
-				return t, true
-			}
+		if slices.Contains(t.Aliases, id) {
+			return t, true
 		}
 	}
 	return ToolSpec{}, false

@@ -22,7 +22,7 @@ import (
 // Called from publishRemote. All outbound HTTP work happens on a worker
 // goroutine inside telegramBroadcastAsync so the bubbletea Update loop is
 // never blocked by a Bot API round trip.
-func (m *Model) dispatchTelegramEvent(kind string, data map[string]interface{}) {
+func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 	if m.telegramRelay == nil {
 		return
 	}

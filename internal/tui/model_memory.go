@@ -204,7 +204,7 @@ func (m Model) viewMemoryReview() string {
 				Foreground(colorText).
 				Width(max(8, contentW-4)).
 				Render(c.Fact)
-			for _, line := range strings.Split(fact, "\n") {
+			for line := range strings.SplitSeq(fact, "\n") {
 				rows = append(rows, "    "+line)
 			}
 			if len(c.Sources) > 0 {

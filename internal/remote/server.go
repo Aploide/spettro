@@ -55,10 +55,10 @@ type SubmitResponse struct {
 // Event is broadcast to every connected /events subscriber and stored in a
 // short replay buffer.
 type Event struct {
-	Seq  uint64                 `json:"seq"`
-	Kind string                 `json:"kind"`
-	At   time.Time              `json:"at"`
-	Data map[string]interface{} `json:"data,omitempty"`
+	Seq  uint64         `json:"seq"`
+	Kind string         `json:"kind"`
+	At   time.Time      `json:"at"`
+	Data map[string]any `json:"data,omitempty"`
 }
 
 // Status is the JSON shape returned by GET /status. It mirrors the bits of
@@ -204,7 +204,7 @@ func (s *Server) Start(preferredPort int) (port int, fellBack bool, err error) {
 			fellBack = true
 		}
 	} else {
-		for i := 0; i < portScanLimit; i++ {
+		for i := range portScanLimit {
 			candidate := DefaultPort + i
 			scanLn, scanErr := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, candidate))
 			if scanErr == nil {
@@ -288,7 +288,7 @@ func (s *Server) Stop() error {
 // Publish records an event in the replay buffer and fans it out to every
 // connected /events subscriber. Slow subscribers are skipped (we never block
 // the TUI).
-func (s *Server) Publish(kind string, data map[string]interface{}) {
+func (s *Server) Publish(kind string, data map[string]any) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -569,7 +569,7 @@ func (s *Server) RequestApproval(ctx context.Context, toolID, command, reason st
 	s.pendingApprovals.Store(toolID, ch)
 	defer s.pendingApprovals.Delete(toolID)
 
-	s.Publish("approval_request", map[string]interface{}{
+	s.Publish("approval_request", map[string]any{
 		"tool_id": toolID,
 		"command": command,
 		"reason":  reason,
@@ -619,7 +619,7 @@ func (s *Server) RequestAskUser(ctx context.Context, questionID, question string
 	s.pendingAskUsers.Store(questionID, ch)
 	defer s.pendingAskUsers.Delete(questionID)
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"question_id":         questionID,
 		"question":            question,
 		"options":             options,

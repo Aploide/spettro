@@ -269,7 +269,7 @@ func isTableSeparator(line string) bool {
 		return false
 	}
 	inner := strings.TrimPrefix(strings.TrimSuffix(trim, "|"), "|")
-	for _, cell := range strings.Split(inner, "|") {
+	for cell := range strings.SplitSeq(inner, "|") {
 		clean := strings.TrimSpace(cell)
 		if clean == "" {
 			continue
