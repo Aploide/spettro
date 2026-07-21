@@ -141,6 +141,18 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+o":
 		m.showTools = !m.showTools
+		if !m.showTools {
+			m.showFullOutput = false
+		}
+		m.sideDetailScroll = 0
+		m.refreshViewport()
+		return m, nil
+	case "ctrl+g":
+		// Toggle full (untrimmed) tool outputs; implies details visible.
+		m.showFullOutput = !m.showFullOutput
+		if m.showFullOutput {
+			m.showTools = true
+		}
 		m.sideDetailScroll = 0
 		m.refreshViewport()
 		return m, nil

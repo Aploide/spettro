@@ -117,7 +117,7 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
 
 	var bodyParts []string
 	if len(msg.Tools) > 0 {
-		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, m.showTools, mc))
+		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, m.showTools, m.showFullOutput, mc))
 	}
 	bodyParts = append(bodyParts, renderMarkdown(strings.TrimSpace(msg.Content), innerW))
 
@@ -190,9 +190,10 @@ func renderUserTextBlock(body string, width int, prefix string) string {
 // Access is single-threaded: renderMessages is only ever called from the Bubble
 // Tea Update goroutine, never from a background tea.Cmd.
 type renderCacheState struct {
-	width     int
-	showTools bool
-	color     string
+	width      int
+	showTools  bool
+	fullOutput bool
+	color      string
 	blocks    map[uint64]string
 }
 
@@ -219,7 +220,7 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		body := renderMarkdown(msg.Content, m.paneWidth()-8)
 		var entryLines []string
 		if len(msg.Tools) > 0 {
-			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
+			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, m.showFullOutput, mc))
 		}
 		if strings.TrimSpace(msg.Content) != "" {
 			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
@@ -290,7 +291,8 @@ func (m *Model) renderMessages() string {
 	// fresh so width/showTools/color changes fully re-render.
 	var prev map[uint64]string
 	if m.renderCache != nil && m.renderCache.width == width &&
-		m.renderCache.showTools == m.showTools && m.renderCache.color == color {
+		m.renderCache.showTools == m.showTools && m.renderCache.fullOutput == m.showFullOutput &&
+		m.renderCache.color == color {
 		prev = m.renderCache.blocks
 	}
 	next := make(map[uint64]string, len(m.messages))
@@ -309,10 +311,11 @@ func (m *Model) renderMessages() string {
 	}
 
 	m.renderCache = &renderCacheState{
-		width:     width,
-		showTools: m.showTools,
-		color:     color,
-		blocks:    next,
+		width:      width,
+		showTools:  m.showTools,
+		fullOutput: m.showFullOutput,
+		color:      color,
+		blocks:     next,
 	}
 
 	return strings.Join(parts, "\n\n")

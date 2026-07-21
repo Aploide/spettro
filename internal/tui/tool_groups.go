@@ -13,7 +13,13 @@ import (
 	"spettro/internal/diff"
 )
 
-func renderToolGroups(tools []ToolItem, showTools bool, mc color.Color) string {
+func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Color) string {
+	// Line caps for tool outputs; lifted when the user toggled full output
+	// with ctrl+g (0 = unlimited, scrollback handles the length).
+	singleCap, groupCap := 20, 8
+	if fullOutput {
+		singleCap, groupCap = 0, 0
+	}
 	if len(tools) == 0 {
 		return ""
 	}
@@ -64,7 +70,7 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc color.Color) string {
 					lines = append(lines, block)
 				}
 			} else if showTools && item.Status != "running" {
-				if out := trimToolOutput(item.Output, 20); out != "" {
+				if out := trimToolOutput(item.Output, singleCap); out != "" {
 					for _, ol := range strings.Split(out, "\n") {
 						lines = append(lines, outputStyle.Render("       "+ol))
 					}
@@ -99,7 +105,7 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc color.Color) string {
 					}
 					lines = append(lines, styleMuted.Render(detail))
 					if gt.Status != "running" {
-						if out := trimToolOutput(gt.Output, 8); out != "" {
+						if out := trimToolOutput(gt.Output, groupCap); out != "" {
 							for _, ol := range strings.Split(out, "\n") {
 								lines = append(lines, outputStyle.Render("       "+ol))
 							}
@@ -504,13 +510,15 @@ func renderDiffBlock(diffText string, expanded bool) string {
 	})
 }
 
+// trimToolOutput caps output at maxLines with a "… N more lines" footer;
+// maxLines <= 0 means no cap.
 func trimToolOutput(output string, maxLines int) string {
 	output = strings.TrimSpace(output)
 	if output == "" {
 		return ""
 	}
 	lines := strings.Split(output, "\n")
-	if len(lines) <= maxLines {
+	if maxLines <= 0 || len(lines) <= maxLines {
 		return output
 	}
 	remaining := len(lines) - maxLines

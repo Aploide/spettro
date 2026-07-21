@@ -778,7 +778,22 @@ func (m Model) statusBarMessage() string {
 		}
 		return styleSuccess.Render(fmt.Sprintf("◈ %s · %s · %s · %s", obj, progress, elapsed, state))
 	}
+	if m.thinking {
+		return styleMuted.Render(m.runTicker())
+	}
 	return ""
+}
+
+// runTicker is the live status-bar readout of the in-flight run: elapsed
+// time and tokens streamed so far. Ultra/swarm runs feed the same usage
+// channel, so the ticker covers them too.
+func (m Model) runTicker() string {
+	if m.agentStartAt.IsZero() {
+		return ""
+	}
+	elapsed := time.Since(m.agentStartAt).Round(time.Second)
+	spin := spinnerFrames[m.eyeFrame%len(spinnerFrames)]
+	return fmt.Sprintf("%s %s · %s tok", spin, elapsed, formatTokenCount(m.liveRunTokens))
 }
 
 func renderStatusBanner(text, kind string) string {

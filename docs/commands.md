@@ -78,7 +78,8 @@
 | `Shift+Tab` | Cycle active mode/agent. |
 | `F2` | Next favorite model. |
 | `Shift+F2` | Previous favorite model. |
-| `Ctrl+O` | Toggle expanded context/tool details in side panel. |
+| `Ctrl+O` | Toggle transcript tool details (trimmed outputs). |
+| `Ctrl+G` | Toggle full (untrimmed) tool outputs; implies details visible. |
 | `Ctrl+C` twice | Quit with safety confirmation. |
 | `Ctrl+Q` | Quit immediately. |
 | `Ctrl+V` | Paste image from clipboard (vision-capable models only). |
@@ -93,6 +94,8 @@
 
 ## Notes
 
+- While a run streams, the status bar shows a live ticker: elapsed time and tokens streamed.
+- Diffs highlight the changed words *within* modified lines, in both unified and side-by-side layouts.
 - `/approve` requires a pending plan (typically produced in `plan` mode).
 - In `ask-first`, coding prompts are gated by approval flow.
 - Shell approval options: allow once, allow always, deny, or provide an alternative instruction.

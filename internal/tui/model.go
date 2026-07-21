@@ -345,6 +345,9 @@ type Model struct {
 	trustCursor int
 
 	showTools bool
+	// showFullOutput (ctrl+g) lifts the per-tool line caps while showTools
+	// (ctrl+o) is on; hiding details clears it.
+	showFullOutput bool
 
 	mouseCaptureOff bool
 
