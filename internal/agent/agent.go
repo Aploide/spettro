@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	compactpkg "spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/memory"
 	"spettro/internal/provider"
@@ -204,6 +205,9 @@ type LLMAgent struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+	// Compact carries the user's auto-compaction settings into the run loop
+	// (typically cfg.CompactConfig()). Zero value → defaults (enabled, 85%).
+	Compact compactpkg.Config
 
 	// Steering, when set, lets the host inject user guidance while the run is
 	// executing: the tool loop drains it at every step boundary and appends
@@ -288,6 +292,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ParentAgentID:   a.ParentAgentID,
 		GoalMode:        a.GoalMode,
 		ContextWindow:   a.ContextWindow,
+		Compact:         a.Compact,
 		ShellTimeoutSec: a.ShellTimeoutSec,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,

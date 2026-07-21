@@ -39,7 +39,20 @@ func EstimateHistoryTokens(system string, msgs []provider.Message) int {
 // first user turn (the task) and the most recent turns verbatim, replacing
 // the middle with a model-produced summary. Returns the (possibly shortened)
 // slice, whether it compacted, and any error.
+//
+// It applies the default auto-compaction policy (enabled, 85%). Callers that
+// carry a user-configured policy should use CompactHistoryWithPolicy.
 func CompactHistory(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool) ([]provider.Message, bool, error) {
+	return CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, Config{}, 0)
+}
+
+// CompactHistoryWithPolicy is CompactHistory with an explicit auto-compaction
+// policy and the caller's consecutive-failure count. A zero-value cfg means
+// "use defaults" (auto enabled at the default threshold); a non-zero cfg is
+// honored as-is, so AutoEnabled=false disables the automatic trigger entirely
+// (force still works). When failures has reached cfg.MaxFailures the
+// automatic trigger pauses, matching Evaluate's semantics.
+func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool, cfg Config, failures int) ([]provider.Message, bool, error) {
 	if window <= 0 {
 		window = 128000 // sane default so compaction always has a threshold
 	}
@@ -47,9 +60,16 @@ func CompactHistory(ctx context.Context, send SendFunc, system string, msgs []pr
 		if len(msgs) <= 5 {
 			return msgs, false, nil
 		}
+		if cfg == (Config{}) {
+			cfg = Config{AutoEnabled: true}
+		}
 		estimate := EstimateHistoryTokens(system, msgs)
-		eval := Evaluate(window, Config{AutoEnabled: true, AutoThresholdPct: 0, MaxFailures: 3}, State{TokensUsed: estimate})
-		if !eval.ShouldAutoCompact && !eval.IsError {
+		eval := Evaluate(window, cfg, State{TokensUsed: estimate, ConsecutiveFailures: failures})
+		// IsError acts as a backstop trigger only while auto compaction is on
+		// and not paused after repeated failures; with the off switch set, the
+		// run proceeds untouched (the budget validator's forced compaction
+		// remains the last line of defense).
+		if !eval.ShouldAutoCompact && !(eval.AutoDisabledReason == "" && eval.IsError) {
 			return msgs, false, nil
 		}
 	}

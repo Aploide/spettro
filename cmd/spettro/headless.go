@@ -234,6 +234,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					Manifest:        &manifest,
 					SandboxState:    sb,
 					SessionDir:      sessionDir,
+					Compact:         cfg.CompactConfig(),
 					ToolCallback: func(tr agent.ToolTrace) {
 						data := map[string]interface{}{
 							"name":   tr.Name,

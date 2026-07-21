@@ -462,6 +462,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		SandboxState:    b.opts.SandboxState,
 		SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
 		ContextWindow:   contextWindow,
+		Compact:         cfg.CompactConfig(),
 		Steering:        steering,
 		StreamCallback:  turn.onStream,
 		ToolCallback:    turn.onTool,

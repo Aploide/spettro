@@ -167,6 +167,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			SessionDir:      sessionDir,
 			GoalMode:        true,
 			ContextWindow:   contextWindow,
+			Compact:         cfg.CompactConfig(),
 			ShellTimeoutSec: shellTimeoutSec,
 			ToolCallback: func(tr agent.ToolTrace) {
 				status := "✓"

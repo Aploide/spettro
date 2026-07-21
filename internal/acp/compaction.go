@@ -97,6 +97,7 @@ func (b *bridge) askCompactPermission(ctx context.Context, turn *turnState, toke
 func (b *bridge) compactSession(ctx context.Context, s *acpSession, cfg *config.UserConfig, force bool) string {
 	b.mu.Lock()
 	history := s.history
+	failures := s.autoCompactFailures
 	b.mu.Unlock()
 	if len(history) == 0 {
 		return "nothing to compact"
@@ -105,7 +106,7 @@ func (b *bridge) compactSession(ctx context.Context, s *acpSession, cfg *config.
 	send := func(ctx context.Context, req provider.Request) (provider.Response, error) {
 		return b.opts.Providers.Send(ctx, cfg.ActiveProvider, cfg.ActiveModel, req)
 	}
-	compacted, did, err := compact.CompactHistory(ctx, send, "", history, b.sessionWindow(cfg), force)
+	compacted, did, err := compact.CompactHistoryWithPolicy(ctx, send, "", history, b.sessionWindow(cfg), force, cfg.CompactConfig(), failures)
 	if err != nil {
 		b.mu.Lock()
 		s.autoCompactFailures++

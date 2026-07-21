@@ -88,6 +88,46 @@ func TestCompactHistoryNeverSplitsToolCallFromResult(t *testing.T) {
 	}
 }
 
+func TestCompactHistoryWithPolicyDisabledIsNoOp(t *testing.T) {
+	msgs := msgsOfLen(20) // well over pressure for a 1000-token window
+	cfg := Config{AutoEnabled: false, AutoThresholdPct: 85, MaxFailures: 3}
+	out, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 0)
+	if err != nil || did {
+		t.Fatalf("expected no-op with auto compaction disabled, did=%v err=%v", did, err)
+	}
+	if len(out) != len(msgs) {
+		t.Fatalf("messages changed while disabled: %d != %d", len(out), len(msgs))
+	}
+}
+
+func TestCompactHistoryWithPolicyDisabledStillForces(t *testing.T) {
+	msgs := msgsOfLen(10)
+	cfg := Config{AutoEnabled: false, AutoThresholdPct: 85, MaxFailures: 3}
+	_, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1_000_000, true, cfg, 0)
+	if err != nil || !did {
+		t.Fatalf("force must bypass the off switch, did=%v err=%v", did, err)
+	}
+}
+
+func TestCompactHistoryWithPolicyPausesAfterFailures(t *testing.T) {
+	msgs := msgsOfLen(20)
+	cfg := Config{AutoEnabled: true, AutoThresholdPct: 85, MaxFailures: 3}
+	if _, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 3); err != nil || did {
+		t.Fatalf("expected pause at MaxFailures, did=%v err=%v", did, err)
+	}
+	if _, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 2); err != nil || !did {
+		t.Fatalf("expected compaction below MaxFailures, did=%v err=%v", did, err)
+	}
+}
+
+func TestCompactHistoryWithPolicyZeroConfigDefaultsOn(t *testing.T) {
+	msgs := msgsOfLen(20)
+	_, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, Config{}, 0)
+	if err != nil || !did {
+		t.Fatalf("zero-value config must keep auto compaction on, did=%v err=%v", did, err)
+	}
+}
+
 func TestCompactHistoryForceTooShortIsNoOp(t *testing.T) {
 	msgs := msgsOfLen(3)
 	_, did, err := CompactHistory(context.Background(), fakeSend("s"), "", msgs, 1000, true)

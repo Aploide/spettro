@@ -103,7 +103,7 @@ func TestJobOutputReadsSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &toolRuntime{}
-	out, err := r.runJobOutput([]byte(fmt.Sprintf(`{"job_id":%q,"offset":0}`, id)))
+	out, err := r.runJobOutput(fmt.Appendf(nil, `{"job_id":%q,"offset":0}`, id))
 	if err != nil {
 		t.Fatalf("job-output on spool ID: %v", err)
 	}
