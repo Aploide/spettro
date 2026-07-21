@@ -411,7 +411,9 @@ func gitPathDiff(cwd, path string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%d @@\n", path, len(lines))
 	for _, l := range lines {
-		sb.WriteString("+" + l + "\n")
+		sb.WriteByte('+')
+		sb.WriteString(l)
+		sb.WriteByte('\n')
 	}
 	return sb.String()
 }
