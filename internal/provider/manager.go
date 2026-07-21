@@ -351,6 +351,66 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	}
 }
 
+// imageOmittedNote is the placeholder substituted for images when the active
+// model cannot consume vision input.
+const imageOmittedNote = "[image omitted: the current model does not support vision]"
+
+func imageOmittedText(n int) string {
+	if n == 1 {
+		return imageOmittedNote
+	}
+	return fmt.Sprintf("[%d images omitted: the current model does not support vision]", n)
+}
+
+// stripImages returns a copy of req with every image removed and replaced by a
+// text placeholder, so a non-vision model can continue a chat whose history
+// contains images. The caller's Request (and thus the stored chat history) is
+// left untouched.
+func stripImages(req Request) Request {
+	out := req
+	if n := len(req.Images); n > 0 {
+		out.Images = nil
+		if len(req.Messages) == 0 {
+			out.Prompt = strings.TrimSpace(req.Prompt + "\n\n" + imageOmittedText(n))
+		}
+	}
+	if len(req.Messages) == 0 {
+		return out
+	}
+	out.Messages = make([]Message, len(req.Messages))
+	copy(out.Messages, req.Messages)
+	for i := range out.Messages {
+		msg := &out.Messages[i]
+		if n := len(msg.Images); n > 0 {
+			msg.Images = nil
+			msg.Content = strings.TrimSpace(msg.Content + "\n\n" + imageOmittedText(n))
+		}
+		if len(msg.ToolResults) == 0 {
+			continue
+		}
+		trs := make([]ToolResult, len(msg.ToolResults))
+		copy(trs, msg.ToolResults)
+		for j := range trs {
+			if n := len(trs[j].Images); n > 0 {
+				trs[j].Images = nil
+				trs[j].Output = strings.TrimSpace(trs[j].Output + "\n\n" + imageOmittedText(n))
+			}
+		}
+		msg.ToolResults = trs
+	}
+	// Request-level images attach to the last user message in multi-turn mode;
+	// note the omission there.
+	if n := len(req.Images); n > 0 {
+		for i := len(out.Messages) - 1; i >= 0; i-- {
+			if out.Messages[i].Role == RoleUser && len(out.Messages[i].ToolResults) == 0 {
+				out.Messages[i].Content = strings.TrimSpace(out.Messages[i].Content + "\n\n" + imageOmittedText(n))
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
 	m.mu.RLock()
 	apiKey := m.apiKeys[providerName]
@@ -367,9 +427,19 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 			hasImages = true
 			break
 		}
+		for _, tr := range msg.ToolResults {
+			if len(tr.Images) > 0 {
+				hasImages = true
+				break
+			}
+		}
 	}
 	if hasImages && !m.SupportsVision(providerName, modelName) {
-		return Response{}, fmt.Errorf("model does not support vision: %s/%s", providerName, modelName)
+		// The chat may carry images from an earlier vision-capable model. Keep
+		// the conversation usable: strip the images from this request only
+		// (history retains them, so switching back restores vision) and leave a
+		// text placeholder so the model knows something was omitted.
+		req = stripImages(req)
 	}
 
 	var allParts []string
