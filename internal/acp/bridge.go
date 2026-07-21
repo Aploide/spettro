@@ -318,7 +318,18 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	}
 
 	if strings.HasPrefix(trimmedTask, "/") {
-		if fields := strings.Fields(trimmedTask); fields[0] == "/goal" {
+		// /plan <task> runs the plan agent on the task as a one-shot turn
+		// (mirrors the TUI); bare /plan is a mode switch handled by the
+		// extended slash-command set below.
+		if fields := strings.Fields(trimmedTask); fields[0] == "/plan" && len(fields) > 1 {
+			b.mu.Lock()
+			if _, ok := s.manifest.AgentByID("plan"); ok {
+				s.agentID = "plan"
+			}
+			b.mu.Unlock()
+			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
+			task = trimmedTask
+		} else if fields[0] == "/goal" {
 			if strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")) == "stop" {
 				// /goal stop while a goal turn is running: cancel that run.
 				b.mu.Lock()
@@ -349,7 +360,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			return b.handleCompactCommand(ctx, s, &cfg, turn, trimmedTask)
 		}
 		b.mu.Lock()
-		reply, _, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
+		reply, modeChanged, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
+		if !handled {
+			reply, modeChanged, handled = handleExtendedSlashCommand(b, s, &cfg, b.opts.Providers, trimmedTask)
+		}
+		_ = modeChanged
 		var options []acpsdk.SessionConfigOption
 		if handled {
 			options = buildConfigOptions(s, &cfg, b.opts.Providers)

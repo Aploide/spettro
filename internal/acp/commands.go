@@ -32,6 +32,14 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "memory", Description: "show, add to, or clear persistent memory", Input: hintInput("[show | add [user|project] <fact> | clear [user|project|all]]")},
 	{Name: "compact", Description: "summarize older history to free context", Input: hintInput("[auto <status|on|off>]")},
 	{Name: "clear", Description: "clear conversation history"},
+	{Name: "stats", Description: "show session token usage and prompt-cache metrics"},
+	{Name: "tasks", Description: "manage session tasks", Input: hintInput("[list|add|done|set|show|rm|clear]")},
+	{Name: "jobs", Description: "list or kill background shell jobs", Input: hintInput("[list] | kill <id>|all")},
+	{Name: "hooks", Description: "list effective runtime hooks"},
+	{Name: "diff", Description: "show diffs of files modified this session", Input: hintInput("[path ...]")},
+	{Name: "ultra", Description: "toggle Ultra swarm mode", Input: hintInput("[on|off]")},
+	{Name: "plan", Description: "switch to plan mode", Input: hintInput("[task]")},
+	{Name: "permissions", Description: "show/set permission level and debug", Input: hintInput("[yolo|restricted|ask-first] | debug <on|off>")},
 }
 
 func hintInput(hint string) *acpsdk.AvailableCommandInput {
@@ -108,7 +116,12 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		}
 		return "model set to " + fields[1], false, true
 
-	case "/permission", "/permissions":
+	case "/permissions":
+		// The richer variant (summary + debug toggle) lives in the extended
+		// command set; route it there instead of the bare setter below.
+		return "", false, false
+
+	case "/permission":
 		if len(fields) < 2 {
 			return "usage: /permission <yolo|restricted|ask-first>  (current: " + string(cfg.Permission) + ")", false, true
 		}
@@ -297,4 +310,12 @@ const acpHelpText = `commands:
   /memory clear [user|project|all]    erase saved memory
   /compact              summarize older history to free context window space
   /compact auto <status|on|off>       manage automatic compaction
-  /clear                clear conversation history`
+  /clear                clear conversation history
+  /stats                show session token usage and prompt-cache hit rate
+  /tasks [list|add|done|set|show|rm|clear]   manage session tasks
+  /jobs [list] | /jobs kill <id>|all  background shell jobs
+  /hooks                list effective runtime hooks
+  /diff [path...]       diffs of files modified this session
+  /ultra [on|off]       toggle Ultra swarm mode
+  /plan [task]          switch to plan mode
+  /permissions          show/set permission level, debug details`
