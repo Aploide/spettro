@@ -148,12 +148,27 @@ configured threshold:
 /compact auto status          # check current setting
 ```
 
-When enabled, Spettro runs a compaction after every agent turn if the context
-occupancy is above the threshold percentage (configurable in
-`~/.spettro/config.json`, default 85 %).
+When enabled, Spettro compacts in two places:
 
-Auto-compact uses a failure budget: if compaction fails 3 times in a row, it
-stops retrying until a manual `/compact` succeeds.
+- **Between turns** (TUI and ACP): after an agent turn, if context occupancy
+  is above the threshold percentage.
+- **Inside the run loop** (all modes, including headless and `/goal`): before
+  each model step, the runtime estimates context pressure and, past the
+  threshold, summarizes older turns into a single message while keeping the
+  first turn (the task) and the most recent turns verbatim. A one-line notice
+  ("compacted 42k → 6k tokens …") appears in the transcript. This is what
+  lets long unattended goal runs survive without anyone watching the gauge.
+
+The threshold percentage is configurable in `~/.spettro/config.json`
+(default 85 % of the model's effective window). The `auto_compact_*` settings
+below apply to both triggers.
+
+Auto-compact uses a failure budget: if the summarizer fails 3 times in a row
+(provider errors), auto-compaction pauses instead of burning a failing call
+every step; a successful compaction (e.g. manual `/compact`) resets the
+counter. Failures never abort the run — the runtime warns and retries at the
+next threshold crossing, and an over-budget request still gets one forced
+compaction as a last resort.
 
 ### Configuration
 
@@ -304,3 +319,28 @@ Terminates every running job at once.
   automatically.
 - Jobs survive `/clear` (which only resets the conversation). Use `/jobs kill all`
   to clean up explicitly.
+
+### Tool output spooling
+
+Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
+`bash`, `web-fetch`) are automatically spooled to disk instead of being
+hard-truncated. The model receives a truncated head with a footer containing a
+`spool:N` ID and an offset, and can page through the full result using
+`job-output {"job_id":"spool:N","offset":Z}`.
+
+Spool files are session-scoped: they are deleted when the session ends (TUI
+exit, `/exit`), the same as background jobs. They are also cleaned up on goal
+completion (`/goal`).
+
+```text
+# example: model receives truncated grep output with a footer
+[truncated: 12,400 of 13,000 lines omitted; use job-output {"job_id":"spool:2","offset":1800} to read more]
+
+# model pages through the omitted portion
+~> job-output {"job_id":"spool:2","offset":1800}
+<~ spool=spool:2 size=280000 next_offset=9800 (more available)
+# the next chunk of content...
+```
+
+The `bash-output` tool also accepts `job_id` and `offset` fields (in addition
+to `command`), so it can double as a spool reader.

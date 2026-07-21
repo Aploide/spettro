@@ -148,7 +148,12 @@ type toolLoopConfig struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
-	AllowedTools    []string
+	// Compact is the auto-compaction policy for the in-loop trigger (user
+	// settings: off switch, threshold percent, failure pause). The zero value
+	// means defaults (enabled at 85%), so hosts that don't wire user config
+	// keep auto-compaction on.
+	Compact      compactpkg.Config
+	AllowedTools []string
 	ToolPolicies    map[string]config.ToolSpec
 	LogToolCalls    bool
 	ProviderManager *provider.Manager
@@ -250,6 +255,11 @@ type toolRuntime struct {
 	skillsCatalog        skills.Catalog
 	goalMode             bool
 	shellTimeoutSec      int
+	// compactCfg is the auto-compaction policy (zero value → defaults);
+	// compactFailures counts consecutive summarizer failures so the trigger
+	// pauses after MaxFailures instead of burning a failing call every step.
+	compactCfg      compactpkg.Config
+	compactFailures int
 	goalComplete         bool
 	goalSummary          string
 	goalVerified         bool
@@ -438,6 +448,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
+		compactCfg:      cfg.Compact,
 	}
 	var loopPolicy config.LoopDetectionPolicy
 	if cfg.Manifest != nil {
@@ -599,12 +610,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 		}
 		// In-loop compaction: summarize older turns when context pressure
-		// approaches the window. Fires for all runs (the loop is unbounded).
-		// On error, keep convMsgs as-is — never abort a run for compaction.
-		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err == nil {
+		// approaches the window. Fires for all runs (the loop is unbounded),
+		// honoring the user's auto-compact settings via runtime.compactCfg.
+		// On error, keep convMsgs as-is — never abort a run for compaction;
+		// the trigger fires again at the next step until MaxFailures pauses it.
+		beforeTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
+		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err != nil {
+			if cfg.ToolCallback != nil {
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("auto-compaction failed (%s) — continuing; will retry at the next threshold crossing", truncate(err.Error(), 200))})
+			}
+		} else {
 			convMsgs = compacted
 			if did && cfg.ToolCallback != nil {
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "compacted working context to stay within the window"})
+				afterTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(afterTokens))})
 			}
 		}
 		// Budget validation: sum system + all messages.
@@ -918,7 +937,24 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			},
 			primary, chain, req, nil)
 	}
-	return compactpkg.CompactHistory(ctx, send, system, msgs, window, force)
+	out, did, err := compactpkg.CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures)
+	// Consecutive-failure bookkeeping: a failing summarizer pauses the auto
+	// trigger after MaxFailures (see compact.Evaluate); any success resets it.
+	if err != nil {
+		r.compactFailures++
+	} else if did {
+		r.compactFailures = 0
+	}
+	return out, did, err
+}
+
+// formatTokens renders a token count compactly for transcript notices
+// ("42k" above a thousand, exact below).
+func formatTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
@@ -1101,7 +1137,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", err
 		}
 		r.markReadFromSearch(out)
-		return truncate(out, r.historyLimit("repo-search")), nil
+		return r.spoolResult("repo-search", out), nil
 	case "file-read":
 		var args struct {
 			Path      string `json:"path"`
@@ -1125,9 +1161,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Unlock()
 		content := string(data)
 		if args.StartLine > 0 {
+			// Bounded reads are already scoped by the model; plain truncation
+			// keeps the response aligned with the requested line window.
 			content = sliceLines(content, args.StartLine, args.EndLine)
+			return truncate(content, r.historyLimit("file-read")), nil
 		}
-		return truncate(content, r.historyLimit("file-read")), nil
+		return r.spoolResult("file-read", content), nil
 	case "file-write":
 		var args struct {
 			Path    string `json:"path"`
@@ -1205,7 +1244,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
 			return "", fmt.Errorf("grep args: %w", err)
 		}
-		return r.runGrep(ctx, gargs)
+		out, err := r.runGrep(ctx, gargs)
+		if err != nil {
+			return "", err
+		}
+		if gargs.OutputMode == "" || gargs.OutputMode == "content" {
+			return r.spoolResult("grep", out), nil
+		}
+		return out, nil
 	case "ls":
 		var args struct {
 			Path string `json:"path"`
@@ -1356,6 +1402,15 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "send-message":
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
+		// Models frequently treat bash-output as the polling tool for background
+		// jobs (job_id + offset) rather than as a bash alias; honor that reading
+		// whenever a job_id is supplied so both conventions work.
+		var probe struct {
+			JobID string `json:"job_id"`
+		}
+		if json.Unmarshal(call.Args, &probe) == nil && strings.TrimSpace(probe.JobID) != "" {
+			return r.runJobOutput(call.Args)
+		}
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "job-output":
 		return r.runJobOutput(call.Args)

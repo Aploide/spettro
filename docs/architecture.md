@@ -11,7 +11,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 ## Core packages
 
 - `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions.
-- `internal/agent`: LLM runtime loop, `TOOL_CALL` parsing/execution, delegation, policy checks.
+- `internal/agent`: LLM runtime loop, `TOOL_CALL` parsing/execution, delegation, policy checks, and **tool output spooling** (large results from `file-read`, `grep`, `shell-exec`, `web-fetch` etc. are written to a session-scoped spool file with a truncated head and a pageable offset, so the model can retrieve the full content via `job-output` with `spool:N` IDs).
 - `internal/config`: config persistence, encrypted keys, trust list, manifest parsing/validation/migration.
 - `internal/provider`: provider adapters, endpoint resolution, connected model routing, and Fantasy-backed text model execution with legacy SDK fallback for vision or legacy completion endpoints.
 - `internal/models`: fetch/cache of `models.dev` catalog.

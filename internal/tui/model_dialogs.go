@@ -1827,6 +1827,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		// generous tool timeouts and recognizes goal-complete.
 		GoalMode:        m.activeGoal != nil,
 		ContextWindow:   resolveGoalContextWindow(m),
+		Compact:         m.cfg.CompactConfig(),
 		ShellTimeoutSec: m.cfg.GoalShellTimeoutSec,
 		Steering:        m.steering,
 		PermissionFn:    permissionFn,

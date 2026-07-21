@@ -41,6 +41,8 @@ func toolOutputHistoryLimit(name string) int {
 		return 16000
 	case "shell-exec", "bash", "bash-output", "job-output":
 		return 8000
+	case "web-fetch":
+		return webFetchDefaultBudget
 	case "agent":
 		return 8000
 	case "ultra":
@@ -255,7 +257,7 @@ var builtinToolSchemas = map[string]string{
 	"sandbox":            `{"action": "status"|"request", "add_writable_dir"?: string, "net"?: "all"|"localhost"|"none"|"ports", "ports"?: [int], "reason"?: string}`,
 	"shell-exec":         `{"command": string, "run_in_background"?: bool}`,
 	"bash":               `{"command": string, "run_in_background"?: bool}`,
-	"bash-output":        `{"command": string, "run_in_background"?: bool}`,
+	"bash-output":        `{"command"?: string, "job_id"?: string, "offset"?: number}`,
 	"job-output":         `{"job_id": string, "offset"?: int}`,
 	"job-kill":           `{"job_id": string}`,
 	"web-fetch":          `{"url": string, "max_length"?: int}`,
@@ -309,8 +311,8 @@ var builtinNativeToolDescs = map[string]string{
 	"repo-search":        "Semantic full-text search across the repository.",
 	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
 	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
-	"bash-output":        "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
-	"job-output":         "Fetch accumulated stdout/stderr of a background job. Pass the next_offset from the previous call to read incrementally.",
+	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",
+	"job-output":         "Fetch accumulated stdout/stderr of a background job (job-N) or page through a spooled truncated tool result (spool:N). Pass the next_offset from the previous call to read incrementally.",
 	"job-kill":           "Terminate a background job by ID.",
 	"web-fetch":          "Fetch a URL and return its content as readable text/markdown (truncated to a size budget). For binary files use the download tool.",
 	"download":           "Download a URL to a file inside the workspace, subject to a maximum size limit.",
@@ -362,7 +364,7 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"repo-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
 	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
-	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"},"job_id":{"type":"string"},"offset":{"type":"number"}}}`),
 	"job-output":         json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer"}},"required":["job_id"]}`),
 	"job-kill":           json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}`),
 	"web-fetch":          json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"},"max_length":{"type":"integer"}},"required":["url"]}`),

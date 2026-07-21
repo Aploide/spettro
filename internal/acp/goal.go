@@ -148,6 +148,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
 			GoalMode:        true,
 			ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
+			Compact:         cfg.CompactConfig(),
 			ShellTimeoutSec: cfg.GoalShellTimeoutSec,
 			Steering:        steering,
 			StreamCallback:  turn.onStream,

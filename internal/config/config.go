@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"spettro/internal/compact"
 )
 
 type PermissionLevel string
@@ -61,6 +63,17 @@ type UserConfig struct {
 // suspended (not cleared) while ask-first is selected.
 func (c UserConfig) UltraActive() bool {
 	return c.Ultra && c.Permission != PermissionAskFirst
+}
+
+// CompactConfig maps the user's auto-compaction settings to the compact
+// package's policy struct, so every host (TUI, headless, goal, ACP) hands the
+// same policy to the run loop's in-loop compaction.
+func (c UserConfig) CompactConfig() compact.Config {
+	return compact.Config{
+		AutoEnabled:      c.AutoCompactEnabled,
+		AutoThresholdPct: c.AutoCompactThresholdPct,
+		MaxFailures:      c.AutoCompactMaxFailures,
+	}
 }
 
 func Default() UserConfig {

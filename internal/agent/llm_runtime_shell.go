@@ -66,7 +66,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
-	text := truncate(string(out), 12000)
+	text := r.spoolResult(toolID, string(out))
 	if err != nil {
 		return text, fmt.Errorf("command failed: %w", err)
 	}

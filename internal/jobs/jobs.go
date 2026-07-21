@@ -115,6 +115,13 @@ func (m *Manager) Start(cmd *exec.Cmd, command string) (*Job, error) {
 	return job, nil
 }
 
+// Register adds a pre-built job to the manager; used by tests.
+func (m *Manager) Register(j *Job) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobs[j.ID] = j
+}
+
 func (m *Manager) Get(id string) (*Job, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
