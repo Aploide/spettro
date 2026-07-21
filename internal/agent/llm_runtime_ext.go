@@ -620,17 +620,17 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	}
 	updated := scope
 	totalReplacements := 0
+	var tierNotes []string
 	for _, op := range ops {
-		if !strings.Contains(updated, op.old) {
-			return "", fmt.Errorf("file-edit: old_string not found: %q", truncate(op.old, 80))
+		next, n, tier, err := replaceWithFallback(updated, op.old, op.new, op.replaceAll, false)
+		if err != nil {
+			return "", fmt.Errorf("file-edit: %w", err)
 		}
-		before := updated
-		if op.replaceAll {
-			updated = strings.ReplaceAll(updated, op.old, op.new)
-		} else {
-			updated = strings.Replace(updated, op.old, op.new, 1)
+		updated = next
+		totalReplacements += n
+		if note := editTierNote(tier); note != "" {
+			tierNotes = append(tierNotes, note)
 		}
-		totalReplacements += strings.Count(before, op.old) - strings.Count(updated, op.old)
 	}
 	if args.Expected > 0 && totalReplacements != args.Expected {
 		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
@@ -647,7 +647,11 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
-	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)), nil
+	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)
+	if len(tierNotes) > 0 {
+		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
+	}
+	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 
 // runMultiEdit applies an ordered list of find/replace edits to one file
@@ -680,6 +684,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	content := string(raw)
 	updated := content
 	totalReplacements := 0
+	var tierNotes []string
 	for i, e := range args.Edits {
 		if e.OldString == "" {
 			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
@@ -687,20 +692,15 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 		if e.OldString == e.NewString {
 			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
 		}
-		n := strings.Count(updated, e.OldString)
-		if n == 0 {
-			return "", fmt.Errorf("multi-edit: edit %d: old_string not found: %q (file untouched)", i+1, truncate(e.OldString, 80))
+		next, n, tier, err := replaceWithFallback(updated, e.OldString, e.NewString, e.ReplaceAll, true)
+		if err != nil {
+			return "", fmt.Errorf("multi-edit: edit %d: %w (file untouched)", i+1, err)
 		}
-		if e.ReplaceAll {
-			updated = strings.ReplaceAll(updated, e.OldString, e.NewString)
-			totalReplacements += n
-			continue
+		updated = next
+		totalReplacements += n
+		if note := editTierNote(tier); note != "" {
+			tierNotes = append(tierNotes, fmt.Sprintf("edit %d %s", i+1, note))
 		}
-		if n > 1 {
-			return "", fmt.Errorf("multi-edit: edit %d: old_string matches %d times; add surrounding context to make it unique or set replace_all (file untouched)", i+1, n)
-		}
-		updated = strings.Replace(updated, e.OldString, e.NewString, 1)
-		totalReplacements++
 	}
 	// Approval comes after all edits are computed so the user is shown the
 	// combined diff exactly as it would be applied.
@@ -713,7 +713,11 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
-	return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)), nil
+	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)
+	if len(tierNotes) > 0 {
+		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
+	}
+	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {
