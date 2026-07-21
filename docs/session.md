@@ -304,3 +304,28 @@ Terminates every running job at once.
   automatically.
 - Jobs survive `/clear` (which only resets the conversation). Use `/jobs kill all`
   to clean up explicitly.
+
+### Tool output spooling
+
+Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
+`bash`, `web-fetch`) are automatically spooled to disk instead of being
+hard-truncated. The model receives a truncated head with a footer containing a
+`spool:N` ID and an offset, and can page through the full result using
+`job-output {"job_id":"spool:N","offset":Z}`.
+
+Spool files are session-scoped: they are deleted when the session ends (TUI
+exit, `/exit`), the same as background jobs. They are also cleaned up on goal
+completion (`/goal`).
+
+```text
+# example: model receives truncated grep output with a footer
+[truncated: 12,400 of 13,000 lines omitted; use job-output {"job_id":"spool:2","offset":1800} to read more]
+
+# model pages through the omitted portion
+~> job-output {"job_id":"spool:2","offset":1800}
+<~ spool=spool:2 size=280000 next_offset=9800 (more available)
+# the next chunk of content...
+```
+
+The `bash-output` tool also accepts `job_id` and `offset` fields (in addition
+to `command`), so it can double as a spool reader.

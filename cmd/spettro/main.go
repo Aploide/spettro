@@ -152,6 +152,8 @@ func main() {
 	// Background shell jobs are detached into their own process groups, so
 	// they would outlive spettro unless killed explicitly on session exit.
 	jobs.Default().KillAll()
+	// Spooled tool outputs are session state too; delete them with the session.
+	jobs.Spool().Cleanup()
 	if err != nil {
 		fatal("runtime error: %v", err)
 	}

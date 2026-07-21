@@ -29,6 +29,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	// Kill detached background shell jobs on exit; they are in their own
 	// process groups and would otherwise outlive the run.
 	defer jobs.Default().KillAll()
+	defer jobs.Spool().Cleanup()
 
 	store, err := storage.New(cwd)
 	if err != nil {

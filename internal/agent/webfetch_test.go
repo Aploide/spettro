@@ -213,8 +213,8 @@ func TestRunWebFetchTruncatesToBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("web-fetch: %v", err)
 	}
-	if !strings.Contains(out, "[content truncated") {
-		t.Fatalf("expected truncation marker, got %d chars", len(out))
+	if !strings.Contains(out, "[truncated:") || !strings.Contains(out, "job-output") {
+		t.Fatalf("expected spool truncation footer, got %q", out)
 	}
 	if len(out) > 200 {
 		t.Fatalf("output not truncated: %d chars", len(out))

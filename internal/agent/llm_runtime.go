@@ -1101,7 +1101,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", err
 		}
 		r.markReadFromSearch(out)
-		return truncate(out, r.historyLimit("repo-search")), nil
+		return r.spoolResult("repo-search", out), nil
 	case "file-read":
 		var args struct {
 			Path      string `json:"path"`
@@ -1125,9 +1125,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Unlock()
 		content := string(data)
 		if args.StartLine > 0 {
+			// Bounded reads are already scoped by the model; plain truncation
+			// keeps the response aligned with the requested line window.
 			content = sliceLines(content, args.StartLine, args.EndLine)
+			return truncate(content, r.historyLimit("file-read")), nil
 		}
-		return truncate(content, r.historyLimit("file-read")), nil
+		return r.spoolResult("file-read", content), nil
 	case "file-write":
 		var args struct {
 			Path    string `json:"path"`
@@ -1205,7 +1208,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
 			return "", fmt.Errorf("grep args: %w", err)
 		}
-		return r.runGrep(ctx, gargs)
+		out, err := r.runGrep(ctx, gargs)
+		if err != nil {
+			return "", err
+		}
+		if gargs.OutputMode == "" || gargs.OutputMode == "content" {
+			return r.spoolResult("grep", out), nil
+		}
+		return out, nil
 	case "ls":
 		var args struct {
 			Path string `json:"path"`
@@ -1356,6 +1366,15 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "send-message":
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
+		// Models frequently treat bash-output as the polling tool for background
+		// jobs (job_id + offset) rather than as a bash alias; honor that reading
+		// whenever a job_id is supplied so both conventions work.
+		var probe struct {
+			JobID string `json:"job_id"`
+		}
+		if json.Unmarshal(call.Args, &probe) == nil && strings.TrimSpace(probe.JobID) != "" {
+			return r.runJobOutput(call.Args)
+		}
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "job-output":
 		return r.runJobOutput(call.Args)

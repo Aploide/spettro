@@ -101,10 +101,10 @@ func (r *toolRuntime) runWebFetch(ctx context.Context, rawArgs []byte) (string, 
 	if budget > webFetchMaxBudget {
 		budget = webFetchMaxBudget
 	}
-	if len(text) > budget {
-		text = text[:budget] + "\n\n[content truncated at " + fmt.Sprintf("%d", budget) + " chars]"
+	if hl := r.historyLimit("web-fetch"); hl > 0 && hl < budget {
+		budget = hl
 	}
-	return text, nil
+	return spoolIfLarge(text, budget, false), nil
 }
 
 func (r *toolRuntime) runDownload(ctx context.Context, rawArgs []byte) (string, error) {
