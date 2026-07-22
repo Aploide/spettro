@@ -3,11 +3,24 @@ package remote
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 )
+
+// testHTTPClient never reuses TCP connections. http.DefaultClient keeps idle
+// conns in a process-wide pool; when tests sequentially bind DefaultPort
+// (7878) on a fresh Server after a previous one stopped, a pooled conn can
+// hit a half-closed socket and surface as "Post ...: EOF" — common on CI.
+var testHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DisableKeepAlives: true,
+	},
+	Timeout: 5 * time.Second,
+}
 
 func startTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -15,8 +28,31 @@ func startTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Start(0); err != nil {
+	// Bind an ephemeral port instead of scanning from DefaultPort (7878).
+	// Production still uses Start(0); tests must not serialize on a fixed
+	// port or invite keep-alive reuse against a rebound address after Stop.
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	_ = free.Close()
+	if _, _, err := s.Start(port); err != nil {
+		t.Fatal(err)
+	}
+	// Confirm the accept loop is up before the first request (slow CI).
+	deadline := time.Now().Add(2 * time.Second)
+	addr := fmt.Sprintf("127.0.0.1:%d", s.Port())
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server not accepting on %s: %v", addr, err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	t.Cleanup(func() { _ = s.Stop() })
 	return s
@@ -32,11 +68,11 @@ func doReq(t *testing.T, s *Server, method, path, token, body string) *http.Resp
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { io.Copy(io.Discard, resp.Body); resp.Body.Close() })
 	return resp
 }
 

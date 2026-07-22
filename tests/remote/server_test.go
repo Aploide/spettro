@@ -32,7 +32,15 @@ func startTestServer(t *testing.T) (*remote.Server, string) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	port, _, err := srv.Start(0) // 0 means scan from DefaultPort, but we still bind 127.0.0.1
+	// Ephemeral port: avoid DefaultPort (7878) contention across packages
+	// and keep-alive reuse against a rebound address after Stop (CI flake).
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	wantPort := free.Addr().(*net.TCPAddr).Port
+	_ = free.Close()
+	port, _, err := srv.Start(wantPort)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
