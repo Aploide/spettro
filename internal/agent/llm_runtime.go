@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -94,7 +95,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -152,8 +153,8 @@ type toolLoopConfig struct {
 	// settings: off switch, threshold percent, failure pause). The zero value
 	// means defaults (enabled at 85%), so hosts that don't wire user config
 	// keep auto-compaction on.
-	Compact      compactpkg.Config
-	AllowedTools []string
+	Compact         compactpkg.Config
+	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
 	LogToolCalls    bool
 	ProviderManager *provider.Manager
@@ -260,9 +261,9 @@ type toolRuntime struct {
 	// pauses after MaxFailures instead of burning a failing call every step.
 	compactCfg      compactpkg.Config
 	compactFailures int
-	goalComplete         bool
-	goalSummary          string
-	goalVerified         bool
+	goalComplete    bool
+	goalSummary     string
+	goalVerified    bool
 
 	// httpClient overrides the hardened SSRF-safe client used by web-fetch,
 	// web-search and download. Nil in production (the safe client is built per
@@ -425,6 +426,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 	runtime := toolRuntime{
 		cwd:             cfg.CWD,
+		searcher:        NewRepoSearcher(cfg.CWD),
 		readSet:         map[string]struct{}{},
 		requiredReads:   map[string]struct{}{},
 		permission:      cfg.Permission,
@@ -1224,6 +1226,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
+		r.invalidateSymbolIndex(rel)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
@@ -1326,6 +1329,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runLSPDiagnostics(ctx, call.Args)
 	case "references":
 		return r.runLSPReferences(ctx, call.Args)
+	case "hover":
+		return r.runLSPHover(ctx, call.Args)
+	case "rename-symbol":
+		return r.runLSPRename(ctx, call.Args)
 	case "lsp-restart":
 		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
@@ -1338,7 +1345,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSaveMemory(call.Args)
 	case "todo-write":
 		var args struct {
-			Todos []interface{} `json:"todos"`
+			Todos []any `json:"todos"`
 		}
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("todo-write args: %w", err)
@@ -1349,7 +1356,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		out := make([]session.Todo, 0, len(args.Todos))
 		now := time.Now()
 		for i, item := range args.Todos {
-			m, ok := item.(map[string]interface{})
+			m, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -1366,7 +1373,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			source, _ := m["source"].(string)
 			priority, _ := m["priority"].(string)
 			var deps []string
-			if rawDeps, ok := m["dependencies"].([]interface{}); ok {
+			if rawDeps, ok := m["dependencies"].([]any); ok {
 				for _, d := range rawDeps {
 					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
 						deps = append(deps, strings.TrimSpace(s))
@@ -1470,13 +1477,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		if strings.TrimSpace(r.agentID) != "" {
 			if caller, ok := r.manifest.AgentByID(r.agentID); ok {
-				allowedHandoff := false
-				for _, id := range caller.Handoffs {
-					if id == target {
-						allowedHandoff = true
-						break
-					}
-				}
+				allowedHandoff := slices.Contains(caller.Handoffs, target)
 				if !allowedHandoff {
 					return "", fmt.Errorf("agent: %q cannot delegate to %q (allowed handoffs: %s)", r.agentID, target, strings.Join(caller.Handoffs, ", "))
 				}
@@ -1543,7 +1544,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // spurious checkpoint is cheap while a missed one is unrecoverable.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "multi-edit", "shell-exec", "bash":
+	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash":
 		return true
 	}
 	return false
@@ -1732,13 +1733,7 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 		// Filter by type
 		if len(exts) > 0 {
 			ext := strings.ToLower(filepath.Ext(d.Name()))
-			found := false
-			for _, e := range exts {
-				if ext == e {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(exts, ext)
 			if !found {
 				return nil
 			}
@@ -1783,10 +1778,7 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 			// Build context blocks
 			included := make([]bool, len(lines))
 			for _, mi := range matchLines {
-				start := mi - args.Context
-				if start < 0 {
-					start = 0
-				}
+				start := max(mi-args.Context, 0)
 				end := mi + args.Context
 				if end >= len(lines) {
 					end = len(lines) - 1
@@ -1943,9 +1935,18 @@ func realPathEscapes(dir, abs string) bool {
 // by markReadFromSearch to detect ripgrep-style "path:lineno:..." rows.
 var searchLineNumberRE = regexp.MustCompile(`^\d+$`)
 
+// invalidateSymbolIndex drops rel from the repo symbol index after one of the
+// agent's own write tools touched it, so the next repo-search re-parses it
+// even if the filesystem mtime didn't visibly change.
+func (r *toolRuntime) invalidateSymbolIndex(rel string) {
+	if r.searcher.Index != nil {
+		r.searcher.Index.Invalidate(rel)
+	}
+}
+
 func (r *toolRuntime) markReadFromSearch(out string) {
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(out, "\n")
+	for line := range lines {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) < 2 {
 			continue

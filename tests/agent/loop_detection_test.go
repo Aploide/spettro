@@ -58,7 +58,7 @@ func TestLoopDetection_NudgeThenAbort(t *testing.T) {
 // loop_detection.disabled the same repeated sequence runs to completion.
 func TestLoopDetection_Disabled(t *testing.T) {
 	responses := make([]string, 0, 11)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		responses = append(responses, `TOOL_CALL {"tool":"comment","args":{"message":"same"}}`)
 	}
 	responses = append(responses, "FINAL\nDone repeating.")

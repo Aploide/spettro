@@ -647,6 +647,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.invalidateSymbolIndex(rel)
 	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)
 	if len(tierNotes) > 0 {
 		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
@@ -713,6 +714,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.invalidateSymbolIndex(rel)
 	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)
 	if len(tierNotes) > 0 {
 		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"

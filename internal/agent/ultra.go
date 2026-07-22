@@ -273,7 +273,7 @@ func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpe
 		ParentAgentID:   r.agentID,
 	}
 	var lastErr error
-	for attempt := 0; attempt < ultraMaxAttempts; attempt++ {
+	for attempt := range ultraMaxAttempts {
 		if attempt > 0 {
 			if !ultraSleep(ctx, ultraRetryBase<<(attempt-1)) {
 				return "", ctx.Err()

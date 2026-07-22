@@ -64,7 +64,7 @@ func TestScanRepoFilesCapsCollectedEntries(t *testing.T) {
 	scanMaxEntries = 5
 
 	root := t.TempDir()
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		writeFile(t, filepath.Join(root, fmt.Sprintf("file%02d.txt", i)))
 	}
 
@@ -96,7 +96,7 @@ func TestScanRepoFilesCapsVisitedPaths(t *testing.T) {
 	scanMaxVisited = 5
 
 	root := t.TempDir()
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		writeFile(t, filepath.Join(root, fmt.Sprintf("file%02d.txt", i)))
 	}
 

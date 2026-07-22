@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -37,7 +38,7 @@ func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
 		return 40000
-	case "repo-search", "grep", "glob", "ls", "diagnostics", "references":
+	case "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover":
 		return 16000
 	case "shell-exec", "bash", "bash-output", "job-output":
 		return 8000
@@ -140,14 +141,11 @@ func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
 		base = base + catalog
 	}
 	commentGuidance := ""
-	for _, tool := range cfg.AllowedTools {
-		if tool == "comment" {
-			if nativeTools {
-				commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
-			} else {
-				commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
-			}
-			break
+	if slices.Contains(cfg.AllowedTools, "comment") {
+		if nativeTools {
+			commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
+		} else {
+			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
 		}
 	}
 	if nativeTools {
@@ -289,6 +287,8 @@ var builtinToolSchemas = map[string]string{
 	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
 	"diagnostics":        `{"path"?: string}`,
 	"references":         `{"path": string, "symbol"?: string, "kind"?: "references"|"definition", "line"?: int, "character"?: int}`,
+	"hover":              `{"path": string, "symbol"?: string, "line"?: int, "character"?: int}`,
+	"rename-symbol":      `{"path": string, "new_name": string, "symbol"?: string, "line"?: int, "character"?: int}`,
 	"lsp-restart":        `{"server"?: string}`,
 	"enter-plan-mode":    `{"reason"?: string}`,
 	"exit-plan-mode":     `{"reason"?: string}`,
@@ -308,7 +308,7 @@ var builtinNativeToolDescs = map[string]string{
 	"multi-edit":         "Apply an ordered list of find/replace edits to one file atomically: each edit sees the result of the previous one, and if any edit fails to match uniquely the whole call fails and the file is untouched.",
 	"glob":               "Find files matching a glob pattern (** for recursive search).",
 	"grep":               "Search files with a regular expression.",
-	"repo-search":        "Semantic full-text search across the repository.",
+	"repo-search":        "Full-text search across the repository. For a symbol name (function, type, class, const) it lists ranked definitions first, then usages.",
 	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
 	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
 	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",
@@ -337,6 +337,8 @@ var builtinNativeToolDescs = map[string]string{
 	"config":             "Get or set configuration values.",
 	"diagnostics":        "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
 	"references":         "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+	"hover":              "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
+	"rename-symbol":      "Language-server rename: rename a symbol across the workspace and apply the edits. Position by symbol name or 1-based line/character; reports the files changed.",
 	"lsp-restart":        "Restart a wedged language server (all servers when none named).",
 	"enter-plan-mode":    "Enter plan mode.",
 	"exit-plan-mode":     "Exit plan mode.",
@@ -390,6 +392,8 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
 	"diagnostics":        json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	"references":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"hover":              json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"rename-symbol":      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"new_name":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path","new_name"]}`),
 	"lsp-restart":        json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
 	"enter-plan-mode":    json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"exit-plan-mode":     json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),

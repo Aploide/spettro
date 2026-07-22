@@ -233,10 +233,7 @@ func (m Model) viewOnboarding() string {
 func (m Model) viewOnboardingPicker() string {
 	mc := m.currentColor()
 	contentH := m.height - 1
-	topPad := contentH / 3
-	if topPad < 2 {
-		topPad = 2
-	}
+	topPad := max(contentH/3, 2)
 
 	instruction := lipgloss.NewStyle().Foreground(mc).Render("To start, let's choose a provider and model.")
 
@@ -246,10 +243,7 @@ func (m Model) viewOnboardingPicker() string {
 		lipgloss.NewStyle().Foreground(colorText).Render(m.onboarding.filter) +
 		cursor
 
-	maxListH := contentH - topPad - 8
-	if maxListH < 4 {
-		maxListH = 4
-	}
+	maxListH := max(contentH-topPad-8, 4)
 	var rows []string
 	selectedRow := 0
 	currentProvider := ""
@@ -293,10 +287,7 @@ func (m Model) viewOnboardingPicker() string {
 	// Scroll window so selected item stays visible.
 	start := 0
 	if len(rows) > maxListH {
-		start = selectedRow - maxListH/2
-		if start < 0 {
-			start = 0
-		}
+		start = max(selectedRow-maxListH/2, 0)
 		if start+maxListH > len(rows) {
 			start = len(rows) - maxListH
 		}
@@ -322,10 +313,7 @@ func (m Model) viewOnboardingPicker() string {
 func (m Model) viewOnboardingKeyEntry() string {
 	mc := m.currentColor()
 	contentH := m.height - 1
-	topPad := contentH * 2 / 5
-	if topPad < 2 {
-		topPad = 2
-	}
+	topPad := max(contentH*2/5, 2)
 
 	provName := m.onboarding.provName
 	if provName == "" {
@@ -366,10 +354,7 @@ func (m Model) viewOnboardingKeyEntry() string {
 func (m Model) viewOnboardingVerifying() string {
 	mc := m.currentColor()
 	contentH := m.height - 1
-	topPad := contentH * 2 / 5
-	if topPad < 2 {
-		topPad = 2
-	}
+	topPad := max(contentH*2/5, 2)
 
 	provName := m.onboarding.provName
 	if provName == "" {
@@ -391,7 +376,7 @@ func (m Model) viewOnboardingVerifying() string {
 	for i := range filled {
 		filled[i] = ' '
 	}
-	for i := 0; i < blockW; i++ {
+	for i := range blockW {
 		if idx := pos + i; idx < barInner {
 			filled[idx] = '█'
 		}
@@ -426,10 +411,7 @@ func (m Model) viewOnboardingVerifying() string {
 
 func (m Model) viewOnboardingError() string {
 	contentH := m.height - 1
-	topPad := contentH * 2 / 5
-	if topPad < 2 {
-		topPad = 2
-	}
+	topPad := max(contentH*2/5, 2)
 
 	provName := m.onboarding.provName
 	if provName == "" {

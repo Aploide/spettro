@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -112,7 +113,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 		Thinking: false,
 		Mode:     mode,
 	})
-	server.Publish("remote_started", map[string]interface{}{
+	server.Publish("remote_started", map[string]any{
 		"cwd":  cwd,
 		"mode": mode,
 	})
@@ -145,7 +146,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					cancelRun()
 				}
 				mu.Unlock()
-				server.Publish("remote_interrupt", map[string]interface{}{"thinking": true})
+				server.Publish("remote_interrupt", map[string]any{"thinking": true})
 			}
 		}
 	}()
@@ -170,12 +171,12 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 			if strings.HasPrefix(msg, "/") {
 				reply, note := handleHeadlessCommand(msg, &mode, &cfg, pm, &manifest)
 				req.Reply <- remote.SubmitResponse{Accepted: true, Note: note}
-				server.Publish("remote_command", map[string]interface{}{
+				server.Publish("remote_command", map[string]any{
 					"command": msg,
 					"mode":    mode,
 				})
 				if reply != "" {
-					server.Publish("comment", map[string]interface{}{
+					server.Publish("comment", map[string]any{
 						"message": reply,
 						"mode":    mode,
 					})
@@ -198,14 +199,14 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 				MessagesCount: msgCount,
 				TokensUsed:    tokensUsed,
 			})
-			server.Publish("state", map[string]interface{}{
+			server.Publish("state", map[string]any{
 				"thinking":       true,
 				"mode":           mode,
 				"session_id":     sessionID,
 				"messages_count": msgCount,
 				"tokens_used":    tokensUsed,
 			})
-			server.Publish("user_message", map[string]interface{}{
+			server.Publish("user_message", map[string]any{
 				"content": msg,
 				"mode":    mode,
 			})
@@ -214,7 +215,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 
 			spec, ok := manifest.AgentByID(mode)
 			if !ok {
-				server.Publish("assistant_error", map[string]interface{}{
+				server.Publish("assistant_error", map[string]any{
 					"error": "agent not found: " + mode,
 					"mode":  mode,
 				})
@@ -236,7 +237,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					SessionDir:      sessionDir,
 					Compact:         cfg.CompactConfig(),
 					ToolCallback: func(tr agent.ToolTrace) {
-						data := map[string]interface{}{
+						data := map[string]any{
 							"name":   tr.Name,
 							"status": tr.Status,
 							"agent":  tr.AgentID,
@@ -286,12 +287,12 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 
 				tokensUsed += result.TokensUsed
 				if runErr != nil {
-					server.Publish("assistant_error", map[string]interface{}{
+					server.Publish("assistant_error", map[string]any{
 						"error": runErr.Error(),
 						"mode":  mode,
 					})
 				} else {
-					server.Publish("assistant_message", map[string]interface{}{
+					server.Publish("assistant_message", map[string]any{
 						"content":     result.Content,
 						"tokens_used": result.TokensUsed,
 						"mode":        mode,
@@ -306,7 +307,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 				MessagesCount: msgCount,
 				TokensUsed:    tokensUsed,
 			})
-			server.Publish("state", map[string]interface{}{
+			server.Publish("state", map[string]any{
 				"thinking":       false,
 				"mode":           mode,
 				"session_id":     sessionID,
@@ -409,13 +410,7 @@ func handleHeadlessCommand(
 func nextHeadlessMode(current string, manifest *config.AgentManifest) string {
 	modes := []string{"plan", "coding", "ask"}
 	for _, a := range manifest.Agents {
-		found := false
-		for _, m := range modes {
-			if m == a.ID {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(modes, a.ID)
 		if !found && a.Enabled {
 			modes = append(modes, a.ID)
 		}

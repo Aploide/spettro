@@ -2,6 +2,7 @@ package skills
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 )
@@ -24,12 +25,12 @@ func splitFrontmatter(content string) (string, string) {
 		return "", content
 	}
 	rest = rest[1:]
-	idx := strings.Index(rest, "\n---")
-	if idx == -1 {
+	before, after, ok := strings.Cut(rest, "\n---")
+	if !ok {
 		return "", content
 	}
-	front := rest[:idx]
-	body := strings.TrimLeft(rest[idx+4:], " \t\n")
+	front := before
+	body := strings.TrimLeft(after, " \t\n")
 	return front, body
 }
 
@@ -114,9 +115,7 @@ func parseFrontmatter(front string) (Skill, error) {
 		// metadata: nested map.
 		if key == "metadata" && rest == "" {
 			meta, consumed := readNestedMap(lines[i+1:])
-			for k, v := range meta {
-				skill.Metadata[k] = v
-			}
+			maps.Copy(skill.Metadata, meta)
 			i += 1 + consumed
 			continue
 		}

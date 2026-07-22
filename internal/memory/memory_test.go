@@ -87,7 +87,7 @@ func TestLoadCombinesScopesAndEmpty(t *testing.T) {
 func TestLoadTailTrimsOversizedFile(t *testing.T) {
 	s := testStore(t)
 	var sb strings.Builder
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		sb.WriteString("- some remembered fact line padded out for size\n")
 	}
 	sb.WriteString("- newest fact\n")

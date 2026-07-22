@@ -360,7 +360,7 @@ enabled = true
 	if !changed {
 		t.Fatal("expected migration change flag for v1 manifest")
 	}
-	if m.Version != 5 {
-		t.Fatalf("expected normalized version 5, got %d", m.Version)
+	if m.Version != 7 {
+		t.Fatalf("expected normalized version 7, got %d", m.Version)
 	}
 }

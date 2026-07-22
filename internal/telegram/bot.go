@@ -189,8 +189,7 @@ func (e *APIError) Error() string {
 // IsAPIError reports whether err is a Telegram API error and returns the
 // description for convenience.
 func IsAPIError(err error) (*APIError, bool) {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr, true
 	}
 	return nil, false

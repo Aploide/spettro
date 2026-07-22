@@ -16,7 +16,7 @@ func fakeSend(summary string) SendFunc {
 
 func msgsOfLen(n int) []provider.Message {
 	msgs := make([]provider.Message, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		role := provider.RoleUser
 		if i%2 == 1 {
 			role = provider.RoleAssistant

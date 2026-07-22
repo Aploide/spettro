@@ -209,6 +209,14 @@ type AgentSpec struct {
 // "let the model see an image" tool: the agent produces images however it
 // likes (its own headless-browser screenshot via shell, a generated chart,
 // an existing asset) and views the file.
+// lspDeepTools are shared between the default manifest and the v6 migration
+// that retrofits them into existing manifests (hover for type info, and
+// rename-symbol for LSP-powered cross-file renames).
+var lspDeepTools = []ToolSpec{
+	{ID: "hover", Name: "LSP Hover", Description: "Type signature and documentation for a symbol via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+	{ID: "rename-symbol", Name: "LSP Rename", Description: "Rename a symbol across the workspace via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
+}
+
 var visionToolViewImage = ToolSpec{ID: "view-image", Name: "View Image", Description: "Attach an image file from the workspace so the model can see it (vision models only).", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
 
 func DefaultAgentManifest() AgentManifest {
@@ -470,7 +478,79 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 5
 		changed = true
 	}
+	if m.Version < 6 {
+		// v6 introduces the deeper LSP tools (hover, rename-symbol). Existing
+		// manifests get the definitions; agents already trusted with the
+		// references tool get hover, and those also holding file-edit get
+		// rename-symbol.
+		m.ensureLSPDeepTools()
+		m.Version = 6
+		changed = true
+	}
+	if m.Version < 7 {
+		// v7 backs repo-search with the symbol index (ranked definitions).
+		// Grant it to agents already trusted with grep — same read/search
+		// surface — so they can use the cheaper symbol lookup.
+		m.ensureRepoSearchTool()
+		m.Version = 7
+		changed = true
+	}
 	return changed
+}
+
+// ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool
+// into a manifest that predates v7: the definition is added when absent, and
+// any agent already holding grep gets repo-search allowed (identical
+// read/search trust level, so deliberate restrictions are preserved).
+func (m *AgentManifest) ensureRepoSearchTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == "repo-search" {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, ToolSpec{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"})
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["grep"] && !allowed["repo-search"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "repo-search")
+		}
+	}
+}
+
+// ensureLSPDeepTools retrofits hover and rename-symbol into a manifest that
+// predates them, mirroring ensureVisionTools: definitions are added when
+// absent, and allow-lists grow only for agents whose existing tools show the
+// same level of trust (references for hover; references + file-edit for
+// rename-symbol) so deliberate restrictions are preserved.
+func (m *AgentManifest) ensureLSPDeepTools() {
+	have := map[string]bool{}
+	for _, t := range m.Tools {
+		have[t.ID] = true
+	}
+	for _, t := range lspDeepTools {
+		if !have[t.ID] {
+			m.Tools = append(m.Tools, t)
+		}
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["references"] && !allowed["hover"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "hover")
+		}
+		if allowed["references"] && allowed["file-edit"] && !allowed["rename-symbol"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "rename-symbol")
+		}
+	}
 }
 
 // ensureVisionTools retrofits the view-image tool into a manifest that
@@ -783,10 +863,8 @@ func (m AgentManifest) ToolByID(id string) (ToolSpec, bool) {
 		if t.ID == id {
 			return t, true
 		}
-		for _, alias := range t.Aliases {
-			if alias == id {
-				return t, true
-			}
+		if slices.Contains(t.Aliases, id) {
+			return t, true
 		}
 	}
 	return ToolSpec{}, false

@@ -93,7 +93,7 @@ func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
 		AgentInfo: &acpsdk.Implementation{
 			Name:    "spettro",
-			Title:   acpsdk.Ptr("Spettro"),
+			Title:   new("Spettro"),
 			Version: version.App,
 		},
 		AgentCapabilities: acpsdk.AgentCapabilities{
@@ -112,7 +112,7 @@ func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 				Terminal: &acpsdk.AuthMethodTerminalInline{
 					Id:   "spettro-setup",
 					Name: "Configure a provider",
-					Description: acpsdk.Ptr(
+					Description: new(
 						"Launch Spettro's own interactive TUI (no --acp flag) and " +
 							"run /models to add a provider API key; ACP sessions " +
 							"reuse that stored configuration.",
@@ -473,7 +473,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			turnUsage.CacheWriteTokens += ev.Usage.CacheWriteTokens
 			turn.onUsage(ev, contextWindow)
 		},
-		PermissionFn:    livePermission,
+		PermissionFn: livePermission,
 		ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			if livePermission() == config.PermissionYOLO {
 				return agent.ShellApprovalAllowOnce, nil
@@ -546,10 +546,10 @@ func turnUsageResponse(u provider.Usage, estimatedTotal int) *acpsdk.Usage {
 		TotalTokens:  total,
 	}
 	if u.CacheReadTokens > 0 {
-		out.CachedReadTokens = acpsdk.Ptr(u.CacheReadTokens)
+		out.CachedReadTokens = new(u.CacheReadTokens)
 	}
 	if u.CacheWriteTokens > 0 {
-		out.CachedWriteTokens = acpsdk.Ptr(u.CacheWriteTokens)
+		out.CachedWriteTokens = new(u.CacheWriteTokens)
 	}
 	return out
 }
@@ -560,7 +560,7 @@ func (t *turnState) requestShellApproval(ctx context.Context, ar agent.ShellAppr
 	title := "Run shell command: " + ar.Command
 	update := acpsdk.ToolCallUpdate{
 		ToolCallId: t.openToolCallID(ar.ToolID),
-		Title:      acpsdk.Ptr(title),
+		Title:      new(title),
 		Kind:       acpsdk.Ptr(acpsdk.ToolKindExecute),
 		Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
 		RawInput:   map[string]any{"command": ar.Command, "reason": ar.Reason},
@@ -617,7 +617,7 @@ func (t *turnState) askUser(ctx context.Context, ar agent.AskUserRequest) (strin
 		SessionId: t.sessionID,
 		ToolCall: acpsdk.ToolCallUpdate{
 			ToolCallId: t.nextToolCallID("ask"),
-			Title:      acpsdk.Ptr(title),
+			Title:      new(title),
 			Kind:       acpsdk.Ptr(acpsdk.ToolKindThink),
 			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
 		},

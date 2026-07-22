@@ -16,7 +16,7 @@ import (
 // ~500 tokens after the reserved-output cut; threshold ~85% of that).
 func longHistory(turns, chars int) []provider.Message {
 	msgs := make([]provider.Message, 0, turns)
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		role := provider.RoleUser
 		if i%2 == 1 {
 			role = provider.RoleAssistant

@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -61,12 +62,12 @@ func flattenTranscript(msgs []session.Message) string {
 	// Keep the most recent turns within the byte cap (oldest dropped first).
 	kept := make([]string, 0, len(lines))
 	total := 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		size := len(lines[i]) + 1
+	for _, line := range slices.Backward(lines) {
+		size := len(line) + 1
 		if total+size > maxACPHistoryBytes && len(kept) > 0 {
 			break
 		}
-		kept = append(kept, lines[i])
+		kept = append(kept, line)
 		total += size
 	}
 	for l, r := 0, len(kept)-1; l < r; l, r = l+1, r-1 {
@@ -250,10 +251,10 @@ func (b *bridge) ListSessions(_ context.Context, params acpsdk.ListSessionsReque
 			Cwd:       meta.ProjectPath,
 		}
 		if meta.Preview != "" {
-			info.Title = acpsdk.Ptr(meta.Preview)
+			info.Title = new(meta.Preview)
 		}
 		if !meta.UpdatedAt.IsZero() {
-			info.UpdatedAt = acpsdk.Ptr(meta.UpdatedAt.Format(time.RFC3339))
+			info.UpdatedAt = new(meta.UpdatedAt.Format(time.RFC3339))
 		}
 		sessions = append(sessions, info)
 	}

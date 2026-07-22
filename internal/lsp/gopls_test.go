@@ -74,6 +74,50 @@ func TestGoplsDiagnosticsAndReferences(t *testing.T) {
 		t.Fatalf("expected declaration and call site, got: %s", refs)
 	}
 
+	// restore a clean file, then exercise hover and a cross-file rename
+	write("main.go", "package main\n\nfunc greet() string { return \"hi\" }\n\nfunc main() {\n\tprintln(greet())\n}\n")
+	write("other.go", "package main\n\nvar msg = greet()\n")
+	// open other.go so the server knows it (we don't send file-watch events;
+	// in the real flow the post-edit diagnostics pass syncs every written file)
+	if _, err := m.DiagnosticsForFile(ctx, filepath.Join(root, "other.go")); err != nil {
+		t.Fatalf("sync other.go: %v", err)
+	}
+
+	hov, err := m.Hover(ctx, mainGo, "greet", 0, 0)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	if !strings.Contains(hov, "greet") || !strings.Contains(hov, "string") {
+		t.Fatalf("expected signature in hover output, got: %s", hov)
+	}
+
+	changes, err := m.RenameEdits(ctx, mainGo, "greet", 0, 0, "salute")
+	if err != nil {
+		t.Fatalf("rename edits: %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected rename to touch 2 files, got %d: %+v", len(changes), changes)
+	}
+	for _, ch := range changes {
+		if strings.Contains(ch.New, "greet") || !strings.Contains(ch.New, "salute") {
+			t.Fatalf("rename not fully applied in %s:\n%s", ch.Rel, ch.New)
+		}
+		if err := os.WriteFile(ch.Path, []byte(ch.New), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err = m.DiagnosticsForFile(ctx, mainGo)
+	if err != nil {
+		t.Fatalf("diagnostics after rename: %v", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("expected clean diagnostics after rename, got: %s", out)
+	}
+
+	// reintroduce a type error so the post-restart respawn check below has a
+	// diagnostic to find
+	write("main.go", "package main\n\nfunc salute() string { return 42 }\n\nfunc main() {\n\tprintln(salute())\n}\n")
+
 	if msg := m.Restart(""); !strings.Contains(msg, "restarted") {
 		t.Fatalf("restart: %s", msg)
 	}

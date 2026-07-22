@@ -93,7 +93,8 @@ func parseAllToolCalls(s string) (calls []toolCall, parseErrs []error) {
 			continue
 		}
 
-		candidate := line
+		var candidate strings.Builder
+		candidate.WriteString(line)
 		var (
 			parsed  bool
 			lastErr error
@@ -105,9 +106,9 @@ func parseAllToolCalls(s string) (calls []toolCall, parseErrs []error) {
 				if strings.HasPrefix(nextLine, toolCallPrefix) || strings.HasPrefix(nextLine, finalPrefix) {
 					break
 				}
-				candidate += "\n" + lines[j]
+				candidate.WriteString("\n" + lines[j])
 			}
-			call, hasCall, err := parseToolCall(strings.TrimSpace(candidate))
+			call, hasCall, err := parseToolCall(strings.TrimSpace(candidate.String()))
 			if err == nil && hasCall {
 				calls = append(calls, call)
 				i = j

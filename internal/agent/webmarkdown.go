@@ -576,11 +576,11 @@ func codeLanguage(pre *html.Node) string {
 	if code := findNode(pre, atom.Code); code != nil {
 		classes += " " + attrVal(code, "class")
 	}
-	for _, cls := range strings.Fields(classes) {
+	for cls := range strings.FieldsSeq(classes) {
 		low := strings.ToLower(cls)
 		for _, prefix := range []string{"language-", "lang-"} {
-			if strings.HasPrefix(low, prefix) {
-				return strings.TrimPrefix(low, prefix)
+			if after, ok := strings.CutPrefix(low, prefix); ok {
+				return after
 			}
 		}
 	}

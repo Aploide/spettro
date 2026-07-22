@@ -38,11 +38,11 @@ func stripFrontmatter(content string) string {
 		return content
 	}
 	rest := content[3:]
-	idx := strings.Index(rest, "\n---")
-	if idx == -1 {
+	_, after, ok := strings.Cut(rest, "\n---")
+	if !ok {
 		return content
 	}
-	return strings.TrimSpace(rest[idx+4:])
+	return strings.TrimSpace(after)
 }
 
 func loadPromptOrFallback(cwd, relative, fallback string) string {

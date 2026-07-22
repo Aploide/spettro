@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -18,8 +19,8 @@ import (
 // they carry provider tool output, not user content, so attachments never
 // belong there.
 func lastUserIndex(msgs []Message) int {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == RoleUser && len(msgs[i].ToolResults) == 0 {
+	for i, msg := range slices.Backward(msgs) {
+		if msg.Role == RoleUser && len(msg.ToolResults) == 0 {
 			return i
 		}
 	}

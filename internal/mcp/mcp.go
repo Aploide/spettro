@@ -37,7 +37,7 @@ type AuthState struct {
 	ServerID    string    `json:"server_id"`
 	Token       string    `json:"token"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at"`
 	Description string    `json:"description,omitempty"`
 }
 

@@ -213,14 +213,8 @@ func buildHunks(lines []diffLine) []hunk {
 		if l.kind == kindContext {
 			continue
 		}
-		lo := i - contextLines
-		if lo < 0 {
-			lo = 0
-		}
-		hi := i + contextLines
-		if hi > len(lines)-1 {
-			hi = len(lines) - 1
-		}
+		lo := max(i-contextLines, 0)
+		hi := min(i+contextLines, len(lines)-1)
 		for k := lo; k <= hi; k++ {
 			keep[k] = true
 		}

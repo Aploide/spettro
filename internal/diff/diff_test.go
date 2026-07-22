@@ -38,7 +38,7 @@ func TestUnifiedNewFile(t *testing.T) {
 
 func TestUnifiedSeparateHunks(t *testing.T) {
 	var oldSB, newSB strings.Builder
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		line := "line\n"
 		oldSB.WriteString(line)
 		newSB.WriteString(line)
@@ -76,7 +76,7 @@ func TestRenderUnifiedHasLineNumbersAndSigns(t *testing.T) {
 
 func TestRenderCollapsesWithFooter(t *testing.T) {
 	var oldSB strings.Builder
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		oldSB.WriteString("old line\n")
 	}
 	d := Unified("f.txt", oldSB.String(), "new\n")
@@ -98,7 +98,7 @@ func TestRenderSideBySideWhenWide(t *testing.T) {
 	}
 	// del and add should share a row: "two ... │ ... 2"
 	found := false
-	for _, l := range strings.Split(out, "\n") {
+	for l := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(l, "two") && strings.Contains(l, "│") && strings.Contains(l, "2 2") {
 			found = true
 		}
@@ -128,7 +128,7 @@ index 1234567..89abcde 100644
 func TestRenderIndentPrefix(t *testing.T) {
 	d := Unified("f.txt", "a\n", "b\n")
 	out := stripANSI(Render(d, Options{Indent: ">>"}))
-	for _, l := range strings.Split(out, "\n") {
+	for l := range strings.SplitSeq(out, "\n") {
 		if !strings.HasPrefix(l, ">>") {
 			t.Fatalf("every line should carry the indent, got %q", l)
 		}
@@ -140,7 +140,7 @@ func TestRenderNeverExceedsWidth(t *testing.T) {
 	d := Unified("f.txt", "short\n", long+"\n"+long+"\n")
 	for _, width := range []int{40, 80, 160} {
 		out := stripANSI(Render(d, Options{Width: width, Indent: "  "}))
-		for _, l := range strings.Split(out, "\n") {
+		for l := range strings.SplitSeq(out, "\n") {
 			if n := len([]rune(l)); n > width {
 				t.Fatalf("width %d: line is %d cells: %q", width, n, l)
 			}
