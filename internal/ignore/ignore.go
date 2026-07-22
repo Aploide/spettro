@@ -171,7 +171,7 @@ func matchDoublestar(pattern, path string) bool {
 		if ok, _ := filepath.Match(suffix, candidate); ok {
 			return true
 		}
-		if matchDoublestar(suffix, candidate) {
+		if strings.Contains(suffix, "**") && matchDoublestar(suffix, candidate) {
 			return true
 		}
 	}
