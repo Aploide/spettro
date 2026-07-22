@@ -455,6 +455,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.approvalCursor = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
+			m.notifyIfUnfocused("Agent is waiting for command approval")
 			m.publishRemote("approval_request", map[string]any{
 				"command":  msg.request.Command,
 				"tool_id":  msg.request.ToolID,
@@ -473,6 +474,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionFreeform = len(msg.request.Options) == 0
 			m.ta.Reset()
 			m.showBanner("agent is waiting for your answer", "info")
+			m.notifyIfUnfocused("Agent is waiting for your answer")
 			m.publishRemote("ask_user", map[string]any{
 				"question":            msg.request.Question,
 				"options":             msg.request.Options,

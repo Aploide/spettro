@@ -52,6 +52,21 @@ Spettro uses both project-local and user-global storage.
 | `restricted` | Allows execution with policy checks and approval gating where required. |
 | `yolo` | Least restrictive execution policy. |
 
+## Notifications
+
+When the terminal is unfocused (or a run took more than 10 s), Spettro alerts
+you on run/goal completion, on errors, and when the agent is waiting for a
+command approval or an answer. Alerts go out on two channels at once: an OSC 9
+terminal escape sequence — rendered as a system notification by iTerm2,
+WezTerm, Ghostty, and Kitty; degraded to a terminal bell (BEL) elsewhere — and
+a best-effort desktop notification (`notify-send` on Linux, `osascript` on
+macOS).
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `notifications_disabled` | `false` | Set `true` to turn all notifications off. |
+| `notify_quiet_sec` | `5` | Minimum seconds between notifications; events inside the window are dropped so bursts don't spam. |
+
 ### Shell command approvals
 
 - Shell tools run via `bash -lc` (`shell-exec`/`bash`).

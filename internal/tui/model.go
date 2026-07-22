@@ -17,6 +17,7 @@ import (
 	"spettro/internal/commands"
 	"spettro/internal/config"
 	"spettro/internal/memory"
+	"spettro/internal/notify"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/session"
@@ -485,9 +486,10 @@ type Model struct {
 	clipboardTempDir string // temp dir for pasted images, created on first paste
 	clipboardCounter int    // increments each paste for [Image #N] labelling
 
-	// Desktop notifications
+	// Notifications (OSC 9 / BEL / desktop)
 	agentStartAt    time.Time
 	terminalFocused bool
+	notifier        *notify.Notifier
 
 	cwd       string
 	store     *storage.Store
@@ -590,6 +592,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		sandboxState: sb,
 		historyIndex: -1,
 		livePerm:     &livePermission{},
+		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
 	m.livePerm.set(cfg.Permission)
 	m.customCommands, _ = commands.Discover(cwd)
