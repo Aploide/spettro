@@ -34,7 +34,7 @@ Model metadata is loaded from `https://models.dev/api.json` and cached locally.
 Spettro starts with `default_agent` from manifest (default: `plan`).
 
 - Explore first with `glob`/`grep`/`file-read`.
-- Spawn sub-agents in parallel via `TOOL_CALL {"tool":"agent","args":{"id":"...","task":"..."}}`.
+- Spawn sub-agents in parallel via the native `agent` tool (multiple calls in one response run concurrently).
 - Switch mode/agent with `Shift+Tab` or `/mode`.
 
 ## 4) Approval flow

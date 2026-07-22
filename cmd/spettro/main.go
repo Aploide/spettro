@@ -135,7 +135,7 @@ func main() {
 		pm.SetCatalog(cat)
 	}
 	for _, endpoint := range cfg.LocalEndpoints {
-		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
+		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint])
 		if err != nil {
 			continue
 		}

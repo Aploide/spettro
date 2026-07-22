@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -318,12 +320,57 @@ func newScriptedManager(t *testing.T, responses []string) (*provider.Manager, st
 			http.Error(w, "no more scripted responses", http.StatusInternalServerError)
 			return
 		}
+		// The runtime only accepts native tool calls; translate the
+		// TOOL_CALL/FINAL script into a structured OpenAI response.
+		var contentLines []string
+		var toolCalls []map[string]any
+		for _, line := range strings.Split(responses[i], "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "TOOL_CALL") {
+				contentLines = append(contentLines, line)
+				continue
+			}
+			raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "TOOL_CALL"))
+			var envelope struct {
+				Tool      string          `json:"tool"`
+				Name      string          `json:"name"`
+				Args      json.RawMessage `json:"args"`
+				Arguments json.RawMessage `json:"arguments"`
+			}
+			if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+				t.Errorf("scripted TOOL_CALL is not valid JSON: %q: %v", raw, err)
+				continue
+			}
+			name := envelope.Tool
+			if name == "" {
+				name = envelope.Name
+			}
+			args := envelope.Args
+			if len(args) == 0 {
+				args = envelope.Arguments
+			}
+			if len(args) == 0 {
+				args = json.RawMessage(`{}`)
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"id":       fmt.Sprintf("call_%d", len(toolCalls)+1),
+				"type":     "function",
+				"function": map[string]any{"name": name, "arguments": string(args)},
+			})
+		}
+		content := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.Join(contentLines, "\n")), "FINAL"))
+		msg := map[string]any{"role": "assistant", "content": content}
+		finish := "stop"
+		if len(toolCalls) > 0 {
+			msg["tool_calls"] = toolCalls
+			finish = "tool_calls"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
 			"id":     "chatcmpl-test",
 			"object": "chat.completion",
 			"choices": []map[string]any{
-				{"index": 0, "message": map[string]any{"role": "assistant", "content": responses[i]}, "finish_reason": "stop"},
+				{"index": 0, "message": msg, "finish_reason": finish},
 			},
 			"usage": map[string]any{"total_tokens": 30},
 		}

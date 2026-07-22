@@ -78,6 +78,45 @@ func TestBeginRun_DetachedFromRequestContext(t *testing.T) {
 	}
 }
 
+// translateScriptedResponse converts a TOOL_CALL/FINAL-style scripted response
+// into (content, native tool_calls) for OpenAI-compatible replies.
+func translateScriptedResponse(response string) (string, []map[string]any) {
+	var contentLines []string
+	var toolCalls []map[string]any
+	for _, line := range strings.Split(response, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "TOOL_CALL") {
+			contentLines = append(contentLines, line)
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "TOOL_CALL"))
+		var envelope struct {
+			Tool string          `json:"tool"`
+			Name string          `json:"name"`
+			Args json.RawMessage `json:"args"`
+		}
+		if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+			continue
+		}
+		name := envelope.Tool
+		if name == "" {
+			name = envelope.Name
+		}
+		args := envelope.Args
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		toolCalls = append(toolCalls, map[string]any{
+			"id":       fmt.Sprintf("call_%d", len(toolCalls)+1),
+			"type":     "function",
+			"function": map[string]any{"name": name, "arguments": string(args)},
+		})
+	}
+	content := strings.TrimSpace(strings.Join(contentLines, "\n"))
+	content = strings.TrimSpace(strings.TrimPrefix(content, "FINAL"))
+	return content, toolCalls
+}
+
 // steeringCaptureServer serves scripted OpenAI-style responses, records every
 // request body, and can hold a response until released.
 type steeringCaptureServer struct {
@@ -107,20 +146,35 @@ func newSteeringCaptureServer(t *testing.T, responses []string) *steeringCapture
 			http.Error(w, "no more responses", 500)
 			return
 		}
+		// The runtime only accepts native tool calls, so TOOL_CALL/FINAL
+		// scripts are translated into structured OpenAI responses.
+		content, toolCalls := translateScriptedResponse(responses[i])
+		finish := "stop"
+		if len(toolCalls) > 0 {
+			finish = "tool_calls"
+		}
 		// ACP turns stream (StreamCallback is set), so the fake must speak
 		// SSE when asked; plain JSON otherwise.
 		if strings.Contains(string(body), `"stream":true`) {
 			w.Header().Set("Content-Type", "text/event-stream")
+			delta := map[string]any{"role": "assistant", "content": content}
+			if len(toolCalls) > 0 {
+				streamCalls := make([]map[string]any, len(toolCalls))
+				for ci, tc := range toolCalls {
+					streamCalls[ci] = map[string]any{"index": ci, "id": tc["id"], "type": "function", "function": tc["function"]}
+				}
+				delta["tool_calls"] = streamCalls
+			}
 			chunk := map[string]any{
 				"id": "chatcmpl-test", "object": "chat.completion.chunk", "model": "fake-model",
 				"choices": []map[string]any{
-					{"index": 0, "delta": map[string]any{"role": "assistant", "content": responses[i]}},
+					{"index": 0, "delta": delta},
 				},
 			}
 			done := map[string]any{
 				"id": "chatcmpl-test", "object": "chat.completion.chunk", "model": "fake-model",
 				"choices": []map[string]any{
-					{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"},
+					{"index": 0, "delta": map[string]any{}, "finish_reason": finish},
 				},
 				"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
 			}
@@ -132,11 +186,15 @@ func newSteeringCaptureServer(t *testing.T, responses []string) *steeringCapture
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		msg := map[string]any{"role": "assistant", "content": content}
+		if len(toolCalls) > 0 {
+			msg["tool_calls"] = toolCalls
+		}
 		resp := map[string]any{
 			"id":     "chatcmpl-test",
 			"object": "chat.completion",
 			"choices": []map[string]any{
-				{"index": 0, "message": map[string]any{"role": "assistant", "content": responses[i]}, "finish_reason": "stop"},
+				{"index": 0, "message": msg, "finish_reason": finish},
 			},
 			"usage": map[string]any{"total_tokens": 30},
 		}

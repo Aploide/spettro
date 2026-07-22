@@ -45,12 +45,13 @@ func newCaptureServer(t *testing.T, responses []string) *captureServer {
 			http.Error(w, "no more responses", 500)
 			return
 		}
+		msg, finish := scriptedMessage(t, responses[i])
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
 			"id":     "chatcmpl-test",
 			"object": "chat.completion",
 			"choices": []map[string]any{
-				{"index": 0, "message": map[string]any{"role": "assistant", "content": responses[i]}, "finish_reason": "stop"},
+				{"index": 0, "message": msg, "finish_reason": finish},
 			},
 			"usage": map[string]any{"total_tokens": 30},
 		}

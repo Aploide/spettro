@@ -9,26 +9,34 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-
-	"spettro/internal/notify"
 )
 
 // ---------------------------------------------------------------------------
 // Desktop notifications
 // ---------------------------------------------------------------------------
 
-// maybeNotify fires a desktop notification when the agent finishes, but only
-// if the terminal is not currently focused or the run took more than 10 s.
+// maybeNotify fires a notification (OSC 9 / BEL plus desktop) when the agent
+// finishes, but only if the terminal is not currently focused or the run took
+// more than 10 s.
 func (m *Model) maybeNotify(runErr error) {
 	elapsed := time.Since(m.agentStartAt)
 	if elapsed < 10*time.Second && m.terminalFocused {
 		return
 	}
 	if runErr != nil {
-		notify.Send("Spettro", "Agent finished with an error")
+		m.notifier.Notify("Spettro", "Agent finished with an error")
 	} else {
-		notify.Send("Spettro", "Agent finished")
+		m.notifier.Notify("Spettro", "Agent finished")
 	}
+}
+
+// notifyIfUnfocused alerts on mid-run attention requests (approval dialog,
+// agent question) only when the user has switched away from the terminal.
+func (m *Model) notifyIfUnfocused(body string) {
+	if m.terminalFocused {
+		return
+	}
+	m.notifier.Notify("Spettro", body)
 }
 
 // ---------------------------------------------------------------------------

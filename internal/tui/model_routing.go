@@ -455,6 +455,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.approvalCursor = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
+			m.notifyIfUnfocused("Agent is waiting for command approval")
 			m.publishRemote("approval_request", map[string]any{
 				"command":  msg.request.Command,
 				"tool_id":  msg.request.ToolID,
@@ -473,6 +474,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionFreeform = len(msg.request.Options) == 0
 			m.ta.Reset()
 			m.showBanner("agent is waiting for your answer", "info")
+			m.notifyIfUnfocused("Agent is waiting for your answer")
 			m.publishRemote("ask_user", map[string]any{
 				"question":            msg.request.Question,
 				"options":             msg.request.Options,
@@ -717,7 +719,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// swallow it so pasted text can't leak into list filters. With no
 		// modal active it falls through to the passthrough guard below.
 		if modal := m.activeModal(); modal != modalNone {
-			inTextEntry := (modal == modalConnect && m.connectStep == 1) ||
+			inTextEntry := (modal == modalConnect && (m.connectStep == 1 || m.connectStep == 5)) ||
 				(modal == modalOnboarding && m.onboarding.step == 1) ||
 				modal == modalSetup
 			if !inTextEntry {

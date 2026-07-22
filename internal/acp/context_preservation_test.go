@@ -67,7 +67,7 @@ func TestPrompt_FailedTurnPreservesContext(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	srv := newFailingServer(t, "FINAL\nfirst answer")
+	srv := newFailingServer(t, "first answer")
 
 	if err := os.MkdirAll(filepath.Join(home, ".spettro"), 0o755); err != nil {
 		t.Fatal(err)

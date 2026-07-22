@@ -68,7 +68,7 @@
 ## Agent usage
 
 - Type `@` in the input to open repository file suggestions and insert mentions.
-- Use `TOOL_CALL` with `{"tool":"agent",...}` to spawn sub-agents; multiple `TOOL_CALL` lines run in parallel.
+- Use the native `agent` tool to spawn sub-agents; multiple calls in one response run in parallel.
 - `/approve` executes a previously generated pending plan.
 
 ## Keyboard shortcuts
@@ -100,7 +100,7 @@
 - In `ask-first`, coding prompts are gated by approval flow.
 - Shell approval options: allow once, allow always, deny, or provide an alternative instruction.
 - "Allow always" persists normalized command approvals in `.spettro/allowed_commands.json`.
-- `/connect` includes `Local endpoint (LM Studio/Ollama)` and probes `/v1/models`.
+- `/connect` includes `Local endpoints (LM Studio/Ollama/llama.cpp/…)` and probes `/v1/models`. Multiple local endpoints can be connected side by side; each can optionally carry an API key (for servers started with authentication, e.g. `llama-server --api-key`), and existing endpoints can be managed (edit key / remove) from the same dialog.
 - In `/models`, press `f` to toggle favorites for highlighted model.
 - Pressing `Enter` on a highlighted command suggestion inserts it first; pressing `Enter` again executes it.
 - `/goal` runs the **coding** orchestrator autonomously. Interrupt with `Esc` or `/goal stop`. Permission `yolo` is required for fully unattended operation; otherwise approval prompts pause the loop. See [Goal Mode](goal.md).

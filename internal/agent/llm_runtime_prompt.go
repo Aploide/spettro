@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -11,25 +10,6 @@ import (
 	"spettro/internal/provider"
 	"spettro/internal/skills"
 )
-
-// summarizeLoopToolResult formats a tool result for the text-protocol history
-// message. outputLimit caps the output chars fed to the model; callers should
-// pass runtime.historyLimit(name) so manifest overrides apply.
-func summarizeLoopToolResult(name, args, status, output string, outputLimit int) string {
-	var parts []string
-	status = strings.TrimSpace(status)
-	if status != "" {
-		parts = append(parts, "status="+status)
-	}
-	if summary := summarizeLoopToolArgs(name, args); summary != "" {
-		parts = append(parts, summary)
-	}
-	output = strings.TrimSpace(output)
-	if output != "" {
-		parts = append(parts, "output="+truncate(output, outputLimit))
-	}
-	return strings.Join(parts, " | ")
-}
 
 // toolOutputHistoryLimit returns the default character cap for a tool's output
 // in model history. These defaults intentionally match the source caps in
@@ -124,15 +104,15 @@ func summarizeLoopToolArgs(name, args string) string {
 	return truncate(strings.TrimSpace(args), 120)
 }
 
-// buildSystemString returns the system-role content for the request.
-// When nativeTools is true the TOOL_CALL/FINAL text protocol is omitted because
-// the model receives tool schemas via the API and uses structured tool calls.
+// buildSystemString returns the system-role content for the request. The model
+// always receives tool schemas via the API and uses structured tool calls, so
+// no text protocol is rendered here.
 //
 // The result MUST be byte-for-byte identical for every step of a run (and every
 // turn of a session): the system prompt is the first segment of the provider
 // cache prefix, so any variation invalidates prompt caching for the entire
 // request. Never embed step counters, timestamps, or other per-call state here.
-func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
+func buildSystemString(cfg toolLoopConfig) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
 		base = "You are an assistant."
@@ -140,42 +120,10 @@ func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	commentGuidance := ""
 	if slices.Contains(cfg.AllowedTools, "comment") {
-		if nativeTools {
-			commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
-		} else {
-			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
-		}
+		base += "\n- Use the comment tool to report meaningful progress steps."
 	}
-	if nativeTools {
-		return base + commentGuidance
-	}
-	toolList := strings.Join(cfg.AllowedTools, ", ")
-	schemaSection := buildToolSchemaSection(cfg.AllowedTools)
-	return fmt.Sprintf(`%s
-
-You can use tools iteratively.
-Allowed tools: %s
-%s
-Output protocol (strict):
-1) To call tools (all executed in parallel), output one TOOL_CALL per line:
-TOOL_CALL {"name":"<tool-name>","arguments":{...}}
-TOOL_CALL {"name":"<another>","arguments":{...}}
-2) When done, output exactly:
-FINAL
-<your final answer>
-
-Rules:
-- Known aliases accepted by runtime: tool/args and function{name,arguments}.
-- Use ONLY the field names listed in the tool argument schemas above. Unknown fields will be rejected.
-- For the agent tool, arguments must include {"agent":"<handoff-id>","task":"..."}.
-- Prefer reading/searching before writing.
-- Never edit an existing file unless it has been read first.
-- Creating a brand-new file without reading is allowed.
-- Keep tool args minimal and valid JSON.
-- If a tool fails, adapt and continue.
-%s`, base, toolList, schemaSection, commentGuidance)
+	return base
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation
@@ -232,69 +180,6 @@ func buildTurnUserMessage(cfg toolLoopConfig) string {
 		}
 	}
 	return sb.String()
-}
-
-// builtinToolSchemas describes the JSON arguments object accepted by every
-// built-in tool dispatched in llm_runtime.go (and friends). The runtime decodes
-// each tool's arguments with json.Decoder.DisallowUnknownFields(), so the LLM
-// MUST use these exact field names. Optional fields are flagged with a `?`.
-//
-// When a manifest exposes additional tools (mcp/script/http), they will simply
-// be omitted from the rendered schema section; the agent prompt should mention
-// their schema separately if needed.
-var builtinToolSchemas = map[string]string{
-	"comment":            `{"message": string}`,
-	"ls":                 `{"path"?: string}`,
-	"file-read":          `{"path": string, "start_line"?: int, "end_line"?: int}`,
-	"file-write":         `{"path": string, "content": string, "append"?: bool}`,
-	"file-edit":          `{"path": string, "old_string"?: string, "new_string"?: string, "replace_all"?: bool, "start_line"?: int, "end_line"?: int, "expected_replacements"?: int, "edits"?: [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
-	"multi-edit":         `{"path": string, "edits": [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
-	"glob":               `{"pattern": string, "path"?: string}`,
-	"grep":               `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
-	"repo-search":        `{"query": string}`,
-	"sandbox":            `{"action": "status"|"request", "add_writable_dir"?: string, "net"?: "all"|"localhost"|"none"|"ports", "ports"?: [int], "reason"?: string}`,
-	"shell-exec":         `{"command": string, "run_in_background"?: bool}`,
-	"bash":               `{"command": string, "run_in_background"?: bool}`,
-	"bash-output":        `{"command"?: string, "job_id"?: string, "offset"?: number}`,
-	"job-output":         `{"job_id": string, "offset"?: int}`,
-	"job-kill":           `{"job_id": string}`,
-	"web-fetch":          `{"url": string, "max_length"?: int}`,
-	"download":           `{"url": string, "path": string, "max_bytes"?: int}`,
-	"web-search":         `{"query": string, "max_results"?: int}`,
-	"view-image":         `{"path": string}`,
-	"grok-image":         `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
-	"grok-video":         `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
-	"ask-user":           `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
-	"agent":              `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
-	"ultra":              `{"description": string, "prompt_template": string, "items": [string], "subagent_type"?: string}`,
-	"save-memory":        `{"fact": string, "scope"?: "user"|"project"}`,
-	"todo-write":         `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
-	"task-create":        `{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
-	"task-get":           `{"id": string}`,
-	"task-update":        `{"id": string, "content"?: string, "status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
-	"task-list":          `{"status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled"|"ready"}`,
-	"task-delete":        `{"id"?: string, "clear_completed"?: bool}`,
-	"task-stop":          `{"reason"?: string}`,
-	"goal-complete":      `{"summary": string, "verified"?: bool}`,
-	"tool-search":        `{"query": string}`,
-	"skill-list":         `{"query"?: string}`,
-	"skill-read":         `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"activate-skill":     `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"skill-activate":     `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"config":             `{"action": "get"|"set", "key"?: string, "value"?: string, "force"?: bool}`,
-	"mcp-list-resources": `{"server_id": string}`,
-	"mcp-read-resource":  `{"server_id": string, "resource_id": string}`,
-	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
-	"diagnostics":        `{"path"?: string}`,
-	"references":         `{"path": string, "symbol"?: string, "kind"?: "references"|"definition", "line"?: int, "character"?: int}`,
-	"hover":              `{"path": string, "symbol"?: string, "line"?: int, "character"?: int}`,
-	"rename-symbol":      `{"path": string, "new_name": string, "symbol"?: string, "line"?: int, "character"?: int}`,
-	"lsp-restart":        `{"server"?: string}`,
-	"enter-plan-mode":    `{"reason"?: string}`,
-	"exit-plan-mode":     `{"reason"?: string}`,
-	"enter-worktree":     `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
-	"exit-worktree":      `{"path": string, "force"?: bool}`,
-	"send-message":       `{"target"?: string, "message": string}`,
 }
 
 // builtinNativeToolDescs and builtinNativeToolSchemas define the description and
@@ -433,37 +318,4 @@ func buildToolSpecs(allowedTools []string) []provider.ToolSpec {
 		out = append(out, provider.ToolSpec{Name: name, Description: desc, Schema: schema})
 	}
 	return out
-}
-
-// buildToolSchemaSection renders a per-tool argument schema section to inject
-// into the system prompt. Tools without a registered built-in schema are
-// skipped (e.g. mcp/script/http tools defined by the manifest); duplicate
-// entries — for example when both a tool and its alias are listed — are
-// rendered once.
-func buildToolSchemaSection(allowedTools []string) string {
-	if len(allowedTools) == 0 {
-		return ""
-	}
-	seen := map[string]struct{}{}
-	var lines []string
-	for _, name := range allowedTools {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		schema, ok := builtinToolSchemas[name]
-		if !ok {
-			continue
-		}
-		if _, dup := seen[name]; dup {
-			continue
-		}
-		seen[name] = struct{}{}
-		lines = append(lines, fmt.Sprintf("- %s arguments: %s", name, schema))
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	sort.Strings(lines)
-	return "\nTool argument schemas (JSON object passed as \"arguments\"; ? marks optional fields):\n" + strings.Join(lines, "\n") + "\n"
 }

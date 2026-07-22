@@ -51,6 +51,12 @@ type UserConfig struct {
 	SpettroPlan       string `json:"spettro_plan,omitempty"`
 	SpettroPlanStatus string `json:"spettro_plan_status,omitempty"`
 
+	// Notifications: OSC 9 terminal escape (system notification in iTerm2,
+	// WezTerm, Ghostty, Kitty; BEL elsewhere) plus a best-effort desktop
+	// notification. Disabled flag keeps the zero value meaning "on".
+	NotificationsDisabled bool `json:"notifications_disabled,omitempty"`
+	NotifyQuietSec        int  `json:"notify_quiet_sec,omitempty"` // min seconds between notifications; 0 → default (5)
+
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited
@@ -125,6 +131,10 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 		// valid
 	default:
 		cfg.ThinkingLevel = ""
+		changed = true
+	}
+	if cfg.NotifyQuietSec <= 0 {
+		cfg.NotifyQuietSec = 5
 		changed = true
 	}
 	if cfg.GoalShellTimeoutSec <= 0 {

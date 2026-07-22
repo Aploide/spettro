@@ -36,7 +36,7 @@ func (m Model) filterProviders(filter string) []provider.ProviderInfo {
 	all := m.providers.AllProviderInfos()
 	all = append([]provider.ProviderInfo{{
 		ID:   localConnectProviderID,
-		Name: "Local endpoint (LM Studio/Ollama)",
+		Name: "Local endpoints (LM Studio/Ollama/llama.cpp/…)",
 	}}, all...)
 
 	if filter != "" {
@@ -82,22 +82,35 @@ func (m Model) hasLocalEndpoint(endpoint string) bool {
 	return slices.Contains(m.cfg.LocalEndpoints, endpoint)
 }
 
+// isLocalProviderID reports whether a connect-dialog provider ID is a local
+// endpoint URL rather than a catalog provider.
+func isLocalProviderID(id string) bool {
+	return strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://")
+}
+
+// localEndpointLabel renders a local endpoint as "LM Studio (localhost:1234)".
+func localEndpointLabel(endpoint string) string {
+	short := strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://")
+	return provider.LocalProviderName(endpoint) + " (" + short + ")"
+}
+
 // localProbeDoneMsg delivers the result of an asynchronous ProbeLocalServer
 // round-trip (see probeLocalServerCmd) back to the Update loop.
 type localProbeDoneMsg struct {
 	endpoint string
+	apiKey   string
 	models   []provider.Model
 	err      error
 }
 
 // probeLocalServerCmd probes a local OpenAI-compatible endpoint off the UI
 // thread. The 10s timeout bounds the blocking HTTP call so the TUI never hangs.
-func probeLocalServerCmd(endpoint string) tea.Cmd {
+func probeLocalServerCmd(endpoint, apiKey string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		models, err := provider.ProbeLocalServer(ctx, endpoint)
-		return localProbeDoneMsg{endpoint: endpoint, models: models, err: err}
+		models, err := provider.ProbeLocalServer(ctx, endpoint, apiKey)
+		return localProbeDoneMsg{endpoint: endpoint, apiKey: apiKey, models: models, err: err}
 	}
 }
 
@@ -116,6 +129,14 @@ func (m Model) handleLocalProbeDone(msg localProbeDoneMsg) (tea.Model, tea.Cmd) 
 	}
 	m.providers.AddLocalModels(msg.models)
 	normalized := msg.models[0].Provider
+	// The endpoint's key lives in the encrypted store under the normalized URL,
+	// which is also the local provider ID — so the adapter picks it up like any
+	// catalog provider key.
+	if msg.apiKey != "" {
+		_ = config.SaveAPIKey(normalized, msg.apiKey)
+	} else {
+		_ = config.RemoveAPIKey(normalized)
+	}
 	_ = m.updateConfig(func(cfg *config.UserConfig) error {
 		if slices.Contains(cfg.LocalEndpoints, normalized) {
 			return nil
@@ -159,12 +180,15 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(m.connectItems) > 0 {
 				m.connectProvider = m.connectItems[m.connectCursor].ID
-				isAPIConnected := m.connectProvider != localConnectProviderID &&
-					m.cfg.APIKeys[m.connectProvider] != ""
-				if isAPIConnected {
+				switch {
+				case m.connectProvider == localConnectProviderID && len(m.cfg.LocalEndpoints) > 0:
+					// Existing endpoints: show the endpoint list (manage or add).
+					m.connectStep = 4
+					m.connectActionCursor = 0
+				case m.connectProvider != localConnectProviderID && m.cfg.APIKeys[m.connectProvider] != "":
 					m.connectStep = 2
 					m.connectActionCursor = 0
-				} else {
+				default:
 					m.connectStep = 1
 					m.connectEditMode = false
 					m.ta.Reset()
@@ -187,10 +211,14 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case 1:
 		switch msg.String() {
 		case "esc":
-			if m.connectEditMode {
+			switch {
+			case m.connectEditMode:
 				m.connectStep = 2
 				m.connectEditMode = false
-			} else {
+			case m.connectProvider == localConnectProviderID && len(m.cfg.LocalEndpoints) > 0:
+				m.connectStep = 4
+				m.connectActionCursor = 0
+			default:
 				m.connectStep = 0
 			}
 			m.ta.Reset()
@@ -201,12 +229,14 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					m.showBanner("endpoint cannot be empty", "error")
 					return m, nil
 				}
-				// Probe the endpoint off the UI thread: ProbeLocalServer does a
-				// blocking HTTP round-trip that previously froze the TUI for up
-				// to 5s inside this key handler. Keep the dialog open and show a
-				// progress banner; localProbeDoneMsg finishes the connect.
-				m.showBanner("probing local endpoint…", "info")
-				return m, probeLocalServerCmd(endpoint)
+				// Ask for the (optional) API key before probing, so servers
+				// started with authentication (llama-server --api-key, vLLM,
+				// unsloth, …) can be connected too.
+				m.connectLocalURL = endpoint
+				m.connectStep = 5
+				m.ta.Reset()
+				m.ta.Focus()
+				return m, nil
 			}
 			key := strings.TrimSpace(m.ta.Value())
 			if key == "" {
@@ -228,7 +258,11 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case 2:
 		switch msg.String() {
 		case "esc":
-			m.connectStep = 0
+			if isLocalProviderID(m.connectProvider) {
+				m.connectStep = 4
+			} else {
+				m.connectStep = 0
+			}
 			m.connectActionCursor = 0
 		case "up", "shift+tab":
 			if m.connectActionCursor > 0 {
@@ -241,7 +275,14 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.connectActionCursor {
 			case 0: // Edit key
-				m.connectStep = 1
+				if isLocalProviderID(m.connectProvider) {
+					// Local endpoint: re-enter the optional-key step; the probe
+					// re-validates the endpoint with the new key.
+					m.connectLocalURL = m.connectProvider
+					m.connectStep = 5
+				} else {
+					m.connectStep = 1
+				}
 				m.connectEditMode = true
 				m.ta.Reset()
 				m.ta.Focus()
@@ -272,7 +313,15 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				removedProvider := m.connectProvider
 				wasActive := m.cfg.ActiveProvider == removedProvider
 				_ = config.RemoveAPIKey(removedProvider)
+				if isLocalProviderID(removedProvider) {
+					m.providers.RemoveLocalModels(removedProvider)
+				}
 				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					if isLocalProviderID(removedProvider) {
+						cfg.LocalEndpoints = slices.DeleteFunc(cfg.LocalEndpoints, func(e string) bool {
+							return e == removedProvider
+						})
+					}
 					if cfg.ActiveProvider == removedProvider {
 						connected := m.providers.ConnectedModels(cfg.APIKeys)
 						if len(connected) > 0 {
@@ -300,6 +349,52 @@ func (m Model) updateConnect(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.connectActionCursor = 0
 			}
 		}
+	case 4: // local endpoint list: manage an existing endpoint or add a new one
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			m.connectStep = 0
+			m.connectActionCursor = 0
+		case "up", "shift+tab":
+			if m.connectActionCursor > 0 {
+				m.connectActionCursor--
+			}
+		case "down", "ctrl+n", "tab":
+			if m.connectActionCursor < len(m.cfg.LocalEndpoints) {
+				m.connectActionCursor++
+			}
+		case "enter":
+			if m.connectActionCursor < len(m.cfg.LocalEndpoints) {
+				m.connectProvider = m.cfg.LocalEndpoints[m.connectActionCursor]
+				m.connectStep = 2
+				m.connectActionCursor = 0
+			} else { // "+ Add new endpoint"
+				m.connectStep = 1
+				m.connectEditMode = false
+				m.ta.Reset()
+				m.ta.Focus()
+			}
+		}
+	case 5: // optional API key for a local endpoint
+		switch msg.String() {
+		case "esc":
+			if m.connectEditMode {
+				m.connectStep = 2
+				m.connectEditMode = false
+			} else {
+				m.connectStep = 1
+				m.ta.Reset()
+				m.ta.SetValue(m.connectLocalURL)
+				m.ta.Focus()
+			}
+		case "enter":
+			// Empty key is valid: most local servers run without auth.
+			m.showBanner("probing local endpoint…", "info")
+			return m, probeLocalServerCmd(m.connectLocalURL, strings.TrimSpace(m.ta.Value()))
+		default:
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, nil
@@ -316,13 +411,17 @@ func (m Model) viewConnect() string {
 	}
 	innerW := dialogInnerWidth(dialogWidth)
 
-	if m.connectStep == 1 {
+	if m.connectStep == 1 || m.connectStep == 5 {
 		provName := m.connectProvider
 		envHint := ""
 		prompt := "paste your API key and press enter:"
 		if m.connectProvider == localConnectProviderID {
 			provName = "Local endpoint"
 			prompt = "enter local endpoint (e.g. localhost:1234) and press enter:"
+		}
+		if m.connectStep == 5 {
+			provName = localEndpointLabel(m.connectLocalURL)
+			prompt = "API key — press enter to skip if the server needs none:"
 		}
 		for _, pi := range m.providers.AllProviderInfos() {
 			if pi.ID == m.connectProvider {
@@ -364,6 +463,9 @@ func (m Model) viewConnect() string {
 
 	if m.connectStep == 2 {
 		provName := m.connectProvider
+		if isLocalProviderID(provName) {
+			provName = localEndpointLabel(provName)
+		}
 		for _, pi := range m.providers.AllProviderInfos() {
 			if pi.ID == m.connectProvider && pi.Name != "" {
 				provName = pi.Name
@@ -404,6 +506,9 @@ func (m Model) viewConnect() string {
 
 	if m.connectStep == 3 {
 		provName := m.connectProvider
+		if isLocalProviderID(provName) {
+			provName = localEndpointLabel(provName)
+		}
 		for _, pi := range m.providers.AllProviderInfos() {
 			if pi.ID == m.connectProvider && pi.Name != "" {
 				provName = pi.Name
@@ -433,6 +538,48 @@ func (m Model) viewConnect() string {
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#FF5555")).
+			Width(dialogWidth+2).
+			Padding(1, 2).
+			Render(inner)
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		)
+	}
+
+	if m.connectStep == 4 {
+		titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ local endpoints")
+		title := diagFillTitle(titleLabel, innerW)
+		options := make([]string, 0, len(m.cfg.LocalEndpoints)+1)
+		for _, ep := range m.cfg.LocalEndpoints {
+			label := localEndpointLabel(ep)
+			if m.cfg.APIKeys[ep] != "" {
+				label += "  🔑"
+			}
+			options = append(options, label)
+		}
+		options = append(options, "+ Add new endpoint")
+		var rows []string
+		for i, opt := range options {
+			if i == m.connectActionCursor {
+				rows = append(rows, lipgloss.NewStyle().
+					Background(colorSelBg).Foreground(colorText).Bold(true).
+					Width(innerW).Render("› "+opt))
+			} else {
+				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+opt))
+			}
+		}
+		inner := lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			strings.Join(rows, "\n"),
+			"",
+			styleMuted.Render("↑↓ navigate  enter select  esc back"),
+		)
+		dialog := lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(mc).
 			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)

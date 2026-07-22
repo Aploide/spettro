@@ -524,16 +524,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 	var traces []ToolTrace
 
-	// Detect whether the selected model supports native tool calling and build
-	// the ToolSpec list once (it doesn't change between steps).
-	useNativeTools := cfg.ProviderManager.SupportsToolCalls(cfg.ProviderName(), cfg.ModelName())
-	var nativeToolSpecs []provider.ToolSpec
-	if useNativeTools {
-		nativeToolSpecs = buildToolSpecs(cfg.AllowedTools)
-		if len(nativeToolSpecs) == 0 {
-			useNativeTools = false // no schemas registered for any allowed tool
-		}
-	}
+	// Native tool calling is always used: tool schemas ride on the API request
+	// for every model. The spec list is built once (it doesn't change between
+	// steps). Models whose catalog entry claims no tool support still get the
+	// schemas — local OpenAI-compatible servers accept them, and the old
+	// TOOL_CALL text-protocol fallback caused tool-capable local models to
+	// emit unparsed TOOL_CALL strings instead of real tool calls.
+	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
@@ -587,7 +584,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 
 	// The system prompt is intentionally built once: it must not vary between
 	// steps or the provider-side prompt cache misses on every call.
-	system := buildSystemString(cfg, useNativeTools)
+	system := buildSystemString(cfg)
 
 	// Resilience state: transient provider failures are retried in-loop and an
 	// over-budget context gets one forced compaction attempt, so a single bad
@@ -657,7 +654,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			MaxTokens: cfg.MaxTokens,
 			Thinking:  cfg.Thinking,
 		}
-		if useNativeTools {
+		if len(nativeToolSpecs) > 0 {
 			req.Tools = nativeToolSpecs
 		}
 		if cfg.ToolCallback != nil {
@@ -797,96 +794,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			continue
 		}
 
-		// Native-tool path final answer: model returned text with no tool calls.
-		if useNativeTools {
-			if next, ok := runtime.nextRequiredRead(); ok {
-				emitNarration(cfg, main)
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
-				continue
-			}
-			return finish(strings.TrimSpace(main), false, "")
-		}
-
-		// Text protocol path (fallback for models without native tool support).
-		calls, parseErrs := parseAllToolCalls(main)
-		if len(calls) > 0 || len(parseErrs) > 0 {
-			if len(calls) > 0 {
-				emitNarration(cfg, main)
-			}
-			loopAct := runtime.loopDetect.observe(calls, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
-			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			var toolFeedback strings.Builder
-			// The text protocol has no tool_result channel, so tool-produced
-			// images ride on the feedback user message itself (message-level
-			// images work on every provider path).
-			var feedbackImages []string
-			for _, res := range results {
-				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images}
-				traces = append(traces, trace)
-				feedbackImages = append(feedbackImages, res.images...)
-				// The LLM must always receive tool outcomes in the next step, even when
-				// human-facing tool logging is disabled in the manifest.
-				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
-			}
-			for _, perr := range parseErrs {
-				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
-			}
-			if loopAct == loopNudge {
-				toolFeedback.WriteString(loopNudgeMessage + "\n")
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
-				}
-			}
-			// Feedback lands in the history before any exit check so the carried
-			// conversation never ends on an unanswered tool request.
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n"), Images: feedbackImages})
-			if runtime.shouldStop() {
-				return finish(runtime.stopMessage(), false, "")
-			}
-			if runtime.goalIsComplete() {
-				summary := runtime.goalSummary
-				if summary == "" {
-					summary = strings.TrimSpace(main)
-				}
-				return finish(summary, true, summary)
-			}
-			continue
-		}
-
-		if final, ok := parseFinal(main); ok {
-			if next, ok := runtime.nextRequiredRead(); ok {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before FINAL.", next)})
-				continue
-			}
-			return finish(strings.TrimSpace(final), false, "")
-		}
-
-		// Plain text without FINAL prefix and without a tool call: the model is
-		// narrating. Surface the text as a comment (it IS the model's output)
-		// and keep the loop alive so it can continue working or finalize.
-		if len(allowed) > 0 {
-			// Identical text emitted step after step is also a loop (e.g. the
-			// model keeps restating a plan instead of acting).
-			loopAct := runtime.loopDetect.observe(nil, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
+		// Final answer: model returned text with no tool calls.
+		if next, ok := runtime.nextRequiredRead(); ok {
 			emitNarration(cfg, main)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			feedback := "system: your text was shown to the user as a progress comment. Continue with TOOL_CALL, or output FINAL on its own line followed by your final answer when done. Do not write TOOL_CALL as text."
-			if loopAct == loopNudge {
-				feedback += "\n" + loopNudgeMessage
-			}
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: feedback})
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
 			continue
 		}
-		return finish(main, false, "")
+		return finish(strings.TrimSpace(main), false, "")
 	}
 }
 
