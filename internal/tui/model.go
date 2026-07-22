@@ -311,6 +311,9 @@ type Model struct {
 	connectProvider     string
 	connectActionCursor int
 	connectEditMode     bool
+	// connectLocalURL holds the endpoint URL between the local connect steps
+	// (URL entry → optional API key entry → probe).
+	connectLocalURL string
 
 	cmdItems  []commandDef
 	cmdCursor int

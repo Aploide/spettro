@@ -9,7 +9,7 @@
 ## "No providers connected"
 
 - Use `/connect` and choose a provider.
-- For LM Studio/Ollama, choose `Local endpoint (LM Studio/Ollama)` and enter endpoint (for example `localhost:1234`).
+- For LM Studio/Ollama/llama.cpp/vLLM, choose `Local endpoints (LM Studio/Ollama/llama.cpp/…)` and enter the endpoint (for example `localhost:1234`). You can add several endpoints; when prompted for an API key, press enter to skip it unless the server requires one.
 - Then use `/models` and select a model.
 
 ## Token budget exceeded or context blocked

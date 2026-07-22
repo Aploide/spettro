@@ -43,7 +43,7 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 		pm.SetCatalog(cat)
 	}
 	for _, endpoint := range cfg.LocalEndpoints {
-		if localModels, err := provider.ProbeLocalServer(ctx, endpoint); err == nil {
+		if localModels, err := provider.ProbeLocalServer(ctx, endpoint, cfg.APIKeys[endpoint]); err == nil {
 			pm.AddLocalModels(localModels)
 		}
 	}

@@ -719,7 +719,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// swallow it so pasted text can't leak into list filters. With no
 		// modal active it falls through to the passthrough guard below.
 		if modal := m.activeModal(); modal != modalNone {
-			inTextEntry := (modal == modalConnect && m.connectStep == 1) ||
+			inTextEntry := (modal == modalConnect && (m.connectStep == 1 || m.connectStep == 5)) ||
 				(modal == modalOnboarding && m.onboarding.step == 1) ||
 				modal == modalSetup
 			if !inTextEntry {
