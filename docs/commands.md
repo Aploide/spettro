@@ -68,7 +68,7 @@
 ## Agent usage
 
 - Type `@` in the input to open repository file suggestions and insert mentions.
-- Use `TOOL_CALL` with `{"tool":"agent",...}` to spawn sub-agents; multiple `TOOL_CALL` lines run in parallel.
+- Use the native `agent` tool to spawn sub-agents; multiple calls in one response run in parallel.
 - `/approve` executes a previously generated pending plan.
 
 ## Keyboard shortcuts

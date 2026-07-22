@@ -90,7 +90,7 @@ enabled skill. Agents have two activation paths:
 1. **Dedicated tool** (preferred): the `skill-read` builtin returns the skill
    body wrapped in `<skill_content name="...">` tags so it is identifiable
    during compaction. The model invokes it with
-   `TOOL_CALL {"name":"skill-read","arguments":{"name":"<skill>"}}`.
+   the native `skill-read` tool with `{"name":"<skill>"}`.
 2. **File read**: the model can also read `SKILL.md` directly via the standard
    `file-read` tool, using the absolute `location` from the catalog.
 
