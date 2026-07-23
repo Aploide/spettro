@@ -198,7 +198,7 @@ func decodePtyInput(s string) string {
 			b.WriteByte(s[i])
 		case 'u':
 			if i+5 < len(s) {
-				if v, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+				if v, err := strconv.ParseUint(s[i+2:i+6], 16, 16); err == nil {
 					b.WriteRune(rune(v))
 					i += 5
 					continue
