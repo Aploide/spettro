@@ -23,6 +23,10 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +37,7 @@ jobs:
           cache: true
 
       - name: Build binary
+        id: build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -40,18 +45,32 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           ARCHIVE_NAME="spettro_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY="spettro.exe"
+          else
+            BINARY="spettro"
+          fi
+
           go build \
             -trimpath \
             -ldflags="-s -w -X spettro/internal/version.App=${VERSION}" \
-            -o spettro \
+            -o "${BINARY}" \
             ./cmd/spettro
-          tar -czf "${ARCHIVE_NAME}.tar.gz" spettro
+
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "${ARCHIVE_NAME}.zip" "${BINARY}"
+            echo "archive=${ARCHIVE_NAME}.zip" >> "${GITHUB_OUTPUT}"
+          else
+            tar -czf "${ARCHIVE_NAME}.tar.gz" "${BINARY}"
+            echo "archive=${ARCHIVE_NAME}.tar.gz" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: spettro_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: "*.tar.gz"
+          path: ${{ steps.build.outputs.archive }}
           retention-days: 1
 
   release:
@@ -66,7 +85,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > checksums.txt
+        run: find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) -print0 | sort -z | xargs -0 sha256sum > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -74,4 +93,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/checksums.txt
