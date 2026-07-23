@@ -281,6 +281,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.showBanner(fmt.Sprintf("memory mining done — %d candidate(s) drafted, review with /memory review", msg.added), "success")
 		}
+	case memoryCurateDoneMsg:
+		switch {
+		case msg.err != nil:
+			m.showBanner("memory curation failed: "+msg.err.Error(), "error")
+		case len(msg.items) == 0:
+			m.showBanner("memory curation done — nothing needs changing", "info")
+		default:
+			m.showMemoryCurate = true
+			m.memoryCurateItems = msg.items
+			m.memoryCurateCursor = 0
+		}
 	case memoryEditDoneMsg:
 		if msg.err != nil {
 			m.showBanner("memory edit failed: "+msg.err.Error(), "error")

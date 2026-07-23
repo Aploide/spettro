@@ -446,6 +446,11 @@ type Model struct {
 	memoryReviewItems  []memory.Candidate
 	memoryReviewCursor int
 
+	// /memory curate proposed ops awaiting apply or skip.
+	showMemoryCurate   bool
+	memoryCurateItems  []curateItem
+	memoryCurateCursor int
+
 	// Checkpointing / rewind checkpointer is opened lazily on the
 	// first agent run; checkpointerFailed latches an open failure so we don't
 	// retry (and re-warn) every run.

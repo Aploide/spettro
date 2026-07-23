@@ -257,11 +257,18 @@ func handleMemoryCommand(cwd string, args []string) string {
 		if fact == "" {
 			return "usage: /memory add [user|project] <fact>"
 		}
-		path, err := store.Save(scope, fact)
+		res, err := store.Save(scope, fact)
 		if err != nil {
 			return "memory save failed: " + err.Error()
 		}
-		return fmt.Sprintf("saved to %s memory (%s) — active from the next session", scope, path)
+		switch res.Outcome {
+		case memory.SavedDuplicate:
+			return fmt.Sprintf("already in %s memory — refreshed its last-used date", scope)
+		case memory.SavedToInbox:
+			return fmt.Sprintf("similar %s memory exists (%q) — new fact routed to the review inbox (/memory review)", scope, res.Near)
+		default:
+			return fmt.Sprintf("saved to %s memory (%s) — active from the next session", scope, res.Path)
+		}
 
 	case "clear":
 		scopes := []memory.Scope{memory.ScopeUser, memory.ScopeProject}
