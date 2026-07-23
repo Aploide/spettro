@@ -51,6 +51,7 @@ var allCommands = []commandDef{
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
+	{"/checkpoints", "checkpoint count and shadow-store disk usage"},
 	{"/update", "update spettro to the latest release"},
 	{"/exit", "exit spettro"},
 }
@@ -284,6 +285,7 @@ const helpText = `commands:
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
   /rewind        restore files and/or conversation to a pre-edit checkpoint
+  /checkpoints   show checkpoint count and shadow-store disk usage
 
 keys:
   esc esc        open the rewind picker (when idle)

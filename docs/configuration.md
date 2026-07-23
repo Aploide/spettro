@@ -67,6 +67,19 @@ macOS).
 | `notifications_disabled` | `false` | Set `true` to turn all notifications off. |
 | `notify_quiet_sec` | `5` | Minimum seconds between notifications; events inside the window are dropped so bursts don't spam. |
 
+## Checkpointing storage
+
+Shadow-git snapshot storage for `/rewind`; see [Checkpointing](checkpointing.md)
+for how each key behaves.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `checkpointing_disabled` | `false` | Set `true` to turn checkpointing (and `/rewind`) off entirely. |
+| `checkpoint_max_file_mb` | `20` | Files larger than this are excluded from snapshots (recorded and surfaced on rewind). |
+| `checkpoint_retention_days` | `14` | Checkpoints older than this are pruned when the shadow repo is opened. |
+| `checkpoint_max_gb` | `5` | If the shadow store still exceeds this after retention, the oldest half of the remaining checkpoints is dropped. |
+| `checkpoint_warn_gb` | `2` | One-time warning threshold for projects without their own `.git` (where snapshots must copy the tree). |
+
 ### Shell command approvals
 
 - Shell tools run via `bash -lc` (`shell-exec`/`bash`).

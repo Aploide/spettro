@@ -48,6 +48,7 @@
 | `/diff [path...]` | Show diffs of files modified this session (all, or given paths). |
 | `/resume` | Open saved conversation picker. |
 | `/rewind` | Restore files and/or conversation to a pre-edit checkpoint. See [Checkpointing](checkpointing.md). |
+| `/checkpoints` | Show checkpoint count and shadow-store disk usage (this project and all projects). |
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
 | `/jobs [list]` | List background shell jobs started by the agent. |
 | `/jobs kill <id\|all>` | Terminate a background job (or all of them). |

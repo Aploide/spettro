@@ -27,10 +27,19 @@ func (m *Model) ensureCheckpointer() *checkpoint.Checkpointer {
 	if m.checkpointer != nil || m.checkpointerFailed {
 		return m.checkpointer
 	}
-	cp, err := checkpoint.Open(m.store.GlobalDir, m.cwd)
+	cp, err := checkpoint.OpenWith(m.store.GlobalDir, m.cwd, checkpoint.Options{
+		Disabled:      m.cfg.CheckpointingDisabled,
+		MaxFileMB:     m.cfg.CheckpointMaxFileMB,
+		RetentionDays: m.cfg.CheckpointRetentionDays,
+		MaxGB:         m.cfg.CheckpointMaxGB,
+		WarnGB:        m.cfg.CheckpointWarnGB,
+	})
 	if err != nil {
 		m.checkpointerFailed = true
 		return nil
+	}
+	if w := cp.Warning(); w != "" {
+		m.showBanner(w, "warn")
 	}
 	m.checkpointer = cp
 	return cp
@@ -60,6 +69,35 @@ func (m Model) conversationSnapshot() []byte {
 		return nil
 	}
 	return raw
+}
+
+// renderCheckpointsInfo builds the /checkpoints report: snapshot count and
+// shadow-store disk usage for this project plus the total across all projects
+// under ~/.spettro/history/.
+func (m *Model) renderCheckpointsInfo() string {
+	cp := m.ensureCheckpointer()
+	if cp == nil {
+		return "checkpointing unavailable (disabled in config, or git not installed)"
+	}
+	items, _ := cp.List()
+	var b strings.Builder
+	fmt.Fprintf(&b, "checkpoints: %d for this project\n", len(items))
+	fmt.Fprintf(&b, "disk usage:  %s (this project)  %s (all projects)\n",
+		formatBytes(cp.Size()), formatBytes(checkpoint.TotalSize(m.store.GlobalDir)))
+	b.WriteString("store:       " + checkpoint.Dir(m.store.GlobalDir, m.cwd))
+	return b.String()
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 func (m Model) openRewind() (tea.Model, tea.Cmd) {
@@ -157,8 +195,11 @@ func (m Model) applyRewind(cp checkpoint.Checkpoint, mode int) (tea.Model, tea.C
 			return m, nil
 		}
 	}
+	if restoreFiles && len(cp.SkippedLarge) > 0 {
+		m.showBanner(fmt.Sprintf("%d large file(s) were not snapshotted and are unaffected by this rewind", len(cp.SkippedLarge)), "warn")
+	}
 	if restoreConv {
-		blob, err := m.checkpointer.Conversation(cp.ID)
+		blob, err := m.checkpointer.Conversation(cp.ConvKey())
 		if err != nil || len(blob) == 0 {
 			m.showRewind = false
 			m.showBanner("no conversation stored for this checkpoint", "warn")
