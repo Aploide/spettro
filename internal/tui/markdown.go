@@ -366,7 +366,10 @@ func renderTable(tableLines []string, width int) string {
 				rendered = styleText.Render(rendered)
 			}
 			padding := strings.Repeat(" ", colWidths[j]-len(cell))
-			b.WriteString(" " + rendered + padding + " ")
+			b.WriteString(" ")
+			b.WriteString(rendered)
+			b.WriteString(padding)
+			b.WriteString(" ")
 			b.WriteString(border.Render("│"))
 		}
 		return b.String()

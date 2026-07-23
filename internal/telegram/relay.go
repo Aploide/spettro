@@ -397,7 +397,7 @@ func (r *Relay) processUpdate(ctx context.Context, u Update) {
 			"chat_id":  chatID,
 			"username": username,
 		})
-		r.sendRaw(ctx, chatID, "🚫 This chat is not allowed to drive Spettro. Ask the operator to run `/telegram allow @"+username+"` (or `/telegram allow "+itoa(chatID)+"`) in the TUI.")
+		r.sendRaw(ctx, chatID, "⊘ This chat is not allowed to drive Spettro. Ask the operator to run `/telegram allow @"+username+"` (or `/telegram allow "+itoa(chatID)+"`) in the TUI.")
 		return
 	}
 
@@ -466,7 +466,7 @@ func (r *Relay) sendAck(ctx context.Context, chatID int64, resp SubmitResponse) 
 	case resp.Error != "":
 		prefix = "❌ " + resp.Error
 	case resp.Queued:
-		prefix = "🕒 queued"
+		prefix = "◷ queued"
 	case resp.Accepted:
 		prefix = "✅ running"
 	default:
@@ -503,7 +503,7 @@ func (r *Relay) handleBotCommand(text string) (bool, string) {
 		case r.interruptCh <- struct{}{}:
 		default:
 		}
-		return true, "🛑 interrupt requested"
+		return true, "■ interrupt requested"
 	case "/whoami":
 		cfg := r.Config()
 		return true, fmt.Sprintf("bot: @%s\nallowlist size: %d", r.BotUsername(), len(cfg.Allowlist))
@@ -517,7 +517,7 @@ func (r *Relay) helpText() string {
 		bot = "your bot"
 	}
 	return strings.Join([]string{
-		"👋 Spettro Telegram relay",
+		"Spettro Telegram relay",
 		"",
 		"Send any message and it becomes a prompt for the active agent.",
 		"Send a /-command (like /plan) and it runs as a slash command.",

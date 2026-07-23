@@ -134,3 +134,84 @@ func TestGroupDigits(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureSpooledSmallOutputNotSpooled(t *testing.T) {
+	if id := ensureSpooled("short output"); id != "" {
+		t.Fatalf("small output was spooled: %q", id)
+	}
+}
+
+func TestEnsureSpooledPersistsFullOutputAtExecTime(t *testing.T) {
+	t.Cleanup(jobs.Spool().Cleanup)
+	out := strings.Repeat("line of build output\n", 300) // > offloadFloor, < history budget
+	id := ensureSpooled(out)
+	if id == "" {
+		t.Fatal("oversized output not spooled")
+	}
+	got, _, size, err := jobs.Spool().Read(id, 0, 0)
+	if err != nil || got != out || size != len(out) {
+		t.Fatalf("spool round-trip failed: err=%v size=%d", err, size)
+	}
+}
+
+func TestEnsureSpooledReusesTruncationFooterID(t *testing.T) {
+	t.Cleanup(jobs.Spool().Cleanup)
+	full := strings.Repeat("some very long shell output line\n", 1000)
+	truncated := spoolIfLarge(full, 4000, true)
+	m := spoolFooterRe.FindStringSubmatch(truncated)
+	if m == nil {
+		t.Fatal("expected truncation footer")
+	}
+	if id := ensureSpooled(truncated); id != m[3] {
+		t.Fatalf("footer ID not reused: got %q want %q", id, m[3])
+	}
+	// The spool must hold the FULL output, not the truncated view.
+	got, _, _, err := jobs.Spool().Read(m[3], 0, 0)
+	if err != nil || got != full {
+		t.Fatalf("spool does not hold full output: err=%v", err)
+	}
+}
+
+func TestRunToolOutputReadsBackWithOffsetAndLimit(t *testing.T) {
+	t.Cleanup(jobs.Spool().Cleanup)
+	id, err := jobs.Spool().Add("0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &toolRuntime{}
+	out, err := r.runToolOutput(fmt.Appendf(nil, `{"id":%q,"offset":4,"limit":6}`, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "456789") || strings.Contains(out, "abc") {
+		t.Fatalf("offset/limit not honored: %q", out)
+	}
+	if !strings.Contains(out, "next_offset=10") || !strings.Contains(out, "size=16") {
+		t.Fatalf("missing paging header: %q", out)
+	}
+	// Bare numeric ID resolves to spool:<n>.
+	n := strings.TrimPrefix(id, "spool:")
+	if out, err = r.runToolOutput(fmt.Appendf(nil, `{"id":%q}`, n)); err != nil || !strings.Contains(out, "0123456789abcdef") {
+		t.Fatalf("bare ID read failed: err=%v out=%q", err, out)
+	}
+	if _, err := r.runToolOutput([]byte(`{"id":"spool:999"}`)); err == nil {
+		t.Fatal("unknown spool ID must error")
+	}
+}
+
+func TestSpoolSurvivesRunEndUntilCleanup(t *testing.T) {
+	t.Cleanup(jobs.Spool().Cleanup)
+	id := ensureSpooled(strings.Repeat("z", 3000))
+	if id == "" {
+		t.Fatal("not spooled")
+	}
+	// Nothing at run end touches the spool; only Cleanup (process exit or
+	// /clear) removes it.
+	if _, _, _, err := jobs.Spool().Read(id, 0, 0); err != nil {
+		t.Fatalf("spool unreadable after run: %v", err)
+	}
+	jobs.Spool().Cleanup()
+	if _, _, _, err := jobs.Spool().Read(id, 0, 0); err == nil {
+		t.Fatal("spool must be gone after Cleanup (/clear)")
+	}
+}

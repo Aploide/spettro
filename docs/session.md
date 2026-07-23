@@ -23,7 +23,9 @@ Spettro automatically saves the current session to disk as you work:
 
 ### Storage path
 
-Sessions live under `~/.spettro/sessions/`. Each session is identified by a
+Sessions live under `~/.spettro/sessions/`. Old sessions can be reclaimed
+with [`/storage clean`](storage.md), which never touches the active session
+and always keeps the most recent few per project. Each session is identified by a
 project-specific hash combined with a timestamp:
 
 ```
@@ -129,6 +131,32 @@ You can focus the compaction on a specific topic:
 ```
 
 This gives the LLM a hint about what to prioritise in the summary.
+
+### Two-stage compaction (reference-based)
+
+Compaction is two-stage. Stage 1 is cheap and lossless-by-reference; stage 2
+is the summarizer.
+
+- **Stage 1 — offload tool results.** Every tool result larger than ~500
+  tokens is already persisted to the session spool at execution time. Before
+  summarizing anything, compaction replaces each such result in the older
+  turns with a short stub that keeps the tool name, an args digest, the size,
+  the ok/error status, and the first/last line:
+
+  ```text
+  [offloaded: re-read with tool-output {"id":"spool:7"}] shell-exec args={"command":"go test ./..."} — 48210 chars, 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
+  ```
+
+  The full output stays on disk and the model can re-read it at any time with
+  the `tool-output` tool (`{"id":"spool:7","offset":0,"limit":4000}`). If
+  offloading alone brings the estimate back under the auto-compact threshold,
+  compaction stops here — no summarizer call, no token spend, nothing lost.
+
+- **Stage 2 — summarize.** If the history is still too large (or on an
+  explicit `/compact`), the older turns are summarized as before, but the
+  summarizer sees the stubs instead of raw truncations and is instructed to
+  carry the `tool-output` IDs into the summary verbatim, so dropped outputs
+  remain re-readable after summarization.
 
 After compaction:
 
@@ -326,11 +354,18 @@ Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
 `bash`, `web-fetch`) are automatically spooled to disk instead of being
 hard-truncated. The model receives a truncated head with a footer containing a
 `spool:N` ID and an offset, and can page through the full result using
-`job-output {"job_id":"spool:N","offset":Z}`.
+`job-output {"job_id":"spool:N","offset":Z}` or the dedicated `tool-output`
+tool (`{"id":"spool:N","offset":Z,"limit":M}`).
 
-Spool files are session-scoped: they are deleted when the session ends (TUI
-exit, `/exit`), the same as background jobs. They are also cleaned up on goal
-completion (`/goal`).
+In addition, *every* tool result over ~500 tokens — even ones small enough to
+stay in context untruncated — is written to the spool at execution time. This
+backs reference-based compaction (see [Compact](#compact-compact)): when the
+context fills up, oversized results are swapped for `[offloaded: …]` stubs
+pointing at their spool IDs rather than being lost to summarization.
+
+Spool files are tied to the conversation, not to a single run: they survive
+run end, and are deleted on `/clear` and when the process exits (TUI exit,
+`/exit`).
 
 ```text
 # example: model receives truncated grep output with a footer

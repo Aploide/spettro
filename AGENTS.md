@@ -21,11 +21,14 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `3`. Pre-v3 manifests
-  are migrated on load (with a `.bak` backup): the previously inert
-  `sandbox_mode = "workspace-write"` default is rewritten to `full-access`
-  because the field is now enforced — re-set it explicitly if you want the
-  OS sandbox.
+- `version` (int, required): schema version, currently `8`. Older manifests
+  are migrated on load (with a `.bak` backup): v3 rewrites the previously
+  inert `sandbox_mode = "workspace-write"` default to `full-access` (the
+  field is now enforced — re-set it explicitly if you want the OS sandbox);
+  later versions retrofit new built-in tools (v5 `view-image`, v6
+  `hover`/`rename-symbol`, v7 `repo-search`, v8 the
+  `pty-start`/`pty-write`/`pty-kill` interactive terminal tools, granted to
+  agents that already hold `shell-exec`).
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.

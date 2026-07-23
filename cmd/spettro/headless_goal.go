@@ -15,6 +15,7 @@ import (
 	"spettro/internal/jobs"
 	"spettro/internal/models"
 	"spettro/internal/provider"
+	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
 	"spettro/internal/spettro"
@@ -30,6 +31,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	// Kill detached background shell jobs on exit; they are in their own
 	// process groups and would otherwise outlive the run.
 	defer jobs.Default().KillAll()
+	defer pty.Default().KillAll()
 	defer jobs.Spool().Cleanup()
 
 	store, err := storage.New(cwd)

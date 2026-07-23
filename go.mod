@@ -12,6 +12,7 @@ require (
 	github.com/aymanbagabas/go-nativeclipboard v0.1.3
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/coder/acp-go-sdk v0.13.5
+	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/landlock-lsm/go-landlock v0.8.1
 	github.com/openai/openai-go/v3 v3.4.0

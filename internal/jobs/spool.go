@@ -50,6 +50,14 @@ func (s *SpoolStore) Add(content string) (string, error) {
 	return id, nil
 }
 
+// Dir returns the spool directory of this store, or "" when nothing has been
+// spooled yet. Storage cleanup uses it to exempt the live session's spool.
+func (s *SpoolStore) Dir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dir
+}
+
 // Read returns up to max bytes of the spool starting at absolute byte offset,
 // the next offset to read from, and the total spool size. max <= 0 means no
 // per-read cap.

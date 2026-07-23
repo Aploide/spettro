@@ -57,6 +57,19 @@ type UserConfig struct {
 	NotificationsDisabled bool `json:"notifications_disabled,omitempty"`
 	NotifyQuietSec        int  `json:"notify_quiet_sec,omitempty"` // min seconds between notifications; 0 → default (5)
 
+	// Checkpointing (/rewind) shadow-git storage. Zero values fall back to
+	// the checkpoint package defaults (20 MB / 14 days / 5 GB / 2 GB).
+	CheckpointingDisabled   bool `json:"checkpointing_disabled,omitempty"`
+	CheckpointMaxFileMB     int  `json:"checkpoint_max_file_mb,omitempty"`    // files above this are not snapshotted
+	CheckpointRetentionDays int  `json:"checkpoint_retention_days,omitempty"` // prune checkpoints older than this on open
+	CheckpointMaxGB         int  `json:"checkpoint_max_gb,omitempty"`         // shadow-store size cap enforced on open
+	CheckpointWarnGB        int  `json:"checkpoint_warn_gb,omitempty"`        // big-repo warning threshold (no project .git)
+
+	// Storage cleanup (/storage clean, `spettro clean`) session policy. Zero
+	// values fall back to the storage package defaults (30 days / keep 5).
+	CleanSessionAgeDays int `json:"clean_session_age_days,omitempty"` // sessions older than this are clean candidates
+	CleanKeepSessions   int `json:"clean_keep_sessions,omitempty"`    // most recent K sessions per project always survive
+
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited

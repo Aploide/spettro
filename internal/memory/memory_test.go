@@ -32,19 +32,25 @@ func TestSaveCreatesFileWithHeaderAndAppends(t *testing.T) {
 	if !strings.HasPrefix(got, "# Spettro memory (user)\n") {
 		t.Fatalf("missing header: %q", got)
 	}
-	if !strings.Contains(got, "- prefers tabs over spaces\n- likes short commit messages\n") {
-		t.Fatalf("entries not appended in order: %q", got)
+	// Entries carry a metadata comment tail and stay in save order.
+	i1 := strings.Index(got, "- prefers tabs over spaces <!-- id:m-")
+	i2 := strings.Index(got, "- likes short commit messages <!-- id:m-")
+	if i1 < 0 || i2 < 0 || i1 > i2 {
+		t.Fatalf("entries not appended in order with metadata: %q", got)
 	}
 }
 
 func TestSaveProjectScope(t *testing.T) {
 	s := testStore(t)
-	path, err := s.Save(ScopeProject, "run make lint before tests")
+	res, err := s.Save(ScopeProject, "run make lint before tests")
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if path != s.ProjectFile {
-		t.Fatalf("path = %q, want %q", path, s.ProjectFile)
+	if res.Path != s.ProjectFile {
+		t.Fatalf("path = %q, want %q", res.Path, s.ProjectFile)
+	}
+	if res.Outcome != SavedNew {
+		t.Fatalf("outcome = %v, want SavedNew", res.Outcome)
 	}
 	if _, err := os.Stat(s.ProjectFile); err != nil {
 		t.Fatalf("project file missing: %v", err)
@@ -79,8 +85,11 @@ func TestLoadCombinesScopesAndEmpty(t *testing.T) {
 	if !strings.Contains(got, "# Memory") || !strings.Contains(got, "- user fact") || !strings.Contains(got, "- project fact") {
 		t.Fatalf("combined load missing content: %q", got)
 	}
-	if strings.Index(got, "- user fact") > strings.Index(got, "- project fact") {
-		t.Fatal("user memory should come before project memory")
+	if strings.Index(got, "- project fact") > strings.Index(got, "- user fact") {
+		t.Fatal("project memory should come before user memory")
+	}
+	if strings.Contains(got, "<!--") {
+		t.Fatalf("metadata not stripped before injection: %q", got)
 	}
 }
 

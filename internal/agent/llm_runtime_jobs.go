@@ -73,6 +73,46 @@ func (r *toolRuntime) readSpoolOutput(spoolID string, offset int) (string, error
 	return header + "\n" + chunk, nil
 }
 
+// runToolOutput reads back a tool result that was offloaded to the spool
+// (either by execution-time truncation or by compaction stage 1). It is the
+// stable read path the compaction stubs point at; job-output with a spool ID
+// remains as an alias.
+func (r *toolRuntime) runToolOutput(rawArgs []byte) (string, error) {
+	var args struct {
+		ID     string `json:"id"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("tool-output args: %w", err)
+	}
+	id := strings.TrimSpace(args.ID)
+	if id == "" {
+		return "", fmt.Errorf("tool-output: id is required")
+	}
+	// Accept a bare number for convenience ("7" -> "spool:7").
+	if !strings.Contains(id, ":") {
+		id = "spool:" + id
+	}
+	maxChunk := max(r.historyLimit("tool-output")-200, 1000)
+	if args.Limit > 0 && args.Limit < maxChunk {
+		maxChunk = args.Limit
+	}
+	chunk, next, size, err := jobs.Spool().Read(id, args.Offset, maxChunk)
+	if err != nil {
+		return "", fmt.Errorf("tool-output: %w", err)
+	}
+	status := "more available"
+	if next >= size {
+		status = "end of output"
+	}
+	header := fmt.Sprintf("output=%s size=%d next_offset=%d (%s)", id, size, next, status)
+	if chunk == "" {
+		return header + "\n(no more output)", nil
+	}
+	return header + "\n" + chunk, nil
+}
+
 // runJobKill terminates a background job's whole process group.
 func (r *toolRuntime) runJobKill(rawArgs []byte) (string, error) {
 	var args struct {

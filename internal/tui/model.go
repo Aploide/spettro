@@ -393,7 +393,6 @@ type Model struct {
 	parallelAgents   []parallelAgentEntry
 	tickCount        int
 	sideCursor       int
-	sideScroll       int
 	sideDetailScroll int
 	modifiedFiles    []modifiedFileEntry
 	gitBranch        string
@@ -446,6 +445,11 @@ type Model struct {
 	memoryReviewItems  []memory.Candidate
 	memoryReviewCursor int
 
+	// /memory curate proposed ops awaiting apply or skip.
+	showMemoryCurate   bool
+	memoryCurateItems  []curateItem
+	memoryCurateCursor int
+
 	// Checkpointing / rewind checkpointer is opened lazily on the
 	// first agent run; checkpointerFailed latches an open failure so we don't
 	// retry (and re-warn) every run.
@@ -453,12 +457,20 @@ type Model struct {
 	checkpointerFailed bool
 	showRewind         bool
 	rewindItems        []checkpoint.Checkpoint
+	rewindCounts       []int // per item: files edited during that turn (see openRewind)
 	rewindCursor       int
 	rewindScroll       int
 	rewindModePick     bool
 	rewindModeCursor   int
 	// lastEscAt drives the esc-esc shortcut that opens /rewind when idle.
 	lastEscAt time.Time
+
+	// /storage clean multi-select: items from the storage registry with
+	// per-item checkboxes (safe defaults preselected).
+	showStorageClean bool
+	storageItems     []storage.Item
+	storageChecked   []bool
+	storageCursor    int
 
 	todos []session.Todo
 

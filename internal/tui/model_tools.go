@@ -86,12 +86,15 @@ func waitForAskUser(ch chan askUserRequestMsg) tea.Cmd {
 
 func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc color.Color) string {
 	var sb strings.Builder
-	sb.WriteString(styleMuted.Render("  "+title) + "\n")
+	sb.WriteString(styleMuted.Render("  " + title))
+	sb.WriteString("\n")
 	for i, opt := range options {
 		if i == cursor {
-			sb.WriteString(lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt))
+			item := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt)
+			sb.WriteString(item)
 		} else {
-			sb.WriteString(styleMuted.Render("    " + opt))
+			item := styleMuted.Render("    " + opt)
+			sb.WriteString(item)
 		}
 		if i < len(options)-1 {
 			sb.WriteString("\n")
@@ -180,6 +183,34 @@ func formatToolLabel(name, argsJSON string) string {
 			return "Ran $ " + cmd
 		}
 		return "Ran command"
+	case "pty-start":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
+			return "Started terminal $ " + truncateLabel(args.Command, 60)
+		}
+		return "Started terminal session"
+	case "pty-write":
+		var args struct {
+			ID    string `json:"id"`
+			Input string `json:"input"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.ID != "" {
+			if in := strings.TrimSpace(args.Input); in != "" {
+				return fmt.Sprintf("Typed %q into %s", truncateLabel(in, 40), args.ID)
+			}
+			return "Polled terminal " + args.ID
+		}
+		return "Typed into terminal"
+	case "pty-kill":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.ID != "" {
+			return "Closed terminal " + args.ID
+		}
+		return "Closed terminal session"
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
@@ -420,6 +451,34 @@ func formatRunningLabel(name, argsJSON string) string {
 			return "Running $ " + cmd + "…"
 		}
 		return "Running…"
+	case "pty-start":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
+			return "Starting terminal $ " + truncateLabel(args.Command, 60) + "…"
+		}
+		return "Starting terminal session…"
+	case "pty-write":
+		var args struct {
+			ID    string `json:"id"`
+			Input string `json:"input"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.ID != "" {
+			if in := strings.TrimSpace(args.Input); in != "" {
+				return fmt.Sprintf("Typing %q into %s…", truncateLabel(in, 40), args.ID)
+			}
+			return "Waiting on terminal " + args.ID + "…"
+		}
+		return "Typing into terminal…"
+	case "pty-kill":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.ID != "" {
+			return "Closing terminal " + args.ID + "…"
+		}
+		return "Closing terminal session…"
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
@@ -511,6 +570,12 @@ func toolActionVerb(name string) string {
 		return "Downloaded"
 	case "shell-exec", "bash", "bash-output":
 		return "Ran"
+	case "pty-start":
+		return "Started"
+	case "pty-write":
+		return "Drove"
+	case "pty-kill":
+		return "Closed"
 	case "glob":
 		return "Matched"
 	case "grep":
@@ -570,6 +635,11 @@ func toolNounCount(name string, count int) string {
 			return "1 command"
 		}
 		return fmt.Sprintf("%d commands", count)
+	case "pty-start", "pty-write", "pty-kill":
+		if count == 1 {
+			return "1 terminal session"
+		}
+		return fmt.Sprintf("%d terminal sessions", count)
 	case "glob":
 		if count == 1 {
 			return "1 pattern"

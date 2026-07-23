@@ -15,12 +15,16 @@ import (
 // memory when the user approves it (which appends it via Store.Save) and it
 // disappears when discarded.
 type Candidate struct {
-	ID          string    `json:"id"`
-	Fact        string    `json:"fact"`
-	Scope       Scope     `json:"scope"`
-	ProjectPath string    `json:"project_path,omitempty"`
-	Sources     []string  `json:"sources,omitempty"` // session IDs the fact was mined from
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string   `json:"id"`
+	Fact        string   `json:"fact"`
+	Scope       Scope    `json:"scope"`
+	ProjectPath string   `json:"project_path,omitempty"`
+	Sources     []string `json:"sources,omitempty"` // session IDs the fact was mined from
+	// Supersedes is the existing memory fact this candidate would replace
+	// (set when Save detected a near-duplicate/contradiction). Approving
+	// such a candidate swaps the old fact for the new one.
+	Supersedes string    `json:"supersedes,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Inbox is the JSON file holding candidates pending review.

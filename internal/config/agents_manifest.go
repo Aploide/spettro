@@ -217,6 +217,23 @@ var lspDeepTools = []ToolSpec{
 	{ID: "rename-symbol", Name: "LSP Rename", Description: "Rename a symbol across the workspace via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
 }
 
+// ptyTools are shared between the default manifest and the v8 migration that
+// retrofits them into existing manifests. pty-start carries the same approval
+// and risk surface as shell-exec; one start approval covers subsequent
+// pty-write input into that session, so pty-write itself needs no approval.
+var ptyTools = []ToolSpec{
+	{ID: "pty-start", Name: "PTY Start", Description: "Start an interactive terminal session under a pseudo-terminal.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
+	{ID: "pty-write", Name: "PTY Write", Description: "Send input to a pty session and read new output.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "high"},
+	{ID: "pty-kill", Name: "PTY Kill", Description: "Terminate a pty session.", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
+}
+
+// toolOutputSpec is shared between the default manifest and the v9 migration
+// that retrofits it into existing manifests. It reads back tool outputs
+// offloaded to the session spool (execution-time truncation and compaction
+// reference stubs point at it), a read-only surface granted alongside
+// file-read.
+var toolOutputSpec = ToolSpec{ID: "tool-output", Name: "Tool Output", Description: "Re-read the full output of an earlier tool call that was offloaded to the session spool.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
+
 var visionToolViewImage = ToolSpec{ID: "view-image", Name: "View Image", Description: "Attach an image file from the workspace so the model can see it (vision models only).", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
 
 func DefaultAgentManifest() AgentManifest {
@@ -267,6 +284,7 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
 			{ID: "job-output", Name: "Job Output", Description: "Fetch accumulated output of a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 			{ID: "job-kill", Name: "Job Kill", Description: "Terminate a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
+			toolOutputSpec,
 			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 			{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"},
 			{ID: "enter-plan-mode", Name: "Enter Plan Mode", Description: "Switch execution into planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
@@ -495,7 +513,80 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 7
 		changed = true
 	}
+	if m.Version < 8 {
+		// v8 introduces interactive PTY sessions (pty-start/write/kill).
+		// Agents already trusted with shell-exec get them: the surface is the
+		// same arbitrary-command trust level, approved through the same path.
+		m.ensurePTYTools()
+		m.Version = 8
+		changed = true
+	}
+	if m.Version < 9 {
+		// v9 introduces the tool-output spool reader used by reference-based
+		// compaction. Agents already trusted with file-read get it: same
+		// read-only surface (it only reads back outputs their own tools
+		// produced).
+		m.ensureToolOutputTool()
+		m.Version = 9
+		changed = true
+	}
 	return changed
+}
+
+// ensureToolOutputTool retrofits the tool-output spool reader into a manifest
+// that predates v9: the definition is added when absent, and any agent
+// already holding file-read gets it allowed (identical read trust level, so
+// deliberate restrictions are preserved).
+func (m *AgentManifest) ensureToolOutputTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == toolOutputSpec.ID {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, toolOutputSpec)
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["file-read"] && !allowed["tool-output"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "tool-output")
+		}
+	}
+}
+
+// ensurePTYTools retrofits the pty session tools into a manifest that
+// predates v8: definitions are added when absent, and any agent already
+// holding shell-exec gets all three (identical execute trust level, so
+// deliberate restrictions are preserved).
+func (m *AgentManifest) ensurePTYTools() {
+	have := map[string]bool{}
+	for _, t := range m.Tools {
+		have[t.ID] = true
+	}
+	for _, t := range ptyTools {
+		if !have[t.ID] {
+			m.Tools = append(m.Tools, t)
+		}
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if !allowed["shell-exec"] {
+			continue
+		}
+		for _, t := range ptyTools {
+			if !allowed[t.ID] {
+				m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, t.ID)
+			}
+		}
+	}
 }
 
 // ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool

@@ -513,6 +513,8 @@ func (m Model) handleMemoryCommand(input string) (tea.Model, tea.Cmd) {
 		return m.runMemoryMine(limit)
 	case "review":
 		return m.openMemoryReview()
+	case "curate":
+		return m.runMemoryCurate(scopeArg)
 	case "edit":
 		scope := memory.ScopeUser
 		if scopeArg == "project" {
@@ -561,6 +563,6 @@ func (m Model) handleMemoryCommand(input string) (tea.Model, tea.Cmd) {
 		m.showBanner("memory cleared — applies from the next session", "success")
 		return m, nil
 	}
-	m.showBanner("usage: /memory [show] | /memory edit [user|project] | /memory clear [user|project|all] | /memory mine [n] | /memory review", "error")
+	m.showBanner("usage: /memory [show] | /memory edit [user|project] | /memory clear [user|project|all] | /memory mine [n] | /memory review | /memory curate [user|project|all]", "error")
 	return m, nil
 }

@@ -140,7 +140,14 @@ func (m Model) resolveMemoryCandidate(approve bool) Model {
 		if cwd == "" {
 			cwd = m.cwd
 		}
-		if _, err := memory.DefaultStore(cwd).Save(cand.Scope, cand.Fact); err != nil {
+		store := memory.DefaultStore(cwd)
+		var err error
+		if cand.Supersedes != "" {
+			_, err = store.Supersede(cand.Scope, cand.Supersedes, cand.Fact)
+		} else {
+			_, err = store.SaveApproved(cand.Scope, cand.Fact)
+		}
+		if err != nil {
 			m.showBanner("memory save failed: "+err.Error(), "error")
 			return m
 		}
@@ -207,6 +214,9 @@ func (m Model) viewMemoryReview() string {
 			for line := range strings.SplitSeq(fact, "\n") {
 				rows = append(rows, "    "+line)
 			}
+			if c.Supersedes != "" {
+				rows = append(rows, styleMuted.Render("    replaces: "+truncateLabel(c.Supersedes, max(8, contentW-14))))
+			}
 			if len(c.Sources) > 0 {
 				rows = append(rows, styleMuted.Render("    from "+truncateLabel(strings.Join(c.Sources, ", "), max(8, contentW-9))))
 			}
@@ -220,6 +230,179 @@ func (m Model) viewMemoryReview() string {
 
 	hint := styleMuted.Render("↑↓ navigate  a/enter approve  d discard  esc close")
 	note := styleMuted.Render("approved memories load into context from the next session")
+	dialog := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(mc).
+		Width(dialogWidth+2).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			strings.Join(rows, "\n"),
+			"",
+			note,
+			hint,
+		))
+
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		dialog,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+	)
+}
+
+// curateItem is one proposed curation op bound to its scope, pending review.
+type curateItem struct {
+	Scope memory.Scope
+	Op    memory.CurateOp
+}
+
+// memoryCurateDoneMsg reports a finished background curation LLM pass.
+type memoryCurateDoneMsg struct {
+	items []curateItem
+	err   error
+}
+
+// runMemoryCurate runs one LLM pass per scope over the memory store and
+// drafts edit operations (merge/rewrite/delete) for review. Explicit like
+// /memory mine — no silent token spend, and nothing is applied without
+// per-op approval in the review modal.
+func (m Model) runMemoryCurate(scopeArg string) (tea.Model, tea.Cmd) {
+	scopes := []memory.Scope{memory.ScopeUser, memory.ScopeProject}
+	switch scopeArg {
+	case "", "all":
+	case "user":
+		scopes = []memory.Scope{memory.ScopeUser}
+	case "project":
+		scopes = []memory.Scope{memory.ScopeProject}
+	default:
+		m.showBanner("usage: /memory curate [user|project|all]", "error")
+		return m, nil
+	}
+	cwd := m.cwd
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	m.showBanner("curating memory in the background…", "info")
+	return m, func() tea.Msg {
+		store := memory.DefaultStore(cwd)
+		complete := func(ctx context.Context, prompt string) (string, error) {
+			resp, err := pm.Send(ctx, providerName, modelName, provider.Request{Prompt: prompt})
+			if err != nil {
+				return "", err
+			}
+			return resp.Content, nil
+		}
+		var items []curateItem
+		for _, sc := range scopes {
+			facts := store.Facts(sc)
+			if len(facts) == 0 {
+				continue
+			}
+			var hints []string
+			if sc == memory.ScopeProject {
+				hints = memory.StaleHints(facts, cwd)
+			}
+			ops, err := memory.Curate(context.Background(), facts, hints, complete)
+			if err != nil {
+				return memoryCurateDoneMsg{err: err}
+			}
+			for _, op := range ops {
+				items = append(items, curateItem{Scope: sc, Op: op})
+			}
+		}
+		return memoryCurateDoneMsg{items: items}
+	}
+}
+
+func (m Model) updateMemoryCurate(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "ctrl+c":
+		m.showMemoryCurate = false
+	case "up", "shift+tab":
+		if m.memoryCurateCursor > 0 {
+			m.memoryCurateCursor--
+		}
+	case "down", "tab", "ctrl+n":
+		if m.memoryCurateCursor < len(m.memoryCurateItems)-1 {
+			m.memoryCurateCursor++
+		}
+	case "a", "enter":
+		m = m.resolveCurateOp(true)
+	case "d", "x":
+		m = m.resolveCurateOp(false)
+	}
+	return m, nil
+}
+
+// resolveCurateOp applies (atomic rewrite) or skips the op under the cursor.
+func (m Model) resolveCurateOp(apply bool) Model {
+	if len(m.memoryCurateItems) == 0 {
+		m.showMemoryCurate = false
+		return m
+	}
+	it := m.memoryCurateItems[m.memoryCurateCursor]
+	if apply {
+		if err := memory.DefaultStore(m.cwd).ApplyOp(it.Scope, it.Op); err != nil {
+			m.showBanner("memory curate failed: "+err.Error(), "error")
+			return m
+		}
+		m.showBanner("memory updated — applies from the next session", "success")
+	} else {
+		m.showBanner("op skipped — memory unchanged", "info")
+	}
+	m.memoryCurateItems = append(m.memoryCurateItems[:m.memoryCurateCursor], m.memoryCurateItems[m.memoryCurateCursor+1:]...)
+	if m.memoryCurateCursor >= len(m.memoryCurateItems) && m.memoryCurateCursor > 0 {
+		m.memoryCurateCursor--
+	}
+	if len(m.memoryCurateItems) == 0 {
+		m.showMemoryCurate = false
+	}
+	return m
+}
+
+func (m Model) viewMemoryCurate() string {
+	mc := m.currentColor()
+	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ memory curation")
+	dialogWidth := 76
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+	contentW := dialogWidth - 6
+
+	maxRows := max(4, m.height-14)
+	start := 0
+	if m.memoryCurateCursor >= maxRows {
+		start = m.memoryCurateCursor - maxRows + 1
+	}
+	end := min(len(m.memoryCurateItems), start+maxRows)
+
+	var rows []string
+	for i := start; i < end; i++ {
+		it := m.memoryCurateItems[i]
+		label := fmt.Sprintf("[%s] %s %s", it.Scope, it.Op.Action, strings.Join(it.Op.IDs, ","))
+		if i == m.memoryCurateCursor {
+			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
+			rows = append(rows, prefix+lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(label))
+			if it.Op.Text != "" {
+				text := lipgloss.NewStyle().Foreground(colorText).Width(max(8, contentW-4)).Render("→ " + it.Op.Text)
+				for line := range strings.SplitSeq(text, "\n") {
+					rows = append(rows, "    "+line)
+				}
+			}
+			if it.Op.Reason != "" {
+				rows = append(rows, styleMuted.Render("    why: "+truncateLabel(it.Op.Reason, max(8, contentW-9))))
+			}
+			continue
+		}
+		rows = append(rows, "  "+lipgloss.NewStyle().Foreground(colorDim).Render(truncateLabel(label, max(8, contentW-2))))
+	}
+
+	hint := styleMuted.Render("↑↓ navigate  a/enter apply  d skip  esc close")
+	note := styleMuted.Render("each applied op rewrites the file atomically; skipped ops change nothing")
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).

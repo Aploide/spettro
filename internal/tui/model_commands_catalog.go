@@ -32,6 +32,7 @@ var allCommands = []commandDef{
 	{"/memory", "show/edit/clear persistent cross-session memory"},
 	{"/memory mine", "scan saved sessions and draft candidate memories into the review inbox"},
 	{"/memory review", "approve or discard drafted memory candidates"},
+	{"/memory curate", "LLM pass over saved memory: propose merges, rewrites, deletions for review"},
 	{"/plan", "switch plan mode or run plan task"},
 	{"/goal", "run autonomously until an objective is met (no step/token limits)"},
 	{"/permissions", "show/set permission level"},
@@ -50,6 +51,9 @@ var allCommands = []commandDef{
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
+	{"/checkpoints", "checkpoint count and shadow-store disk usage"},
+	{"/storage", "report what spettro stores on disk, per artifact class"},
+	{"/storage clean", "reclaim disk: multi-select cleanup with safe defaults"},
 	{"/update", "update spettro to the latest release"},
 	{"/exit", "exit spettro"},
 }
@@ -264,6 +268,7 @@ const helpText = `commands:
   /memory clear [user|project|all]  erase saved memory
   /memory mine [n]   scan saved sessions, draft memory candidates (background)
   /memory review     approve/discard drafted candidates (nothing saves without approval)
+  /memory curate [user|project|all]  propose dedup/merge/expiry edits, apply per-op
   /init          analyze codebase and write SPETTRO.md
   /compact [x]   summarize conversation (optional focus instruction)
   /compact auto  view/set auto-compact (status|on|off)
@@ -282,6 +287,8 @@ const helpText = `commands:
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
   /rewind        restore files and/or conversation to a pre-edit checkpoint
+  /checkpoints   show checkpoint count and shadow-store disk usage
+  /storage       report what spettro stores on disk (add "clean" to reclaim)
 
 keys:
   esc esc        open the rewind picker (when idle)

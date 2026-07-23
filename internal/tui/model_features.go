@@ -132,9 +132,9 @@ func (m Model) renderAttachmentChips(mc color.Color) string {
 	for i, att := range m.attachments {
 		var label string
 		if att.Kind == "image" {
-			label = fmt.Sprintf("🖼 %s [%d]", att.RelPath, i+1)
+			label = fmt.Sprintf("▣ %s [%d]", att.RelPath, i+1)
 		} else {
-			label = fmt.Sprintf("📄 %s [%d]", filepath.Base(att.RelPath), i+1)
+			label = fmt.Sprintf("▤ %s [%d]", filepath.Base(att.RelPath), i+1)
 		}
 		chip := lipgloss.NewStyle().
 			Foreground(mc).

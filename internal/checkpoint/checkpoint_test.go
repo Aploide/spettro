@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,5 +135,44 @@ func TestSnapshotDisabled(t *testing.T) {
 	}
 	if err := c.RestoreFiles("x"); err == nil {
 		t.Error("disabled checkpointer must refuse RestoreFiles")
+	}
+}
+
+func TestCheckpointsFileRecordsProjectPath(t *testing.T) {
+	c, project := newTestCheckpointer(t)
+	if err := os.WriteFile(filepath.Join(project, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Snapshot("write", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(c.dir, "checkpoints.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file checkpointsFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	if file.ProjectPath != project {
+		t.Errorf("project_path = %q, want %q", file.ProjectPath, project)
+	}
+	if len(file.Checkpoints) != 1 {
+		t.Errorf("checkpoints = %d, want 1", len(file.Checkpoints))
+	}
+}
+
+func TestListReadsLegacyArrayFormat(t *testing.T) {
+	c, _ := newTestCheckpointer(t)
+	legacy := `[{"id":"abc123","tool":"write"}]`
+	if err := os.WriteFile(filepath.Join(c.dir, "checkpoints.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != "abc123" {
+		t.Fatalf("legacy list = %+v", list)
 	}
 }

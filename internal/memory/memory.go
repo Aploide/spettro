@@ -26,18 +26,20 @@ const (
 	userHeader    = "# Spettro memory (user)\n"
 	projectHeader = "# Spettro memory (project)\n"
 	// maxFileBytes caps how much of each memory file is loaded into context.
-	// Memory is meant to stay small; oversized files are tail-trimmed on load
-	// (newest entries win — files are append-only).
+	// Facts are injected recently-used-first, so when the cap hits, the
+	// stalest facts are the ones dropped.
 	maxFileBytes = 8 * 1024
 	// maxFactLen caps a single saved fact.
 	maxFactLen = 500
 )
 
 // Store holds the resolved paths of the two memory files. Zero-value fields
-// mean "no file for that scope".
+// mean "no file for that scope". When Inbox is set, Save routes near-duplicate
+// facts there as supersede candidates instead of appending blindly.
 type Store struct {
 	UserFile    string
 	ProjectFile string
+	Inbox       *Inbox
 }
 
 // DefaultStore returns the store for the standard locations: the per-user file
@@ -50,6 +52,9 @@ func DefaultStore(cwd string) Store {
 	if strings.TrimSpace(cwd) != "" {
 		s.ProjectFile = filepath.Join(cwd, ".spettro", "memory.md")
 	}
+	if in := DefaultInbox(); in.Path != "" {
+		s.Inbox = &in
+	}
 	return s
 }
 
@@ -61,45 +66,115 @@ func (s Store) Path(scope Scope) string {
 	return s.UserFile
 }
 
-// Save appends one fact as a bullet line to the scope's memory file, creating
-// the file (with a header) and parent directory as needed. The file is
-// append-only: existing lines are never rewritten or reordered, so earlier
-// content stays stable.
-func (s Store) Save(scope Scope, fact string) (string, error) {
+// SaveOutcome reports what Save did with a fact.
+type SaveOutcome int
+
+const (
+	// SavedNew: the fact was appended to the memory file.
+	SavedNew SaveOutcome = iota
+	// SavedDuplicate: an exact (normalized) match already existed; its
+	// used: date was bumped instead of appending a duplicate.
+	SavedDuplicate
+	// SavedToInbox: a near-duplicate or likely contradiction exists; the
+	// new fact was routed to the review inbox as a supersede candidate so
+	// the user decides which version wins (/memory review).
+	SavedToInbox
+)
+
+// SaveResult describes where a saved fact ended up.
+type SaveResult struct {
+	Path    string
+	Outcome SaveOutcome
+	// Near is the existing fact the new one collided with (set for
+	// SavedDuplicate and SavedToInbox).
+	Near string
+}
+
+// Save persists one fact into the scope's memory file. Exact duplicates bump
+// the existing fact's used: date; near-duplicates/contradictions are routed
+// to the review inbox (when one is configured) instead of piling up; new
+// facts are appended with id/added/used metadata. Rewrites are atomic.
+func (s Store) Save(scope Scope, fact string) (SaveResult, error) {
+	return s.save(scope, fact, true)
+}
+
+// SaveApproved is Save without inbox routing, for facts the user already
+// reviewed (inbox approval, supersede resolution): near-duplicates append
+// anyway rather than bouncing back into the inbox.
+func (s Store) SaveApproved(scope Scope, fact string) (SaveResult, error) {
+	return s.save(scope, fact, false)
+}
+
+func (s Store) save(scope Scope, fact string, routeNearDupes bool) (SaveResult, error) {
 	fact = strings.TrimSpace(fact)
 	if fact == "" {
-		return "", fmt.Errorf("save-memory: empty fact")
+		return SaveResult{}, fmt.Errorf("save-memory: empty fact")
 	}
 	if len(fact) > maxFactLen {
-		return "", fmt.Errorf("save-memory: fact too long (%d chars, max %d) — keep memories short", len(fact), maxFactLen)
+		return SaveResult{}, fmt.Errorf("save-memory: fact too long (%d chars, max %d) — keep memories short", len(fact), maxFactLen)
 	}
 	if strings.ContainsAny(fact, "\n\r") {
-		return "", fmt.Errorf("save-memory: fact must be a single line")
+		return SaveResult{}, fmt.Errorf("save-memory: fact must be a single line")
 	}
 	path := s.Path(scope)
 	if path == "" {
-		return "", fmt.Errorf("save-memory: no %s memory file available", scope)
+		return SaveResult{}, fmt.Errorf("save-memory: no %s memory file available", scope)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", fmt.Errorf("save-memory: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("save-memory: %w", err)
-	}
-	defer f.Close()
-	entry := "- " + fact + "\n"
-	if fi, err := f.Stat(); err == nil && fi.Size() == 0 {
-		header := userHeader
-		if scope == ScopeProject {
-			header = projectHeader
+	facts := s.readFacts(scope)
+	norm := normalizeFact(fact)
+	for i := range facts {
+		if normalizeFact(facts[i].Text) == norm {
+			facts[i].Used = today()
+			if err := s.writeFacts(scope, facts); err != nil {
+				return SaveResult{}, err
+			}
+			return SaveResult{Path: path, Outcome: SavedDuplicate, Near: facts[i].Text}, nil
 		}
-		entry = header + "\n" + entry
 	}
-	if _, err := f.WriteString(entry); err != nil {
-		return "", fmt.Errorf("save-memory: %w", err)
+	if routeNearDupes && s.Inbox != nil {
+		for _, existing := range facts {
+			if nearDuplicate(existing.Text, fact) {
+				cand := Candidate{
+					Fact:       fact,
+					Scope:      scope,
+					Supersedes: existing.Text,
+				}
+				if scope == ScopeProject {
+					cand.ProjectPath = filepath.Dir(filepath.Dir(path))
+				}
+				if _, err := s.Inbox.Add([]Candidate{cand}, ""); err != nil {
+					return SaveResult{}, err
+				}
+				return SaveResult{Path: s.Inbox.Path, Outcome: SavedToInbox, Near: existing.Text}, nil
+			}
+		}
 	}
-	return path, nil
+	nf := Fact{Text: fact}
+	nf.stamp()
+	if err := s.writeFacts(scope, append(facts, nf)); err != nil {
+		return SaveResult{}, err
+	}
+	return SaveResult{Path: path, Outcome: SavedNew}, nil
+}
+
+// Supersede replaces oldText (matched on normalized form, if still present)
+// with newText in one atomic rewrite. Used when the user approves a
+// supersede candidate from the review inbox.
+func (s Store) Supersede(scope Scope, oldText, newText string) (SaveResult, error) {
+	facts := s.readFacts(scope)
+	norm := normalizeFact(oldText)
+	kept := facts[:0]
+	for _, f := range facts {
+		if normalizeFact(f.Text) != norm {
+			kept = append(kept, f)
+		}
+	}
+	sCopy := s
+	sCopy.Inbox = nil // never bounce an approved replacement back to the inbox
+	if err := sCopy.writeFacts(scope, kept); err != nil {
+		return SaveResult{}, err
+	}
+	return sCopy.save(scope, newText, false)
 }
 
 // Clear truncates the scope's memory file. Missing files are not an error.
@@ -114,44 +189,40 @@ func (s Store) Clear(scope Scope) error {
 	return os.WriteFile(path, nil, 0o600)
 }
 
-// readCapped returns the file content, tail-trimmed to maxFileBytes on a line
-// boundary (append-only files keep the newest facts at the end).
-func readCapped(path string) string {
-	if path == "" {
-		return ""
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	content := strings.TrimSpace(string(data))
-	if len(content) > maxFileBytes {
-		content = content[len(content)-maxFileBytes:]
-		if i := strings.IndexByte(content, '\n'); i >= 0 {
-			content = content[i+1:]
+// renderCapped renders a scope's facts as metadata-stripped bullets,
+// recently-used first, dropping whatever exceeds maxFileBytes — so the cap
+// cuts the stalest facts, never the freshest.
+func renderCapped(facts []Fact) string {
+	var sb strings.Builder
+	for _, f := range orderByRecency(facts) {
+		line := "- " + f.Text + "\n"
+		if sb.Len()+len(line) > maxFileBytes {
+			break
 		}
+		sb.WriteString(line)
 	}
-	return content
+	return strings.TrimRight(sb.String(), "\n")
 }
 
-// Load renders the combined memory as a system-context section. Returns ""
-// when no memory is saved.
+// Load renders the combined memory as a system-context section: project
+// facts before user facts, recently-used first within each scope, metadata
+// stripped. Returns "" when no memory is saved.
 func (s Store) Load() string {
-	user := readCapped(s.UserFile)
-	project := readCapped(s.ProjectFile)
+	project := renderCapped(s.readFacts(ScopeProject))
+	user := renderCapped(s.readFacts(ScopeUser))
 	if user == "" && project == "" {
 		return ""
 	}
 	var sb strings.Builder
 	sb.WriteString("\n\n# Memory\nFacts and preferences saved in earlier sessions. Honor them unless the user says otherwise.\n")
-	if user != "" {
-		sb.WriteString("\n")
-		sb.WriteString(user)
-		sb.WriteString("\n")
-	}
 	if project != "" {
 		sb.WriteString("\n")
 		sb.WriteString(project)
+		sb.WriteString("\n")
+	}
+	if user != "" {
+		sb.WriteString("\n")
+		sb.WriteString(user)
 		sb.WriteString("\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")

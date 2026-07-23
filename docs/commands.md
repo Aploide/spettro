@@ -41,17 +41,22 @@
 | `/memory clear [user\|project\|all]` | Erase saved memory. |
 | `/memory mine [n]` | Scan recent saved sessions in the background and draft candidate memories into the review inbox. |
 | `/memory review` | Approve or discard drafted memory candidates (nothing saves without approval). |
-| `/compact [focus...]` | Summarize the current conversation. |
+| `/compact [focus...]` | Compact the current conversation (two-stage: offload oversized tool results to re-readable references, then summarize). |
 | `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
 | `/compact policy` | Show compact thresholds and failure counters. |
 | `/clear` | Save and clear the current conversation. |
 | `/diff [path...]` | Show diffs of files modified this session (all, or given paths). |
 | `/resume` | Open saved conversation picker. |
 | `/rewind` | Restore files and/or conversation to a pre-edit checkpoint. See [Checkpointing](checkpointing.md). |
+| `/checkpoints` | Show checkpoint count and shadow-store disk usage (this project and all projects). |
+| `/storage` | Report what Spettro stores on disk, per artifact class. See [Storage](storage.md). |
+| `/storage clean` | Interactive multi-select cleanup with safe defaults preselected; also available headless as `spettro clean`. |
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
 | `/jobs [list]` | List background shell jobs started by the agent. |
 | `/jobs kill <id\|all>` | Terminate a background job (or all of them). |
 | `job-output` | Tool-only (not a slash command): fetches accumulated output of a background shell job (`job-N`), or pages through a **spooled** truncated tool result (`spool:N`). See [Session Lifecycle](session.md#tool-output-spooling). |
+| `tool-output` | Tool-only: re-reads the full output of an earlier tool call that was offloaded to the session spool (by truncation or by compaction), with `id`/`offset`/`limit` paging. See [Session Lifecycle](session.md#tool-output-spooling). |
+| `pty-start` / `pty-write` / `pty-kill` | Tool-only: interactive terminal sessions (REPLs, debuggers, ssh, watch-mode servers) the agent can type into. See [Interactive PTY sessions](pty.md). |
 | `/remote` | Start the local HTTP/SSE control plane on `127.0.0.1` (default port `7878`). |
 | `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
 | `/remote local` | Start the LAN HTTP/SSE control plane on `0.0.0.0` (default port `7878`). |
@@ -105,7 +110,7 @@
 - Pressing `Enter` on a highlighted command suggestion inserts it first; pressing `Enter` again executes it.
 - `/goal` runs the **coding** orchestrator autonomously. Interrupt with `Esc` or `/goal stop`. Permission `yolo` is required for fully unattended operation; otherwise approval prompts pause the loop. See [Goal Mode](goal.md).
 - `/clear` **saves** the session first, then starts fresh. The saved session is available via `/resume`. See [Session Lifecycle](session.md).
-- `/compact` replaces the transcript with a summary. Auto-compact triggers at 85 % context window by default. See [Session Lifecycle](session.md).
+- `/compact` compacts the transcript in two stages: oversized tool results are first replaced with `[offloaded: …]` stubs the agent can re-read via `tool-output` (lossless), then the remainder is summarized. Auto-compact triggers at 85 % context window by default and skips the summary entirely when offloading alone frees enough space. See [Session Lifecycle](session.md).
 - `/login` and `/logout` manage your Spettro Subscription. See [Subscription](subscription.md).
 - Clipboard pasting (`Ctrl+V`), file attachments (`Ctrl+F`), and text-select mode (`Ctrl+T`) are described in [Clipboard and Attachments](clipboard.md).
 - The first-launch onboarding wizard is documented in [Onboarding](onboarding.md).

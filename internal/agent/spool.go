@@ -2,11 +2,43 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"spettro/internal/jobs"
 )
+
+// offloadFloor is the minimum output size (in bytes, ~500 tokens) above which
+// a tool result is persisted to the spool at execution time so compaction can
+// later replace the in-context copy with a reference stub (see
+// internal/compact stage 1) without losing information.
+const offloadFloor = 2000
+
+// spoolFooterIDRe extracts the spool ID from the deterministic truncation
+// footer written by spoolTruncate, so already-spooled outputs are not written
+// to disk a second time by ensureSpooled.
+var spoolFooterIDRe = regexp.MustCompile(`job-output \{"job_id":"(spool:\d+)"`)
+
+// ensureSpooled guarantees that a tool result over the offload floor has a
+// spool file backing it and returns the spool ID ("" for small outputs or on
+// spool failure — offloading is best-effort). Outputs already truncated by
+// spoolResult carry their ID in the footer (the spool holds the full,
+// untruncated text); everything else is written as-is, which is the complete
+// output since it was never cut.
+func ensureSpooled(out string) string {
+	if len(out) <= offloadFloor {
+		return ""
+	}
+	if m := spoolFooterIDRe.FindStringSubmatch(out); m != nil {
+		return m[1]
+	}
+	id, err := jobs.Spool().Add(out)
+	if err != nil {
+		return ""
+	}
+	return id
+}
 
 // spoolFooterReserve is the budget slice held back for the truncation footer
 // so the assembled result never exceeds the tool's history budget (downstream
@@ -18,7 +50,7 @@ const spoolFooterReserve = 200
 // session spool and replaced by their head (plus, for shell output, the tail)
 // with a footer telling the model how to page the rest via job-output.
 func (r *toolRuntime) spoolResult(toolName, out string) string {
-	keepTail := toolName == "shell-exec" || toolName == "bash"
+	keepTail := toolName == "shell-exec" || toolName == "bash" || toolName == "pty-start" || toolName == "pty-write"
 	return spoolIfLarge(out, r.historyLimit(toolName), keepTail)
 }
 

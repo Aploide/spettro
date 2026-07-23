@@ -20,6 +20,63 @@ its own hooks path — nothing in the user's git config or hooks can interfere.
 The project's `.gitignore` files are honoured, so build artifacts and
 dependencies are never tracked.
 
+### Storage design
+
+Checkpointing is engineered to not duplicate your repository:
+
+- **Object borrowing (alternates).** When the project has its own `.git`, the
+  shadow repo points `objects/info/alternates` at the project's object store
+  (worktree/submodule aware via `git rev-parse --git-common-dir`). Content
+  already committed in your repo is *borrowed*, not copied — the shadow store
+  only holds uncommitted deltas, so even a 20 GB repo costs almost nothing.
+- **Size-capped snapshots.** Files above `checkpoint_max_file_mb` (default
+  20 MB) are excluded from snapshots, along with default heavyweight patterns
+  (`*.iso`, `*.qcow2`, `*.safetensors`, `*.gguf`, …) seeded in the shadow
+  repo's `info/exclude` (editable there). Skipped files are recorded on the
+  checkpoint, and `/rewind` warns that they are unaffected by a restore.
+- **No-change fast path.** If the tree is identical to the previous
+  checkpoint, no new commit is minted — the list entry points at the same
+  commit and only the conversation snapshot is stored.
+- **Maintenance.** The shadow repo runs with `core.untrackedCache` and
+  `index.version=4` to keep `add -A` fast on large trees, `git gc --auto`
+  runs every 20 snapshots, and reflogs are disabled so pruned checkpoints
+  can actually be collected.
+- **Retention.** On open (never in the per-snapshot hot path), checkpoints
+  older than `checkpoint_retention_days` (default 14) are pruned: list
+  entries and conversation blobs are deleted, their pinning refs
+  (`refs/checkpoints/<hash>`) removed, and `git gc --prune=now` reclaims the
+  objects. If the store still exceeds `checkpoint_max_gb` (default 5), the
+  oldest half of the remaining checkpoints is dropped too.
+- **Big-repo guard.** For projects *without* their own `.git` (no alternates
+  available), a first snapshot must copy the tracked tree. If the project is
+  larger than `checkpoint_warn_gb` (default 2), a one-time banner warns you
+  before that happens; disable checkpointing with
+  `"checkpointing_disabled": true` in `config.json` if you don't want it.
+
+All keys live in `config.json` — see
+[Configuration](configuration.md#checkpointing-storage).
+
+### The alternates caveat
+
+Because the shadow repo borrows objects from your project's `.git`, an
+aggressive `git gc --prune` in the project can delete objects an old
+checkpoint still needs. Checkpoints are a convenience cache, so this is
+accepted: before restoring, Spettro verifies every object is reachable and
+fails with a clear "checkpoint is no longer restorable" error instead of
+corrupting the working tree. Newer checkpoints are unaffected.
+
+## /checkpoints — disk usage
+
+```text
+/checkpoints
+```
+
+Prints the number of checkpoints for the current project, the shadow-store
+disk usage for this project and across all projects under
+`~/.spettro/history/`, and the store path. To reclaim checkpoint history
+across projects (including orphaned entries for moved/deleted projects), use
+[`/storage clean` or `spettro clean`](storage.md).
+
 ### Requirements
 
 - **git** must be installed and on `$PATH`. If `git` is not found,
@@ -39,10 +96,16 @@ session, ordered oldest first (newest at the bottom):
 ```
 ◈ rewind to checkpoint
 
-  › 2026-01-15 14:30:23  3 file(s)  implement the auth middleware
-    2026-01-15 14:28:10  1 file(s)  add user model
-    2026-01-15 14:25:01  2 file(s)  initial scaffold
+  › 2026-01-15 14:30:23  3 file(s) edited  implement the auth middleware
+    2026-01-15 14:28:10  1 file(s) edited  add user model
+    2026-01-15 14:25:01  2 file(s) edited  initial scaffold
 ```
+
+The file count on each row is what changed *after* that checkpoint (that
+turn's edits, up to the next checkpoint — or up to the current working tree
+for the newest row). In other words, it is exactly what rewinding to that row
+would undo; edits you made before the checkpoint are captured inside it and
+are restored, not deleted.
 
 Navigation in the picker:
 
@@ -116,5 +179,9 @@ the same project always maps to the same history directory across sessions.
 - Conversation snapshots are stored as plain JSON in `~/.spettro/history/`.
   They are not encrypted; if you need privacy, consider encrypting the
   directory yourself.
-- The shadow repo is never automatically pruned. Old checkpoints accumulate.
-  You can delete checkpoints manually by removing `~/.spettro/history/`.
+- Retention is time/size based (`checkpoint_retention_days`,
+  `checkpoint_max_gb`), not per-checkpoint: you cannot pin an individual
+  checkpoint beyond the horizon. You can still delete everything manually by
+  removing `~/.spettro/history/`.
+- Restores of old checkpoints can fail if the project repo's objects were
+  pruned (see the alternates caveat above).

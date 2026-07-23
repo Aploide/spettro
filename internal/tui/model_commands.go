@@ -9,6 +9,7 @@ import (
 
 	"spettro/internal/commands"
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 )
@@ -189,6 +190,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.autoSave()
 		m.messages = nil
 		m.convHistory = nil
+		// Spooled tool outputs are only reachable through the cleared
+		// history's references; drop them with the conversation.
+		jobs.Spool().Cleanup()
 		m.sessionID = ""
 		m.todos = nil
 		// Occupancy resets with the conversation; keep the gauge honest.
@@ -222,6 +226,10 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handlePermissionsCommand(input)
 	case "/rewind":
 		return m.openRewind()
+	case "/checkpoints":
+		m.pushSystemMsg(m.renderCheckpointsInfo())
+	case "/storage":
+		return m.handleStorageCommand(input)
 	case "/resume":
 		items, err := session.List(m.store.GlobalDir, m.cwd)
 		if err != nil || len(items) == 0 {

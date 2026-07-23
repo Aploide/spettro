@@ -27,10 +27,19 @@ func (m *Model) ensureCheckpointer() *checkpoint.Checkpointer {
 	if m.checkpointer != nil || m.checkpointerFailed {
 		return m.checkpointer
 	}
-	cp, err := checkpoint.Open(m.store.GlobalDir, m.cwd)
+	cp, err := checkpoint.OpenWith(m.store.GlobalDir, m.cwd, checkpoint.Options{
+		Disabled:      m.cfg.CheckpointingDisabled,
+		MaxFileMB:     m.cfg.CheckpointMaxFileMB,
+		RetentionDays: m.cfg.CheckpointRetentionDays,
+		MaxGB:         m.cfg.CheckpointMaxGB,
+		WarnGB:        m.cfg.CheckpointWarnGB,
+	})
 	if err != nil {
 		m.checkpointerFailed = true
 		return nil
+	}
+	if w := cp.Warning(); w != "" {
+		m.showBanner(w, "warn")
 	}
 	m.checkpointer = cp
 	return cp
@@ -62,6 +71,36 @@ func (m Model) conversationSnapshot() []byte {
 	return raw
 }
 
+// renderCheckpointsInfo builds the /checkpoints report: snapshot count and
+// shadow-store disk usage for this project plus the total across all projects
+// under ~/.spettro/history/.
+func (m *Model) renderCheckpointsInfo() string {
+	cp := m.ensureCheckpointer()
+	if cp == nil {
+		return "checkpointing unavailable (disabled in config, or git not installed)"
+	}
+	items, _ := cp.List()
+	var b strings.Builder
+	fmt.Fprintf(&b, "checkpoints: %d for this project\n", len(items))
+	fmt.Fprintf(&b, "disk usage:  %s (this project)  %s (all projects)\n",
+		formatBytes(cp.Size()), formatBytes(checkpoint.TotalSize(m.store.GlobalDir)))
+	b.WriteString("store:       ")
+	b.WriteString(checkpoint.Dir(m.store.GlobalDir, m.cwd))
+	return b.String()
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
 func (m Model) openRewind() (tea.Model, tea.Cmd) {
 	cp := m.ensureCheckpointer()
 	if cp == nil {
@@ -77,8 +116,23 @@ func (m Model) openRewind() (tea.Model, tea.Cmd) {
 		m.showBanner("no checkpoints yet — they are taken before each file-modifying tool", "info")
 		return m, nil
 	}
+	// Each checkpoint is taken *before* its tool call runs, so the edits of
+	// turn i land between checkpoint i and checkpoint i+1. Showing a row's
+	// own FilesChanged (diff vs the previous checkpoint) would count earlier
+	// manual edits too; instead show what happened *after* each checkpoint —
+	// the next checkpoint's diff, or for the newest row a live diff against
+	// the working tree. That is exactly what rewinding that row undoes.
+	counts := make([]int, len(items))
+	for i := range items {
+		if i < len(items)-1 {
+			counts[i] = items[i+1].FilesChanged
+		} else {
+			counts[i] = cp.ChangesSince(items[i].ID)
+		}
+	}
 	m.showRewind = true
 	m.rewindItems = items
+	m.rewindCounts = counts
 	// Newest at the bottom, cursor starting on the most recent step.
 	m.rewindCursor = len(items) - 1
 	m.rewindModePick = false
@@ -157,8 +211,11 @@ func (m Model) applyRewind(cp checkpoint.Checkpoint, mode int) (tea.Model, tea.C
 			return m, nil
 		}
 	}
+	if restoreFiles && len(cp.SkippedLarge) > 0 {
+		m.showBanner(fmt.Sprintf("%d large file(s) were not snapshotted and are unaffected by this rewind", len(cp.SkippedLarge)), "warn")
+	}
 	if restoreConv {
-		blob, err := m.checkpointer.Conversation(cp.ID)
+		blob, err := m.checkpointer.Conversation(cp.ConvKey())
 		if err != nil || len(blob) == 0 {
 			m.showRewind = false
 			m.showBanner("no conversation stored for this checkpoint", "warn")
@@ -259,7 +316,7 @@ func (m Model) viewRewind() string {
 		for i, cp := range m.rewindItems {
 			isSelected := i == m.rewindCursor
 			timeStr := cp.At.Format("2006-01-02 15:04:05")
-			files := fmt.Sprintf("%d file(s)", cp.FilesChanged)
+			files := fmt.Sprintf("%d file(s) edited", m.rewindCounts[i])
 			preview := strings.ReplaceAll(cp.Prompt, "\n", " ")
 			if preview == "" {
 				preview = "(no prompt)"

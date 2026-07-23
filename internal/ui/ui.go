@@ -35,17 +35,17 @@ type Renderer struct {
 func NewRenderer() *Renderer {
 	return &Renderer{
 		themes: map[string]Theme{
-			"planning":    {Label: "Planning Agent", Accent: blue, Prompt: "◈", Icon: "🧠", Stage: "planning (planning agent)"},
+			"planning":    {Label: "Planning Agent", Accent: blue, Prompt: "◈", Icon: "◈", Stage: "planning (planning agent)"},
 			"coding":      {Label: "Coding Agent", Accent: green, Prompt: "◆", Icon: "⚙", Stage: "acting (coding agent)"},
-			"architect":   {Label: "Architect", Accent: magenta, Prompt: "▲", Icon: "🏛", Stage: "orchestrate (architect)"},
-			"chat":        {Label: "Chat Agent", Accent: yellow, Prompt: "●", Icon: "💬", Stage: "chat (chat agent)"},
-			"research":    {Label: "Research Agent", Accent: blue, Prompt: "◉", Icon: "🔍", Stage: "research (research agent)"},
-			"reviewer":    {Label: "Code Review Agent", Accent: red, Prompt: "◈", Icon: "👁", Stage: "review (reviewer agent)"},
-			"debugger":    {Label: "Debugger Agent", Accent: cyan, Prompt: "◆", Icon: "🐛", Stage: "debug (debugger agent)"},
+			"architect":   {Label: "Architect", Accent: magenta, Prompt: "▲", Icon: "▲", Stage: "orchestrate (architect)"},
+			"chat":        {Label: "Chat Agent", Accent: yellow, Prompt: "●", Icon: "❯", Stage: "chat (chat agent)"},
+			"research":    {Label: "Research Agent", Accent: blue, Prompt: "◉", Icon: "◎", Stage: "research (research agent)"},
+			"reviewer":    {Label: "Code Review Agent", Accent: red, Prompt: "◈", Icon: "◉", Stage: "review (reviewer agent)"},
+			"debugger":    {Label: "Debugger Agent", Accent: cyan, Prompt: "◆", Icon: "⚑", Stage: "debug (debugger agent)"},
 			"tester":      {Label: "Testing Agent", Accent: yellow, Prompt: "◉", Icon: "✓", Stage: "test (tester agent)"},
 			"git-expert":  {Label: "Git Expert Agent", Accent: yellow, Prompt: "◇", Icon: "⎇", Stage: "git (git-expert agent)"},
-			"docs-writer": {Label: "Documentation Agent", Accent: cyan, Prompt: "◫", Icon: "📝", Stage: "docs (docs-writer agent)"},
-			"explore":     {Label: "Explore Agent", Accent: blue, Prompt: "◉", Icon: "🗺", Stage: "explore (explore agent)"},
+			"docs-writer": {Label: "Documentation Agent", Accent: cyan, Prompt: "◫", Icon: "✎", Stage: "docs (docs-writer agent)"},
+			"explore":     {Label: "Explore Agent", Accent: blue, Prompt: "◉", Icon: "⌖", Stage: "explore (explore agent)"},
 			"init":        {Label: "Init Agent", Accent: cyan, Prompt: "◈", Icon: "⚡", Stage: "init (init agent)"},
 		},
 	}
