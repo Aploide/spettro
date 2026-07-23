@@ -72,13 +72,13 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestPrefix(t *testing.T) {
-	if got := Prefix("🔔", "body"); got != "🔔 body" {
+	if got := Prefix("◆", "body"); got != "◆ body" {
 		t.Errorf("Prefix = %q", got)
 	}
 	if got := Prefix("", " body "); got != "body" {
 		t.Errorf("empty tag = %q", got)
 	}
-	if got := Prefix(" 🔔 ", ""); got != "🔔" {
+	if got := Prefix(" ◆ ", ""); got != "◆" {
 		t.Errorf("empty body = %q", got)
 	}
 }

@@ -69,7 +69,7 @@ func TestSendMediaFile_RoutesByExtensionAndSize(t *testing.T) {
 		wantField string
 		wantMthd  string
 	}{
-		{"image goes via sendPhoto", imgPath, telegram.MediaKindImage, "🖼 hello", "photo", "sendPhoto"},
+		{"image goes via sendPhoto", imgPath, telegram.MediaKindImage, "▣ hello", "photo", "sendPhoto"},
 		{"video goes via sendVideo", vidPath, telegram.MediaKindVideo, "", "video", "sendVideo"},
 		{"explicit document forces sendDocument", docPath, telegram.MediaKindDocument, "log.txt", "document", "sendDocument"},
 	}

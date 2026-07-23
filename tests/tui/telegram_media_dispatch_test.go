@@ -46,10 +46,10 @@ func TestParseMediaTraceOutput_HandlesEmptyOrInvalid(t *testing.T) {
 // TestMediaCaption_FormatsByTool checks the per-tool emoji prefix and the
 // truncation behaviour on long prompts.
 func TestMediaCaption_FormatsByTool(t *testing.T) {
-	if got := tui.MediaCaptionForTesting("grok-image", "  a cute logo  "); got != "🖼 a cute logo" {
+	if got := tui.MediaCaptionForTesting("grok-image", "  a cute logo  "); got != "▣ a cute logo" {
 		t.Fatalf("image caption: %q", got)
 	}
-	if got := tui.MediaCaptionForTesting("grok-video", "a panning shot"); got != "🎬 a panning shot" {
+	if got := tui.MediaCaptionForTesting("grok-video", "a panning shot"); got != "▶ a panning shot" {
 		t.Fatalf("video caption: %q", got)
 	}
 	if got := tui.MediaCaptionForTesting("grok-image", ""); got != "" {
@@ -57,7 +57,7 @@ func TestMediaCaption_FormatsByTool(t *testing.T) {
 	}
 	long := strings.Repeat("p", 1024)
 	caption := tui.MediaCaptionForTesting("grok-image", long)
-	if !strings.HasPrefix(caption, "🖼") {
+	if !strings.HasPrefix(caption, "▣") {
 		t.Fatal("missing emoji prefix on long caption")
 	}
 	if len([]rune(caption)) > 500 {

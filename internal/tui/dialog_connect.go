@@ -556,7 +556,7 @@ func (m Model) viewConnect() string {
 		for _, ep := range m.cfg.LocalEndpoints {
 			label := localEndpointLabel(ep)
 			if m.cfg.APIKeys[ep] != "" {
-				label += "  🔑"
+				label += "  ✦"
 			}
 			options = append(options, label)
 		}

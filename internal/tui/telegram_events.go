@@ -33,27 +33,27 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 	case "assistant_message":
 		content, _ := data["content"].(string)
 		if strings.TrimSpace(content) != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("🤖", content))
+			m.telegramBroadcastAsync(telegram.Prefix("◆", content))
 		}
 	case "assistant_error":
 		errStr, _ := data["error"].(string)
 		if errStr != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("⚠️ error", errStr))
+			m.telegramBroadcastAsync(telegram.Prefix("⚠ error", errStr))
 		}
 	case "plan":
 		plan, _ := data["plan"].(string)
 		if strings.TrimSpace(plan) != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("📋 plan", plan))
+			m.telegramBroadcastAsync(telegram.Prefix("▤ plan", plan))
 		}
 	case "plan_error":
 		errStr, _ := data["error"].(string)
 		if errStr != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("⚠️ plan error", errStr))
+			m.telegramBroadcastAsync(telegram.Prefix("⚠ plan error", errStr))
 		}
 	case "comment":
 		msg, _ := data["message"].(string)
 		if strings.TrimSpace(msg) != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("💬", msg))
+			m.telegramBroadcastAsync(telegram.Prefix("❯", msg))
 		}
 	case "banner":
 		level, _ := data["level"].(string)
@@ -61,7 +61,7 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 		case "warn", "error":
 			text, _ := data["text"].(string)
 			if text != "" {
-				m.telegramBroadcastAsync(telegram.Prefix("⚠️", text))
+				m.telegramBroadcastAsync(telegram.Prefix("⚠", text))
 			}
 		}
 	case "ask_user":
@@ -95,7 +95,7 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 	case "approval_request":
 		cmd, _ := data["command"].(string)
 		reason, _ := data["reason"].(string)
-		text := "🔐 shell approval required\n  command: " + telegram.Truncate(cmd, 1000)
+		text := "‼ shell approval required\n  command: " + telegram.Truncate(cmd, 1000)
 		if reason != "" {
 			text += "\n  reason:  " + reason
 		}
@@ -104,12 +104,12 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 	case "commit":
 		msg, _ := data["message"].(string)
 		if msg != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("🟢 commit", msg))
+			m.telegramBroadcastAsync(telegram.Prefix("✓ commit", msg))
 		}
 	case "commit_error":
 		errStr, _ := data["error"].(string)
 		if errStr != "" {
-			m.telegramBroadcastAsync(telegram.Prefix("🔴 commit error", errStr))
+			m.telegramBroadcastAsync(telegram.Prefix("✗ commit error", errStr))
 		}
 	case "state":
 		if m.telegramRelay.Config().Verbose {
@@ -127,7 +127,7 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 		if name == "" || status == "" {
 			return
 		}
-		m.telegramBroadcastAsync(fmt.Sprintf("🔧 %s — %s", name, status))
+		m.telegramBroadcastAsync(fmt.Sprintf("⚙ %s — %s", name, status))
 	}
 }
 
@@ -246,9 +246,9 @@ func mediaCaption(toolName, prompt string) string {
 	preview := telegram.Truncate(prompt, 400)
 	switch toolName {
 	case "grok-image":
-		return "🖼 " + preview
+		return "▣ " + preview
 	case "grok-video":
-		return "🎬 " + preview
+		return "▶ " + preview
 	}
 	return preview
 }
