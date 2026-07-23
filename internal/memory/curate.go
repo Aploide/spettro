@@ -89,12 +89,22 @@ Facts:
 	for i := range facts {
 		f := facts[i]
 		f.stamp()
-		sb.WriteString(fmt.Sprintf("- id:%s added:%s used:%s | %s\n", f.ID, f.Added, f.Used, f.Text))
+		sb.WriteString("- id:")
+		sb.WriteString(f.ID)
+		sb.WriteString(" added:")
+		sb.WriteString(f.Added)
+		sb.WriteString(" used:")
+		sb.WriteString(f.Used)
+		sb.WriteString(" | ")
+		sb.WriteString(f.Text)
+		sb.WriteString("\n")
 	}
 	if len(hints) > 0 {
 		sb.WriteString("\nStaleness evidence (verified against the working tree):\n")
 		for _, h := range hints {
-			sb.WriteString("- " + h + "\n")
+			sb.WriteString("- ")
+			sb.WriteString(h)
+			sb.WriteString("\n")
 		}
 	}
 	raw, err := complete(ctx, sb.String())
