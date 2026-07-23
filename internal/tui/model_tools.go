@@ -86,12 +86,15 @@ func waitForAskUser(ch chan askUserRequestMsg) tea.Cmd {
 
 func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc color.Color) string {
 	var sb strings.Builder
-	sb.WriteString(styleMuted.Render("  "+title) + "\n")
+	sb.WriteString(styleMuted.Render("  " + title))
+	sb.WriteString("\n")
 	for i, opt := range options {
 		if i == cursor {
-			sb.WriteString(lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt))
+			item := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt)
+			sb.WriteString(item)
 		} else {
-			sb.WriteString(styleMuted.Render("    " + opt))
+			item := styleMuted.Render("    " + opt)
+			sb.WriteString(item)
 		}
 		if i < len(options)-1 {
 			sb.WriteString("\n")

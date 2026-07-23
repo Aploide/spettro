@@ -205,7 +205,8 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
 			imgLabel := styleMuted.Render(fmt.Sprintf("     [Image #%d]", i+1))
-			entry.WriteString("\n" + imgLabel)
+			entry.WriteString("\n")
+			entry.WriteString(imgLabel)
 		}
 		return entry.String()
 	case RoleAssistant:
