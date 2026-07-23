@@ -9,6 +9,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/memory"
 	"spettro/internal/provider"
 )
@@ -200,6 +201,9 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 
 	case "/clear":
 		s.history = nil
+		// Spooled tool outputs are only reachable through the cleared
+		// history's references; drop them with the conversation.
+		jobs.Spool().Cleanup()
 		return "conversation history cleared", false, true
 	}
 	return "", false, false

@@ -95,7 +95,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "tool-output", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -763,11 +763,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for i, res := range results {
 				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images})
 				toolResults[i] = provider.ToolResult{
-					ID:     resp.ToolCalls[i].ID,
-					Name:   res.name,
-					Output: res.output,
-					IsErr:  res.status == "error",
-					Images: res.images,
+					ID:      resp.ToolCalls[i].ID,
+					Name:    res.name,
+					Output:  res.output,
+					IsErr:   res.status == "error",
+					Images:  res.images,
+					SpoolID: ensureSpooled(res.output),
 				}
 			}
 			// Tool results are appended before any exit check: an assistant
@@ -1336,6 +1337,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "job-output":
 		return r.runJobOutput(call.Args)
+	case "tool-output":
+		return r.runToolOutput(call.Args)
 	case "job-kill":
 		return r.runJobKill(call.Args)
 	case "pty-start":
