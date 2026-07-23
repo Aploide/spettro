@@ -49,6 +49,8 @@
 | `/resume` | Open saved conversation picker. |
 | `/rewind` | Restore files and/or conversation to a pre-edit checkpoint. See [Checkpointing](checkpointing.md). |
 | `/checkpoints` | Show checkpoint count and shadow-store disk usage (this project and all projects). |
+| `/storage` | Report what Spettro stores on disk, per artifact class. See [Storage](storage.md). |
+| `/storage clean` | Interactive multi-select cleanup with safe defaults preselected; also available headless as `spettro clean`. |
 | `/init` | Analyze codebase and create/update `SPETTRO.md`. |
 | `/jobs [list]` | List background shell jobs started by the agent. |
 | `/jobs kill <id\|all>` | Terminate a background job (or all of them). |

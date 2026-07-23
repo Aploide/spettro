@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"spettro/internal/storage"
 )
 
 // emptyTree is git's well-known hash of the empty tree, used as a diff base
@@ -416,6 +418,14 @@ func (c *Checkpointer) List() ([]Checkpoint, error) {
 	return c.list()
 }
 
+// checkpointsFile is the on-disk format of checkpoints.json. The project path
+// is recorded alongside the list so storage cleanup can detect orphaned
+// history dirs (the dir name is sha256(projectPath) — one-way).
+type checkpointsFile struct {
+	ProjectPath string       `json:"project_path"`
+	Checkpoints []Checkpoint `json:"checkpoints"`
+}
+
 func (c *Checkpointer) list() ([]Checkpoint, error) {
 	data, err := os.ReadFile(filepath.Join(c.dir, "checkpoints.json"))
 	if err != nil {
@@ -424,15 +434,23 @@ func (c *Checkpointer) list() ([]Checkpoint, error) {
 		}
 		return nil, err
 	}
-	var out []Checkpoint
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, err
+	var file checkpointsFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		// Legacy format: a bare array without project_path metadata.
+		var out []Checkpoint
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
-	return out, nil
+	return file.Checkpoints, nil
 }
 
 func (c *Checkpointer) writeList(list []Checkpoint) error {
-	raw, err := json.MarshalIndent(list, "", "  ")
+	raw, err := json.MarshalIndent(checkpointsFile{
+		ProjectPath: c.project,
+		Checkpoints: list,
+	}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -491,7 +509,7 @@ func (c *Checkpointer) enforceRetention() {
 	for cut < len(list) && list[cut].At.Before(horizon) {
 		cut++
 	}
-	if cut == 0 && dirSize(c.dir) > int64(c.opts.MaxGB)<<30 {
+	if cut == 0 && storage.DirSize(c.dir) > int64(c.opts.MaxGB)<<30 {
 		cut = len(list) / 2
 	}
 	if cut == 0 {
@@ -541,24 +559,10 @@ func (c *Checkpointer) ChangesSince(id string) int {
 
 // Size returns the disk usage in bytes of this project's checkpoint store
 // (shadow repo, conversation blobs and index).
-func (c *Checkpointer) Size() int64 { return dirSize(c.dir) }
+func (c *Checkpointer) Size() int64 { return storage.DirSize(c.dir) }
 
 // TotalSize returns the disk usage in bytes of all checkpoint stores under
 // globalDir (every project's history).
 func TotalSize(globalDir string) int64 {
-	return dirSize(filepath.Join(globalDir, "history"))
-}
-
-func dirSize(root string) int64 {
-	var total int64
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if info, err := d.Info(); err == nil {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total
+	return storage.DirSize(filepath.Join(globalDir, "history"))
 }

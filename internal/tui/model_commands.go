@@ -228,6 +228,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.openRewind()
 	case "/checkpoints":
 		m.pushSystemMsg(m.renderCheckpointsInfo())
+	case "/storage":
+		return m.handleStorageCommand(input)
 	case "/resume":
 		items, err := session.List(m.store.GlobalDir, m.cwd)
 		if err != nil || len(items) == 0 {

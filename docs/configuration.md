@@ -15,7 +15,7 @@ Spettro uses both project-local and user-global storage.
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
 | `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
-| `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created, never pruned). |
+| `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created; reclaimable via [`/storage clean`](storage.md)). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
 
@@ -79,6 +79,16 @@ for how each key behaves.
 | `checkpoint_retention_days` | `14` | Checkpoints older than this are pruned when the shadow repo is opened. |
 | `checkpoint_max_gb` | `5` | If the shadow store still exceeds this after retention, the oldest half of the remaining checkpoints is dropped. |
 | `checkpoint_warn_gb` | `2` | One-time warning threshold for projects without their own `.git` (where snapshots must copy the tree). |
+
+## Storage cleanup
+
+Session policy for `/storage clean` and `spettro clean`; see
+[Storage](storage.md) for the full artifact inventory.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `clean_session_age_days` | `30` | Sessions not updated within this many days become clean candidates. |
+| `clean_keep_sessions` | `5` | The most recent K sessions per project always survive cleanup, regardless of age. |
 
 ### Shell command approvals
 

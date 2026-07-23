@@ -84,8 +84,9 @@ func (m Model) sidePanelGitSummary(width int) (string, int) {
 }
 
 func (m Model) sideListGeometry() (startY, rows int) {
-	reserved := m.sidePanelReservedRows(m.sidePanelWidth())
-	_, _, rows = m.sidePanelWindow(m.sidePanelItems(), m.sidePanelInnerHeight(), reserved)
+	width := m.sidePanelWidth()
+	reserved := m.sidePanelReservedRows(width)
+	rows = m.sidePanelListBudget(width)
 	return 5 + reserved, rows
 }
 
@@ -94,28 +95,45 @@ func (m Model) sidePanelInnerHeight() int {
 	return h
 }
 
-func (m Model) sidePanelWindow(items []sidePanelItem, innerHeight, gitRows int) (cursor, start, rows int) {
-	if len(items) == 0 {
-		return 0, 0, 4
-	}
-	cursor = max(m.sideCursor, 0)
+// sidePanelCursor clamps the stored cursor to the current item list.
+func (m Model) sidePanelCursor(items []sidePanelItem) int {
+	cursor := max(m.sideCursor, 0)
 	if cursor >= len(items) {
 		cursor = len(items) - 1
 	}
-	availableRows := max(innerHeight-10-gitRows, 6)
-	rows = min(max(4, availableRows/2), max(4, len(items)))
-	start = m.sideScroll
-	maxStart := max(0, len(items)-rows)
-	if start > maxStart {
-		start = maxStart
+	return cursor
+}
+
+// sidePanelListBudget is the number of display lines the activity list gets,
+// consistent with the budget viewSidePanel actually renders with.
+func (m Model) sidePanelListBudget(width int) int {
+	items := m.sidePanelItems()
+	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
+	reserved := m.sidePanelReservedRows(width)
+	metaLines := 3
+	if len(items) > 0 {
+		metaLines = len(m.sidePanelDetailMeta(items[m.sidePanelCursor(items)]))
 	}
-	if cursor < start {
-		start = cursor
+	listBudget, _ := m.sidePanelBudgets(innerHeight, reserved, metaLines)
+	return listBudget
+}
+
+// sidePanelList renders the full activity list (agent-group headers included)
+// and returns the visible window of display lines, centered on the cursor's
+// rendered row like the model selector, plus the row→item mapping for mouse
+// clicks. Windowing over display lines — not item indices — is what keeps the
+// cursor on screen when headers make the two diverge.
+func (m Model) sidePanelList(items []sidePanelItem, width, maxRows int) (visible []string, rowToItem []int) {
+	lines, rowMap, selectedRow := m.sidePanelLines(items, width)
+	if len(lines) > maxRows && maxRows > 0 {
+		start := max(selectedRow-maxRows/2, 0)
+		if start+maxRows > len(lines) {
+			start = len(lines) - maxRows
+		}
+		lines = lines[start : start+maxRows]
+		rowMap = rowMap[start : start+maxRows]
 	}
-	if cursor >= start+rows {
-		start = cursor - rows + 1
-	}
-	return cursor, start, rows
+	return lines, rowMap
 }
 
 // swarmSpecID strips the per-instance suffix from a swarm member name
@@ -218,14 +236,17 @@ func activityAgentLabel(agent string) string {
 	return agent
 }
 
-func (m Model) sidePanelLines(items []sidePanelItem, width, cursor, start, rows int) ([]string, []int) {
-	lines := make([]string, 0, rows+4)
-	rowToItem := make([]int, 0, rows+4)
+// sidePanelLines renders every item as display lines with agent-group
+// headers, returning the row→item mapping (-1 for headers) and the rendered
+// row index of the cursor.
+func (m Model) sidePanelLines(items []sidePanelItem, width int) ([]string, []int, int) {
+	cursor := m.sidePanelCursor(items)
+	lines := make([]string, 0, len(items)+4)
+	rowToItem := make([]int, 0, len(items)+4)
+	selectedRow := 0
 	rowBudget := max(12, width-6)
 	prevAgent := ""
-	renderedItems := 0
-	for idx := start; idx < len(items) && renderedItems < rows; idx++ {
-		it := items[idx]
+	for idx, it := range items {
 		agent := activityAgentLabel(it.Agent)
 		if agent != prevAgent {
 			header := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
@@ -236,6 +257,7 @@ func (m Model) sidePanelLines(items []sidePanelItem, width, cursor, start, rows 
 		prefix := "    "
 		titleStyle := lipgloss.NewStyle().Foreground(colorMuted)
 		if idx == cursor {
+			selectedRow = len(lines)
 			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("›   ")
 			titleStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
 		}
@@ -270,9 +292,8 @@ func (m Model) sidePanelLines(items []sidePanelItem, width, cursor, start, rows 
 		}
 		lines = append(lines, row)
 		rowToItem = append(rowToItem, idx)
-		renderedItems++
 	}
-	return lines, rowToItem
+	return lines, rowToItem, selectedRow
 }
 
 func clampLines(s string, maxLines int) string {
@@ -388,8 +409,7 @@ func (m Model) sidePanelDetailMaxScroll(width int) int {
 	}
 	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
 	reserved := m.sidePanelReservedRows(width)
-	cursor, _, _ := m.sidePanelWindow(items, innerHeight, reserved)
-	selected := items[cursor]
+	selected := items[m.sidePanelCursor(items)]
 	meta := m.sidePanelDetailMeta(selected)
 	_, detailBodyRows := m.sidePanelBudgets(innerHeight, reserved, len(meta))
 	body := m.sidePanelDetailBody(selected, width)
@@ -432,13 +452,12 @@ func (m Model) viewSidePanel(width int) string {
 		return lipgloss.JoinVertical(lipgloss.Left, box, hints)
 	}
 
-	cursor, start, rows := m.sidePanelWindow(items, innerHeight, reserved)
-	lines, _ := m.sidePanelLines(items, width, cursor, start, rows)
-	selected := items[cursor]
+	selected := items[m.sidePanelCursor(items)]
 	detailMeta := m.sidePanelDetailMeta(selected)
 	listLinesBudget, detailBodyRows := m.sidePanelBudgets(innerHeight, reserved, len(detailMeta))
+	lines, _ := m.sidePanelList(items, width, listLinesBudget)
 
-	listBlock := clampLines(strings.Join(lines, "\n"), listLinesBudget)
+	listBlock := strings.Join(lines, "\n")
 
 	detailBody := m.sidePanelDetailBody(selected, width)
 	detailWindow, detailOffset, detailMax := scrollBlock(detailBody, detailBodyRows, m.sideDetailScroll)

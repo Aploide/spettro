@@ -19,6 +19,7 @@ const (
 	modalMemoryReview
 	modalMemoryCurate
 	modalRewind
+	modalStorageClean
 	modalConnect
 	modalSelector
 	modalSetup
@@ -43,6 +44,8 @@ func (m Model) activeModal() modal {
 		return modalMemoryCurate
 	case m.showRewind:
 		return modalRewind
+	case m.showStorageClean:
+		return modalStorageClean
 	case m.showConnect:
 		return modalConnect
 	case m.showSelector:
@@ -73,6 +76,7 @@ var modalHandlers = map[modal]modalHandler{
 	modalMemoryReview: {update: Model.updateMemoryReview, view: Model.viewMemoryReview},
 	modalMemoryCurate: {update: Model.updateMemoryCurate, view: Model.viewMemoryCurate},
 	modalRewind:       {update: Model.updateRewind, view: Model.viewRewind},
+	modalStorageClean: {update: Model.updateStorageClean, view: Model.viewStorageClean},
 	modalConnect:      {update: Model.updateConnect, view: Model.viewConnect},
 	modalSelector:     {update: Model.updateSelector, view: Model.viewSelector},
 	modalSetup:        {update: Model.updateSetup},

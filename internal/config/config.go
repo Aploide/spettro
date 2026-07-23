@@ -65,6 +65,11 @@ type UserConfig struct {
 	CheckpointMaxGB         int  `json:"checkpoint_max_gb,omitempty"`         // shadow-store size cap enforced on open
 	CheckpointWarnGB        int  `json:"checkpoint_warn_gb,omitempty"`        // big-repo warning threshold (no project .git)
 
+	// Storage cleanup (/storage clean, `spettro clean`) session policy. Zero
+	// values fall back to the storage package defaults (30 days / keep 5).
+	CleanSessionAgeDays int `json:"clean_session_age_days,omitempty"` // sessions older than this are clean candidates
+	CleanKeepSessions   int `json:"clean_keep_sessions,omitempty"`    // most recent K sessions per project always survive
+
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited

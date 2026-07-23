@@ -626,18 +626,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		onSidePanel := sideW > 0 && mouse.X >= m.paneWidth()+1
 		if onSidePanel {
 			items := m.sidePanelItems()
-			innerHeight := m.sidePanelInnerHeight()
-			reserved := m.sidePanelReservedRows(sideW)
-			_, _, rows := m.sidePanelWindow(items, innerHeight, reserved)
-			maxStart := max(0, len(items)-rows)
 			switch mouse.Button {
 			case tea.MouseWheelUp:
 				if m.sideDetailScroll > 0 {
 					m.sideDetailScroll--
 					return m, tea.Batch(cmds...)
-				}
-				if m.sideScroll > 0 {
-					m.sideScroll--
 				}
 				if m.sideCursor > 0 {
 					m.sideCursor--
@@ -650,31 +643,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sideDetailScroll++
 					return m, tea.Batch(cmds...)
 				}
-				if m.sideScroll < maxStart {
-					m.sideScroll++
-				}
 				if m.sideCursor < len(items)-1 {
 					m.sideCursor++
 					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
 			case tea.MouseLeft:
-				startY, _ := m.sideListGeometry()
+				startY, rows := m.sideListGeometry()
 				row := mouse.Y - startY
 				if row >= 0 {
-					cursor, start, rows := m.sidePanelWindow(items, innerHeight, reserved)
-					_, rowToItem := m.sidePanelLines(items, sideW, cursor, start, rows)
-					if row >= 0 && row < len(rowToItem) {
+					// Same window the view rendered, so screen rows map
+					// one-to-one onto items (headers map to -1).
+					_, rowToItem := m.sidePanelList(items, sideW, rows)
+					if row < len(rowToItem) {
 						idx := rowToItem[row]
-						if idx >= 0 && idx < len(items) {
-							if m.sideCursor != idx {
-								m.sideDetailScroll = 0
-							}
-							m.sideCursor = idx
-						}
-					}
-					if len(rowToItem) == 0 {
-						idx := m.sideScroll + row
 						if idx >= 0 && idx < len(items) {
 							if m.sideCursor != idx {
 								m.sideDetailScroll = 0

@@ -84,7 +84,8 @@ func (m *Model) renderCheckpointsInfo() string {
 	fmt.Fprintf(&b, "checkpoints: %d for this project\n", len(items))
 	fmt.Fprintf(&b, "disk usage:  %s (this project)  %s (all projects)\n",
 		formatBytes(cp.Size()), formatBytes(checkpoint.TotalSize(m.store.GlobalDir)))
-	b.WriteString("store:       " + checkpoint.Dir(m.store.GlobalDir, m.cwd))
+	b.WriteString("store:       ")
+	b.WriteString(checkpoint.Dir(m.store.GlobalDir, m.cwd))
 	return b.String()
 }
 

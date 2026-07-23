@@ -52,6 +52,8 @@ var allCommands = []commandDef{
 	{"/resume", "resume a previous conversation"},
 	{"/rewind", "rewind files and/or conversation to a checkpoint (esc esc)"},
 	{"/checkpoints", "checkpoint count and shadow-store disk usage"},
+	{"/storage", "report what spettro stores on disk, per artifact class"},
+	{"/storage clean", "reclaim disk: multi-select cleanup with safe defaults"},
 	{"/update", "update spettro to the latest release"},
 	{"/exit", "exit spettro"},
 }
@@ -286,6 +288,7 @@ const helpText = `commands:
   /resume        resume a previous saved conversation
   /rewind        restore files and/or conversation to a pre-edit checkpoint
   /checkpoints   show checkpoint count and shadow-store disk usage
+  /storage       report what spettro stores on disk (add "clean" to reclaim)
 
 keys:
   esc esc        open the rewind picker (when idle)

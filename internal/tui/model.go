@@ -393,7 +393,6 @@ type Model struct {
 	parallelAgents   []parallelAgentEntry
 	tickCount        int
 	sideCursor       int
-	sideScroll       int
 	sideDetailScroll int
 	modifiedFiles    []modifiedFileEntry
 	gitBranch        string
@@ -465,6 +464,13 @@ type Model struct {
 	rewindModeCursor   int
 	// lastEscAt drives the esc-esc shortcut that opens /rewind when idle.
 	lastEscAt time.Time
+
+	// /storage clean multi-select: items from the storage registry with
+	// per-item checkboxes (safe defaults preselected).
+	showStorageClean bool
+	storageItems     []storage.Item
+	storageChecked   []bool
+	storageCursor    int
 
 	todos []session.Todo
 

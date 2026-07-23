@@ -27,6 +27,13 @@ func main() {
 	// otherwise.
 	sandbox.RunChildIfRequested()
 
+	// Subcommands run before flag parsing (the flag set below is for the
+	// TUI/headless modes). `spettro clean` works entirely without the TUI.
+	if len(os.Args) > 1 && os.Args[1] == "clean" {
+		runClean(os.Args[2:])
+		return
+	}
+
 	headless := flag.Bool("headless", false, "run as headless HTTP/SSE server (for Android)")
 	acpMode := flag.Bool("acp", false, "run as Agent Client Protocol (ACP) agent over stdio (for editors like Zed)")
 	cwdFlag := flag.String("cwd", "", "working directory (headless/acp modes only)")

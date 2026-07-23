@@ -73,7 +73,9 @@ corrupting the working tree. Newer checkpoints are unaffected.
 
 Prints the number of checkpoints for the current project, the shadow-store
 disk usage for this project and across all projects under
-`~/.spettro/history/`, and the store path.
+`~/.spettro/history/`, and the store path. To reclaim checkpoint history
+across projects (including orphaned entries for moved/deleted projects), use
+[`/storage clean` or `spettro clean`](storage.md).
 
 ### Requirements
 

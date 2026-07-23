@@ -23,7 +23,9 @@ Spettro automatically saves the current session to disk as you work:
 
 ### Storage path
 
-Sessions live under `~/.spettro/sessions/`. Each session is identified by a
+Sessions live under `~/.spettro/sessions/`. Old sessions can be reclaimed
+with [`/storage clean`](storage.md), which never touches the active session
+and always keeps the most recent few per project. Each session is identified by a
 project-specific hash combined with a timestamp:
 
 ```

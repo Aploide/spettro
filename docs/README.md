@@ -12,6 +12,7 @@
 - [Agent Skills](skills.md)
 - [Runtime Hooks](hooks.md) — custom bash middleware for tool events
 - [Checkpointing and Rewind](checkpointing.md) — auto-snapshots before file edits, `/rewind`
+- [Storage report and cleanup](storage.md) — `/storage`, `spettro clean`, artifact inventory
 - [Language Server (LSP) Integration](lsp.md) — zero-config diagnostics, references, go-to-definition
 - [Symbol-aware repo search](symbol-index.md) — ranked definitions in `repo-search`, cached symbol index
 - [Web Tools](web-tools.md) — web-search, web-fetch markdown engine, download

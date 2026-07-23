@@ -258,12 +258,15 @@ func TestRetentionPrunesOldCheckpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var list []checkpoint.Checkpoint
-	if err := json.Unmarshal(raw, &list); err != nil {
+	var file struct {
+		ProjectPath string                  `json:"project_path"`
+		Checkpoints []checkpoint.Checkpoint `json:"checkpoints"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
 		t.Fatal(err)
 	}
-	list[0].At = time.Now().AddDate(0, 0, -30)
-	raw, _ = json.Marshal(list)
+	file.Checkpoints[0].At = time.Now().AddDate(0, 0, -30)
+	raw, _ = json.Marshal(file)
 	if err := os.WriteFile(filepath.Join(dir, "checkpoints.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
