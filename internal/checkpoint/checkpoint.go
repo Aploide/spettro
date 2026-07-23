@@ -517,6 +517,28 @@ func (c *Checkpointer) enforceRetention() {
 	_, _ = c.git("gc", "--quiet", "--prune=now")
 }
 
+// ChangesSince returns how many files differ between checkpoint id and the
+// current working tree (including files created since, honouring ignores).
+// The /rewind picker uses it to show what restoring the latest checkpoint
+// would actually undo.
+func (c *Checkpointer) ChangesSince(id string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.disabled {
+		return 0
+	}
+	// Same staging step as Snapshot: refresh the shadow index to the live
+	// tree, then diff it against the checkpoint's commit.
+	if _, err := c.git("add", "-A", "."); err != nil {
+		return 0
+	}
+	out, err := c.git("diff", "--cached", "--name-only", id)
+	if err != nil || out == "" {
+		return 0
+	}
+	return len(strings.Split(out, "\n"))
+}
+
 // Size returns the disk usage in bytes of this project's checkpoint store
 // (shadow repo, conversation blobs and index).
 func (c *Checkpointer) Size() int64 { return dirSize(c.dir) }

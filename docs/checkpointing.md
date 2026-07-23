@@ -94,10 +94,16 @@ session, ordered oldest first (newest at the bottom):
 ```
 ◈ rewind to checkpoint
 
-  › 2026-01-15 14:30:23  3 file(s)  implement the auth middleware
-    2026-01-15 14:28:10  1 file(s)  add user model
-    2026-01-15 14:25:01  2 file(s)  initial scaffold
+  › 2026-01-15 14:30:23  3 file(s) edited  implement the auth middleware
+    2026-01-15 14:28:10  1 file(s) edited  add user model
+    2026-01-15 14:25:01  2 file(s) edited  initial scaffold
 ```
+
+The file count on each row is what changed *after* that checkpoint (that
+turn's edits, up to the next checkpoint — or up to the current working tree
+for the newest row). In other words, it is exactly what rewinding to that row
+would undo; edits you made before the checkpoint are captured inside it and
+are restored, not deleted.
 
 Navigation in the picker:
 

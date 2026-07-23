@@ -115,8 +115,23 @@ func (m Model) openRewind() (tea.Model, tea.Cmd) {
 		m.showBanner("no checkpoints yet — they are taken before each file-modifying tool", "info")
 		return m, nil
 	}
+	// Each checkpoint is taken *before* its tool call runs, so the edits of
+	// turn i land between checkpoint i and checkpoint i+1. Showing a row's
+	// own FilesChanged (diff vs the previous checkpoint) would count earlier
+	// manual edits too; instead show what happened *after* each checkpoint —
+	// the next checkpoint's diff, or for the newest row a live diff against
+	// the working tree. That is exactly what rewinding that row undoes.
+	counts := make([]int, len(items))
+	for i := range items {
+		if i < len(items)-1 {
+			counts[i] = items[i+1].FilesChanged
+		} else {
+			counts[i] = cp.ChangesSince(items[i].ID)
+		}
+	}
 	m.showRewind = true
 	m.rewindItems = items
+	m.rewindCounts = counts
 	// Newest at the bottom, cursor starting on the most recent step.
 	m.rewindCursor = len(items) - 1
 	m.rewindModePick = false
@@ -300,7 +315,7 @@ func (m Model) viewRewind() string {
 		for i, cp := range m.rewindItems {
 			isSelected := i == m.rewindCursor
 			timeStr := cp.At.Format("2006-01-02 15:04:05")
-			files := fmt.Sprintf("%d file(s)", cp.FilesChanged)
+			files := fmt.Sprintf("%d file(s) edited", m.rewindCounts[i])
 			preview := strings.ReplaceAll(cp.Prompt, "\n", " ")
 			if preview == "" {
 				preview = "(no prompt)"

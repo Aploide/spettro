@@ -458,6 +458,7 @@ type Model struct {
 	checkpointerFailed bool
 	showRewind         bool
 	rewindItems        []checkpoint.Checkpoint
+	rewindCounts       []int // per item: files edited during that turn (see openRewind)
 	rewindCursor       int
 	rewindScroll       int
 	rewindModePick     bool
