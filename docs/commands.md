@@ -52,6 +52,7 @@
 | `/jobs [list]` | List background shell jobs started by the agent. |
 | `/jobs kill <id\|all>` | Terminate a background job (or all of them). |
 | `job-output` | Tool-only (not a slash command): fetches accumulated output of a background shell job (`job-N`), or pages through a **spooled** truncated tool result (`spool:N`). See [Session Lifecycle](session.md#tool-output-spooling). |
+| `pty-start` / `pty-write` / `pty-kill` | Tool-only: interactive terminal sessions (REPLs, debuggers, ssh, watch-mode servers) the agent can type into. See [Interactive PTY sessions](pty.md). |
 | `/remote` | Start the local HTTP/SSE control plane on `127.0.0.1` (default port `7878`). |
 | `/remote :PORT` | Start the control plane on a specific port; falls back to a free port if it is busy. |
 | `/remote local` | Start the LAN HTTP/SSE control plane on `0.0.0.0` (default port `7878`). |

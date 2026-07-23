@@ -29,6 +29,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Normalized [thinking/reasoning levels](docs/thinking.md) across providers (`/thinking off|low|medium|high|x-high|max`)
 - [Ultra mode](docs/ultra.md) — fan hard tasks out across a swarm of parallel sub-agents (`/ultra`, any model)
+- [Interactive PTY sessions](docs/pty.md) — the agent drives REPLs, debuggers, and ssh through a real terminal
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
 

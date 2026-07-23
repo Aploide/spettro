@@ -12,6 +12,7 @@ import (
 	"spettro/internal/compact"
 	"spettro/internal/diff"
 	"spettro/internal/jobs"
+	"spettro/internal/pty"
 	"spettro/internal/session"
 	"spettro/internal/version"
 )
@@ -722,6 +723,10 @@ func (m Model) viewStatusBar(width int) string {
 		if n > 1 {
 			label += "s"
 		}
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(label) + "  " + right
+	}
+	if n := pty.Default().RunningCount(); n > 0 {
+		label := fmt.Sprintf("▣ %d pty", n)
 		right = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(label) + "  " + right
 	}
 

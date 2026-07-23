@@ -1338,6 +1338,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runJobOutput(call.Args)
 	case "job-kill":
 		return r.runJobKill(call.Args)
+	case "pty-start":
+		return r.runPtyStart(ctx, call.Tool, call.Args)
+	case "pty-write":
+		return r.runPtyWrite(call.Args)
+	case "pty-kill":
+		return r.runPtyKill(call.Args)
 	case "comment":
 		var args struct {
 			Message string `json:"message"`
@@ -1459,7 +1465,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // spurious checkpoint is cheap while a missed one is unrecoverable.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash":
+	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash", "pty-start", "pty-write":
 		return true
 	}
 	return false

@@ -18,7 +18,7 @@ const spoolFooterReserve = 200
 // session spool and replaced by their head (plus, for shell output, the tail)
 // with a footer telling the model how to page the rest via job-output.
 func (r *toolRuntime) spoolResult(toolName, out string) string {
-	keepTail := toolName == "shell-exec" || toolName == "bash"
+	keepTail := toolName == "shell-exec" || toolName == "bash" || toolName == "pty-start" || toolName == "pty-write"
 	return spoolIfLarge(out, r.historyLimit(toolName), keepTail)
 }
 

@@ -14,6 +14,7 @@ import (
 	"spettro/internal/jobs"
 	"spettro/internal/models"
 	"spettro/internal/provider"
+	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
@@ -152,6 +153,8 @@ func main() {
 	// Background shell jobs are detached into their own process groups, so
 	// they would outlive spettro unless killed explicitly on session exit.
 	jobs.Default().KillAll()
+	// Interactive PTY sessions are session state for the same reason.
+	pty.Default().KillAll()
 	// Spooled tool outputs are session state too; delete them with the session.
 	jobs.Spool().Cleanup()
 	if err != nil {

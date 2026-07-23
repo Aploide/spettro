@@ -20,7 +20,7 @@ func toolOutputHistoryLimit(name string) int {
 		return 40000
 	case "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover":
 		return 16000
-	case "shell-exec", "bash", "bash-output", "job-output":
+	case "shell-exec", "bash", "bash-output", "job-output", "pty-start", "pty-write":
 		return 8000
 	case "web-fetch":
 		return webFetchDefaultBudget
@@ -199,6 +199,9 @@ var builtinNativeToolDescs = map[string]string{
 	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",
 	"job-output":         "Fetch accumulated stdout/stderr of a background job (job-N) or page through a spooled truncated tool result (spool:N). Pass the next_offset from the previous call to read incrementally.",
 	"job-kill":           "Terminate a background job by ID.",
+	"pty-start":          "Start an interactive terminal session (REPL, debugger, ssh, watch-mode server) under a pseudo-terminal. Returns a session ID plus the initial screen; drive it with pty-write.",
+	"pty-write":          "Send input to a pty session and return output produced since the last read. Backslash escapes in input are decoded server-side (\\r \\n \\t \\e \\xHH \\uHHHH; \\\\ for a literal backslash), so {\"input\":\"2+2\",\"submit\":true} runs a REPL line and {\"input\":\"\\x03\"} sends Ctrl-C. submit:true appends \\r. Prefer wait_for (return as soon as this literal string, e.g. the prompt \">>> \", appears in new output) over guessing wait_ms. Empty input just polls.",
+	"pty-kill":           "Terminate a pty session (SIGTERM, then SIGKILL) and free it.",
 	"web-fetch":          "Fetch a URL and return its content as readable text/markdown (truncated to a size budget). For binary files use the download tool.",
 	"download":           "Download a URL to a file inside the workspace, subject to a maximum size limit.",
 	"web-search":         "Search the web.",
@@ -254,6 +257,9 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"},"job_id":{"type":"string"},"offset":{"type":"number"}}}`),
 	"job-output":         json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer"}},"required":["job_id"]}`),
 	"job-kill":           json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}`),
+	"pty-start":          json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"cols":{"type":"integer"},"rows":{"type":"integer"}},"required":["command"]}`),
+	"pty-write":          json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"input":{"type":"string"},"submit":{"type":"boolean","description":"append \\r to submit the input as a line"},"wait_for":{"type":"string","description":"return as soon as this literal string appears in new output (default timeout 10s)"},"wait_ms":{"type":"integer"}},"required":["id"]}`),
+	"pty-kill":           json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
 	"web-fetch":          json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"},"max_length":{"type":"integer"}},"required":["url"]}`),
 	"download":           json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"},"path":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["url","path"]}`),
 	"web-search":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`),

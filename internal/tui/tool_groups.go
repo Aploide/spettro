@@ -11,6 +11,7 @@ import (
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/diff"
+	"spettro/internal/pty"
 )
 
 func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Color) string {
@@ -50,6 +51,11 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 				label = styleMuted.Render(label)
 			}
 			lines = append(lines, bullet+" "+label)
+			if item.Status == "running" {
+				for _, tl := range renderPtyLiveTail(name, item.Args, fullOutput) {
+					lines = append(lines, outputStyle.Render("       "+tl))
+				}
+			}
 			if showTools {
 				if p := extractToolPath(name, item.Args); p != "" {
 					icon := "✓"
@@ -104,7 +110,11 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 						}
 					}
 					lines = append(lines, styleMuted.Render(detail))
-					if gt.Status != "running" {
+					if gt.Status == "running" {
+						for _, tl := range renderPtyLiveTail(gt.Name, gt.Args, fullOutput) {
+							lines = append(lines, outputStyle.Render("       "+tl))
+						}
+					} else {
 						if out := trimToolOutput(gt.Output, groupCap); out != "" {
 							for ol := range strings.SplitSeq(out, "\n") {
 								lines = append(lines, outputStyle.Render("       "+ol))
@@ -118,6 +128,43 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 		i = j
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderPtyLiveTail returns the last few settled scrollback lines of the pty
+// session a running pty tool call is driving, so the user watches the
+// terminal move while the model waits on it (e.g. a wait_for poll). The
+// ctrl+g full-output toggle lifts the line cap to the whole scrollback.
+func renderPtyLiveTail(name, argsJSON string, fullOutput bool) []string {
+	var sess *pty.Session
+	switch name {
+	case "pty-write", "pty-kill":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			sess, _ = pty.Default().Get(args.ID)
+		}
+	case "pty-start":
+		// The session ID does not exist until the tool returns; tail the
+		// newest session, which is the one this call just spawned.
+		if list := pty.Default().List(); len(list) > 0 {
+			sess = list[len(list)-1]
+		}
+	default:
+		return nil
+	}
+	if sess == nil {
+		return nil
+	}
+	n := 6
+	if fullOutput {
+		n = 0
+	}
+	tail := sess.Tail(n)
+	for len(tail) > 0 && strings.TrimSpace(tail[len(tail)-1]) == "" {
+		tail = tail[:len(tail)-1]
+	}
+	return tail
 }
 
 func hasRunningTool(items []ToolItem) bool {
@@ -350,12 +397,19 @@ func toolDescriptor(name, argsJSON string) string {
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.URL) != "" {
 			return fmt.Sprintf("%q", truncateLabel(args.URL, 36))
 		}
-	case "shell-exec", "bash", "bash-output":
+	case "shell-exec", "bash", "bash-output", "pty-start":
 		var args struct {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Command) != "" {
 			return "$ " + truncateLabel(args.Command, 36)
+		}
+	case "pty-write", "pty-kill":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			return args.ID
 		}
 	case "mcp-read-resource":
 		var args struct {
@@ -402,6 +456,12 @@ func runningVerb(name string) string {
 		return "Downloading"
 	case "shell-exec", "bash", "bash-output":
 		return "Running"
+	case "pty-start":
+		return "Starting"
+	case "pty-write":
+		return "Driving"
+	case "pty-kill":
+		return "Closing"
 	case "glob":
 		return "Matching"
 	case "grep":
