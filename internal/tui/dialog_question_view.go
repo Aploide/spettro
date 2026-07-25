@@ -13,10 +13,13 @@ package tui
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"spettro/internal/agent"
 )
 
 // questionMinContentH is the smallest conversation pane the question block is
@@ -132,21 +135,10 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 	if !ok {
 		return nil
 	}
-	g := glyphs()
 
 	head := wrapPlainLines("  "+question.Question, width)
 	questionLines := len(head)
 	head = append(head, wrapPlainLines("  "+strings.TrimSpace(q.form.Context), width)...)
-
-	if q.editing {
-		// Prompt line + textarea + footer sit below the question.
-		head = clampTextLines(head, max(budget-2-lipgloss.Height(m.ta.View()), 1), width)
-		return [][]string{
-			m.styleQuestionHead(head, questionLines),
-			{styleMuted.Render("  type your answer and press enter:"), m.ta.View()},
-			{styleMuted.Render("  " + m.questionHint())},
-		}
-	}
 
 	// Reserve the footer, one option row, and the line the "… N more" marker
 	// takes when the list has to be windowed.
@@ -158,72 +150,247 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 		headLines = append(headLines, styleMuted.Render("  select all that apply"))
 	}
 
-	rows := questionRows(question)
-	picker := make([]pickerOption, 0, len(rows))
-	labelW := 0
-	for i, row := range rows {
-		opt := pickerOption{Label: row.label, Separated: row.custom && i > 0}
-		switch {
-		case row.recommended:
-			opt.Badge = g.recommended + " recommended"
-		case row.custom && strings.TrimSpace(q.custom[q.tab]) != "":
-			opt.Badge = "“" + truncateLabel(q.custom[q.tab], 40) + "”"
-		case row.description != "":
-			// Task 04 gives descriptions their own muted line; folded in until
-			// then so a distinction the agent drew is not lost.
-			opt.Badge = row.description
-		}
-		if row.option >= 0 && q.selected[q.tab][row.option] {
-			opt.Label = g.checked + " " + opt.Label
-		}
-		// The row prefix takes 4 columns and the badge follows the label.
-		opt.Label = truncateLabel(opt.Label, max(width-6-lipgloss.Width(opt.Badge), 8))
-		if opt.Badge != "" {
-			// Only badged rows set the column: padding to a long bare label
-			// (the free-text entry, usually) would push the descriptions away
-			// from the answers they describe.
-			labelW = max(labelW, lipgloss.Width(opt.Label))
-		}
-		picker = append(picker, opt)
-	}
-	// Pad the labels to a column so the descriptions line up: ragged badges
-	// read as noise beside the answers they belong to.
-	for i := range picker {
-		if pad := labelW - lipgloss.Width(picker[i].Label); picker[i].Badge != "" && pad > 0 {
-			picker[i].Label += strings.Repeat(" ", pad)
-		}
-	}
-
-	visible, cursor, hidden := windowPickerRows(picker, q.cursor[q.tab], budget-len(headLines)-1)
-	list := m.renderQuestionRows(visible, cursor)
-	if hidden > 0 {
-		list = append(list, styleMuted.Render(fmt.Sprintf("    … %d more (↑ ↓ to scroll)", hidden)))
-	}
+	list := m.renderQuestionAnswerList(question, width, budget-len(headLines)-1)
 	return [][]string{headLines, list, {styleMuted.Render("  " + m.questionHint())}}
 }
 
-// renderQuestionRows draws the answer list. It is deliberately the question
-// form's own renderer rather than the approval picker's: task 04 turns these
-// rows into numbered ones with their own description lines, and the approval
-// dialogs must not follow them there.
-func (m Model) renderQuestionRows(rows []pickerOption, cursor int) []string {
+// questionRowIndent is the column the labels start at, and the column their
+// description lines are indented to: two of margin, the cursor and its space,
+// then the widest row number and its ". ".
+func questionRowIndent(numWidth int) int { return 4 + numWidth + 2 }
+
+// renderQuestionAnswerList draws the numbered rows of one question inside
+// budget lines. The rows below the rule — the chat escape hatch — are pinned to
+// the bottom: they are the way out of the form, so a long option list must not
+// scroll them away.
+func (m Model) renderQuestionAnswerList(question agent.AskUserQuestion, width, budget int) []string {
+	q := m.pendingQuestion
+	rows := questionRows(question)
+	if len(rows) == 0 || budget < 1 {
+		return nil
+	}
+	numWidth := len(strconv.Itoa(len(rows)))
+	indent := questionRowIndent(numWidth)
+	cursor := min(max(q.cursor[q.tab], 0), len(rows)-1)
+
+	// The rule above the chat row is a block of its own, so the same windowing
+	// arithmetic covers it whether it is pinned or scrolling.
+	cursorBlock := cursor
+	build := func(descriptions bool) (blocks [][]string, total int) {
+		blocks = make([][]string, 0, len(rows)+1)
+		for i, row := range rows {
+			if row.chat {
+				blocks = append(blocks, []string{styleMuted.Render("    " + strings.Repeat(glyphs().rule, max(width-4, 4)))})
+				total++
+				if i <= cursor {
+					cursorBlock = i + 1
+				}
+			}
+			block := m.renderQuestionRow(row, i+1, numWidth, indent, width, i == cursor, descriptions)
+			blocks = append(blocks, block)
+			total += len(block)
+		}
+		return blocks, total
+	}
+	flatten := func(blocks [][]string, total int) []string {
+		out := make([]string, 0, total)
+		for _, block := range blocks {
+			out = append(out, block...)
+		}
+		return out
+	}
+
+	blocks, total := build(true)
+	if total <= budget {
+		return flatten(blocks, total)
+	}
+	// Descriptions yield to rows before rows yield to scrolling: a list the user
+	// can see whole beats a windowed one they have to arrow through, and the
+	// labels are what they are choosing between.
+	if bare, bareTotal := build(false); bareTotal <= budget {
+		return flatten(bare, bareTotal)
+	}
+
+	// Too long to show whole: the option list scrolls under the rule and the
+	// chat row, which stay pinned to the bottom — the way out of the form must
+	// not be the first thing to scroll away. The tail costs two lines, and a
+	// windowed list needs two of its own (a row and the "… N more" marker), so
+	// below four the answers win instead: esc still leaves the form.
+	const tail = 2
+	if budget-tail >= 2 {
+		out := m.windowedQuestionRows(blocks[:len(blocks)-tail], cursorBlock, budget-tail, indent)
+		for _, block := range blocks[len(blocks)-tail:] {
+			out = append(out, block...)
+		}
+		return out
+	}
+	return m.windowedQuestionRows(blocks, cursorBlock, budget, indent)
+}
+
+// windowedQuestionRows renders the run of row blocks around the cursor that
+// fits in budget lines, marking what it left out.
+func (m Model) windowedQuestionRows(blocks [][]string, cursor, budget, indent int) []string {
+	budget = max(budget, 1)
+	start, end, hidden := windowQuestionBlocks(blocks, min(cursor, len(blocks)-1), budget)
+	out := make([]string, 0, budget)
+	for _, block := range blocks[start:end] {
+		out = append(out, block...)
+	}
+	// The marker outranks the tail of the row above it: a windowed page that
+	// does not say so reads as the whole list. One row taller than the budget is
+	// a line the frame does not have, so trim rather than trust the window — a
+	// row can be taller on its own than the page is. A one-line page is the
+	// exception: an answer beats the news that there are others.
+	if hidden > 0 && budget >= 2 {
+		if len(out) >= budget {
+			out = out[:budget-1]
+		}
+		out = append(out, styleMuted.Render(strings.Repeat(" ", indent)+fmt.Sprintf("… %d more (↑ ↓ to scroll)", hidden)))
+	}
+	return out[:min(len(out), budget)]
+}
+
+// renderQuestionRow draws one numbered row: `❯ 3. Label ● recommended`, with
+// the option's description wrapped underneath at the label column. The
+// recommended marker is drawn on every row state — the cursor moving off the
+// agent's suggestion must not erase it.
+func (m Model) renderQuestionRow(row questionRow, number, numWidth, indent, width int, focused, descriptions bool) []string {
 	g := glyphs()
-	mc := m.currentColor()
-	out := make([]string, 0, len(rows)+1)
-	for i, row := range rows {
-		if row.Separated {
-			out = append(out, styleMuted.Render("    ─────"))
+	q := m.pendingQuestion
+
+	accent := lipgloss.NewStyle().Foreground(m.currentColor())
+	// The chevron sits at the left margin, outside the number column, so the
+	// numbers stay in one column whichever row is focused.
+	chevron := "    "
+	if focused {
+		chevron = accent.Render("  " + g.cursor + " ")
+	}
+
+	label := row.label
+	if row.option >= 0 && q.selected[q.tab][row.option] {
+		label = g.checked + " " + label
+	}
+	suffix := ""
+	if row.recommended {
+		suffix = "  " + g.recommended + " recommended"
+	}
+	label = truncateLabel(label, max(width-indent-lipgloss.Width(suffix), 8))
+
+	labelStyle := lipgloss.NewStyle().Foreground(colorText)
+	if focused {
+		labelStyle = accent.Bold(true)
+	}
+	line := chevron +
+		styleMuted.Render(fmt.Sprintf("%*d. ", numWidth, number)) +
+		labelStyle.Render(label)
+	if suffix != "" {
+		line += accent.Render(suffix)
+	}
+	out := []string{line}
+
+	// The free-text row becomes the field itself while it is being typed in, so
+	// the answer is written where the row that offers it sits. Neither the field
+	// nor the answer already given is a description: both stay when the page is
+	// too short to afford the muted lines.
+	if row.custom {
+		if q.editing {
+			return append(out, indentLines(m.questionCustomField(width-indent), indent)...)
 		}
-		line := styleMuted.Render("    " + row.Label)
-		if i == cursor {
-			line = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  " + g.cursor + " " + row.Label)
+		if text := strings.TrimSpace(q.custom[q.tab]); text != "" {
+			return append(out, indentLines([]string{"“" + truncateLabel(text, max(width-indent-2, 8)) + "”"}, indent)...)
 		}
-		if row.Badge != "" {
-			line += styleMuted.Render("  " + row.Badge)
-		}
-		out = append(out, line)
+	}
+	if !descriptions {
+		return out
+	}
+	for _, desc := range questionDescriptionLines(row.description, width-indent) {
+		out = append(out, indentLines([]string{styleMuted.Render(desc)}, indent)...)
 	}
 	return out
+}
+
+// questionCustomFieldMaxLines caps the inline text field so a multi-line draft
+// cannot squeeze the option list it is sitting in.
+const questionCustomFieldMaxLines = 3
+
+// questionCustomField renders the shared textarea narrowed to the column the
+// row sits at, so the inline field is the existing free-text flow rather than a
+// second text-entry implementation. m is a value receiver, so resizing here
+// touches only this render's copy.
+func (m Model) questionCustomField(width int) []string {
+	m.ta.SetWidth(max(width, 12))
+	// The shared input is three rows tall; inline it grows with the draft
+	// instead, so an empty field is one line rather than two blank ones under
+	// the row it replaced.
+	m.ta.SetHeight(min(max(m.ta.LineCount(), 1), questionCustomFieldMaxLines))
+	return strings.Split(m.ta.View(), "\n")
+}
+
+// questionDescriptionMaxLines bounds one row's description. Descriptions reflow
+// rather than clip, but an essay under one option must not push the others off
+// the page.
+const questionDescriptionMaxLines = 3
+
+// questionDescriptionLines wraps a description to the width left beside the
+// label column.
+func questionDescriptionLines(desc string, width int) []string {
+	if strings.TrimSpace(desc) == "" {
+		return nil
+	}
+	width = max(width, 8)
+	return clampTextLines(wrapPlainLines(desc, width), questionDescriptionMaxLines, width)
+}
+
+// indentLines shifts a rendered block right to the label column.
+func indentLines(lines []string, indent int) []string {
+	pad := strings.Repeat(" ", max(indent, 0))
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = pad + line
+	}
+	return out
+}
+
+// windowQuestionBlocks keeps the cursor's row visible within budget terminal
+// lines, growing the window outwards from it. Unlike windowPickerRows the rows
+// are variable-height — a row is its label plus its wrapped description — so
+// the window is measured in lines, not rows. When rows are dropped it reserves
+// one line for the caller's "… N more" marker.
+func windowQuestionBlocks(blocks [][]string, cursor, budget int) (start, end, hidden int) {
+	if len(blocks) == 0 {
+		return 0, 0, 0
+	}
+	if cursor < 0 || cursor >= len(blocks) {
+		cursor = 0
+	}
+	budget = max(budget, 1)
+	total := 0
+	for _, block := range blocks {
+		total += len(block)
+	}
+	if total <= budget {
+		return 0, len(blocks), 0
+	}
+	avail := max(budget-1, 1)
+
+	start, end = cursor, cursor+1
+	used := len(blocks[cursor])
+	for {
+		grew := false
+		if end < len(blocks) && used+len(blocks[end]) <= avail {
+			used += len(blocks[end])
+			end++
+			grew = true
+		}
+		if start > 0 && used+len(blocks[start-1]) <= avail {
+			start--
+			used += len(blocks[start])
+			grew = true
+		}
+		if !grew {
+			return start, end, len(blocks) - (end - start)
+		}
+	}
 }
 
 // styleQuestionHead styles the wrapped question/context block: the question
@@ -249,9 +416,9 @@ func (m Model) questionHint() string {
 	case q.editing:
 		return "enter sends  esc goes back"
 	case q.singlePage():
-		return "↑↓ move  enter answers  esc declines"
+		return "↑↓ or 1-9 pick  enter answers  esc declines"
 	default:
-		return "↑↓ move  enter records  tab/←→ switch tab  esc declines"
+		return "↑↓ or 1-9 pick  enter records  tab/←→ switch tab  esc declines"
 	}
 }
 

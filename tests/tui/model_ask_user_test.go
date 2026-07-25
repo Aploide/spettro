@@ -1,15 +1,23 @@
 package tui_test
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
 	"spettro/internal/tui"
 )
+
+// plainForm is the question block with its styling stripped. The rows carry a
+// style change between the number and the label, so any assertion about how a
+// row reads has to be made against the text a user actually sees.
+func plainForm(m tui.Model) string { return ansi.Strip(m.ViewQuestionForTesting()) }
 
 // oneQuestion builds the single-question form the flat ask-user payload
 // normalises to — the shape almost every question still arrives in.
@@ -309,6 +317,249 @@ func TestQuestionModal_ASCIIGlyphFallback(t *testing.T) {
 
 // --- the answer list ---
 
+// The mockup's layout: a chevron at the left margin outside the number column,
+// every row numbered, and each option's description on its own line indented to
+// the label.
+func TestQuestionModal_RowsAreNumberedWithDescriptionLines(t *testing.T) {
+	restore := tui.UseASCIIGlyphsForTesting(false)
+	defer restore()
+
+	m := openForm(t, oneQuestion("Which part?", true,
+		agent.AskUserOption{Label: "ACP extensions", Description: "Continue building out the extension surface."},
+		agent.AskUserOption{Label: "TUI polish", Description: "Refine terminal UI behavior."},
+	))
+	lines := strings.Split(plainForm(m), "\n")
+
+	want := []string{
+		"  ❯ 1. ACP extensions",
+		"       Continue building out the extension surface.",
+		"    2. TUI polish",
+		"       Refine terminal UI behavior.",
+		"    3. Type something.",
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(lines, func(l string) bool { return strings.TrimRight(l, " ") == w }) {
+			t.Fatalf("missing row line %q in:\n%s", w, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// The agent's suggestion is where the cursor starts and carries a marker of its
+// own, so it stays legible once the cursor moves on.
+func TestQuestionModal_RecommendedMarkerAndInitialFocus(t *testing.T) {
+	restore := tui.UseASCIIGlyphsForTesting(false)
+	defer restore()
+
+	m := openForm(t, oneQuestion("Which part?", false,
+		agent.AskUserOption{Label: "Parser"},
+		agent.AskUserOption{Label: "Renderer", IsRecommended: true},
+	))
+	if got := m.QuestionCursorForTesting(0); got != 1 {
+		t.Fatalf("the recommended option must hold initial focus, cursor = %d", got)
+	}
+	if view := plainForm(m); !strings.Contains(view, "❯ 2. Renderer  ● recommended") {
+		t.Fatalf("expected the marker after the label:\n%s", view)
+	}
+	m = pressQuestion(t, m, key("up"))
+	if view := plainForm(m); !strings.Contains(view, "2. Renderer  ● recommended") {
+		t.Fatalf("the marker must survive the cursor moving off it:\n%s", view)
+	}
+}
+
+// The mockups number every row, so the digits have to pick one.
+func TestQuestionModal_DigitHotkeySelectsTheMatchingRow(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(oneQuestion("Which option?", false, opts("A", "B", "C")...))
+
+	m = pressQuestion(t, m, key("3"))
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("a digit must select and answer, got (%v, %v)", err, ok)
+	}
+	if len(answers[0].Selected) != 1 || answers[0].Selected[0] != "C" {
+		t.Fatalf("digit picked the wrong row: %+v", answers[0])
+	}
+	if got := m.QuestionCursorForTesting(0); got >= 0 {
+		t.Fatalf("the form should be closed, cursor = %d", got)
+	}
+}
+
+// A digit past the last row is not a selection — it must not wrap onto one.
+func TestQuestionModal_DigitPastTheLastRowDoesNothing(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(oneQuestion("Which option?", false, opts("A", "B")...))
+
+	m = pressQuestion(t, m, key("9"))
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("a digit with no row behind it must not answer the form")
+	}
+	if got := m.QuestionCursorForTesting(0); got != 0 {
+		t.Fatalf("the cursor must not move, cursor = %d", got)
+	}
+}
+
+// The free-text row becomes the field itself, commits with enter, and backs out
+// with esc without touching what the other questions already hold.
+func TestQuestionModal_CustomEntryCommitsAndCancels(t *testing.T) {
+	m := openForm(t, twoQuestions())
+	m = pressQuestion(t, m, key("enter")) // Q1 answered with "Parser"
+	m = pressQuestion(t, m, key("tab"), key("3"))
+	if !m.QuestionEditingForTesting() {
+		t.Fatal("the digit on the free-text row must open the field")
+	}
+	if view := plainForm(m); !strings.Contains(view, "❯ 3. Type something.") {
+		t.Fatalf("the field must render at the row it replaced:\n%s", view)
+	}
+
+	m = pressQuestion(t, m, key("h"), key("i"), key("esc"))
+	if m.QuestionEditingForTesting() {
+		t.Fatal("esc must return to the list")
+	}
+	if got := m.QuestionCustomForTesting(1); got != "" {
+		t.Fatalf("an abandoned draft must not be recorded, got %q", got)
+	}
+	if !m.QuestionAnsweredForTesting(0) {
+		t.Fatal("backing out of one question must not clear another's answer")
+	}
+
+	m = pressQuestion(t, m, key("enter"), key("h"), key("i"), key("enter"))
+	if got := m.QuestionCustomForTesting(1); got != "hi" {
+		t.Fatalf("enter must commit the text, got %q", got)
+	}
+	if view := plainForm(m); !strings.Contains(view, "“hi”") {
+		t.Fatalf("the committed answer must show on its row:\n%s", view)
+	}
+}
+
+// The chat exit is the last numbered row, below the rule, and it is neither an
+// answer nor a decline: the tool is told the user wants to talk, and the run
+// ends on that (settled 2026-07-25).
+func TestQuestionModal_ChatAboutThisEndsTheTurn(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(oneQuestion("Which database?", false, opts("Postgres", "SQLite")...))
+
+	view := plainForm(m)
+	rule := strings.Index(view, "─────")
+	chat := strings.Index(view, "3. Chat about this")
+	if rule < 0 || chat < 0 || rule > chat {
+		t.Fatalf("the chat exit must be numbered last, below the rule:\n%s", view)
+	}
+
+	m = pressQuestion(t, m, key("3"))
+	answers, err, ok := handle.Answered()
+	if !ok {
+		t.Fatal("the chat exit must unblock the tool call")
+	}
+	if !errors.Is(err, agent.ErrAskUserReplyInChat) {
+		t.Fatalf("expected the reply-in-chat signal, got %v", err)
+	}
+	if answers != nil {
+		t.Fatalf("nothing is answered when the user leaves for the chat: %+v", answers)
+	}
+	if m.HasPendingAskUserForTesting() {
+		t.Fatal("the form must close so the user can type")
+	}
+}
+
+// Even a question with nothing to pick from has rows worth reaching, so esc out
+// of the field lands on the list rather than declining outright.
+func TestQuestionModal_ChatExitIsReachableFromAFreeTextQuestion(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(oneQuestion("What should we call it?", true))
+
+	if !m.QuestionEditingForTesting() {
+		t.Fatal("a question with no options opens in the field")
+	}
+	m = pressQuestion(t, m, key("esc"))
+	if !m.HasPendingAskUserForTesting() || m.QuestionEditingForTesting() {
+		t.Fatal("esc from the field must land on the list, not decline the form")
+	}
+	m = pressQuestion(t, m, key("2"))
+	if _, err, ok := handle.Answered(); !ok || !errors.Is(err, agent.ErrAskUserReplyInChat) {
+		t.Fatalf("the chat exit must be reachable, got (%v, %v)", err, ok)
+	}
+}
+
+// Descriptions reflow at the width left beside the label column; they are never
+// clipped mid-word onto one line.
+func TestQuestionModal_DescriptionsWrapAtNarrowWidth(t *testing.T) {
+	desc := "Refine terminal UI behavior, selection, rendering, keybindings and status display"
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(60, 40)
+	m.SetPendingAskUserFormForTesting(oneQuestion("Which part?", false,
+		agent.AskUserOption{Label: "TUI polish", Description: desc},
+		agent.AskUserOption{Label: "Parser"},
+	))
+	m = m.RecalcLayoutForTesting()
+
+	var wrapped []string
+	for _, line := range strings.Split(plainForm(m), "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(desc, trimmed) || strings.HasSuffix(desc, trimmed) {
+			if trimmed != "" {
+				wrapped = append(wrapped, trimmed)
+			}
+		}
+	}
+	if len(wrapped) < 2 {
+		t.Fatalf("the description must reflow onto several lines at 60 columns:\n%s", plainForm(m))
+	}
+	if !strings.HasPrefix(desc, wrapped[0]) || !strings.HasSuffix(desc, wrapped[len(wrapped)-1]) {
+		t.Fatalf("the description was cut instead of wrapped: %q", wrapped)
+	}
+	if got := lipgloss.Width(m.ViewQuestionForTesting()); got > 60-4 {
+		t.Fatalf("the block is %d columns wide inside a 60-column terminal", got)
+	}
+}
+
+// A list too long for the page scrolls under the rule and the chat exit: the
+// way out of the form must not be the first thing to scroll away.
+func TestQuestionModal_LongListScrollsWithTheChatExitPinned(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(80, 26)
+	m.SetPendingAskUserFormForTesting(oneQuestion("Pick one", true,
+		opts("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "last")...))
+	m = m.RecalcLayoutForTesting()
+
+	view := plainForm(m)
+	if !strings.Contains(view, "more (↑ ↓ to scroll)") {
+		t.Fatalf("expected the list to be windowed at 26 rows:\n%s", view)
+	}
+	if !strings.Contains(view, "Chat about this") || !strings.Contains(view, "─────") {
+		t.Fatalf("the rule and the chat exit must stay pinned:\n%s", view)
+	}
+	if strings.Contains(view, "last") {
+		t.Fatalf("an option far from the cursor should have scrolled away:\n%s", view)
+	}
+
+	for range 7 {
+		m = pressQuestion(t, m, key("down"))
+	}
+	view = plainForm(m)
+	if !strings.Contains(view, "last") {
+		t.Fatalf("the cursor row must be scrolled into view:\n%s", view)
+	}
+	if !strings.Contains(view, "Chat about this") {
+		t.Fatalf("the chat exit must still be pinned after scrolling:\n%s", view)
+	}
+	if got := lipgloss.Height(m.RecalcLayoutForTesting().ViewForTesting()); got > 26 {
+		t.Fatalf("view is %d lines on a 26-row terminal", got)
+	}
+}
+
 func TestQuestionModal_DownMovesCursor(t *testing.T) {
 	m := openForm(t, oneQuestion("Which option?", false, opts("Option A", "Option B")...))
 	m = pressQuestion(t, m, key("down"))
@@ -342,25 +593,24 @@ func TestQuestionModal_RecommendedBadgeSurvivesCursorMove(t *testing.T) {
 	}
 }
 
-// The free-text entry is a client affordance, not one of the agent's answers:
-// it stays last and is drawn below a separator.
-func TestQuestionModal_CustomEntryIsLastAndSeparated(t *testing.T) {
+// The free-text entry is still an answer to the question, so it is the last
+// numbered *option* — above the rule. Only the chat exit, which answers
+// nothing, sits below it.
+func TestQuestionModal_CustomEntryIsTheLastOptionAboveTheRule(t *testing.T) {
 	m := openForm(t, oneQuestion("Which database?", true, opts("Postgres", "SQLite")...))
-	view := m.ViewQuestionForTesting()
+	view := plainForm(m)
 
-	sep := strings.Index(view, "─")
 	own := strings.Index(view, "Type something.")
-	if sep < 0 || own < 0 || own < sep {
-		t.Fatalf("the free-text entry must render last, below a separator:\n%s", view)
+	sep := strings.Index(view, "─────")
+	chat := strings.Index(view, "Chat about this")
+	if own < 0 || sep < 0 || chat < 0 {
+		t.Fatalf("expected the free-text entry, the rule and the chat exit:\n%s", view)
 	}
-}
-
-// With no options to separate from, the free-text entry stands alone: no stray
-// divider above the only row.
-func TestQuestionModal_NoSeparatorWithoutAgentOptions(t *testing.T) {
-	m := openForm(t, oneQuestion("What should we call it?", true))
-	if view := m.ViewQuestionForTesting(); strings.Contains(view, "─────") {
-		t.Fatalf("unexpected separator in a freeform-only prompt:\n%s", view)
+	if !(own < sep && sep < chat) {
+		t.Fatalf("expected the order option / rule / chat exit:\n%s", view)
+	}
+	if !strings.Contains(view, "3. Type something.") || !strings.Contains(view, "4. Chat about this") {
+		t.Fatalf("every row is numbered, the client's rows included:\n%s", view)
 	}
 }
 
@@ -534,7 +784,7 @@ func TestQuestionModal_FormBlockFitsTheInputBox(t *testing.T) {
 			Options: opts("Parser", "Renderer", "Cache", "Docs", "Tests"), AllowCustom: true},
 		{Header: "Layout", Question: "How should the panel sit?", Options: opts("Left", "Right")},
 	}}
-	for _, size := range []struct{ w, h int }{{120, 40}, {100, 30}, {80, 24}, {60, 24}} {
+	for _, size := range []struct{ w, h int }{{120, 40}, {100, 30}, {90, 22}, {80, 24}, {60, 24}} {
 		m := tui.NewModelForTesting()
 		m.MarkReadyAndTrustedForTesting()
 		m.SetDimensionsForTesting(size.w, size.h)

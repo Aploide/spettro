@@ -91,18 +91,6 @@ type pickerOption struct {
 	Label string
 	// Badge is a muted suffix rendered after the label on every row state.
 	Badge string
-	// Separated draws a divider above the row, marking the rows below it as
-	// client affordances rather than answers the agent supplied.
-	Separated bool
-}
-
-// pickerRowHeight is the number of terminal lines one row occupies: two when
-// it carries a separator above it.
-func pickerRowHeight(row pickerOption) int {
-	if row.Separated {
-		return 2
-	}
-	return 1
 }
 
 // windowPickerRows keeps the cursor's row visible within maxLines of terminal
@@ -113,31 +101,23 @@ func windowPickerRows(rows []pickerOption, cursor, maxLines int) (visible []pick
 	if cursor < 0 || cursor >= len(rows) {
 		cursor = 0
 	}
-	total := 0
-	for _, row := range rows {
-		total += pickerRowHeight(row)
-	}
-	if len(rows) == 0 || total <= max(maxLines, 1) {
+	if len(rows) == 0 || len(rows) <= max(maxLines, 1) {
 		return rows, cursor, 0
 	}
 	// One line goes to the caller's marker, so the rows themselves get the
-	// rest. A single-line budget cannot show both; the caller reserves for
-	// this (see renderAskUserPrompt) and gets one row over budget rather than
-	// an empty list if it does not.
+	// rest. A single-line budget cannot show both; the caller reserves for this
+	// and gets one row over budget rather than an empty list if it does not.
 	budget := max(maxLines-1, 1)
 
 	start, end := cursor, cursor+1
-	height := pickerRowHeight(rows[cursor])
-	for {
+	for end-start < budget {
 		grew := false
-		if end < len(rows) && height+pickerRowHeight(rows[end]) <= budget {
-			height += pickerRowHeight(rows[end])
+		if end < len(rows) {
 			end++
 			grew = true
 		}
-		if start > 0 && height+pickerRowHeight(rows[start-1]) <= budget {
+		if start > 0 && end-start < budget {
 			start--
-			height += pickerRowHeight(rows[start])
 			grew = true
 		}
 		if !grew {
@@ -145,10 +125,7 @@ func windowPickerRows(rows []pickerOption, cursor, maxLines int) (visible []pick
 		}
 	}
 
-	visible = append([]pickerOption(nil), rows[start:end]...)
-	// A separator at the top of a truncated list separates nothing, and its
-	// extra line is what would overflow when the budget is down to one row.
-	visible[0].Separated = false
+	visible = rows[start:end]
 	return visible, cursor - start, len(rows) - len(visible)
 }
 
@@ -165,10 +142,6 @@ func (m Model) renderAnnotatedPicker(title string, options []pickerOption, curso
 	sb.WriteString(styleMuted.Render("  " + title))
 	sb.WriteString("\n")
 	for i, opt := range options {
-		if opt.Separated {
-			sb.WriteString(styleMuted.Render("    ─────"))
-			sb.WriteString("\n")
-		}
 		if i == cursor {
 			sb.WriteString(lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt.Label))
 		} else {

@@ -52,7 +52,9 @@ func NewModelForTesting() Model {
 	ta.Focus()
 	// Match New()'s input height: the default (6 rows) makes every rendered
 	// frame three lines taller than the real one, which hides layout overflow
-	// from tests that measure the view.
+	// from tests that measure the view. The gutter has to match for the same
+	// reason — it is columns the real input does not spend.
+	ta.ShowLineNumbers = false
 	ta.SetHeight(3)
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
 	cfg := config.Default()

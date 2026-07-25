@@ -20,9 +20,13 @@ import (
 )
 
 // questionCustomRow is the client-supplied free-text entry appended to a
-// question's options. It is not one of the agent's answers, so it sits below
-// the separator and outside the option cap.
+// question's options. It is not one of the agent's answers, but it is still an
+// answer to the question, so it is the last numbered *option* — above the rule.
 const questionCustomRow = "Type something."
+
+// questionChatRow is the escape hatch below the rule: not an answer at all, but
+// a way out of the form and back into the conversation.
+const questionChatRow = "Chat about this"
 
 // questionForm is the live state of one ask-user form. The per-question slices
 // are parallel to form.Questions: switching tabs changes an index and nothing
@@ -65,21 +69,31 @@ func newQuestionForm(msg askUserRequestMsg) *questionForm {
 	return q
 }
 
-// questionRow is one line of the answer list: an agent option or the client's
-// free-text entry.
+// Row kinds outside the agent's options. Both are negative so `option` stays
+// the index into AskUserQuestion.Options for everything the agent supplied.
+const (
+	questionRowOptionCustom = -1
+	questionRowOptionChat   = -2
+)
+
+// questionRow is one row of the answer list: an agent option, the client's
+// free-text entry, or the chat escape hatch.
 type questionRow struct {
-	// option indexes the question's Options; -1 marks the free-text entry.
+	// option indexes the question's Options, or is one of the questionRowOption*
+	// constants for the client's own rows.
 	option      int
 	label       string
 	description string
 	recommended bool
 	custom      bool
+	chat        bool
 }
 
 // questionRows is the answer list for one question: the agent's options in
-// order, then the free-text entry when the question allows one.
+// order, the free-text entry when the question allows one, and last — below the
+// rule the renderer draws — the chat escape hatch, which is always offered.
 func questionRows(q agent.AskUserQuestion) []questionRow {
-	rows := make([]questionRow, 0, len(q.Options)+1)
+	rows := make([]questionRow, 0, len(q.Options)+2)
 	for i, opt := range q.Options {
 		rows = append(rows, questionRow{
 			option:      i,
@@ -89,9 +103,9 @@ func questionRows(q agent.AskUserQuestion) []questionRow {
 		})
 	}
 	if q.AllowCustom || len(q.Options) == 0 {
-		rows = append(rows, questionRow{option: -1, label: questionCustomRow, custom: true})
+		rows = append(rows, questionRow{option: questionRowOptionCustom, label: questionCustomRow, custom: true})
 	}
-	return rows
+	return append(rows, questionRow{option: questionRowOptionChat, label: questionChatRow, chat: true})
 }
 
 // question returns the question the active tab points at, or false on the
@@ -232,7 +246,7 @@ func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if q.cursor[q.tab] >= len(rows) {
 		q.cursor[q.tab] = len(rows) - 1
 	}
-	switch msg.String() {
+	switch key := msg.String(); key {
 	case "up", "ctrl+p":
 		if q.cursor[q.tab] > 0 {
 			q.cursor[q.tab]--
@@ -242,24 +256,67 @@ func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			q.cursor[q.tab]++
 		}
 	case "enter":
-		row := rows[q.cursor[q.tab]]
-		if row.custom {
-			q.editing = true
-			m.ta.Reset()
-			m.ta.SetValue(q.custom[q.tab])
-			m.showBanner("type your answer and press enter", "info")
-			return m, nil
+		return m.activateQuestionRow(rows, q.cursor[q.tab]), nil
+	default:
+		// The mockups number every row, so the digits have to work: 1-9 jumps
+		// to that row and picks it in one keypress. A tenth row (eight options,
+		// the free-text entry and the chat exit) is reachable by cursor only —
+		// "0" for a tenth item reads as a typo, not a shortcut.
+		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+			if idx := int(key[0] - '1'); idx < len(rows) {
+				q.cursor[q.tab] = idx
+				return m.activateQuestionRow(rows, idx), nil
+			}
 		}
-		q.choose(q.tab, row.option)
-		if q.singlePage() {
-			return m.submitQuestionForm(), nil
-		}
-		// Settled: no auto-advance. The selection is recorded, the tab's
-		// glyph flips, and the cursor stays put so revising an answer never
-		// means arrowing back to it.
-		m.showBanner(questionRecordedBanner(), "info")
 	}
 	return m, nil
+}
+
+// activateQuestionRow is what enter and the digit hotkeys both do to the row
+// under them: open the free-text entry, leave for the chat, or record the
+// answer.
+func (m Model) activateQuestionRow(rows []questionRow, idx int) Model {
+	q := m.pendingQuestion
+	if idx < 0 || idx >= len(rows) {
+		return m
+	}
+	row := rows[idx]
+	switch {
+	case row.chat:
+		return m.chatAboutQuestion()
+	case row.custom:
+		q.editing = true
+		m.ta.Reset()
+		m.ta.SetValue(q.custom[q.tab])
+		m.showBanner("type your answer and press enter", "info")
+		return m
+	}
+	q.choose(q.tab, row.option)
+	if q.singlePage() {
+		return m.submitQuestionForm()
+	}
+	// Settled: no auto-advance. The selection is recorded, the tab's glyph
+	// flips, and the cursor stays put so revising an answer never means
+	// arrowing back to it.
+	m.showBanner(questionRecordedBanner(), "info")
+	return m
+}
+
+// chatAboutQuestion takes the escape hatch below the rule. Settled 2026-07-25:
+// this ends the run's turn rather than steering it — the tool reports that the
+// user wants to talk, the agent finishes on that, and whatever the user types
+// next is an ordinary new turn. Distinct from a decline, which tells the model
+// the user refused the question.
+func (m Model) chatAboutQuestion() Model {
+	q := m.pendingQuestion
+	if q == nil {
+		return m
+	}
+	q.reply(askUserResponse{err: agent.ErrAskUserReplyInChat})
+	m.showBanner("say what you think below — the agent is waiting for your message", "info")
+	m = m.advanceQuestionQueue()
+	m.refreshViewport()
+	return m
 }
 
 // focusQuestionTab opens the free-text entry when the tab the user just landed
@@ -301,14 +358,13 @@ func (m Model) updateQuestionCustom(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.showBanner(questionRecordedBanner(), "info")
 		return m, nil
 	case "esc":
-		question, _ := q.question()
+		// Back to the list rather than straight out. Even a question with no
+		// options has rows worth reaching — the chat escape hatch is one of
+		// them — and a second esc still declines from there.
 		q.editing = false
 		m.ta.Reset()
-		if len(question.Options) > 0 {
-			m.showBanner("choose an option or press esc again to decline", "info")
-			return m, nil
-		}
-		return m.rejectAskUser("question declined"), nil
+		m.showBanner("choose a row or press esc again to decline", "info")
+		return m, nil
 	default:
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
@@ -502,6 +558,8 @@ type questionGlyphSet struct {
 	cursor      string
 	recommended string
 	warn        string
+	// rule is one cell of the horizontal separator above the chat escape hatch.
+	rule string
 }
 
 var (
@@ -509,10 +567,10 @@ var (
 		// ○/● rather than ☐/☒: the boxed glyphs draw as hairlines in most
 		// terminal fonts, and the filled circle is what the rest of the TUI
 		// already uses for a checked row (see the storage dialog).
-		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠",
+		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠", rule: "─",
 	}
 	questionGlyphsASCII = questionGlyphSet{
-		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!",
+		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!", rule: "-",
 	}
 )
 
