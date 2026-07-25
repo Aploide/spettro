@@ -271,9 +271,17 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 							return agent.ShellApprovalDeny, nil
 						}
 					},
-					AskUser: func(sctx context.Context, ar agent.AskUserRequest) (string, error) {
+					// The whole form goes out in one versioned event. A client
+					// that only understands the flat v1 shape answers its first
+					// question; the rest come back skipped rather than
+					// defaulted, which is what the model needs to be told.
+					AskUser: func(sctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
 						qid := fmt.Sprintf("q-%d", msgCount)
-						return server.RequestAskUser(sctx, qid, ar.Question, ar.Options, ar.AllowFreeResponse)
+						reply, err := server.RequestAskUser(sctx, qid, agent.RemoteAskUserPayload(form, 0))
+						if err != nil {
+							return nil, err
+						}
+						return agent.AnswersFromRemote(form, reply.Answer, reply.Answers), nil
 					},
 				}
 				ag.Spec.Permission = cfg.Permission

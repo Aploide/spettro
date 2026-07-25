@@ -50,6 +50,12 @@ func IsPlanningEyeModeForTesting(mode string) bool {
 func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
+	// Match New()'s input height: the default (6 rows) makes every rendered
+	// frame three lines taller than the real one, which hides layout overflow
+	// from tests that measure the view. The gutter has to match for the same
+	// reason — it is columns the real input does not spend.
+	ta.ShowLineNumbers = false
+	ta.SetHeight(3)
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
 	cfg := config.Default()
 	// Point at a reasoning-capable catalog model so thinking-level commands
@@ -95,15 +101,6 @@ func (m *Model) SetPendingShellApprovalForTesting(cursor int) {
 	m.approvalCursor = cursor
 }
 
-func (m *Model) SetPendingAskUserForTesting(req agent.AskUserRequest, freeform bool) {
-	m.pendingQuestion = &askUserRequestMsg{
-		request:  req,
-		response: make(chan askUserResponse, 1),
-	}
-	m.questionCursor = askUserDefaultCursor(req)
-	m.questionFreeform = freeform
-}
-
 func (m Model) TextareaValueForTesting() string {
 	return m.ta.Value()
 }
@@ -126,14 +123,6 @@ func (m Model) HasPendingShellApprovalForTesting() bool {
 
 func (m Model) HasPendingAskUserForTesting() bool {
 	return m.pendingQuestion != nil
-}
-
-func (m Model) QuestionCursorForTesting() int {
-	return m.questionCursor
-}
-
-func (m Model) QuestionFreeformForTesting() bool {
-	return m.questionFreeform
 }
 
 func (m *Model) SetThinkingForTesting(v bool) {
@@ -204,6 +193,14 @@ func (m *Model) MutateMessageContentForTesting(idx int, content string) {
 	if idx >= 0 && idx < len(m.messages) {
 		m.messages[idx].Content = content
 	}
+}
+
+// RefreshViewportForTesting fills the conversation pane from the messages a
+// test added, so assertions about the frame see the transcript the real app
+// would have painted.
+func (m Model) RefreshViewportForTesting() Model {
+	m.refreshViewport()
+	return m
 }
 
 func (m *Model) RenderMessagesForTesting() string {
@@ -296,12 +293,171 @@ func SteerChoiceOptionsForTesting() []string {
 	return append([]string(nil), steerChoiceOptions...)
 }
 
-func AskUserOptionsForTesting(req agent.AskUserRequest) []string {
-	return askUserOptions(req)
+// OpenSelectorForTesting opens the model picker, so a test can assert what a
+// higher-precedence overlay does to it.
+func (m Model) OpenSelectorForTesting() Model {
+	return m.openSelector("")
 }
 
-func (m Model) UpdateAskUserQuestionForTesting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	return m.updateAskUserQuestion(msg)
+// SetPendingAskUserFormForTesting opens the question modal on a form without
+// going through the agent, for tests that only care about the modal itself.
+func (m *Model) SetPendingAskUserFormForTesting(form agent.AskUserForm) {
+	m.pendingQuestion = newQuestionForm(askUserRequestMsg{
+		form:     form,
+		response: make(chan askUserResponse, 1),
+	})
+}
+
+func (m Model) UpdateQuestionForTesting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	return m.updateQuestion(msg)
+}
+
+func (m Model) ViewQuestionForTesting() string {
+	return m.renderQuestionForm()
+}
+
+func (m Model) QuestionTabForTesting() int {
+	if m.pendingQuestion == nil {
+		return -1
+	}
+	return m.pendingQuestion.tab
+}
+
+// QuestionCursorForTesting is the option cursor of the question at index i, so
+// a test can assert that a tab kept its place while another one was visited.
+func (m Model) QuestionCursorForTesting(i int) int {
+	if m.pendingQuestion == nil || i < 0 || i >= len(m.pendingQuestion.cursor) {
+		return -1
+	}
+	return m.pendingQuestion.cursor[i]
+}
+
+func (m Model) QuestionAnsweredForTesting(i int) bool {
+	return m.pendingQuestion != nil && m.pendingQuestion.answered(i)
+}
+
+func (m Model) QuestionCustomForTesting(i int) string {
+	if m.pendingQuestion == nil || i < 0 || i >= len(m.pendingQuestion.custom) {
+		return ""
+	}
+	return m.pendingQuestion.custom[i]
+}
+
+func (m Model) QuestionEditingForTesting() bool {
+	return m.pendingQuestion != nil && m.pendingQuestion.editing
+}
+
+// QuestionRemotePayloadForTesting is the `ask_user` event body the modal would
+// publish for the form on screen, or nil when there is nothing to publish.
+func (m Model) QuestionRemotePayloadForTesting() map[string]any {
+	payload, ok := m.questionRemotePayload()
+	if !ok {
+		return nil
+	}
+	return payload
+}
+
+// TelegramQuestionHeadingForTesting is the first line of a forwarded ask-user
+// prompt for a given event body.
+func TelegramQuestionHeadingForTesting(data map[string]any) string {
+	return telegramQuestionHeading(data)
+}
+
+// QuestionReviewCursorForTesting is the cursor on the review page: 0 sends the
+// form, 1 goes back.
+func (m Model) QuestionReviewCursorForTesting() int {
+	if m.pendingQuestion == nil {
+		return -1
+	}
+	return m.pendingQuestion.review
+}
+
+func (m Model) QuestionNoteForTesting(i int) string {
+	if m.pendingQuestion == nil || i < 0 || i >= len(m.pendingQuestion.notes) {
+		return ""
+	}
+	return m.pendingQuestion.notes[i]
+}
+
+func (m Model) QuestionNotesEditingForTesting() bool {
+	return m.pendingQuestion != nil && m.pendingQuestion.notesEditing
+}
+
+// QuestionPreviewCacheForTesting is the memoised preview of the focused option.
+// Tests compare the *slice* across renders: a cache miss would hand back a
+// freshly allocated one, which is what makes a re-sanitised preview visible.
+func (m Model) QuestionPreviewCacheForTesting() []string {
+	if m.pendingQuestion == nil {
+		return nil
+	}
+	return m.pendingQuestion.previewLines
+}
+
+func (m Model) QuestionStripForTesting() string {
+	if m.pendingQuestion == nil {
+		return ""
+	}
+	return m.renderQuestionStrip(max(m.width-4, 20))
+}
+
+// UseASCIIGlyphsForTesting pins the modal's symbol set, which is otherwise
+// picked from the locale once per process.
+func UseASCIIGlyphsForTesting(on bool) func() {
+	if on {
+		questionGlyphOverride = &questionGlyphsASCII
+	} else {
+		questionGlyphOverride = &questionGlyphsUnicode
+	}
+	return func() { questionGlyphOverride = nil }
+}
+
+// AskUserHandleForTesting is the tool side of a delivered form: the channel the
+// blocked ask-user call is waiting on.
+type AskUserHandleForTesting struct {
+	response chan askUserResponse
+}
+
+// Answered reports whether the tool call got a reply, and what it was. It
+// never blocks: a form still waiting for the user simply reports false.
+func (h AskUserHandleForTesting) Answered() (answers []agent.AskUserAnswer, err error, ok bool) {
+	select {
+	case resp := <-h.response:
+		return resp.answers, resp.err, true
+	default:
+		return nil, nil, false
+	}
+}
+
+// DeliverAskUserForTesting routes a form through the same update path the
+// agent's callback feeds, so tests exercise arrival, queueing, and teardown
+// rather than a hand-set field.
+func (m Model) DeliverAskUserForTesting(form agent.AskUserForm) (Model, AskUserHandleForTesting) {
+	msg := askUserRequestMsg{form: form, response: make(chan askUserResponse, 1)}
+	updated, _ := m.update(msg)
+	return updated.(Model), AskUserHandleForTesting{response: msg.response}
+}
+
+func (m Model) QuestionQueueLenForTesting() int {
+	return len(m.questionQueue)
+}
+
+// PendingQuestionTextForTesting is the question the modal is showing, empty on
+// the Submit tab or with no form open.
+func (m Model) PendingQuestionTextForTesting() string {
+	if m.pendingQuestion == nil {
+		return ""
+	}
+	question, ok := m.pendingQuestion.question()
+	if !ok {
+		return ""
+	}
+	return question.Question
+}
+
+// StopAgentForTesting runs the interrupt path (esc / ctrl+c) so tests can
+// assert that no tool call is left blocked on a question.
+func (m *Model) StopAgentForTesting() {
+	m.stopAgent()
 }
 
 func (m *Model) SetDimensionsForTesting(width, height int) {

@@ -387,31 +387,32 @@ func (m Model) viewMentionPalette(width int) string {
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
 
-func (m Model) renderAskUserPrompt() string {
-	if m.pendingQuestion == nil {
-		return ""
+// wrapPlainLines word-wraps unstyled text to width and returns one entry per
+// terminal line, so callers can count and cut lines before styling them —
+// measuring styled output is what lets a wrapped line escape the layout's
+// height budget.
+func wrapPlainLines(s string, width int) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
 	}
-	req := m.pendingQuestion.request
-	var lines []string
-	lines = append(lines, styleMuted.Render("  "+req.Question))
-	if strings.TrimSpace(req.Context) != "" {
-		lines = append(lines, styleMuted.Render("  "+req.Context))
+	wrapped := lipgloss.NewStyle().Width(width).Render(s)
+	lines := strings.Split(wrapped, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " ")
 	}
-	options := askUserOptions(req)
-	if m.questionFreeform || len(options) == 0 {
-		lines = append(lines, styleMuted.Render("  type your answer and press enter:"))
-		lines = append(lines, m.ta.View())
-		lines = append(lines, styleMuted.Render("  esc declines"))
-		return strings.Join(lines, "\n")
+	return lines
+}
+
+// clampTextLines keeps at most maxLines of text, marking the cut with an ellipsis
+// so a long question reads as truncated rather than silently missing its tail.
+func clampTextLines(lines []string, maxLines, width int) []string {
+	if maxLines < 1 || len(lines) <= maxLines {
+		return lines
 	}
-	lines = append(lines, m.renderApprovalPicker(
-		"Choose an answer",
-		options,
-		m.questionCursor,
-		m.currentColor(),
-	))
-	lines = append(lines, styleMuted.Render("  enter selects  esc declines"))
-	return strings.Join(lines, "\n")
+	lines = lines[:maxLines]
+	last := len(lines) - 1
+	lines[last] = truncateLabel(lines[last], max(width-2, 4)) + " …"
+	return lines
 }
 
 func (m Model) viewInput(width int) string {
@@ -444,7 +445,7 @@ func (m Model) viewInput(width int) string {
 		))
 		lines = append(lines, styleMuted.Render("  enter selects  esc keeps typing"))
 	} else if m.pendingQuestion != nil {
-		lines = append(lines, m.renderAskUserPrompt())
+		lines = append(lines, m.renderQuestionForm())
 	} else if m.pendingAuth != nil {
 		cmd := formatApprovalCommandLabel(m.pendingAuth.request.Command)
 		lines = append(lines, styleWarn.Render("  "+cmd))

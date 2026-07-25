@@ -68,16 +68,6 @@ type ShellApprovalRequest struct {
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
 
-type AskUserRequest struct {
-	Question          string
-	Options           []string
-	Context           string
-	DefaultOption     string
-	AllowFreeResponse bool
-}
-
-type AskUserCallback func(context.Context, AskUserRequest) (string, error)
-
 func (c LLMCoder) Execute(ctx context.Context, plan string, level config.PermissionLevel, approved bool) (RunResult, error) {
 	if strings.TrimSpace(plan) == "" {
 		return RunResult{}, fmt.Errorf("empty approved plan")
@@ -350,7 +340,7 @@ func (r *toolRuntime) offerFallback(ctx context.Context, failed provider.ModelRe
 		return provider.ModelRef{}, false
 	}
 	switchOpt := fmt.Sprintf("Switch to %s", next)
-	answer, err := r.askUser(ctx, AskUserRequest{
+	answer, err := AskSingleQuestion(ctx, r.askUser, AskUserRequest{
 		Question:      fmt.Sprintf("Model %s is unavailable (%s). Switch to %s for the rest of this run? Note: switching models invalidates the prompt cache.", failed, kind, next),
 		Options:       []string{switchOpt, "Abort"},
 		Context:       truncate(cause.Error(), 300),
@@ -984,6 +974,16 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 }
 
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	if blocksOnUserInput(call.Tool) {
+		// The tool is waiting on a person, who may take as long as they take.
+		// A deadline here would cancel the question out from under them and
+		// hand the model a timeout error as if nobody was there — the run must
+		// block until the user actually answers (or declines). The manifest's
+		// timeout_sec bounds tool execution, not human attention.
+		out, err := r.execute(ctx, call, allowed)
+		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
+		return out, err
+	}
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
@@ -1008,6 +1008,13 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	out, err := r.execute(tctx, call, allowed)
 	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
 	return out, err
+}
+
+// blocksOnUserInput reports whether a tool's execution is a wait on the human,
+// not work the agent is doing. Those tools run without a deadline; everything
+// else is bounded by executeWithTimeout.
+func blocksOnUserInput(tool string) bool {
+	return tool == "ask-user"
 }
 
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {

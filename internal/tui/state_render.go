@@ -332,6 +332,12 @@ func (m Model) recalcLayout() Model {
 	}
 	if m.showPlanApproval {
 		inputH += 2 + len(planApprovalOptions)
+	} else if m.pendingQuestion != nil {
+		// The form replaces the textarea and grows with the answer list, so
+		// reserve what it actually renders instead of the fixed textarea
+		// height. renderQuestionForm keeps itself inside questionBlockBudget,
+		// so this can never squeeze the conversation pane away.
+		inputH = 3 + lipgloss.Height(m.renderQuestionForm())
 	} else if m.pendingAuth != nil {
 		inputH += 2 + len(shellApprovalOptions)
 		if block := m.approvalDiffView(m.paneWidth()); block != "" {

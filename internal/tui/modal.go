@@ -15,6 +15,7 @@ const (
 	modalTrust
 	modalLogin
 	modalOnboarding
+	modalQuestion
 	modalResume
 	modalMemoryReview
 	modalMemoryCurate
@@ -36,6 +37,11 @@ func (m Model) activeModal() modal {
 		return modalLogin
 	case m.showOnboarding:
 		return modalOnboarding
+	case m.pendingQuestion != nil:
+		// A question is raised mid-run and blocks a tool call, so it outranks
+		// every incidental picker the user may have left open. It stays below
+		// the startup gates, which decide whether the run may happen at all.
+		return modalQuestion
 	case m.showResume:
 		return modalResume
 	case m.showMemoryReview:
@@ -69,9 +75,13 @@ type modalHandler struct {
 }
 
 var modalHandlers = map[modal]modalHandler{
-	modalTrust:        {update: Model.updateTrust, view: Model.viewTrust},
-	modalLogin:        {update: Model.updateLogin, view: Model.viewLogin},
-	modalOnboarding:   {update: Model.updateOnboarding, view: Model.viewOnboarding},
+	modalTrust:      {update: Model.updateTrust, view: Model.viewTrust},
+	modalLogin:      {update: Model.updateLogin, view: Model.viewLogin},
+	modalOnboarding: {update: Model.updateOnboarding, view: Model.viewOnboarding},
+	// The question form renders inside the input box (see viewInput), so it
+	// registers no view of its own: the conversation it is asking about has to
+	// stay on screen behind it.
+	modalQuestion:     {update: Model.updateQuestion},
 	modalResume:       {update: Model.updateResume, view: Model.viewResume},
 	modalMemoryReview: {update: Model.updateMemoryReview, view: Model.viewMemoryReview},
 	modalMemoryCurate: {update: Model.updateMemoryCurate, view: Model.viewMemoryCurate},

@@ -84,17 +84,71 @@ func waitForAskUser(ch chan askUserRequestMsg) tea.Cmd {
 	}
 }
 
+// pickerOption is one row of an approval picker. The annotations are drawn
+// independently of the cursor, so a marker the agent attached to a row (its
+// recommended answer) stays readable after the user arrows away from it.
+type pickerOption struct {
+	Label string
+	// Badge is a muted suffix rendered after the label on every row state.
+	Badge string
+}
+
+// windowPickerRows keeps the cursor's row visible within maxLines of terminal
+// height, growing the window outwards from the cursor. When rows are dropped it
+// reserves one line for the caller's "… N more" marker and returns how many are
+// hidden; the caller must render that marker for the count to add up.
+func windowPickerRows(rows []pickerOption, cursor, maxLines int) (visible []pickerOption, newCursor, hidden int) {
+	if cursor < 0 || cursor >= len(rows) {
+		cursor = 0
+	}
+	if len(rows) == 0 || len(rows) <= max(maxLines, 1) {
+		return rows, cursor, 0
+	}
+	// One line goes to the caller's marker, so the rows themselves get the
+	// rest. A single-line budget cannot show both; the caller reserves for this
+	// and gets one row over budget rather than an empty list if it does not.
+	budget := max(maxLines-1, 1)
+
+	start, end := cursor, cursor+1
+	for end-start < budget {
+		grew := false
+		if end < len(rows) {
+			end++
+			grew = true
+		}
+		if start > 0 && end-start < budget {
+			start--
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+
+	visible = rows[start:end]
+	return visible, cursor - start, len(rows) - len(visible)
+}
+
 func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc color.Color) string {
+	rows := make([]pickerOption, 0, len(options))
+	for _, opt := range options {
+		rows = append(rows, pickerOption{Label: opt})
+	}
+	return m.renderAnnotatedPicker(title, rows, cursor, mc)
+}
+
+func (m Model) renderAnnotatedPicker(title string, options []pickerOption, cursor int, mc color.Color) string {
 	var sb strings.Builder
 	sb.WriteString(styleMuted.Render("  " + title))
 	sb.WriteString("\n")
 	for i, opt := range options {
 		if i == cursor {
-			item := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt)
-			sb.WriteString(item)
+			sb.WriteString(lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt.Label))
 		} else {
-			item := styleMuted.Render("    " + opt)
-			sb.WriteString(item)
+			sb.WriteString(styleMuted.Render("    " + opt.Label))
+		}
+		if opt.Badge != "" {
+			sb.WriteString(styleMuted.Render("  " + opt.Badge))
 		}
 		if i < len(options)-1 {
 			sb.WriteString("\n")
@@ -284,14 +338,28 @@ func formatToolLabel(name, argsJSON string) string {
 		}
 		return "Deleted tasks"
 	case "ask-user":
+		// The form shape (questions[]) and the legacy flat question both reach
+		// this label; a multi-question form is summarised by its first question.
 		var args struct {
-			Question string `json:"question"`
+			Question  string `json:"question"`
+			Questions []struct {
+				Question string `json:"question"`
+			} `json:"questions"`
 		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Question) != "" {
-			q := truncateLabel(args.Question, 50)
-			return fmt.Sprintf("Asked user %q", q)
+		if json.Unmarshal([]byte(argsJSON), &args) != nil {
+			return "Asked user"
 		}
-		return "Asked user"
+		first := strings.TrimSpace(args.Question)
+		if len(args.Questions) > 0 {
+			first = strings.TrimSpace(args.Questions[0].Question)
+		}
+		if first == "" {
+			return "Asked user"
+		}
+		if n := len(args.Questions); n > 1 {
+			return fmt.Sprintf("Asked user %q (+%d more)", truncateLabel(first, 40), n-1)
+		}
+		return fmt.Sprintf("Asked user %q", truncateLabel(first, 50))
 	case "enter-plan-mode":
 		return "Entered plan mode"
 	case "exit-plan-mode":

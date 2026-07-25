@@ -69,7 +69,7 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 		options, _ := data["options"].([]string)
 		ctxStr, _ := data["context"].(string)
 		def, _ := data["default"].(string)
-		parts := []string{"❓ Spettro is asking:", question}
+		parts := []string{telegramQuestionHeading(data), question}
 		if ctxStr != "" {
 			parts = append(parts, "", ctxStr)
 		}
@@ -129,6 +129,19 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 		}
 		m.telegramBroadcastAsync(fmt.Sprintf("⚙ %s — %s", name, status))
 	}
+}
+
+// telegramQuestionHeading is the first line of a forwarded ask-user prompt.
+// The event carries the whole form, but this relay takes one answer at a time,
+// so the heading says which question the chat is looking at — otherwise a
+// three-question form reads as three unrelated interruptions.
+func telegramQuestionHeading(data map[string]any) string {
+	count, _ := data["count"].(int)
+	if count <= 1 {
+		return "❓ Spettro is asking:"
+	}
+	active, _ := data["active"].(int)
+	return fmt.Sprintf("❓ Spettro is asking (question %d of %d):", active+1, count)
 }
 
 // telegramBroadcastAsync sends text on a worker goroutine so the TUI's

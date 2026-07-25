@@ -22,9 +22,6 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth != nil {
 		return m.updateShellApproval(msg)
 	}
-	if m.pendingQuestion != nil {
-		return m.updateAskUserQuestion(msg)
-	}
 
 	switch msg.String() {
 	case "ctrl+c":
