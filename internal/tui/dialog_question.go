@@ -52,6 +52,12 @@ type questionForm struct {
 	// editing is set while the active question's free-text entry has the
 	// keyboard; the textarea holds the text until it is committed.
 	editing bool
+	// review is the cursor on the Submit tab's review page: 0 sends the form,
+	// 1 goes back. originTab is the question tab the user left to get there, so
+	// backing out returns them where they were rather than to the first
+	// question.
+	review    int
+	originTab int
 	// notesEditing is set while the note field has it instead. The two are
 	// separate because a note is not an answer: committing one must not answer
 	// the question, and a form that submits on its only answer must not submit
@@ -96,7 +102,27 @@ const (
 	questionRowOptionCustom = -1
 	questionRowOptionChat   = -2
 	questionRowOptionSubmit = -3
+	questionRowOptionSend   = -4
+	questionRowOptionCancel = -5
 )
+
+// The review page's two actions. Sending is the first row and the default
+// cursor: the page is reached by walking to the end of the form, so the thing
+// the user came for is the thing under the cursor when they arrive.
+const (
+	questionSendRow   = "Submit answers"
+	questionCancelRow = "Cancel"
+)
+
+// questionReviewRows is the review page's answer list. It is built as ordinary
+// rows so the page draws with the same cursor, numbering and hotkeys as every
+// question — the last page of the form must not have keys of its own.
+func questionReviewRows() []questionRow {
+	return []questionRow{
+		{option: questionRowOptionSend, label: questionSendRow, number: 1},
+		{option: questionRowOptionCancel, label: questionCancelRow, number: 2},
+	}
+}
 
 // questionRow is one row of the answer list: an agent option, the client's
 // free-text entry, the multi-select Submit action, or the chat escape hatch.
@@ -275,25 +301,36 @@ func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "left", "shift+tab":
+		q.rememberQuestionTab()
 		if q.tab > 0 {
 			q.tab--
 		}
 		return m.focusQuestionTab(), nil
 	case "right", "tab":
+		q.rememberQuestionTab()
 		if q.tab < q.tabCount()-1 {
 			q.tab++
 		}
 		return m.focusQuestionTab(), nil
+	case "ctrl+d":
+		// Settled 2026-07-25: submit from anywhere on the form, under the same
+		// rules the review page's Submit row applies — unanswered questions go
+		// as skipped. It never fires from a text field: those are handled above,
+		// where bubbles' textarea keeps ctrl+d as delete-forward.
+		return m.submitQuestionForm(), nil
 	case "esc":
+		if q.onSubmitTab() {
+			// The review page is a page of the form, not a way out of it.
+			// Declining is esc from a question, where the user can see what they
+			// would be refusing.
+			return m.leaveQuestionReview(), nil
+		}
 		// Declining is all-or-nothing: a partial answer is a Submit-tab
 		// action, never a side effect of backing out.
 		return m.rejectAskUser("question declined"), nil
 	}
 	if q.onSubmitTab() {
-		if msg.String() == "enter" {
-			return m.submitQuestionForm(), nil
-		}
-		return m, nil
+		return m.updateQuestionReview(msg), nil
 	}
 	question, _ := q.question()
 	rows := questionRows(question)
@@ -415,6 +452,60 @@ func (m Model) commitQuestion() Model {
 	}
 	m.showBanner(questionRecordedBanner(), "info")
 	return m
+}
+
+// --- the review page ---
+
+// rememberQuestionTab records the question the user is leaving, so the review
+// page knows where "back" is. Cancelling to the first question would lose the
+// place of anyone reviewing a four-question form from its end.
+func (q *questionForm) rememberQuestionTab() {
+	if !q.onSubmitTab() {
+		q.originTab = q.tab
+	}
+}
+
+// updateQuestionReview is the review page's key handling: the same cursor,
+// enter and digit hotkeys the question pages use, over two rows.
+func (m Model) updateQuestionReview(msg tea.KeyPressMsg) Model {
+	q := m.pendingQuestion
+	rows := questionReviewRows()
+	switch key := msg.String(); key {
+	case "up", "ctrl+p":
+		q.review = max(q.review-1, 0)
+	case "down", "ctrl+n":
+		q.review = min(q.review+1, len(rows)-1)
+	case "enter":
+		return m.activateQuestionReviewRow(q.review)
+	default:
+		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+			if idx := questionRowByNumber(rows, int(key[0]-'0')); idx >= 0 {
+				q.review = idx
+				return m.activateQuestionReviewRow(idx)
+			}
+		}
+	}
+	return m
+}
+
+// activateQuestionReviewRow sends the form or goes back to it. Nothing else can
+// happen from this page: it is the end of the form, not another question.
+func (m Model) activateQuestionReviewRow(idx int) Model {
+	if idx == 0 {
+		return m.submitQuestionForm()
+	}
+	return m.leaveQuestionReview()
+}
+
+// leaveQuestionReview returns to the question the user came from with every
+// answer intact. Cancel is "not yet", not "never" — declining the form is esc
+// from a question page, where what is being refused is on screen.
+func (m Model) leaveQuestionReview() Model {
+	q := m.pendingQuestion
+	q.tab = min(max(q.originTab, 0), max(len(q.form.Questions)-1, 0))
+	q.review = 0
+	m.showBanner("back to your answers", "info")
+	return m.focusQuestionTab()
 }
 
 // chatAboutQuestion takes the escape hatch below the rule. Settled 2026-07-25:
@@ -716,6 +807,9 @@ type questionGlyphSet struct {
 	warn        string
 	// rule is one cell of the horizontal separator above the chat escape hatch.
 	rule string
+	// bullet leads a question on the review page: it names the question rather
+	// than offering it, so it is not a checkbox and not a cursor.
+	bullet string
 	// clip marks a preview line cut off at the pane's right edge. Preview text
 	// is preformatted, so it is clipped rather than wrapped and the cut has to
 	// be visible — otherwise a truncated sketch reads as the whole one.
@@ -727,10 +821,10 @@ var (
 		// ○/● rather than ☐/☒: the boxed glyphs draw as hairlines in most
 		// terminal fonts, and the filled circle is what the rest of the TUI
 		// already uses for a checked row (see the storage dialog).
-		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠", rule: "─", clip: "›",
+		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠", rule: "─", clip: "›", bullet: "●",
 	}
 	questionGlyphsASCII = questionGlyphSet{
-		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!", rule: "-", clip: ">",
+		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!", rule: "-", clip: ">", bullet: "*",
 	}
 )
 

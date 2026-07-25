@@ -347,6 +347,15 @@ func (m Model) QuestionEditingForTesting() bool {
 	return m.pendingQuestion != nil && m.pendingQuestion.editing
 }
 
+// QuestionReviewCursorForTesting is the cursor on the review page: 0 sends the
+// form, 1 goes back.
+func (m Model) QuestionReviewCursorForTesting() int {
+	if m.pendingQuestion == nil {
+		return -1
+	}
+	return m.pendingQuestion.review
+}
+
 func (m Model) QuestionNoteForTesting(i int) string {
 	if m.pendingQuestion == nil || i < 0 || i >= len(m.pendingQuestion.notes) {
 		return ""

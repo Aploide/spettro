@@ -103,10 +103,19 @@ func (m Model) renderQuestionForm() string {
 		sections = append(sections, m.renderQuestionPage(innerW, body)...)
 	}
 
+	// The gaps were reserved for the sections a question page has; the review
+	// page has one more. Spend the room that is actually left rather than
+	// trusting the reservation: a blank line the frame cannot hold is a row past
+	// the bottom of the terminal, and one the frame can hold is worth having.
+	room := budget
+	for _, section := range sections {
+		room -= len(section)
+	}
 	joined := make([]string, 0, len(sections)*2)
 	for i, section := range sections {
-		if i > 0 && spaced {
+		if i > 0 && spaced && room > 0 {
 			joined = append(joined, "")
+			room--
 		}
 		joined = append(joined, section...)
 	}
@@ -525,6 +534,8 @@ func (m Model) questionHint() string {
 		return "enter sends  esc goes back"
 	case q.notesEditing:
 		return "enter attaches the note  esc keeps what you typed"
+	case q.onSubmitTab():
+		return "↑↓ or 1-2 pick  enter confirms  ctrl+d sends  esc goes back"
 	case q.singlePage():
 		return "↑↓ or 1-9 pick  enter answers  n notes  esc declines"
 	default:
@@ -535,42 +546,87 @@ func (m Model) questionHint() string {
 	}
 }
 
-// renderQuestionSubmitPage is the Submit tab. Task 07 turns it into the full
-// review page; today it lists what will be sent and what will not.
+// renderQuestionSubmitPage is the review page behind the ✓ Submit chip: what
+// will be sent, and the two rows that send it or go back.
 func (m Model) renderQuestionSubmitPage(width, budget int) [][]string {
 	q := m.pendingQuestion
-	g := glyphs()
 
-	rows := make([]pickerOption, 0, len(q.form.Questions))
-	for i, question := range q.form.Questions {
-		mark := g.unchecked
-		if q.answered(i) {
-			mark = g.checked
-		}
-		label := mark + " " + question.Header + ": " + questionAnswerSummary(q, i)
-		rows = append(rows, pickerOption{Label: truncateLabel(label, max(width-6, 8))})
+	title := lipgloss.NewStyle().Bold(true).Foreground(colorText)
+	rows := questionReviewRows()
+	actions := make([]string, 0, len(rows))
+	for i, row := range rows {
+		actions = append(actions, m.renderQuestionRow(row, 1, questionRowIndent(1), width, i == q.review, false)...)
 	}
-	// The list is informational, so no row carries a cursor: it is windowed
-	// around the first unanswered question, which is the one the user would go
-	// back to.
-	focus := max(q.firstUnanswered(), 0)
-	visible, _, hidden := windowPickerRows(rows, focus, max(budget-3, 1))
 
-	list := make([]string, 0, len(visible)+2)
-	for _, row := range visible {
-		list = append(list, styleMuted.Render("    "+row.Label))
+	// The rows and the key legend are the page; everything else is what the page
+	// says about itself. On a terminal too short for all of it the two headings
+	// go first — the strip's ✓ Submit chip already says where the user is, and
+	// the rows say what they do — leaving the summary, which is the only part
+	// carrying information the rest of the form does not.
+	room := budget - len(actions) - 1
+	headings := room >= 3
+	bodyBudget := room
+	if headings {
+		bodyBudget = room - 2
 	}
-	if hidden > 0 {
-		list = append(list, styleMuted.Render(fmt.Sprintf("    … %d more", hidden)))
+	body := m.renderQuestionReview(width, bodyBudget)
+
+	sections := make([][]string, 0, 5)
+	if headings {
+		sections = append(sections, []string{title.Render("  Review your answers")})
+	}
+	if len(body) > 0 {
+		sections = append(sections, body)
+	}
+	if headings {
+		sections = append(sections, []string{title.Render("  " + truncateLabel("Ready to submit your answers?", max(width-2, 8)))})
+	}
+	return append(sections, actions, []string{styleMuted.Render("  " + m.questionHint())})
+}
+
+// renderQuestionReview is the middle of the review page: one bullet per
+// question with its answer under it. Settled 2026-07-25: an incomplete form
+// shows the warning *instead of* the list — the page says one thing at a time,
+// and the tab strip is where the missing answer is located.
+func (m Model) renderQuestionReview(width, budget int) []string {
+	q := m.pendingQuestion
+	if budget < 1 {
+		return nil
 	}
 	if !q.complete() {
-		list = append(list, styleWarn.Render("  "+g.warn+" unanswered questions are sent as skipped"))
+		return []string{styleWarn.Render("  " + glyphs().warn + " You have not answered all questions")}
 	}
-	return [][]string{
-		{lipgloss.NewStyle().Bold(true).Foreground(colorText).Render("  Send these answers to the agent?")},
-		list,
-		{styleMuted.Render("  enter sends  tab/←→ back to a question  esc declines")},
+
+	// Two lines per question, kept together: an answer under someone else's
+	// question would misreport what the user said.
+	blocks := make([][]string, 0, len(q.form.Questions))
+	for i, question := range q.form.Questions {
+		// Every answer here is green: the list is only drawn for a complete
+		// form, so there is no unanswered question left for it to report.
+		answer := styleSuccess.Render("→ " + truncateLabel(questionAnswerSummary(q, i), max(width-8, 8)))
+		blocks = append(blocks, []string{
+			styleMuted.Render("  " + glyphs().bullet + " " + truncateLabel(question.Question, max(width-4, 8))),
+			"    " + answer,
+		})
 	}
+
+	// The list has a cursor on no row — it is what the page reports, not what it
+	// asks — so a form too tall for the page windows from its top.
+	start, end, hidden := windowQuestionBlocks(blocks, 0, budget)
+	out := make([]string, 0, budget)
+	for _, block := range blocks[start:end] {
+		out = append(out, block...)
+	}
+	// As on a windowed answer list, the marker outranks the tail of what is
+	// above it: a summary that does not say it is partial reads as the whole
+	// form, which on this page is exactly the wrong thing to believe.
+	if hidden > 0 && budget >= 2 {
+		if len(out) >= budget {
+			out = out[:budget-1]
+		}
+		out = append(out, styleMuted.Render(fmt.Sprintf("    … %d more", hidden)))
+	}
+	return out[:min(len(out), budget)]
 }
 
 // questionAnswerSummary renders one question's collected answer for the review

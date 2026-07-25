@@ -209,8 +209,8 @@ func TestQuestionModal_SubmitTabSendsAnswersAndMarksSkipped(t *testing.T) {
 	if got := m.QuestionTabForTesting(); got != 2 {
 		t.Fatalf("tab from the last question must land on Submit, tab = %d", got)
 	}
-	if view := m.ViewForTesting(); !strings.Contains(view, "skipped") {
-		t.Fatalf("the submit page must warn about unanswered questions:\n%s", view)
+	if view := ansi.Strip(m.ViewForTesting()); !strings.Contains(view, "You have not answered all questions") {
+		t.Fatalf("the review page must warn about unanswered questions:\n%s", view)
 	}
 
 	m = pressQuestion(t, m, key("enter"))
@@ -1017,6 +1017,286 @@ func TestQuestionModal_WindowFollowsCursor(t *testing.T) {
 	}
 	if got := lipgloss.Height(view); got > 24 {
 		t.Fatalf("view is %d lines, overflowing:\n%s", got, view)
+	}
+}
+
+// --- the review page ---
+
+// reviewForm is the mockup's form: three questions whose answers the review
+// page lists, the last one multi-select so the joining rule is exercised.
+func reviewForm() agent.AskUserForm {
+	return agent.AskUserForm{Questions: []agent.AskUserQuestion{
+		{Header: "Focus", Question: "Which part of Spettro would you like to work on next?",
+			Options: opts("ACP extensions", "TUI polish")},
+		{Header: "Layout", Question: "How should I present the layout for a new TUI panel?",
+			Options: opts("Stacked", "Split"), AllowCustom: true},
+		{Header: "Checks", Question: "Which checks should run before commits?",
+			Options: opts("Unit tests", "gofmt check", "go vet"), MultiSelect: true},
+	}}
+}
+
+// answerReviewForm fills every question and stops on the review page.
+func answerReviewForm(t *testing.T, m tui.Model) tui.Model {
+	t.Helper()
+	return pressQuestion(t, m,
+		key("enter"),             // Focus: ACP extensions
+		key("tab"), key("enter"), // Layout: Stacked
+		key("tab"), key(" "), key("down"), key(" "), // Checks: two ticked
+		key("down"), key("down"), key("enter"), // the multi-select Submit row
+		key("tab"))
+}
+
+// The review page lists what will be sent in the mockup's shape: the question,
+// then its answer under it. Multi-select answers are comma-joined in option
+// order, and the user's own words are shown verbatim.
+func TestQuestionModal_ReviewListsEveryAnswer(t *testing.T) {
+	m := answerReviewForm(t, openForm(t, reviewForm()))
+	view := plainForm(m)
+
+	if !strings.Contains(view, "Review your answers") {
+		t.Fatalf("expected the review page:\n%s", view)
+	}
+	for _, want := range []string{
+		"● Which part of Spettro would you like to work on next?",
+		"→ ACP extensions",
+		"● How should I present the layout for a new TUI panel?",
+		"→ Stacked",
+		"→ Unit tests, gofmt check",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("the review page is missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "You have not answered") {
+		t.Fatalf("a complete form has nothing to warn about:\n%s", view)
+	}
+
+	// The user's own words are the answer when they typed one.
+	custom := pressQuestion(t, openForm(t, reviewForm()),
+		key("enter"),                                           // Focus
+		key("tab"), key("3"), key("h"), key("i"), key("enter"), // Layout, typed
+		key("tab"), key(" "), key("down"), key("down"), key("down"), key("enter"), // Checks
+		key("tab"))
+	if got := plainForm(custom); !strings.Contains(got, "→ “hi”") {
+		t.Fatalf("a typed answer must be shown verbatim:\n%s", got)
+	}
+}
+
+// Settled 2026-07-25: on an incomplete form the warning *replaces* the answer
+// list. The page says one thing at a time; the tab strip is where the missing
+// answer is located.
+func TestQuestionModal_ReviewWarningReplacesTheList(t *testing.T) {
+	m := pressQuestion(t, openForm(t, reviewForm()), key("enter"), key("tab"), key("tab"), key("tab"))
+	view := plainForm(m)
+
+	if !strings.Contains(view, "⚠ You have not answered all questions") {
+		t.Fatalf("expected the incomplete warning:\n%s", view)
+	}
+	if strings.Contains(view, "→ ACP extensions") || strings.Contains(view, "● Which part of Spettro") {
+		t.Fatalf("the warning replaces the summary, it does not join it:\n%s", view)
+	}
+	// The actions are still there — an incomplete form can still be sent.
+	for _, want := range []string{"Ready to submit your answers?", "1. Submit answers", "2. Cancel"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("%q must stay on an incomplete review page:\n%s", want, view)
+		}
+	}
+}
+
+// The review page has to fit the input box like every other page of the form.
+// What it drops as the terminal shrinks is the two headings — the strip and the
+// rows already say what they said — never the rows themselves.
+func TestQuestionModal_ReviewFitsShortTerminals(t *testing.T) {
+	for _, size := range []struct{ w, h int }{{120, 40}, {100, 30}, {100, 24}, {80, 26}, {62, 24}} {
+		for _, complete := range []bool{false, true} {
+			m := openPreview(t, size.w, size.h, reviewForm())
+			if complete {
+				m = answerReviewForm(t, m)
+			} else {
+				m = pressQuestion(t, m, key("tab"), key("tab"), key("tab"))
+			}
+			m = m.RecalcLayoutForTesting()
+
+			block := plainForm(m)
+			if got := lipgloss.Width(m.ViewQuestionForTesting()); got > size.w-4 {
+				t.Fatalf("%dx%d: the review page is %d columns wide:\n%s", size.w, size.h, got, block)
+			}
+			if got := lipgloss.Height(m.ViewQuestionForTesting()); got > size.h {
+				t.Fatalf("%dx%d: the review page is %d lines:\n%s", size.w, size.h, got, block)
+			}
+			for _, want := range []string{"1. Submit answers", "2. Cancel"} {
+				if !strings.Contains(block, want) {
+					t.Fatalf("%dx%d: %q must survive at any size:\n%s", size.w, size.h, want, block)
+				}
+			}
+			if !complete && !strings.Contains(block, "You have not answered all questions") {
+				t.Fatalf("%dx%d: the warning must survive at any size:\n%s", size.w, size.h, block)
+			}
+		}
+	}
+}
+
+// Submit answers delivers the form; unanswered questions come back skipped, and
+// a multi-select question submitted empty comes back answered — the model has
+// to be able to tell those apart.
+func TestQuestionModal_ReviewSubmitDeliversSkipsAndEmptyAnswers(t *testing.T) {
+	form := agent.AskUserForm{Questions: []agent.AskUserQuestion{
+		{Header: "Focus", Question: "Where first?", Options: opts("Parser", "Renderer")},
+		{Header: "Extras", Question: "Anything else?", Options: opts("Docs", "Tests"), MultiSelect: true},
+		{Header: "Rollout", Question: "How to ship?", Options: opts("Now", "Later")},
+	}}
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(form)
+
+	m = pressQuestion(t, m,
+		key("enter"),                                       // Focus: Parser
+		key("tab"), key("down"), key("down"), key("enter"), // Extras: Submit with nothing ticked
+		key("tab"), key("tab"), // past Rollout to the review page
+		key("enter")) // Submit answers
+
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("expected the form to submit, got (%v, %v)", err, ok)
+	}
+	if len(answers) != 3 {
+		t.Fatalf("expected one answer per question, got %d", len(answers))
+	}
+	if answers[0].Skipped || len(answers[0].Selected) != 1 {
+		t.Fatalf("the answered question came back wrong: %+v", answers[0])
+	}
+	if answers[1].Skipped || len(answers[1].Selected) != 0 {
+		t.Fatalf("an empty multi-select answer is an answer, not a skip: %+v", answers[1])
+	}
+	if !answers[2].Skipped {
+		t.Fatalf("the untouched question must come back skipped: %+v", answers[2])
+	}
+}
+
+// Cancel and esc are the same thing: back to the question the user came from,
+// with every answer intact. Neither declines the form — that is esc from a
+// question page, where what would be refused is on screen.
+func TestQuestionModal_ReviewCancelReturnsToTheOriginatingTab(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(reviewForm())
+
+	// Answer the first question, then walk to the review page from the last.
+	m = pressQuestion(t, m, key("enter"), key("tab"), key("tab"), key("tab"))
+	if got := m.QuestionTabForTesting(); got != 3 {
+		t.Fatalf("expected the review page, tab = %d", got)
+	}
+
+	m = pressQuestion(t, m, key("down"), key("enter")) // Cancel
+	if got := m.QuestionTabForTesting(); got != 2 {
+		t.Fatalf("Cancel must return to the tab the user came from, tab = %d", got)
+	}
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("Cancel must not send the form")
+	}
+	if !m.QuestionAnsweredForTesting(0) {
+		t.Fatal("Cancel must not cost the user an answer")
+	}
+
+	m = pressQuestion(t, m, key("tab"), key("esc"))
+	if got := m.QuestionTabForTesting(); got != 2 {
+		t.Fatalf("esc on the review page must go back, not decline, tab = %d", got)
+	}
+	if !m.HasPendingAskUserForTesting() {
+		t.Fatal("esc on the review page must not decline the form")
+	}
+}
+
+// ctrl+d sends the form from wherever the user is, under the same rules the
+// review page applies.
+func TestQuestionModal_CtrlDSubmitsFromAnyTab(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(twoQuestions())
+
+	m = pressQuestion(t, m, key("enter"), key("ctrl+d"))
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("ctrl+d must submit from a question page, got (%v, %v)", err, ok)
+	}
+	if len(answers[0].Selected) != 1 || !answers[1].Skipped {
+		t.Fatalf("ctrl+d must apply the partial-submit rules: %+v", answers)
+	}
+	if m.HasPendingAskUserForTesting() {
+		t.Fatal("the form should be closed after ctrl+d")
+	}
+}
+
+// bubbles binds ctrl+d to delete-forward inside a textarea, so a field with the
+// keyboard keeps it: sending the form out from under someone mid-sentence is
+// the one thing that keypress must not do.
+func TestQuestionModal_CtrlDIsDeleteForwardInATextField(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(twoQuestions())
+
+	// The custom-answer field on the second question.
+	m = pressQuestion(t, m, key("tab"), key("3"), key("h"), key("i"), key("ctrl+d"))
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("ctrl+d must not submit while the custom-answer field has the keyboard")
+	}
+	if !m.QuestionEditingForTesting() {
+		t.Fatal("ctrl+d must leave the field open")
+	}
+
+	// The note field, which shares the same textarea.
+	m = pressQuestion(t, m, key("esc"), key("n"), key("h"), key("ctrl+d"))
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("ctrl+d must not submit while the note field has the keyboard")
+	}
+	if !m.QuestionNotesEditingForTesting() {
+		t.Fatal("ctrl+d must leave the note field open")
+	}
+}
+
+// The strip's glyphs and the review page read the same helper, so a tab can
+// never say a question is answered while the page counts it missing.
+func TestQuestionModal_StripAndReviewAgreeOnAnsweredState(t *testing.T) {
+	// Each case answers one more question than the last. A fresh form per case:
+	// the state is behind a pointer the model shares, so replaying prefixes on
+	// one model would not be the same thing at all.
+	prefixes := [][]tea.KeyPressMsg{
+		{},
+		{key("enter")},
+		{key("enter"), key("tab"), key("enter")},
+		{key("enter"), key("tab"), key("enter"),
+			key("tab"), key(" "), key("down"), key("down"), key("down"), key("enter")},
+	}
+	for want, keys := range prefixes {
+		m := pressQuestion(t, openForm(t, reviewForm()), keys...)
+
+		answered := 0
+		for i := range 3 {
+			if m.QuestionAnsweredForTesting(i) {
+				answered++
+			}
+		}
+		if answered != want {
+			t.Fatalf("case %d: %d questions read as answered", want, answered)
+		}
+		strip := ansi.Strip(m.QuestionStripForTesting())
+		if got := strings.Count(strip, "●"); got != answered {
+			t.Fatalf("the strip shows %d answered chips, the form counts %d: %q", got, answered, strip)
+		}
+
+		review := plainForm(pressQuestion(t, m, key("tab"), key("tab"), key("tab"), key("tab")))
+		warned := strings.Contains(review, "You have not answered")
+		if warned == (answered == 3) {
+			t.Fatalf("review page and strip disagree (answered=%d):\n%s", answered, review)
+		}
 	}
 }
 
