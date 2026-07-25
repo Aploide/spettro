@@ -108,6 +108,23 @@ type AskUserQuestionCallback func(context.Context, AskUserRequest) (string, erro
 // nothing usable. It never sees a substituted default.
 var errAskUserNoAnswer = errors.New("user did not answer")
 
+// ErrAskUserReplyInChat is returned by a consumer when the user took the form's
+// "chat about this" exit: they want to discuss the question rather than pick
+// from it. It is not a decline and not an answer — the run ends on it and the
+// user's next message arrives as an ordinary new turn.
+var ErrAskUserReplyInChat = errors.New("the user chose to reply in chat")
+
+const (
+	// askUserChatResult is what the model reads when the user takes the chat
+	// exit. It has to be unambiguous about what happens next: the turn is over,
+	// so anything the model would "do about it" here is never seen.
+	askUserChatResult = "The user chose to reply in chat rather than answer the form. " +
+		"Your turn ends here — do not act on a guess at what they meant; their reply arrives as a new turn."
+	// askUserChatStopReason closes the run. It is read by the user, not the
+	// model, so it says what the UI is now waiting for.
+	askUserChatStopReason = "Waiting for your reply in the chat below."
+)
+
 // askUserMultiSelectHint tells the user that a single-choice picker is standing
 // in for a multi-select question, and how to answer anyway.
 const askUserMultiSelectHint = "(more than one answer is allowed — pick one, or type several separated by commas)"
@@ -574,6 +591,13 @@ func (r *toolRuntime) runAskUser(ctx context.Context, rawArgs []byte) (string, e
 		return "", fmt.Errorf("ask-user: interactive callback not configured")
 	}
 	answers, err := r.askUser(ctx, form)
+	if errors.Is(err, ErrAskUserReplyInChat) {
+		// Settled 2026-07-25: the chat exit ends the turn rather than steering
+		// the live run. Stopping here is what makes the user's next message an
+		// ordinary new turn instead of an interjection into this one.
+		r.requestStop(askUserChatStopReason)
+		return askUserChatResult, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("ask-user: %w", err)
 	}

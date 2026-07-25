@@ -807,11 +807,18 @@ func (r *toolRuntime) runTaskStop(rawArgs []byte) (string, error) {
 	if reason == "" {
 		reason = "Stopped by task-stop request."
 	}
+	r.requestStop(reason)
+	return reason, nil
+}
+
+// requestStop ends the turn after the current batch of tool results is
+// appended. The reason becomes the run's closing line, so it is written for the
+// user rather than the model.
+func (r *toolRuntime) requestStop(reason string) {
 	r.mu.Lock()
 	r.stopRequested = true
 	r.stopReason = reason
 	r.mu.Unlock()
-	return reason, nil
 }
 
 func (r *toolRuntime) shouldStop() bool {

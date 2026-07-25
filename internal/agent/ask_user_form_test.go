@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -350,5 +351,42 @@ func TestAskSingleQuestion(t *testing.T) {
 		return []AskUserAnswer{{Skipped: true}}, nil
 	}, AskUserRequest{Question: "Switch model?", Options: []string{"Switch", "Abort"}, DefaultOption: "Switch"}); err == nil {
 		t.Fatal("a skipped question must not resolve to the recommended option")
+	}
+}
+
+// The chat escape hatch is neither an answer nor a decline: the tool succeeds
+// with a result that says the user wants to talk, and the run stops on it so
+// their next message arrives as an ordinary new turn (settled 2026-07-25 — no
+// steering, no keeping the run alive while they compose).
+func TestRunAskUser_ChatExitEndsTheTurn(t *testing.T) {
+	rt := &toolRuntime{askUser: func(context.Context, AskUserForm) ([]AskUserAnswer, error) {
+		return nil, ErrAskUserReplyInChat
+	}}
+	out, err := rt.runAskUser(context.Background(), []byte(`{"question":"Which database?","options":["Postgres","SQLite"]}`))
+	if err != nil {
+		t.Fatalf("the chat exit must not fail the tool call: %v", err)
+	}
+	if !strings.Contains(out, "reply in chat") {
+		t.Fatalf("the model must be told why there is no answer, got %q", out)
+	}
+	if !rt.shouldStop() {
+		t.Fatal("the chat exit must end the turn")
+	}
+	if got := rt.stopMessage(); got != askUserChatStopReason {
+		t.Fatalf("unexpected closing line: %q", got)
+	}
+}
+
+// A decline is still a failure: the model must not read "the user declined" as
+// an invitation to keep going without an answer.
+func TestRunAskUser_DeclineStillFailsTheCall(t *testing.T) {
+	rt := &toolRuntime{askUser: func(context.Context, AskUserForm) ([]AskUserAnswer, error) {
+		return nil, errors.New("user declined to answer")
+	}}
+	if _, err := rt.runAskUser(context.Background(), []byte(`{"question":"Which database?","options":["Postgres"]}`)); err == nil {
+		t.Fatal("a decline must fail the tool call")
+	}
+	if rt.shouldStop() {
+		t.Fatal("a decline must not end the turn — only the chat exit does")
 	}
 }
