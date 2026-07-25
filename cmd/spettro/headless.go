@@ -271,10 +271,13 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 							return agent.ShellApprovalDeny, nil
 						}
 					},
-					AskUser: func(sctx context.Context, ar agent.AskUserRequest) (string, error) {
+					// The remote event carries one question (task 08 versions it
+					// into a questions[] array), so the form is walked through
+					// the shared adapter.
+					AskUser: agent.QuestionByQuestion(func(sctx context.Context, ar agent.AskUserRequest) (string, error) {
 						qid := fmt.Sprintf("q-%d", msgCount)
 						return server.RequestAskUser(sctx, qid, ar.Question, ar.Options, ar.AllowFreeResponse)
-					},
+					}),
 				}
 				ag.Spec.Permission = cfg.Permission
 

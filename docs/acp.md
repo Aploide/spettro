@@ -161,6 +161,10 @@ free-text answer. It is available to the agents you converse with directly
 (`plan`, `coding`, `ask`); worker and sub-agent runs cannot interrupt you with
 a question.
 
+The model can ask up to four related questions as one form. The transports below
+carry a single question, so a form is put to your client one question at a time,
+in order; declining any of them declines the whole form.
+
 Core ACP has no question primitive, so Spettro offers the same payload over
 three transports and takes the best one the client supports.
 

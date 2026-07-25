@@ -161,7 +161,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 				}
 				return turn.requestShellApproval(sctx, ar)
 			},
-			AskUser: turn.askUser,
+			AskUser: agent.QuestionByQuestion(turn.askUser),
 		}
 
 		result, err := ag.Run(ctx, task)

@@ -255,7 +255,10 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				return agent.ShellApprovalDeny, ctx.Err()
 			}
 		},
-		AskUser: func(ctx context.Context, req agent.AskUserRequest) (string, error) {
+		// The inline picker answers one question at a time, so the form is
+		// walked question by question through the shared adapter (tasks 03-07
+		// replace the picker with a form modal that renders the whole form).
+		AskUser: agent.QuestionByQuestion(func(ctx context.Context, req agent.AskUserRequest) (string, error) {
 			respCh := make(chan askUserResponse, 1)
 			select {
 			case askUserCh <- askUserRequestMsg{request: req, response: respCh}:
@@ -268,7 +271,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}
-		},
+		}),
 	}
 
 	return m, tea.Batch(

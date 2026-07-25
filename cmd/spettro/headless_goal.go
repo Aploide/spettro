@@ -180,9 +180,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 				// Auto-approve in headless goal mode (yolo)
 				return agent.ShellApprovalAllowOnce, nil
 			},
-			AskUser: func(ctx context.Context, req agent.AskUserRequest) (string, error) {
+			AskUser: func(ctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
 				// In headless mode, we can't ask the user, so return error
-				return "", fmt.Errorf("cannot ask user in headless mode")
+				return nil, fmt.Errorf("cannot ask user in headless mode")
 			},
 		}
 

@@ -112,6 +112,23 @@ interrupt the user mid-orchestration with no context about who is asking.
 Granting it to another agent takes both halves: `"ask-user"` in
 `allowed_tools` and `"ask"` in `permitted_actions`.
 
+One call carries a **form**, not a single question: an ordered list of up to 4
+questions, each with a short `header` (the tab label, unique within the form and
+the key the answer comes back under), the question line, up to 8 options
+(`label`, optional `description` and `preview`, `is_recommended`), a
+`multi_select` flag and an `allow_custom` free-text entry. Both caps are hard —
+an over-cap form is rejected with an error the model can correct, never
+truncated. The older flat payload (`question` + `options: [...]` +
+`default_option` + `allow_free_response`) is still accepted and normalised into
+a one-question form, so custom agent files that use it keep working.
+
+Answers come back one line per question, `<header>: <answer>`: multi-select
+answers comma-joined, the user's own words quoted verbatim, and a question the
+user skipped explicitly marked as unanswered so the agent cannot read silence as
+agreement with its recommendation. Surfaces that can only put one question at a
+time to the user (the TUI picker, the ACP transports, remote/Telegram) walk the
+form through one shared adapter rather than each reimplementing the loop.
+
 ## Validation rules
 
 Spettro validates at startup:

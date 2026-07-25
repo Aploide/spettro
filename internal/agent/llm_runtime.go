@@ -68,16 +68,6 @@ type ShellApprovalRequest struct {
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
 
-type AskUserRequest struct {
-	Question          string
-	Options           []string
-	Context           string
-	DefaultOption     string
-	AllowFreeResponse bool
-}
-
-type AskUserCallback func(context.Context, AskUserRequest) (string, error)
-
 func (c LLMCoder) Execute(ctx context.Context, plan string, level config.PermissionLevel, approved bool) (RunResult, error) {
 	if strings.TrimSpace(plan) == "" {
 		return RunResult{}, fmt.Errorf("empty approved plan")
@@ -350,7 +340,7 @@ func (r *toolRuntime) offerFallback(ctx context.Context, failed provider.ModelRe
 		return provider.ModelRef{}, false
 	}
 	switchOpt := fmt.Sprintf("Switch to %s", next)
-	answer, err := r.askUser(ctx, AskUserRequest{
+	answer, err := AskSingleQuestion(ctx, r.askUser, AskUserRequest{
 		Question:      fmt.Sprintf("Model %s is unavailable (%s). Switch to %s for the rest of this run? Note: switching models invalidates the prompt cache.", failed, kind, next),
 		Options:       []string{switchOpt, "Abort"},
 		Context:       truncate(cause.Error(), 300),

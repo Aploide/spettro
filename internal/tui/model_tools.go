@@ -365,14 +365,28 @@ func formatToolLabel(name, argsJSON string) string {
 		}
 		return "Deleted tasks"
 	case "ask-user":
+		// The form shape (questions[]) and the legacy flat question both reach
+		// this label; a multi-question form is summarised by its first question.
 		var args struct {
-			Question string `json:"question"`
+			Question  string `json:"question"`
+			Questions []struct {
+				Question string `json:"question"`
+			} `json:"questions"`
 		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Question) != "" {
-			q := truncateLabel(args.Question, 50)
-			return fmt.Sprintf("Asked user %q", q)
+		if json.Unmarshal([]byte(argsJSON), &args) != nil {
+			return "Asked user"
 		}
-		return "Asked user"
+		first := strings.TrimSpace(args.Question)
+		if len(args.Questions) > 0 {
+			first = strings.TrimSpace(args.Questions[0].Question)
+		}
+		if first == "" {
+			return "Asked user"
+		}
+		if n := len(args.Questions); n > 1 {
+			return fmt.Sprintf("Asked user %q (+%d more)", truncateLabel(first, 40), n-1)
+		}
+		return fmt.Sprintf("Asked user %q", truncateLabel(first, 50))
 	case "enter-plan-mode":
 		return "Entered plan mode"
 	case "exit-plan-mode":
