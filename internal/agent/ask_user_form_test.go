@@ -220,6 +220,24 @@ func TestFormatAskUserAnswers_ExplicitEmptyAnswerIsNotASkip(t *testing.T) {
 	}
 }
 
+// A note annotates an answer; it is not one. A question carrying only a note
+// still reads as unanswered, so the model cannot mistake "here is some context"
+// for a decision — but the words are passed on, and a form annotated and
+// nothing more is not the empty interaction that fails the call.
+func TestFormatAskUserAnswers_NoteAloneIsNotAnAnswer(t *testing.T) {
+	form := AskUserForm{Questions: []AskUserQuestion{{Header: "Deadline", Question: "By when?"}}}
+	out, err := formatAskUserAnswers(form, []AskUserAnswer{{Header: "Deadline", Notes: "depends on the demo", Skipped: true}})
+	if err != nil {
+		t.Fatalf("a note is something the user said, so the call is not empty: %v", err)
+	}
+	if !strings.Contains(out, askUserSkippedMarker) {
+		t.Fatalf("a question with only a note must still read as unanswered: %q", out)
+	}
+	if !strings.Contains(out, "depends on the demo") {
+		t.Fatalf("the note must reach the model: %q", out)
+	}
+}
+
 // A form nobody answered is an error, not a result the model can mistake for
 // agreement with its recommendation.
 func TestFormatAskUserAnswers_NothingAnsweredIsAnError(t *testing.T) {

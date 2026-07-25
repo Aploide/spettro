@@ -150,8 +150,71 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 		headLines = append(headLines, styleMuted.Render("  select all that apply"))
 	}
 
-	list := m.renderQuestionAnswerList(question, width, budget-len(headLines)-1)
-	return [][]string{headLines, list, {styleMuted.Render("  " + m.questionHint())}}
+	body := m.renderQuestionBody(question, width, budget-len(headLines)-1)
+	return [][]string{headLines, body, {styleMuted.Render("  " + m.questionHint())}}
+}
+
+// renderQuestionBody is the answer list plus everything that sits with it: the
+// focused option's preview pane, the notes affordance, and the note field while
+// it is open. budget covers all of them together, and the list is what gives up
+// room to the rest — the pane is context for a choice, not the choice.
+func (m Model) renderQuestionBody(question agent.AskUserQuestion, width, budget int) []string {
+	q := m.pendingQuestion
+
+	var field []string
+	if q.notesEditing {
+		// The field the user is typing in outranks the rows behind it, so it is
+		// taken off the budget first and clipped to it — a page too short for
+		// both shows the note being written, not the list it annotates.
+		field = m.questionNoteField(width)
+		field = field[:min(len(field), max(budget, 0))]
+		budget -= len(field)
+	}
+	if budget < 1 {
+		return field
+	}
+	preview := m.focusedPreview(question)
+
+	// Side by side while both columns are worth their width. The notes line
+	// sits under the pane, where the mockup puts it.
+	labels, full := m.questionListWidth(question)
+	if listW, paneW := questionPreviewLayout(width, labels, full); preview != "" && paneW > 0 {
+		// Whether the notes line is drawn is a question of height, not width, so
+		// it can be reserved before the columns are settled.
+		notesH := len(m.questionNotesRows(paneW, budget))
+		if column := m.questionPreviewPane(preview, paneW, budget-2*notesH); len(column) > 0 {
+			// The pane may have shrunk to the sketch inside it. The list keeps
+			// its column anyway — it is sized from the question, so moving the
+			// cursor between options with differently sized previews does not
+			// reflow every row.
+			for _, line := range m.questionNotesRows(blockWidth(column), budget) {
+				column = append(column, "", line)
+			}
+			list := m.renderQuestionAnswerList(question, listW, budget)
+			return append(questionColumns(list, column, listW, budget), field...)
+		}
+	}
+
+	notes := m.questionNotesRows(width, budget)
+
+	// One column: the pane goes under the list, taking the lines the list does
+	// not need and up to a third of the page when it needs them all. It is never
+	// reflowed to fit — wrapping a preformatted sketch destroys the thing being
+	// previewed — so below the height where a couple of its lines and a couple
+	// of options both fit, it is dropped instead.
+	list := m.renderQuestionAnswerList(question, width, max(budget-len(notes), 1))
+	var stacked []string
+	if preview != "" {
+		h := min(max(budget-len(notes)-len(list), budget/3), questionPreviewStackedMaxLines)
+		if h >= questionPreviewMinLines && budget-len(notes)-h >= questionPreviewStackedMinListLines {
+			if stacked = indentLines(m.questionPreviewPane(preview, width-2, h), 2); len(stacked) > 0 {
+				list = m.renderQuestionAnswerList(question, width, max(budget-len(notes)-len(stacked), 1))
+			}
+		}
+	}
+	out := append(list, stacked...)
+	out = append(out, notes...)
+	return append(out, field...)
 }
 
 // questionRowIndent is the column the labels start at, and the column their
@@ -460,13 +523,15 @@ func (m Model) questionHint() string {
 	switch {
 	case q.editing:
 		return "enter sends  esc goes back"
+	case q.notesEditing:
+		return "enter attaches the note  esc keeps what you typed"
 	case q.singlePage():
-		return "↑↓ or 1-9 pick  enter answers  esc declines"
+		return "↑↓ or 1-9 pick  enter answers  n notes  esc declines"
 	default:
 		if question, ok := q.question(); ok && question.MultiSelect {
-			return "space or 1-9 toggle  " + questionSubmitRow + " records  tab/←→ switch tab  esc declines"
+			return "space or 1-9 toggle  " + questionSubmitRow + " records  n notes  tab/←→ switch  esc declines"
 		}
-		return "↑↓ or 1-9 pick  enter records  tab/←→ switch tab  esc declines"
+		return "↑↓ or 1-9 pick  enter records  n notes  tab/←→ switch  esc declines"
 	}
 }
 

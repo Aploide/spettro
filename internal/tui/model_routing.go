@@ -741,7 +741,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if modal := m.activeModal(); modal != modalNone {
 			inTextEntry := (modal == modalConnect && (m.connectStep == 1 || m.connectStep == 5)) ||
 				(modal == modalOnboarding && m.onboarding.step == 1) ||
-				(modal == modalQuestion && m.pendingQuestion.editing) ||
+				(modal == modalQuestion && m.pendingQuestion.textEntry()) ||
 				modal == modalSetup
 			if !inTextEntry {
 				return m, tea.Batch(cmds...)

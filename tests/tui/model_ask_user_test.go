@@ -3,8 +3,10 @@ package tui_test
 import (
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -1015,6 +1017,317 @@ func TestQuestionModal_WindowFollowsCursor(t *testing.T) {
 	}
 	if got := lipgloss.Height(view); got > 24 {
 		t.Fatalf("view is %d lines, overflowing:\n%s", got, view)
+	}
+}
+
+// --- the preview pane ---
+
+// previewSketch is the kind of thing a preview carries: a preformatted layout
+// drawing, whose alignment is the whole point of showing it.
+const previewSketch = "┌────────────┬────────────┐\n" +
+	"│ conversat. │ details    │\n" +
+	"│ ▸ item 1   │ name: foo  │\n" +
+	"└────────────┴────────────┘"
+
+// previewForm is a mixed question: the first option carries a preview, the
+// second does not, so the pane has to appear and collapse as the cursor moves.
+func previewForm(preview string) agent.AskUserForm {
+	return oneQuestion("How should the panel sit?", false,
+		agent.AskUserOption{Label: "Split vertical", Preview: preview},
+		agent.AskUserOption{Label: "Stacked"},
+	)
+}
+
+func openPreview(t *testing.T, w, h int, form agent.AskUserForm) tui.Model {
+	t.Helper()
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(w, h)
+	m.SetPendingAskUserFormForTesting(form)
+	return m.RecalcLayoutForTesting()
+}
+
+// linesWith returns the rendered lines holding sub, which is how the tests
+// below tell a pane *beside* the list from one under it.
+func linesWith(view, sub string) []string {
+	var out []string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, sub) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// The pane sits beside the option list, bordered like the mention picker: the
+// preview is context for the choice, so it has to be readable while the choice
+// is being made.
+func TestQuestionModal_PreviewRendersBesideTheOptionList(t *testing.T) {
+	m := openPreview(t, 110, 40, previewForm(previewSketch))
+	view := plainForm(m)
+
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected a bordered preview pane:\n%s", view)
+	}
+	for _, line := range strings.Split(previewSketch, "\n") {
+		if !strings.Contains(view, line) {
+			t.Fatalf("the preview must be shown verbatim, %q is missing:\n%s", line, view)
+		}
+	}
+	// Beside, not under: the focused row and the pane share a terminal line.
+	rows := linesWith(view, "Split vertical")
+	if len(rows) != 1 || !strings.ContainsAny(rows[0], "╭│") {
+		t.Fatalf("the pane must render on the same lines as the option list:\n%s", view)
+	}
+}
+
+// A question where only some options carry a preview must not leave a hole
+// where the pane was: it collapses and the list takes the width back.
+func TestQuestionModal_PreviewCollapsesForAnOptionWithout(t *testing.T) {
+	m := openPreview(t, 110, 40, previewForm(previewSketch))
+	withPane := plainForm(m)
+
+	m = pressQuestion(t, m, key("down"))
+	collapsed := plainForm(m)
+	if strings.Contains(collapsed, "╭") || strings.Contains(collapsed, "conversat.") {
+		t.Fatalf("the pane must collapse when the focused option has no preview:\n%s", collapsed)
+	}
+	// The rule above the chat exit spans the answer list, so its length is what
+	// the list reclaimed.
+	narrow, wide := linesWith(withPane, "──────")[0], linesWith(collapsed, "──────")[0]
+	if len(strings.TrimSpace(wide)) <= len(strings.TrimSpace(narrow)) {
+		t.Fatalf("the list must reflow to the full width once the pane is gone:\n%s", collapsed)
+	}
+}
+
+// Preview text is preformatted. Wrapping it would destroy the alignment it
+// exists to show, so it is clipped with a marker and capped in height with a
+// footer that says how much was left out.
+func TestQuestionModal_PreviewIsClippedAndCappedNeverWrapped(t *testing.T) {
+	long := strings.Repeat("x", 400)
+	preview := long
+	for i := range 60 {
+		preview += "\n" + strconv.Itoa(i)
+	}
+	m := openPreview(t, 110, 40, previewForm(preview))
+	view := plainForm(m)
+
+	if strings.Contains(view, strings.Repeat("x", 200)) {
+		t.Fatalf("a long preview line must be clipped, not shown whole:\n%s", view)
+	}
+	clipped := linesWith(view, "xxx")
+	if len(clipped) != 1 {
+		t.Fatalf("the long line must stay on one line, got %d:\n%s", len(clipped), view)
+	}
+	if !strings.Contains(clipped[0], "›") {
+		t.Fatalf("a clipped line must say so: %q", clipped[0])
+	}
+	if !strings.Contains(view, "more lines") {
+		t.Fatalf("a preview taller than the pane needs a truncation footer:\n%s", view)
+	}
+}
+
+// The preview is model output: markdown in it is text, not formatting, and
+// escape sequences in it never reach the terminal.
+func TestQuestionModal_PreviewIsNeitherRenderedNorTrusted(t *testing.T) {
+	m := openPreview(t, 110, 40, previewForm("# heading **bold**\n\x1b[31mred\x1b[0m\x1b[2J\x07 tail"))
+
+	raw := m.ViewQuestionForTesting()
+	for _, seq := range []string{"\x1b[2J", "\x07", "\x1b[31m"} {
+		if strings.Contains(raw, seq) {
+			t.Fatalf("preview escape sequence %q reached the terminal:\n%q", seq, raw)
+		}
+	}
+	view := plainForm(m)
+	if !strings.Contains(view, "# heading **bold**") {
+		t.Fatalf("preview markdown must be shown as text, not rendered:\n%s", view)
+	}
+	if !strings.Contains(view, "red") || !strings.Contains(view, "tail") {
+		t.Fatalf("stripping must keep the text it was wrapped around:\n%s", view)
+	}
+}
+
+// Narrow terminals drop the side-by-side layout rather than squeezing both
+// columns, and drop the pane entirely once even the stacked one costs the
+// answers too much.
+func TestQuestionModal_NarrowTerminalStacksThenHidesThePreview(t *testing.T) {
+	stacked := plainForm(openPreview(t, 62, 40, previewForm(previewSketch)))
+	if !strings.Contains(stacked, "╭") {
+		t.Fatalf("expected the pane to survive at 62 columns:\n%s", stacked)
+	}
+	if rows := linesWith(stacked, "Split vertical"); strings.Contains(rows[0], "│") {
+		t.Fatalf("at 62 columns the pane belongs under the list, not beside it:\n%s", stacked)
+	}
+	if !strings.Contains(stacked, "│ conversat. │ details    │") {
+		t.Fatalf("the stacked pane must keep the preview's own alignment:\n%s", stacked)
+	}
+
+	tiny := plainForm(openPreview(t, 46, 24, previewForm(previewSketch)))
+	if strings.Contains(tiny, "╭") {
+		t.Fatalf("a terminal this small must drop the pane:\n%s", tiny)
+	}
+	for _, want := range []string{"Split vertical", "Stacked", "Chat about this"} {
+		if !strings.Contains(tiny, want) {
+			t.Fatalf("dropping the pane must leave the option list intact, %q missing:\n%s", want, tiny)
+		}
+	}
+}
+
+// The pane is part of the block the layout reserved room for, so it obeys the
+// same bounds as the rest of it — at every width where the columns split
+// differently, and with the note field open on top of it.
+func TestQuestionModal_PreviewStaysInsideTheInputBox(t *testing.T) {
+	form := previewForm(previewSketch + "\n" + strings.Repeat("wide "+strings.Repeat("z", 40)+"\n", 30))
+	for _, size := range []struct{ w, h int }{{200, 60}, {120, 40}, {100, 30}, {80, 26}, {66, 24}, {55, 30}, {46, 24}} {
+		for _, keys := range [][]tea.KeyPressMsg{{}, {key("down")}, {key("n"), key("a")}} {
+			m := pressQuestion(t, openPreview(t, size.w, size.h, form), keys...).RecalcLayoutForTesting()
+			if got := lipgloss.Width(m.ViewQuestionForTesting()); got > size.w-4 {
+				t.Fatalf("%dx%d: the block is %d columns wide inside a %d-column box:\n%s",
+					size.w, size.h, got, size.w-4, plainForm(m))
+			}
+			if got := lipgloss.Height(m.ViewForTesting()); got > size.h {
+				t.Fatalf("%dx%d: view is %d lines:\n%s", size.w, size.h, got, plainForm(m))
+			}
+		}
+	}
+}
+
+// The pane redraws on every keystroke, so the sanitising pass is memoised: the
+// same focused option hands back the same lines rather than re-reading a
+// preview that may be thousands of lines long.
+func TestQuestionModal_PreviewIsCachedUntilTheCursorMoves(t *testing.T) {
+	m := openPreview(t, 110, 40, previewForm(strings.Repeat("sketch line\n", 4000)))
+	_ = m.ViewQuestionForTesting()
+	first := m.QuestionPreviewCacheForTesting()
+	if len(first) == 0 {
+		t.Fatal("expected the preview to be cached after a render")
+	}
+	_ = m.ViewQuestionForTesting()
+	if second := m.QuestionPreviewCacheForTesting(); &second[0] != &first[0] {
+		t.Fatal("a second render of the same option must reuse the cached preview")
+	}
+
+	start := time.Now()
+	for range 40 {
+		m = pressQuestion(t, m, key("down"), key("up"))
+		_ = m.ViewQuestionForTesting()
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("cursor movement over a full-height preview took %s", elapsed)
+	}
+}
+
+// --- notes ---
+
+// `n` annotates the question, not the option under the cursor, and the note
+// rides along with whatever answer the question comes back with.
+func TestQuestionModal_NoteAttachesToTheQuestion(t *testing.T) {
+	m, handle := openMultiSelect(t, multiSelect())
+
+	m = pressQuestion(t, m, key("n"))
+	if !m.QuestionNotesEditingForTesting() {
+		t.Fatal("n must open the note field")
+	}
+	m = pressQuestion(t, m, key("h"), key("i"), key("enter"))
+	if m.QuestionNotesEditingForTesting() {
+		t.Fatal("enter must close the note field")
+	}
+	if got := m.QuestionNoteForTesting(0); got != "hi" {
+		t.Fatalf("note not kept, got %q", got)
+	}
+	if view := plainForm(m); !strings.Contains(view, "Notes: “hi”") {
+		t.Fatalf("the hint must show that a note exists:\n%s", view)
+	}
+
+	// Tick the first option, walk down past the free-text row to Submit, record.
+	m = pressQuestion(t, m, key(" "), key("down"), key("down"), key("down"), key("down"), key("enter"))
+	m = pressQuestion(t, m, key("tab"), key("enter"))
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("expected the form to submit, got (%v, %v)", err, ok)
+	}
+	if len(answers) != 1 || answers[0].Notes != "hi" {
+		t.Fatalf("the note must ride along with the answer: %+v", answers)
+	}
+}
+
+// esc closes the field keeping what was typed: a note is a scratch annotation,
+// so there is nothing to confirm and nothing to lose by backing out of it.
+func TestQuestionModal_EscKeepsTheNote(t *testing.T) {
+	m := openForm(t, twoQuestions())
+	m = pressQuestion(t, m, key("n"), key("h"), key("i"), key("esc"))
+	if m.QuestionNotesEditingForTesting() {
+		t.Fatal("esc must close the note field")
+	}
+	if got := m.QuestionNoteForTesting(0); got != "hi" {
+		t.Fatalf("esc must keep the text, got %q", got)
+	}
+	if !m.HasPendingAskUserForTesting() {
+		t.Fatal("esc out of the note field must not decline the form")
+	}
+}
+
+// A note is an annotation, not a decision: a question carrying only one is
+// still unanswered, on the tab strip and in what the model is told.
+func TestQuestionModal_NoteAloneDoesNotAnswerTheQuestion(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(twoQuestions())
+
+	m = pressQuestion(t, m, key("n"), key("h"), key("i"), key("enter"))
+	if m.QuestionAnsweredForTesting(0) {
+		t.Fatal("a note must not mark the question answered")
+	}
+	if strip := ansi.Strip(m.QuestionStripForTesting()); !strings.Contains(strip, "○ Focus area") {
+		t.Fatalf("the tab must still read as unanswered: %q", strip)
+	}
+
+	m = pressQuestion(t, m, key("tab"), key("tab"), key("enter"))
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("expected the form to submit, got (%v, %v)", err, ok)
+	}
+	if !answers[0].Skipped || answers[0].Notes != "hi" {
+		t.Fatalf("the question must come back skipped, note attached: %+v", answers[0])
+	}
+}
+
+// The note field comes off the form's line budget rather than being added to
+// it: the block's height is what the layout reserved for the input box, so a
+// field that grew the page would push the box off the bottom of the terminal.
+func TestQuestionModal_NoteFieldStaysInsideTheBlockBudget(t *testing.T) {
+	for _, size := range []struct{ w, h int }{{110, 40}, {80, 26}, {62, 24}, {46, 24}} {
+		m := openPreview(t, size.w, size.h, previewForm(previewSketch))
+		m = pressQuestion(t, m, key("n"), key("a"))
+		m = m.RecalcLayoutForTesting()
+
+		if got := lipgloss.Height(m.ViewForTesting()); got > size.h {
+			t.Fatalf("%dx%d: the note field pushed the view to %d lines:\n%s",
+				size.w, size.h, got, m.ViewForTesting())
+		}
+		if !strings.Contains(plainForm(m), "Notes:") {
+			t.Fatalf("%dx%d: the field being typed in must stay on screen:\n%s",
+				size.w, size.h, plainForm(m))
+		}
+	}
+}
+
+// A single-question form submits on its answer. A note is not one, so writing
+// one must not send the form out from under the user.
+func TestQuestionModal_NoteDoesNotSubmitASinglePageForm(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(100, 40)
+	m.SetThinkingForTesting(true)
+	m, handle := m.DeliverAskUserForTesting(oneQuestion("Which option?", false, opts("Option A", "Option B")...))
+
+	m = pressQuestion(t, m, key("n"), key("h"), key("enter"))
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("writing a note must not submit the form")
+	}
+	if !m.HasPendingAskUserForTesting() {
+		t.Fatal("the form must stay open after a note")
 	}
 }
 

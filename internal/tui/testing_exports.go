@@ -347,6 +347,27 @@ func (m Model) QuestionEditingForTesting() bool {
 	return m.pendingQuestion != nil && m.pendingQuestion.editing
 }
 
+func (m Model) QuestionNoteForTesting(i int) string {
+	if m.pendingQuestion == nil || i < 0 || i >= len(m.pendingQuestion.notes) {
+		return ""
+	}
+	return m.pendingQuestion.notes[i]
+}
+
+func (m Model) QuestionNotesEditingForTesting() bool {
+	return m.pendingQuestion != nil && m.pendingQuestion.notesEditing
+}
+
+// QuestionPreviewCacheForTesting is the memoised preview of the focused option.
+// Tests compare the *slice* across renders: a cache miss would hand back a
+// freshly allocated one, which is what makes a re-sanitised preview visible.
+func (m Model) QuestionPreviewCacheForTesting() []string {
+	if m.pendingQuestion == nil {
+		return nil
+	}
+	return m.pendingQuestion.previewLines
+}
+
 func (m Model) QuestionStripForTesting() string {
 	if m.pendingQuestion == nil {
 		return ""

@@ -321,7 +321,10 @@ func alignAskUserAnswers(form AskUserForm, answers []AskUserAnswer) []AskUserAns
 		out[i].Selected = selected
 		out[i].Custom = strings.TrimSpace(out[i].Custom)
 		out[i].Notes = strings.TrimSpace(out[i].Notes)
-		if len(selected) > 0 || out[i].Custom != "" || out[i].Notes != "" {
+		// A note is an annotation on an answer, not an answer: a question the
+		// user only wrote a note against is still unanswered, and the model has
+		// to read it that way rather than as a decision it can act on.
+		if len(selected) > 0 || out[i].Custom != "" {
 			out[i].Skipped = false
 		}
 	}
@@ -353,6 +356,10 @@ func formatAskUserAnswers(form AskUserForm, answers []AskUserAnswer) (string, er
 			answered = true
 		}
 		if note := strings.TrimSpace(a.Notes); note != "" {
+			// The note rides along with whatever the question came back as,
+			// including "(not answered)": it does not turn a skip into a choice,
+			// but a user who took the trouble to write one did interact, so the
+			// call is not the empty one errAskUserNoAnswer describes.
 			text += " — note: " + strconv.Quote(note)
 			answered = true
 		}

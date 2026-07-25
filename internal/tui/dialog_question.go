@@ -44,15 +44,26 @@ type questionForm struct {
 	cursor   []int          // per-question row cursor
 	selected []map[int]bool // per-question chosen option indices
 	custom   []string       // per-question free text
-	notes    []string       // per-question annotation (task 06)
+	notes    []string       // per-question annotation
 	// committed marks a multi-select question the user finished through its
 	// Submit row. It is what separates "I chose none of these" from "I never
 	// looked at this question": both hold an empty selection.
 	committed []bool
 	// editing is set while the active question's free-text entry has the
 	// keyboard; the textarea holds the text until it is committed.
-	editing  bool
-	response chan askUserResponse
+	editing bool
+	// notesEditing is set while the note field has it instead. The two are
+	// separate because a note is not an answer: committing one must not answer
+	// the question, and a form that submits on its only answer must not submit
+	// on a note.
+	notesEditing bool
+	// previewKey/previewLines memoise the focused option's sanitised preview.
+	// The pane is re-rendered on every keystroke, and the sanitising pass is
+	// O(whole preview) rather than O(what fits) — an option carrying a long
+	// sketch would otherwise be paid for on each cursor move.
+	previewKey   string
+	previewLines []string
+	response     chan askUserResponse
 }
 
 // newQuestionForm arms the per-question state and focuses each question's
@@ -151,6 +162,11 @@ func (q *questionForm) question() (agent.AskUserQuestion, bool) {
 	}
 	return q.form.Questions[q.tab], true
 }
+
+// textEntry reports whether the keyboard belongs to a text field — the
+// free-text answer or a note. Pasted text is forwarded only then; anywhere else
+// on the form it would land in a list of options.
+func (q *questionForm) textEntry() bool { return q.editing || q.notesEditing }
 
 // onSubmitTab reports whether the trailing ✔ Submit chip is active.
 func (q *questionForm) onSubmitTab() bool { return q.tab >= len(q.form.Questions) }
@@ -254,6 +270,9 @@ func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if q.editing {
 		return m.updateQuestionCustom(msg)
 	}
+	if q.notesEditing {
+		return m.updateQuestionNote(msg)
+	}
 	switch msg.String() {
 	case "left", "shift+tab":
 		if q.tab > 0 {
@@ -303,6 +322,11 @@ func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if question.MultiSelect {
 			return m.toggleQuestionRow(rows, q.cursor[q.tab]), nil
 		}
+	case "n":
+		// A note annotates the *question*, not the row the cursor happens to be
+		// on, so it is reachable from anywhere on the page. It is not a digit
+		// hotkey and not a selection: opening the field records nothing.
+		return m.openQuestionNote(), nil
 	default:
 		// The mockups number every row, so the digits have to work: 1-9 jumps
 		// to that row and picks it in one keypress. A tenth row (eight options,
@@ -455,6 +479,47 @@ func (m Model) updateQuestionCustom(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		q.editing = false
 		m.ta.Reset()
 		m.showBanner("choose a row or press esc again to decline", "info")
+		return m, nil
+	default:
+		var taCmd tea.Cmd
+		m.ta, taCmd = m.ta.Update(msg)
+		return m, taCmd
+	}
+}
+
+// openQuestionNote hands the keyboard to the note field of the active
+// question, seeded with whatever note it already carries so `n` edits rather
+// than restarts.
+func (m Model) openQuestionNote() Model {
+	q := m.pendingQuestion
+	if _, ok := q.question(); !ok {
+		return m
+	}
+	q.notesEditing = true
+	m.ta.Reset()
+	m.ta.SetValue(q.notes[q.tab])
+	m.showBanner("type your note", "info")
+	return m
+}
+
+// updateQuestionNote handles the note field. Both keys that close it keep the
+// text — a note is a scratch annotation, and there is nothing to confirm — so
+// enter and esc differ only in what they say afterwards. Neither answers the
+// question: a form the user only annotated is still unanswered, and a
+// single-page form does not submit on it.
+func (m Model) updateQuestionNote(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	q := m.pendingQuestion
+	switch msg.String() {
+	case "enter", "esc":
+		note := strings.TrimSpace(m.ta.Value())
+		q.notes[q.tab] = note
+		q.notesEditing = false
+		m.ta.Reset()
+		if note == "" {
+			m.showBanner("note cleared", "info")
+			return m, nil
+		}
+		m.showBanner("note attached", "info")
 		return m, nil
 	default:
 		var taCmd tea.Cmd
@@ -651,6 +716,10 @@ type questionGlyphSet struct {
 	warn        string
 	// rule is one cell of the horizontal separator above the chat escape hatch.
 	rule string
+	// clip marks a preview line cut off at the pane's right edge. Preview text
+	// is preformatted, so it is clipped rather than wrapped and the cut has to
+	// be visible — otherwise a truncated sketch reads as the whole one.
+	clip string
 }
 
 var (
@@ -658,10 +727,10 @@ var (
 		// ○/● rather than ☐/☒: the boxed glyphs draw as hairlines in most
 		// terminal fonts, and the filled circle is what the rest of the TUI
 		// already uses for a checked row (see the storage dialog).
-		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠", rule: "─",
+		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠", rule: "─", clip: "›",
 	}
 	questionGlyphsASCII = questionGlyphSet{
-		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!", rule: "-",
+		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!", rule: "-", clip: ">",
 	}
 )
 
