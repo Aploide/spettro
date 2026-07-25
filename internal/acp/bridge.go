@@ -28,6 +28,11 @@ type bridge struct {
 
 	mu       sync.Mutex
 	sessions map[string]*acpSession
+
+	// logins holds the in-flight Spettro Subscription device-flow login, if
+	// any. It is connection-scoped rather than session-scoped: signing in is
+	// an account-level act that every session on this bridge observes.
+	logins loginRegistry
 }
 
 // acpSession is the per-conversation state. Mutable fields are guarded by the
@@ -91,6 +96,16 @@ func newBridge(opts Options) *bridge {
 func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		// Advertise the `_spettro/*` extension surface (see ext.go) so a
+		// native client can detect it at handshake and fall back to
+		// "configure this in the TUI" against an older CLI instead of
+		// calling methods that would come back method-not-found.
+		Meta: map[string]any{
+			"spettro.app/extensions": map[string]any{
+				"version": extensionsVersion,
+				"methods": extensionMethods,
+			},
+		},
 		AgentInfo: &acpsdk.Implementation{
 			Name:    "spettro",
 			Title:   new("Spettro"),
