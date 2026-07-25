@@ -1611,6 +1611,61 @@ func TestQuestionModal_NoteDoesNotSubmitASinglePageForm(t *testing.T) {
 	}
 }
 
+// --- the remote and Telegram surfaces ---
+
+// The remote event carries the whole form, versioned, with the flat v1 fields
+// describing the question those surfaces are being asked to answer right now.
+func TestQuestionModal_RemoteEventCarriesTheWholeForm(t *testing.T) {
+	m := openForm(t, reviewForm())
+
+	payload := m.QuestionRemotePayloadForTesting()
+	if payload["version"] != agent.RemoteAskUserVersion {
+		t.Fatalf("the event must be versioned: %v", payload["version"])
+	}
+	questions, _ := payload["questions"].([]map[string]any)
+	if len(questions) != 3 {
+		t.Fatalf("expected every question in the event, got %d", len(questions))
+	}
+	if payload["active"] != 0 {
+		t.Fatalf("active = %v, want the question on screen", payload["active"])
+	}
+
+	// Those surfaces answer one question at a time, so the flat fields follow
+	// the user through the form.
+	m = pressQuestion(t, m, key("tab"))
+	payload = m.QuestionRemotePayloadForTesting()
+	if payload["active"] != 1 {
+		t.Fatalf("active = %v, want the tab the user moved to", payload["active"])
+	}
+	if q, _ := payload["question"].(string); !strings.Contains(q, "layout for a new TUI panel") {
+		t.Fatalf("the flat question must describe the active tab: %q", q)
+	}
+
+	// The review page is a page of the TUI, not a question anyone can be asked.
+	m = pressQuestion(t, m, key("tab"), key("tab"))
+	if got := m.QuestionRemotePayloadForTesting(); got != nil {
+		t.Fatalf("nothing to publish from the review page, got %+v", got)
+	}
+}
+
+// A form is one interaction in the chat too: the relay says which question it
+// is showing rather than sending three unexplained prompts.
+func TestQuestionModal_TelegramHeadingNumbersTheForm(t *testing.T) {
+	one := tui.TelegramQuestionHeadingForTesting(map[string]any{"count": 1, "active": 0})
+	if one != "❓ Spettro is asking:" {
+		t.Fatalf("a single question needs no numbering: %q", one)
+	}
+	many := tui.TelegramQuestionHeadingForTesting(map[string]any{"count": 3, "active": 1})
+	if many != "❓ Spettro is asking (question 2 of 3):" {
+		t.Fatalf("heading = %q", many)
+	}
+	// A v1 event has neither field and must still read correctly.
+	legacy := tui.TelegramQuestionHeadingForTesting(map[string]any{})
+	if legacy != "❓ Spettro is asking:" {
+		t.Fatalf("legacy heading = %q", legacy)
+	}
+}
+
 // --- the queue ---
 
 // A second form arriving while the user is answering the first must not

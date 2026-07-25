@@ -515,10 +515,9 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			}
 			return turn.requestShellApproval(sctx, ar)
 		},
-		// One question per client round-trip: the ACP transports carry a single
-		// question today, so the form is walked through the shared adapter
-		// (task 08 sends the whole form).
-		AskUser: agent.QuestionByQuestion(turn.askUser),
+		// The whole form when the client can take one, question by question when
+		// it cannot. See question_form.go for the ladder.
+		AskUser: turn.askForm,
 	}
 
 	result, runErr := ag.Run(runCtx, task)

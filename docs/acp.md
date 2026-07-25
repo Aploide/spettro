@@ -161,19 +161,42 @@ free-text answer. It is available to the agents you converse with directly
 (`plan`, `coding`, `ask`); worker and sub-agent runs cannot interrupt you with
 a question.
 
-The model can ask up to four related questions as one form. The transports below
-carry a single question, so a form is put to your client one question at a time,
-in order; declining any of them declines the whole form.
-
-Core ACP has no question primitive, so Spettro offers the same payload over
-three transports and takes the best one the client supports.
+The model asks a *form*: up to four related questions put to you together. Core
+ACP has no question primitive, so Spettro offers the same payload over several
+transports and takes the best one the client supports — the first two carry the
+whole form, the rest carry one question at a time.
 
 | Client supports | Transport | What the user gets |
 |---|---|---|
-| `_spettro/question/ask` (mirrored back at `initialize`) | `CallExtension` with the payload below | Full fidelity: descriptions, recommended marker, free text |
-| `_meta` on permission requests | `session/request_permission` with the payload in `_meta` and `isRecommended` on the matching option | Native picker plus the recommended marker; free text via the answer `_meta` |
-| `elicitation.form` capability | `session/elicitation/create` (form mode) | Free-text answers, including option-less questions |
-| none of the above | plain `session/request_permission` | Working multiple-choice prompt |
+| `_spettro/question/ask` (mirrored back at `initialize`) | `CallExtension` with the form payload below | The whole form in one interaction: descriptions, previews, recommended marker, multi-select, free text |
+| `elicitation.form` capability (multi-question forms) | `elicitation/create` (form mode) with a schema property per question | Every question in one native form; `enum` picks, `array` multi-select, free text |
+| `_meta` on permission requests | `session/request_permission` per question, with the payload in `_meta` and `isRecommended` on the matching option | Native picker plus the recommended marker; free text via the answer `_meta` |
+| `elicitation.form` capability (single question) | `elicitation/create` (form mode) | Free-text answers, including option-less questions |
+| none of the above | plain `session/request_permission` per question | Working multiple-choice prompt |
+
+Elicitation requests are sent in the spec's own shape: `mode: "form"`, the
+`sessionId` scope the request belongs to, `requestedSchema`, and the question
+payload below in `_meta`. A client that rejects one — no such method, or a body
+it cannot read — is treated as a client without elicitation, and the form is
+walked instead of failing the turn.
+
+Each question is one property, `q-0`…, keyed by position: `enum` for a
+single-select, `array` of `enum` for a multi-select, a plain string for a
+question with no options. Nothing in the elicitation schema is both a picker and
+a text box, so a question that has options *and* allows free text is sent as
+**two** properties — the picker, plus `q-N-custom` for the user's own words. Fill
+in either. If both are filled the answer carries both, since a choice and the
+words written beside it are two things the user said; free text that names one of
+the options resolves to that option instead. Option descriptions and the
+recommended marker are folded into each property's `description`, which is the
+only place an `enum` leaves for them.
+
+A form that has to be walked question by question is asked in order, and
+declining any question declines the whole form: half a form delivered as if you
+had skipped the rest would misreport what you said. Option previews have no
+representation outside the extension transport and are dropped there; option
+descriptions are folded into the option name (`label — description`) so a bare
+picker still shows what separates the choices.
 
 If none of them can reach you — an option-less question against a client with
 no elicitation support — the model gets an error telling it to proceed on its
@@ -187,7 +210,7 @@ Spettro advertises its extension surface in the `initialize` response
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "methods": ["_spettro/account/status", "..."],
   "clientMethods": ["_spettro/question/ask"]
 }
@@ -198,7 +221,7 @@ Nothing is called on the client until it mirrors the ones it implements back
 in its own `initialize` request `_meta`, using the same key and shape:
 
 ```json
-{ "_meta": { "spettro.app/extensions": { "version": 2, "methods": ["_spettro/question/ask"] } } }
+{ "_meta": { "spettro.app/extensions": { "version": 3, "methods": ["_spettro/question/ask"] } } }
 ```
 
 Client capabilities from `initialize` (`elicitation.form` in particular) are
@@ -207,11 +230,14 @@ recorded per connection and gate the transports above.
 ### Question payload
 
 Sent as the `_spettro/question/ask` params, and mirrored into
-`_meta["spettro.app/question"]` on the permission request:
+`_meta["spettro.app/question"]` on the permission request. Version 2 carries the
+whole form in `questions[]` and keeps every version 1 field alongside it,
+describing the form's **first** question — so a client written against version 1
+still renders something answerable:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "sessionId": "…",
   "question": "Which database?",
   "context": "both are already provisioned",
@@ -219,9 +245,34 @@ Sent as the `_spettro/question/ask` params, and mirrored into
     { "id": "opt-0", "label": "Postgres" },
     { "id": "opt-1", "label": "SQLite", "isRecommended": true }
   ],
-  "allowCustomInput": true
+  "allowCustomInput": true,
+  "questions": [
+    {
+      "id": "q-0",
+      "header": "Database",
+      "question": "Which database?",
+      "options": [
+        { "id": "opt-0", "label": "Postgres", "description": "already provisioned" },
+        { "id": "opt-1", "label": "SQLite", "isRecommended": true, "preview": "file: ./spettro.db" }
+      ],
+      "multiSelect": false,
+      "allowCustomInput": true
+    },
+    {
+      "id": "q-1",
+      "header": "Checks",
+      "question": "Which checks run before commits?",
+      "options": [{ "id": "opt-0", "label": "go vet" }, { "id": "opt-1", "label": "gofmt" }],
+      "multiSelect": true,
+      "allowCustomInput": false
+    }
+  ]
 }
 ```
+
+A per-question walk (`session/request_permission`, or elicitation for a single
+question) sends the version 1 shape with no `questions[]`, one question at a
+time. The `version` field is what tells the two apart.
 
 On the permission transport each `PermissionOption` carries
 `_meta["spettro.app/isRecommended"]` on the recommended answer, and when
@@ -240,6 +291,35 @@ Every transport resolves to the same tagged shape — as the
 { "kind": "declined" }
 { "kind": "cancelled" }
 ```
+
+A form answered through `_spettro/question/ask` comes back as one answer per
+question instead, each naming the question it belongs to (`questionId`, or
+`header`) and carrying `optionIds` for a multi-select answer:
+
+```json
+{
+  "answers": [
+    { "questionId": "q-0", "kind": "option", "optionId": "opt-1" },
+    { "questionId": "q-1", "kind": "option", "optionIds": ["opt-0", "opt-1"], "notes": "vet is the slow one" },
+    { "questionId": "q-2", "kind": "custom", "text": "neither — use the existing MySQL box" }
+  ]
+}
+```
+
+A question with no answer in the array — or one answered `declined` — is
+reported to the model as unanswered rather than defaulted; `kind` at the top
+level of the response (rather than inside `answers`) declines the whole form.
+A client that answers the flat question with the bare tagged shape is read as
+having answered the form's first question, and the rest come back unanswered.
+
+The elicitation form uses one property per question, keyed by the question id:
+`enum` of option labels for a single-select question, `array` with
+`items.enum` for a multi-select one, and a plain string where the question
+takes free text (including a question that offers options *and* allows free
+text, since an `enum` would forbid the text it explicitly allows — a reply
+naming an option is resolved back to it). Nothing is marked `required`: a form
+you answer in part is delivered in part, and the questions you left alone are
+reported as unanswered.
 
 An option resolves to that option's label; custom text reaches the model
 verbatim, never as the synthetic option's label. A client that answers a

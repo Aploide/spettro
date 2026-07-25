@@ -347,6 +347,22 @@ func (m Model) QuestionEditingForTesting() bool {
 	return m.pendingQuestion != nil && m.pendingQuestion.editing
 }
 
+// QuestionRemotePayloadForTesting is the `ask_user` event body the modal would
+// publish for the form on screen, or nil when there is nothing to publish.
+func (m Model) QuestionRemotePayloadForTesting() map[string]any {
+	payload, ok := m.questionRemotePayload()
+	if !ok {
+		return nil
+	}
+	return payload
+}
+
+// TelegramQuestionHeadingForTesting is the first line of a forwarded ask-user
+// prompt for a given event body.
+func TelegramQuestionHeadingForTesting(data map[string]any) string {
+	return telegramQuestionHeading(data)
+}
+
 // QuestionReviewCursorForTesting is the cursor on the review page: 0 sends the
 // form, 1 goes back.
 func (m Model) QuestionReviewCursorForTesting() int {

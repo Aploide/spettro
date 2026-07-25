@@ -25,16 +25,20 @@ import (
 //     (plus `isRecommended` on the matching option's `_meta`, and a synthetic
 //     final option when free text is allowed) — a client that ignores `_meta`
 //     still renders a working multiple-choice prompt, which is transport 3;
-//  3. `session/elicitation/create` in form mode — the spec's own free-text
-//     mechanism, used when the question has no options (or the user picked the
-//     free-text option) and the client advertised the capability.
+//  3. `elicitation/create` in form mode — the spec's own free-text mechanism,
+//     used when the question has no options (or the user picked the free-text
+//     option) and the client advertised the capability.
 //
 // When none of them can reach the user, the model gets a guidance error. It is
 // never handed the agent's own default as if a human had chosen it.
 const (
-	// questionPayloadVersion versions the wire shape. Task 08 extends it with
-	// a questions[] array; a client reads this before assuming a layout.
+	// questionPayloadVersion versions the wire shape a client reads before
+	// assuming a layout. 1 is the flat single question below; version 2 adds the
+	// `questions[]` array carrying a whole form and is sent by the form
+	// transports in question_form.go, which keep every field of version 1
+	// alongside it.
 	questionPayloadVersion = 1
+	formPayloadVersion     = 2
 
 	// questionMetaKey carries the outbound question payload on a permission
 	// request; questionAnswerMetaKey carries the structured answer back on the
@@ -107,7 +111,7 @@ type questionAnswer struct {
 type questionTransport interface {
 	CallExtension(ctx context.Context, method string, params any) (json.RawMessage, error)
 	RequestPermission(ctx context.Context, params acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error)
-	UnstableCreateElicitation(ctx context.Context, params acpsdk.UnstableCreateElicitationRequest) (acpsdk.UnstableCreateElicitationResponse, error)
+	CreateElicitation(ctx context.Context, params elicitationRequest) (acpsdk.UnstableCreateElicitationResponse, error)
 }
 
 // transport returns the client request surface, or nil when the bridge has no
@@ -121,7 +125,7 @@ func (b *bridge) transport() questionTransport {
 	if b.conn == nil {
 		return nil
 	}
-	return b.conn
+	return connTransport{b.conn}
 }
 
 // clientHasExtension reports whether the client mirrored the `_spettro/*`
@@ -333,20 +337,24 @@ func (t *turnState) askViaPermission(ctx context.Context, tr questionTransport, 
 func askViaElicitation(ctx context.Context, tr questionTransport, payload questionPayload) (string, error) {
 	title := "Answer"
 	description := payload.Context
-	req := acpsdk.NewUnstableCreateElicitationRequestForm(acpsdk.UnstableElicitationSchema{
+	req := newElicitationForm(acpsdk.SessionId(payload.SessionId), payload.Question, acpsdk.UnstableElicitationSchema{
 		Title:      &title,
 		Type:       "object",
 		Properties: map[string]any{elicitationAnswerField: map[string]any{"type": "string", "description": payload.Question}},
 		Required:   []string{elicitationAnswerField},
 	})
-	req.Form.Message = payload.Question
 	if description != "" {
-		req.Form.RequestedSchema.Description = &description
+		req.RequestedSchema.Description = &description
 	}
-	req.Form.Meta = map[string]any{questionMetaKey: payload}
+	req.Meta = map[string]any{questionMetaKey: payload}
 
-	resp, err := tr.UnstableCreateElicitation(ctx, req)
+	resp, err := tr.CreateElicitation(ctx, req)
 	if err != nil {
+		// A client that cannot take the request never put the question to
+		// anyone; the model is owed the guidance error, not a protocol one.
+		if elicitationRejected(err) {
+			return "", errQuestionUnreachable
+		}
 		return "", err
 	}
 	if resp.Accept == nil {
@@ -377,9 +385,15 @@ func answerFromMeta(meta map[string]any) (questionAnswer, bool) {
 	return questionAnswer{}, false
 }
 
+// JSON-RPC error codes the question flow reacts to rather than propagates.
+const (
+	codeMethodNotFound = -32601
+	codeInvalidParams  = -32602
+)
+
 // isMethodNotFound reports whether an error is the JSON-RPC method-not-found
 // response, i.e. the client advertised a method it does not actually serve.
 func isMethodNotFound(err error) bool {
 	var reqErr *acpsdk.RequestError
-	return errors.As(err, &reqErr) && reqErr.Code == -32601
+	return errors.As(err, &reqErr) && reqErr.Code == codeMethodNotFound
 }

@@ -73,7 +73,7 @@ When messaging the bot:
 | --- | --- |
 | Plain text (no leading `/`) | Treated as a new prompt for the active agent. |
 | `/plan ...`, `/approve`, `/models ...`, etc. | Treated as a Spettro slash command (subject to the usual "not while thinking" rules). |
-| Plain text **while Spettro is awaiting an ask-user answer** | Routed as the answer to the question currently on screen. Spettro confirms in the TUI. When the agent asked several questions at once, the next unanswered one is sent to the chat and the form is submitted after the last. |
+| Plain text **while Spettro is awaiting an ask-user answer** | Routed as the answer to the question currently on screen. Spettro confirms in the TUI. When the agent asked several questions at once, the chat is told which one it is looking at (`question 2 of 3`), the next unanswered one is sent after each reply, and the form is submitted after the last. |
 | `/cancel` (or `/stop`) | Interrupt the currently running agent (equivalent to pressing Esc). |
 | `/whoami` | Print the bot's identity and allowlist size. |
 | `/help`, `/start` | Print the bot-side cheat sheet. |
@@ -93,7 +93,7 @@ the chat stays useful rather than noisy:
 | Progress comments (via the `comment` tool) | `💬` |
 | Banners with level `warn` / `error` | `⚠️` |
 | Agent errors | `⚠️ error` |
-| Ask-user dialog | `❓` + options + “reply with your answer” hint |
+| Ask-user dialog | `❓` + options + “reply with your answer” hint; a multi-question form is announced as `question N of M` |
 | Shell-approval request | `🔐` + the command (handle inside the TUI) |
 | Successful commits | `🟢 commit` |
 | Generated image (`grok-image`) | `sendPhoto` with the prompt as caption (`🖼 …`); falls back to `sendDocument` when the file is over Telegram's 10 MB photo cap. |

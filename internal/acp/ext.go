@@ -55,7 +55,12 @@ const (
 // probing each method.
 //
 // v2: `_spettro/question/ask` (structured agent questions).
-const extensionsVersion = 2
+// v3: that payload carries `questions[]` — a whole multi-question form — and
+// accepts an `answers[]` response. Version 1 of the payload is still emitted
+// alongside it for the form's first question, so a v2 client is not broken by
+// the change; the version number is what lets a client know it can answer the
+// rest.
+const extensionsVersion = 3
 
 // metaExtensionsKey is the `_meta` key carrying the extension surface at
 // handshake, in both directions: the agent advertises what it serves, and a

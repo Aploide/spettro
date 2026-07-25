@@ -656,37 +656,29 @@ func (m Model) presentQuestion(msg askUserRequestMsg) Model {
 	return m
 }
 
-// publishQuestionRemote pushes the question the user is being asked to the
-// remote/Telegram surfaces, which can only carry one at a time. Task 08 gives
-// them the whole form; until then they see the active question, and answering
-// it moves them to the next one that still needs an answer.
+// publishQuestionRemote pushes the form the user is being asked to the remote
+// and Telegram surfaces. The whole form goes out — `questions[]`, versioned —
+// while the flat fields describe the question those surfaces are being asked to
+// answer right now: they take one reply at a time, so the event is republished
+// as the user moves through the form.
 func (m Model) publishQuestionRemote() {
+	if payload, ok := m.questionRemotePayload(); ok {
+		m.publishRemote("ask_user", payload)
+	}
+}
+
+// questionRemotePayload is the event body for the form on screen, or false when
+// there is nothing to publish — no form, or the user on the review page, which
+// is a page of the TUI rather than a question anyone can be asked.
+func (m Model) questionRemotePayload() (map[string]any, bool) {
 	q := m.pendingQuestion
 	if q == nil {
-		return
+		return nil, false
 	}
-	question, ok := q.question()
-	if !ok {
-		return
+	if _, ok := q.question(); !ok {
+		return nil, false
 	}
-	options := make([]string, 0, len(question.Options))
-	for _, opt := range question.Options {
-		options = append(options, opt.Label)
-	}
-	def := ""
-	for _, opt := range question.Options {
-		if opt.IsRecommended {
-			def = opt.Label
-			break
-		}
-	}
-	m.publishRemote("ask_user", map[string]any{
-		"question":            question.Question,
-		"options":             options,
-		"context":             q.form.Context,
-		"default":             def,
-		"allow_free_response": question.AllowCustom || len(question.Options) == 0,
-	})
+	return agent.RemoteAskUserPayload(q.form, q.tab), true
 }
 
 // advanceQuestionQueue clears the form just answered and promotes the next one

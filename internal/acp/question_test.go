@@ -18,7 +18,7 @@ import (
 type fakeQuestionTransport struct {
 	extensionCalls   []json.RawMessage
 	permissionCalls  []acpsdk.RequestPermissionRequest
-	elicitationCalls []acpsdk.UnstableCreateElicitationRequest
+	elicitationCalls []elicitationRequest
 
 	extensionResp    any
 	extensionErr     error
@@ -49,7 +49,7 @@ func (f *fakeQuestionTransport) RequestPermission(_ context.Context, params acps
 	return f.permissionResp, f.permissionErr
 }
 
-func (f *fakeQuestionTransport) UnstableCreateElicitation(_ context.Context, params acpsdk.UnstableCreateElicitationRequest) (acpsdk.UnstableCreateElicitationResponse, error) {
+func (f *fakeQuestionTransport) CreateElicitation(_ context.Context, params elicitationRequest) (acpsdk.UnstableCreateElicitationResponse, error) {
 	f.elicitationCalls = append(f.elicitationCalls, params)
 	f.elicitationCount++
 	return f.elicitationResp, f.elicitationErr
@@ -326,8 +326,8 @@ func TestAskUser_OptionlessUsesElicitation(t *testing.T) {
 	if len(tr.permissionCalls) != 0 {
 		t.Fatal("an option-less question must not become a permission request")
 	}
-	form := tr.elicitationCalls[0].Form
-	if form == nil || form.Mode != "form" {
+	form := tr.elicitationCalls[0]
+	if form.Mode != elicitationModeForm {
 		t.Fatalf("expected a form elicitation, got %+v", tr.elicitationCalls[0])
 	}
 	if _, ok := form.RequestedSchema.Properties[elicitationAnswerField]; !ok {
