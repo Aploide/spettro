@@ -368,7 +368,13 @@ type Model struct {
 	cancelAgent     context.CancelFunc
 	pendingAuth     *shellApprovalRequestMsg
 	pendingQuestion *askUserRequestMsg
-	approvalCursor  int
+	// questionQueue holds questions that arrived while another one was on
+	// screen — parallel tool calls, or a second agent question raised while
+	// the user was still typing an answer. They are asked in arrival order as
+	// each is answered; none is ever dropped, because every one of them has a
+	// tool call blocked on its reply.
+	questionQueue  []askUserRequestMsg
+	approvalCursor int
 	// approvalDiffExpanded toggles (ctrl+o) the full diff in a file-write /
 	// file-edit approval prompt; collapsed shows the first lines only.
 	approvalDiffExpanded bool

@@ -86,10 +86,13 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   to the client as an ACP `plan` update in dependency order, so editors with
   plan support render the agent's live todo list; tasks gated by incomplete
   dependencies are suffixed with "(blocked)".
-- **Permissions** — shell command approvals and agent questions are routed
-  through `session/request_permission`, so the editor shows its native
-  approval prompt. With `/permission yolo` set in Spettro's config, shell
-  commands run without asking.
+- **Permissions** — shell command approvals are routed through
+  `session/request_permission`, so the editor shows its native approval
+  prompt. With `/permission yolo` set in Spettro's config, shell commands run
+  without asking.
+- **Agent questions** — when the agent calls `ask-user` the question is put to
+  the client as a structured payload; see [Agent questions](#agent-questions)
+  below for the transports, the payload, and the answer shape.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
   `/thinking`, `/goal`, `/memory`, `/compact`, and `/clear` are advertised to
   the client (`available_commands_update`). Config commands resolve in one
@@ -149,3 +152,95 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   session picker stays current without any explicit save action. MCP
   servers provided by the editor in `session/new` are still ignored;
   Spettro's own MCP configuration applies as usual.
+
+## Agent questions
+
+The `ask-user` tool lets the model put a decision back to you: a question,
+selectable options, one of them marked as *recommended*, and optionally a
+free-text answer. It is available to the agents you converse with directly
+(`plan`, `coding`, `ask`); worker and sub-agent runs cannot interrupt you with
+a question.
+
+Core ACP has no question primitive, so Spettro offers the same payload over
+three transports and takes the best one the client supports.
+
+| Client supports | Transport | What the user gets |
+|---|---|---|
+| `_spettro/question/ask` (mirrored back at `initialize`) | `CallExtension` with the payload below | Full fidelity: descriptions, recommended marker, free text |
+| `_meta` on permission requests | `session/request_permission` with the payload in `_meta` and `isRecommended` on the matching option | Native picker plus the recommended marker; free text via the answer `_meta` |
+| `elicitation.form` capability | `session/elicitation/create` (form mode) | Free-text answers, including option-less questions |
+| none of the above | plain `session/request_permission` | Working multiple-choice prompt |
+
+If none of them can reach you — an option-less question against a client with
+no elicitation support — the model gets an error telling it to proceed on its
+own judgment or offer explicit options. The agent's own `default_option` is
+never returned as if a human had chosen it.
+
+### Handshake
+
+Spettro advertises its extension surface in the `initialize` response
+`_meta["spettro.app/extensions"]`:
+
+```json
+{
+  "version": 2,
+  "methods": ["_spettro/account/status", "..."],
+  "clientMethods": ["_spettro/question/ask"]
+}
+```
+
+`methods` are served by the agent; `clientMethods` are served by the *client*.
+Nothing is called on the client until it mirrors the ones it implements back
+in its own `initialize` request `_meta`, using the same key and shape:
+
+```json
+{ "_meta": { "spettro.app/extensions": { "version": 2, "methods": ["_spettro/question/ask"] } } }
+```
+
+Client capabilities from `initialize` (`elicitation.form` in particular) are
+recorded per connection and gate the transports above.
+
+### Question payload
+
+Sent as the `_spettro/question/ask` params, and mirrored into
+`_meta["spettro.app/question"]` on the permission request:
+
+```json
+{
+  "version": 1,
+  "sessionId": "…",
+  "question": "Which database?",
+  "context": "both are already provisioned",
+  "options": [
+    { "id": "opt-0", "label": "Postgres" },
+    { "id": "opt-1", "label": "SQLite", "isRecommended": true }
+  ],
+  "allowCustomInput": true
+}
+```
+
+On the permission transport each `PermissionOption` carries
+`_meta["spettro.app/isRecommended"]` on the recommended answer, and when
+`allowCustomInput` is set a synthetic final option (`optionId: "custom"`,
+flagged with `_meta["spettro.app/isCustomInput"]`) offers free text.
+
+### Answer
+
+Every transport resolves to the same tagged shape — as the
+`_spettro/question/ask` result, or in
+`_meta["spettro.app/questionAnswer"]` on the permission response:
+
+```json
+{ "kind": "option", "optionId": "opt-1" }
+{ "kind": "custom", "text": "neither — use the existing MySQL box" }
+{ "kind": "declined" }
+{ "kind": "cancelled" }
+```
+
+An option resolves to that option's label; custom text reaches the model
+verbatim, never as the synthetic option's label. A client that answers a
+`_meta`-annotated request without any `_meta` of its own is read from the
+selected `optionId` instead; selecting the synthetic `custom` option then
+escalates to an elicitation to collect the text, or fails if the client cannot
+collect it. `declined`, `cancelled`, and a cancelled permission outcome all
+tell the model that nobody answered.

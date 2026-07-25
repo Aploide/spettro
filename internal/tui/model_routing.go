@@ -36,6 +36,7 @@ func (m *Model) resetRunState() {
 	m.currentTool = nil
 	m.pendingAuth = nil
 	m.pendingQuestion = nil
+	m.discardQuestionQueue(fmt.Errorf("run ended"))
 	m.questionCursor = 0
 	m.questionFreeform = false
 	m.parallelAgents = nil
@@ -479,25 +480,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		}
 	case askUserRequestMsg:
-		if m.thinking {
-			m.pendingQuestion = &msg
-			m.questionCursor = askUserDefaultCursor(msg.request)
-			m.questionFreeform = len(msg.request.Options) == 0
-			m.ta.Reset()
-			m.showBanner("agent is waiting for your answer", "info")
-			m.notifyIfUnfocused("Agent is waiting for your answer")
-			m.publishRemote("ask_user", map[string]any{
-				"question":            msg.request.Question,
-				"options":             msg.request.Options,
-				"context":             msg.request.Context,
-				"default":             msg.request.DefaultOption,
-				"allow_free_response": msg.request.AllowFreeResponse,
-			})
-			if m.askUserCh != nil {
-				cmds = append(cmds, waitForAskUser(m.askUserCh))
-			}
-			m.refreshViewport()
+		switch {
+		case !m.thinking:
+			// The run ended or was cancelled while this question was in
+			// flight. Answer it so the tool call unblocks instead of hanging
+			// on a reply that can never come.
+			answerAskUser(msg, askUserResponse{err: fmt.Errorf("run ended before the question was answered")})
+		case m.pendingQuestion == nil:
+			m = m.presentQuestion(msg)
+		default:
+			// One question at a time owns the input, but the others are only
+			// waiting their turn: dropping one would strand its tool call.
+			m.questionQueue = append(m.questionQueue, msg)
+			m.showBanner(fmt.Sprintf("another question arrived — %d waiting after this one", len(m.questionQueue)), "info")
 		}
+		// Keep draining regardless of what happened above, so a question that
+		// arrives next is still seen.
+		if m.askUserCh != nil {
+			cmds = append(cmds, waitForAskUser(m.askUserCh))
+		}
+		m.refreshViewport()
 	case pasteImageMsg:
 		if msg.err != nil {
 			m.clipboardCounter-- // keep numbering gap-free on failure

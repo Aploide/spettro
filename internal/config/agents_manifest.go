@@ -236,6 +236,14 @@ var toolOutputSpec = ToolSpec{ID: "tool-output", Name: "Tool Output", Descriptio
 
 var visionToolViewImage = ToolSpec{ID: "view-image", Name: "View Image", Description: "Attach an image file from the workspace so the model can see it (vision models only).", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
 
+// askUserToolSpec is shared between the default manifest and the v10 migration
+// that retrofits the grant into existing manifests. It is the only way an
+// agent can put a question to the human driving it, so it is granted to the
+// agents a person talks to directly (primary/orchestrator roles) and withheld
+// from workers and subagents, whose runs inherit the parent's callback and
+// would interrupt the user mid-orchestration with no context about who asked.
+var askUserToolSpec = ToolSpec{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"}
+
 func DefaultAgentManifest() AgentManifest {
 	m := AgentManifest{
 		// Version starts below the latest migration on purpose: the
@@ -286,7 +294,7 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "job-kill", Name: "Job Kill", Description: "Terminate a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
 			toolOutputSpec,
 			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"},
+			askUserToolSpec,
 			{ID: "enter-plan-mode", Name: "Enter Plan Mode", Description: "Switch execution into planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
 			{ID: "exit-plan-mode", Name: "Exit Plan Mode", Description: "Exit planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
 			{ID: "web-search", Name: "Web Search", Description: "Search the web and return result links.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"search", "network"}, RiskLevel: "medium"},
@@ -306,9 +314,9 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "skill-list", Name: "Skill List", Description: "List installed Agent Skills with name + description.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 		},
 		Agents: []AgentSpec{
-			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
-			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
+			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
+			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
 			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
 			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "todo-write", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
 			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
@@ -530,7 +538,52 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 9
 		changed = true
 	}
+	if m.Version < 10 {
+		// v10 makes ask-user reachable: the tool existed but no shipped agent
+		// could actually call it (the allow-list grant was missing, and the
+		// "ask" action family was missing from the agents that had it), so a
+		// model had no way to put a question to the user at all.
+		m.ensureAskUserTool()
+		m.Version = 10
+		changed = true
+	}
 	return changed
+}
+
+// ensureAskUserTool retrofits the ask-user grant into a manifest that predates
+// v10. The definition is added when absent, and the grant goes to
+// primary/orchestrator agents only — the ones a human converses with directly.
+// Workers and subagents are left alone: their runs inherit the parent's
+// callback, so a question from a nested worker would interrupt the user
+// mid-orchestration with no context about who is asking.
+//
+// Reachability needs both halves: the tool ID on the agent's allow-list AND
+// the "ask" action family on its permitted_actions, since resolveToolPolicies
+// drops an allow-listed tool whose actions the agent does not hold.
+func (m *AgentManifest) ensureAskUserTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == askUserToolSpec.ID {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, askUserToolSpec)
+	}
+	for i := range m.Agents {
+		if !m.Agents[i].IsPrimaryRole() {
+			continue
+		}
+		if !slices.Contains(m.Agents[i].AllowedTools, askUserToolSpec.ID) {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, askUserToolSpec.ID)
+		}
+		// An empty permitted_actions list means "no action filtering at all";
+		// appending to it would narrow the agent to the ask family alone.
+		if len(m.Agents[i].PermittedActions) > 0 && !slices.Contains(m.Agents[i].PermittedActions, "ask") {
+			m.Agents[i].PermittedActions = append(m.Agents[i].PermittedActions, "ask")
+		}
+	}
 }
 
 // ensureToolOutputTool retrofits the tool-output spool reader into a manifest

@@ -23,11 +23,9 @@ func (m *Model) stopAgent() {
 		}
 	}
 	if m.pendingQuestion != nil {
-		select {
-		case m.pendingQuestion.response <- askUserResponse{err: fmt.Errorf("cancelled")}:
-		default:
-		}
+		answerAskUser(*m.pendingQuestion, askUserResponse{err: fmt.Errorf("cancelled")})
 	}
+	m.discardQuestionQueue(fmt.Errorf("cancelled"))
 	m.thinking = false
 	m.toolCh = nil
 	m.streamCh = nil

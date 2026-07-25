@@ -41,6 +41,11 @@ const (
 	extModelsList          = "_spettro/models/list"
 	extModelsFavorite      = "_spettro/models/favorite"
 
+	// Agent -> client requests. Unlike the methods above, this one is served
+	// by the CLIENT: the agent calls it (CallExtension) to put a structured
+	// question to the user. See question.go.
+	extQuestionAsk = "_spettro/question/ask"
+
 	// Agent -> client notifications.
 	extAccountUpdate = "_spettro/account/update"
 )
@@ -48,7 +53,14 @@ const (
 // extensionsVersion is bumped whenever the `_spettro/*` surface gains or
 // changes methods, so a client can gate features on one number instead of
 // probing each method.
-const extensionsVersion = 1
+//
+// v2: `_spettro/question/ask` (structured agent questions).
+const extensionsVersion = 2
+
+// metaExtensionsKey is the `_meta` key carrying the extension surface at
+// handshake, in both directions: the agent advertises what it serves, and a
+// client mirrors back the client-served methods it implements.
+const metaExtensionsKey = "spettro.app/extensions"
 
 // extensionMethods is advertised at initialize (InitializeResponse._meta) so
 // clients can feature-detect without a round trip per method.
@@ -66,6 +78,14 @@ var extensionMethods = []string{
 	extLocalRemove,
 	extModelsList,
 	extModelsFavorite,
+}
+
+// extensionClientMethods is advertised alongside extensionMethods as the
+// methods the AGENT will call on the client. A client answers by mirroring the
+// ones it implements back in its own initialize `_meta` (see
+// parseClientExtensions); nothing is called until it does.
+var extensionClientMethods = []string{
+	extQuestionAsk,
 }
 
 var _ acpsdk.ExtensionMethodHandler = (*bridge)(nil)

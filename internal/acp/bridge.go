@@ -2,7 +2,6 @@ package acp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +27,16 @@ type bridge struct {
 
 	mu       sync.Mutex
 	sessions map[string]*acpSession
+
+	// clientCaps / clientExtensions are what the client declared at
+	// initialize: its core capabilities (elicitation in particular) and the
+	// `_spettro/*` methods it serves. Both gate the agent-question transports
+	// in question.go.
+	clientCaps       acpsdk.ClientCapabilities
+	clientExtensions map[string]bool
+	// questionTransport overrides the client request surface used by agent
+	// questions. Nil in production (the SDK connection is used); tests set it.
+	questionTransport questionTransport
 
 	// logins holds the in-flight Spettro Subscription device-flow login, if
 	// any. It is connection-scoped rather than session-scoped: signing in is
@@ -94,16 +103,27 @@ func newBridge(opts Options) *bridge {
 }
 
 func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
+	// Record what the client can do before any capability gating: agent
+	// questions pick their transport from the extension surface the client
+	// mirrors back and from its elicitation capability (see question.go).
+	b.mu.Lock()
+	b.clientCaps = params.ClientCapabilities
+	b.clientExtensions = parseClientExtensions(params.Meta)
+	b.mu.Unlock()
+
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
 		// Advertise the `_spettro/*` extension surface (see ext.go) so a
 		// native client can detect it at handshake and fall back to
 		// "configure this in the TUI" against an older CLI instead of
 		// calling methods that would come back method-not-found.
+		// `clientMethods` is the other direction: methods this agent will
+		// call on a client that mirrors them back.
 		Meta: map[string]any{
-			"spettro.app/extensions": map[string]any{
-				"version": extensionsVersion,
-				"methods": extensionMethods,
+			metaExtensionsKey: map[string]any{
+				"version":       extensionsVersion,
+				"methods":       extensionMethods,
+				"clientMethods": extensionClientMethods,
 			},
 		},
 		AgentInfo: &acpsdk.Implementation{
@@ -605,52 +625,8 @@ func (t *turnState) requestShellApproval(ctx context.Context, ar agent.ShellAppr
 	}
 }
 
-// askUser maps the ask-user tool onto session/request_permission, the only
-// stable interactive request ACP offers. Options become permission choices;
-// free-form input is not representable, so option-less questions fail with a
-// hint the model can act on.
-func (t *turnState) askUser(ctx context.Context, ar agent.AskUserRequest) (string, error) {
-	if len(ar.Options) == 0 {
-		if ar.DefaultOption != "" {
-			return ar.DefaultOption, nil
-		}
-		return "", errors.New("this client cannot answer free-form questions; proceed with your best judgment or offer explicit options")
-	}
-	opts := make([]acpsdk.PermissionOption, 0, len(ar.Options))
-	for i, o := range ar.Options {
-		opts = append(opts, acpsdk.PermissionOption{
-			OptionId: acpsdk.PermissionOptionId(fmt.Sprintf("opt-%d", i)),
-			Name:     o,
-			Kind:     acpsdk.PermissionOptionKindAllowOnce,
-		})
-	}
-	title := ar.Question
-	if ar.Context != "" {
-		title += " — " + ar.Context
-	}
-	resp, err := t.bridge.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
-		SessionId: t.sessionID,
-		ToolCall: acpsdk.ToolCallUpdate{
-			ToolCallId: t.nextToolCallID("ask"),
-			Title:      new(title),
-			Kind:       acpsdk.Ptr(acpsdk.ToolKindThink),
-			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
-		},
-		Options: opts,
-	})
-	if err != nil {
-		return "", err
-	}
-	if resp.Outcome.Cancelled != nil || resp.Outcome.Selected == nil {
-		return "", errors.New("user did not answer")
-	}
-	for i, o := range ar.Options {
-		if string(resp.Outcome.Selected.OptionId) == fmt.Sprintf("opt-%d", i) {
-			return o, nil
-		}
-	}
-	return "", errors.New("user did not answer")
-}
+// Agent questions (the ask-user tool) live in question.go: turnState.askUser
+// negotiates the extension / `_meta` / elicitation transports there.
 
 // Unsupported optional capabilities.
 

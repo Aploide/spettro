@@ -99,6 +99,32 @@ func askUserOptions(req agent.AskUserRequest) []string {
 	return options
 }
 
+// askUserRecommendedBadge marks the option the agent recommended
+// (DefaultOption). It is a suffix rather than a cursor style so it survives
+// the user moving the cursor elsewhere.
+const askUserRecommendedBadge = "● recommended"
+
+// askUserPickerRows annotates the answer list: the agent's recommended option
+// keeps a persistent badge, and the free-text entry is separated from the
+// agent's own options so it reads as a client affordance.
+func askUserPickerRows(req agent.AskUserRequest) []pickerOption {
+	def := strings.TrimSpace(req.DefaultOption)
+	options := askUserOptions(req)
+	rows := make([]pickerOption, 0, len(options))
+	for i, option := range options {
+		row := pickerOption{Label: option}
+		switch {
+		// The free-text entry is always the appended last row.
+		case req.AllowFreeResponse && i == len(options)-1:
+			row.Separated = len(req.Options) > 0
+		case def != "" && strings.EqualFold(option, def):
+			row.Badge = askUserRecommendedBadge
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
 func askUserDefaultCursor(req agent.AskUserRequest) int {
 	def := strings.TrimSpace(req.DefaultOption)
 	if def == "" {
@@ -172,36 +198,83 @@ func (m Model) updateAskUserQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) resolveAskUser(answer, banner string) Model {
-	if m.pendingQuestion != nil {
-		select {
-		case m.pendingQuestion.response <- askUserResponse{answer: answer}:
-		default:
-		}
+// answerAskUser delivers a reply to the tool call blocked on this question.
+// The response channel is buffered and read exactly once, so a non-blocking
+// send is enough — and a second send (a race between, say, a Telegram answer
+// and a keypress) is dropped rather than deadlocking the UI.
+func answerAskUser(msg askUserRequestMsg, resp askUserResponse) {
+	select {
+	case msg.response <- resp:
+	default:
 	}
+}
+
+// presentQuestion makes a question the active one. Everything that targets
+// "the question on screen" — the picker, the textarea, the desktop
+// notification, the remote/Telegram answer expectation — is armed here, so a
+// queued question stays invisible to those surfaces until its turn.
+func (m Model) presentQuestion(msg askUserRequestMsg) Model {
+	m.pendingQuestion = &msg
+	m.questionCursor = askUserDefaultCursor(msg.request)
+	m.questionFreeform = len(msg.request.Options) == 0
+	m.ta.Reset()
+	banner := "agent is waiting for your answer"
+	if n := len(m.questionQueue); n > 0 {
+		banner = fmt.Sprintf("%s (%d more after this)", banner, n)
+	}
+	m.showBanner(banner, "info")
+	m.notifyIfUnfocused("Agent is waiting for your answer")
+	m.publishRemote("ask_user", map[string]any{
+		"question":            msg.request.Question,
+		"options":             msg.request.Options,
+		"context":             msg.request.Context,
+		"default":             msg.request.DefaultOption,
+		"allow_free_response": msg.request.AllowFreeResponse,
+	})
+	return m
+}
+
+// advanceQuestionQueue clears the question just answered and promotes the next
+// one the agent asked while the user was busy.
+func (m Model) advanceQuestionQueue() Model {
 	m.pendingQuestion = nil
 	m.questionCursor = 0
 	m.questionFreeform = false
 	m.ta.Reset()
 	m.telegramClearAnswerExpectations()
+	if len(m.questionQueue) == 0 {
+		return m
+	}
+	next := m.questionQueue[0]
+	m.questionQueue = m.questionQueue[1:]
+	return m.presentQuestion(next)
+}
+
+// discardQuestionQueue answers every waiting question with err, so no tool
+// call is left blocked when the run they belong to goes away.
+func (m *Model) discardQuestionQueue(err error) {
+	for _, queued := range m.questionQueue {
+		answerAskUser(queued, askUserResponse{err: err})
+	}
+	m.questionQueue = nil
+}
+
+func (m Model) resolveAskUser(answer, banner string) Model {
+	if m.pendingQuestion != nil {
+		answerAskUser(*m.pendingQuestion, askUserResponse{answer: answer})
+	}
 	m.showBanner(banner, "info")
+	m = m.advanceQuestionQueue()
 	m.refreshViewport()
 	return m
 }
 
 func (m Model) rejectAskUser(banner string) Model {
 	if m.pendingQuestion != nil {
-		select {
-		case m.pendingQuestion.response <- askUserResponse{err: fmt.Errorf("user declined to answer")}:
-		default:
-		}
+		answerAskUser(*m.pendingQuestion, askUserResponse{err: fmt.Errorf("user declined to answer")})
 	}
-	m.pendingQuestion = nil
-	m.questionCursor = 0
-	m.questionFreeform = false
-	m.ta.Reset()
-	m.telegramClearAnswerExpectations()
 	m.showBanner(banner, "warn")
+	m = m.advanceQuestionQueue()
 	m.refreshViewport()
 	return m
 }

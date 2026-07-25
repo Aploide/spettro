@@ -50,6 +50,10 @@ func IsPlanningEyeModeForTesting(mode string) bool {
 func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
+	// Match New()'s input height: the default (6 rows) makes every rendered
+	// frame three lines taller than the real one, which hides layout overflow
+	// from tests that measure the view.
+	ta.SetHeight(3)
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
 	cfg := config.Default()
 	// Point at a reasoning-capable catalog model so thinking-level commands
@@ -302,6 +306,53 @@ func AskUserOptionsForTesting(req agent.AskUserRequest) []string {
 
 func (m Model) UpdateAskUserQuestionForTesting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m.updateAskUserQuestion(msg)
+}
+
+func (m Model) RenderAskUserPromptForTesting() string {
+	return m.renderAskUserPrompt()
+}
+
+// AskUserHandleForTesting is the tool side of a delivered question: the
+// channel the blocked ask-user call is waiting on.
+type AskUserHandleForTesting struct {
+	response chan askUserResponse
+}
+
+// Answered reports whether the tool call got a reply, and what it was. It
+// never blocks: a question still waiting for the user simply reports false.
+func (h AskUserHandleForTesting) Answered() (answer string, err error, ok bool) {
+	select {
+	case resp := <-h.response:
+		return resp.answer, resp.err, true
+	default:
+		return "", nil, false
+	}
+}
+
+// DeliverAskUserForTesting routes a question through the same update path the
+// agent's callback feeds, so tests exercise arrival, queueing, and teardown
+// rather than a hand-set field.
+func (m Model) DeliverAskUserForTesting(req agent.AskUserRequest) (Model, AskUserHandleForTesting) {
+	msg := askUserRequestMsg{request: req, response: make(chan askUserResponse, 1)}
+	updated, _ := m.update(msg)
+	return updated.(Model), AskUserHandleForTesting{response: msg.response}
+}
+
+func (m Model) QuestionQueueLenForTesting() int {
+	return len(m.questionQueue)
+}
+
+func (m Model) PendingQuestionTextForTesting() string {
+	if m.pendingQuestion == nil {
+		return ""
+	}
+	return m.pendingQuestion.request.Question
+}
+
+// StopAgentForTesting runs the interrupt path (esc / ctrl+c) so tests can
+// assert that no tool call is left blocked on a question.
+func (m *Model) StopAgentForTesting() {
+	m.stopAgent()
 }
 
 func (m *Model) SetDimensionsForTesting(width, height int) {

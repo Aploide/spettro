@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"image/color"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -320,6 +321,39 @@ func (m *Model) renderMessages() string {
 	return strings.Join(parts, "\n\n")
 }
 
+// askUserMinContentH is the smallest conversation pane the question block is
+// allowed to leave behind.
+const askUserMinContentH = 3
+
+// askUserBlockBudget is how many lines the ask-user question block may occupy
+// inside the input box. Everything else on screen — header, eyes, separators,
+// status bar, the box's own border and agent label, the parallel-agent strip —
+// keeps its space, and the conversation pane keeps a minimum. The renderer
+// windows its option list to fit this; without it a question with many options
+// pushes the input box off the bottom of the terminal.
+func (m Model) askUserBlockBudget() int {
+	if m.height <= 0 {
+		// No WindowSizeMsg yet: nothing is on screen to overflow, and guessing
+		// a budget here would truncate a question the terminal can hold.
+		return math.MaxInt32
+	}
+	paneW := m.paneWidth()
+	// Measure the chrome instead of hard-coding its line counts: the eyes art
+	// and the header change height on their own, and a stale constant here
+	// reappears as an off-by-one row past the bottom of the screen.
+	fixed := lipgloss.Height(m.viewHeader()) +
+		lipgloss.Height(renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)) +
+		2 + // the separators bracketing the conversation pane
+		lipgloss.Height(m.viewStatusBar(paneW)) +
+		3 // the input box's border plus the agent label inside it
+	if m.sidePanelWidth() <= 0 {
+		if pa := m.renderParallelAgents(); pa != "" {
+			fixed += lipgloss.Height(pa)
+		}
+	}
+	return max(m.height-fixed-askUserMinContentH, 4)
+}
+
 func (m Model) recalcLayout() Model {
 	eyesH := len(eyesActing)
 	headerH := 1
@@ -332,6 +366,12 @@ func (m Model) recalcLayout() Model {
 	}
 	if m.showPlanApproval {
 		inputH += 2 + len(planApprovalOptions)
+	} else if m.pendingQuestion != nil {
+		// The question block replaces the textarea and grows with the option
+		// list, so reserve what it actually renders instead of the fixed
+		// textarea height. renderAskUserPrompt keeps itself inside
+		// askUserBlockBudget, so this can never squeeze the pane away.
+		inputH = 3 + lipgloss.Height(m.renderAskUserPrompt())
 	} else if m.pendingAuth != nil {
 		inputH += 2 + len(shellApprovalOptions)
 		if block := m.approvalDiffView(m.paneWidth()); block != "" {
