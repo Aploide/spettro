@@ -78,7 +78,7 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   context occupancy (`used`) against the model's context window (`size`), so
   editors that support it render a live context gauge while the agent is
   still working. The cumulative turn cost travels in `_meta`
-  (`spettro.dev/tokensUsed`) on each update, and the completed turn's
+  (`spettro.app/tokensUsed`) on each update, and the completed turn's
   aggregated accounting (input/output plus cache read/write tokens) is
   returned in the `session/prompt` response's `usage` field.
 - **Plan** — whenever the agent updates its session task graph (`task-create`,

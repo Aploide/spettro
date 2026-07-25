@@ -386,6 +386,17 @@ func (m Model) MouseCaptureOffForTesting() bool {
 	return m.mouseCaptureOff
 }
 
+func (m Model) TextSelectionDraggingForTesting() bool {
+	return m.textSel.dragging
+}
+
+func ExtractSelectionForTesting(frame string, startX, startY, endX, endY int) string {
+	return extractSelection(frame, textSelection{
+		active: true, dragging: true,
+		startX: startX, startY: startY, endX: endX, endY: endY,
+	})
+}
+
 func PrimaryAgentIDsForTesting(manifest config.AgentManifest) []string {
 	return primaryAgentIDs(manifest)
 }

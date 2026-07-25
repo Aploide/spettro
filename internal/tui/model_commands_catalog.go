@@ -300,6 +300,7 @@ keys:
   ctrl+r         remove last file attachment
   ctrl+b         toggle side activity panel
   ctrl+o         toggle expanded tool context in side panel
+  drag (mouse)   select text on screen; release copies it to the clipboard
   ctrl+t         toggle text-select mode (release mouse for terminal selection)
 
 in model selector:

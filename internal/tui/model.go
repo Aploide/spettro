@@ -354,6 +354,9 @@ type Model struct {
 	showFullOutput bool
 
 	mouseCaptureOff bool
+	// textSel tracks an in-progress left-drag text selection over the frame
+	// (screen cell coordinates); released selections are copied via OSC 52.
+	textSel textSelection
 
 	liveTools       []ToolItem
 	currentTool     *ToolItem

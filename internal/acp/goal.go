@@ -115,7 +115,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(outcome))
 		return acpsdk.PromptResponse{
 			StopReason: acpsdk.StopReasonEndTurn,
-			Meta:       map[string]any{"spettro.dev/tokensUsed": totalTokens},
+			Meta:       map[string]any{"spettro.app/tokensUsed": totalTokens},
 		}, nil
 	}
 

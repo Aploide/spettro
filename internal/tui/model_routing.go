@@ -597,15 +597,42 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mouseCaptureOff {
 			return m, tea.Batch(cmds...)
 		}
-		// v2 splits mouse events into distinct message types; only wheel and
-		// click (press) events drive the UI here — motion and release are
-		// ignored, matching the v1 behavior of matching on wheel/left buttons.
+		// v2 splits mouse events into distinct message types. Wheel and click
+		// (press) events drive the UI below; motion and release implement
+		// drag-to-select: a left drag highlights text and the release copies
+		// it to the clipboard (OSC 52), so copying works without disabling
+		// mouse capture.
 		switch msg.(type) {
 		case tea.MouseWheelMsg, tea.MouseClickMsg:
+		case tea.MouseMotionMsg:
+			mm := msg.Mouse()
+			if m.textSel.active && (mm.Button == tea.MouseLeft || m.textSel.dragging) {
+				m.textSel.dragging = true
+				m.textSel.endX, m.textSel.endY = mm.X, mm.Y
+			}
+			return m, tea.Batch(cmds...)
+		case tea.MouseReleaseMsg:
+			if m.textSel.dragging {
+				text := extractSelection(m.viewContent(), m.textSel)
+				if strings.TrimSpace(text) != "" {
+					cmds = append(cmds, tea.SetClipboard(text))
+					m.showBanner(fmt.Sprintf("copied %d chars to clipboard", len(text)), "success")
+				}
+			}
+			m.textSel = textSelection{}
+			return m, tea.Batch(cmds...)
 		default:
 			return m, tea.Batch(cmds...)
 		}
 		mouse := msg.Mouse()
+		if _, isWheel := msg.(tea.MouseWheelMsg); isWheel {
+			// Scrolling moves content under a screen-space selection; drop it.
+			m.textSel = textSelection{}
+		} else if mouse.Button == tea.MouseLeft {
+			// Arm a potential drag selection at the press cell. Plain clicks
+			// (press+release with no motion) are unaffected.
+			m.textSel = textSelection{active: true, startX: mouse.X, startY: mouse.Y, endX: mouse.X, endY: mouse.Y}
+		}
 		if m.showResume {
 			switch mouse.Button {
 			case tea.MouseWheelUp:
@@ -724,6 +751,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 	case tea.KeyPressMsg:
+		// Typing invalidates a screen-space selection (content may move).
+		m.textSel = textSelection{}
 		if msg.String() == "ctrl+t" {
 			// View() reads mouseCaptureOff to pick the view's MouseMode; no
 			// imperative enable/disable command exists in v2.

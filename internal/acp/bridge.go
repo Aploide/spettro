@@ -525,7 +525,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	return acpsdk.PromptResponse{
 		StopReason: acpsdk.StopReasonEndTurn,
 		Usage:      turnUsageResponse(turnUsage, result.TokensUsed),
-		Meta:       map[string]any{"spettro.dev/tokensUsed": result.TokensUsed},
+		Meta:       map[string]any{"spettro.app/tokensUsed": result.TokensUsed},
 	}, nil
 }
 

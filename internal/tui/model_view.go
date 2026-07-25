@@ -57,7 +57,11 @@ func (m Model) approvalDiffView(width int) string {
 // mode, focus reporting) on the returned tea.View, per the bubbletea v2
 // declarative model.
 func (m Model) View() tea.View {
-	v := tea.NewView(m.viewContent())
+	content := m.viewContent()
+	if m.textSel.dragging {
+		content = applySelectionHighlight(content, m.textSel)
+	}
+	v := tea.NewView(content)
 	v.AltScreen = true
 	// Focus/blur events drive m.terminalFocused (desktop notifications).
 	v.ReportFocus = true
