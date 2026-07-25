@@ -145,8 +145,8 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 	head = clampTextLines(head, max(budget-3, 1), width)
 	headLines := m.styleQuestionHead(head, questionLines)
 	if question.MultiSelect {
-		// Say it where the answer is given, not in the key legend: the rows
-		// look the same either way until task 05 gives them checkboxes.
+		// The checkboxes say the question takes more than one answer; this says
+		// it in words, where the question itself is read.
 		headLines = append(headLines, styleMuted.Render("  select all that apply"))
 	}
 
@@ -169,7 +169,13 @@ func (m Model) renderQuestionAnswerList(question agent.AskUserQuestion, width, b
 	if len(rows) == 0 || budget < 1 {
 		return nil
 	}
-	numWidth := len(strconv.Itoa(len(rows)))
+	// Measured over the numbers the rows actually show: the Submit row carries
+	// none, so counting rows would widen the column by a digit that is never
+	// drawn.
+	numWidth := 1
+	for _, row := range rows {
+		numWidth = max(numWidth, len(strconv.Itoa(row.number)))
+	}
 	indent := questionRowIndent(numWidth)
 	cursor := min(max(q.cursor[q.tab], 0), len(rows)-1)
 
@@ -186,7 +192,7 @@ func (m Model) renderQuestionAnswerList(question agent.AskUserQuestion, width, b
 					cursorBlock = i + 1
 				}
 			}
-			block := m.renderQuestionRow(row, i+1, numWidth, indent, width, i == cursor, descriptions)
+			block := m.renderQuestionRow(row, numWidth, indent, width, i == cursor, descriptions)
 			blocks = append(blocks, block)
 			total += len(block)
 		}
@@ -213,10 +219,15 @@ func (m Model) renderQuestionAnswerList(question agent.AskUserQuestion, width, b
 
 	// Too long to show whole: the option list scrolls under the rule and the
 	// chat row, which stay pinned to the bottom — the way out of the form must
-	// not be the first thing to scroll away. The tail costs two lines, and a
-	// windowed list needs two of its own (a row and the "… N more" marker), so
-	// below four the answers win instead: esc still leaves the form.
-	const tail = 2
+	// not be the first thing to scroll away, and neither must the way to finish
+	// it, so a multi-select question pins its Submit row with them. The tail
+	// costs a line per pinned block, and a windowed list needs two of its own (a
+	// row and the "… N more" marker), so below that the answers win instead:
+	// esc still leaves the form, and Submit is one arrow key away.
+	tail := 2
+	if question.MultiSelect {
+		tail++
+	}
 	if budget-tail >= 2 {
 		out := m.windowedQuestionRows(blocks[:len(blocks)-tail], cursorBlock, budget-tail, indent)
 		for _, block := range blocks[len(blocks)-tail:] {
@@ -254,7 +265,7 @@ func (m Model) windowedQuestionRows(blocks [][]string, cursor, budget, indent in
 // the option's description wrapped underneath at the label column. The
 // recommended marker is drawn on every row state — the cursor moving off the
 // agent's suggestion must not erase it.
-func (m Model) renderQuestionRow(row questionRow, number, numWidth, indent, width int, focused, descriptions bool) []string {
+func (m Model) renderQuestionRow(row questionRow, numWidth, indent, width int, focused, descriptions bool) []string {
 	g := glyphs()
 	q := m.pendingQuestion
 
@@ -265,10 +276,17 @@ func (m Model) renderQuestionRow(row questionRow, number, numWidth, indent, widt
 	if focused {
 		chevron = accent.Render("  " + g.cursor + " ")
 	}
+	// An unnumbered row (Submit) starts where the labels do, which is also the
+	// column the descriptions are indented to — the mockup tucks it under the
+	// last option rather than lining it up with them.
+	number := strings.Repeat(" ", numWidth+2)
+	if row.number > 0 {
+		number = styleMuted.Render(fmt.Sprintf("%*d. ", numWidth, row.number))
+	}
 
 	label := row.label
-	if row.option >= 0 && q.selected[q.tab][row.option] {
-		label = g.checked + " " + label
+	if box := m.questionRowCheckbox(row); box != "" {
+		label = box + " " + label
 	}
 	suffix := ""
 	if row.recommended {
@@ -280,9 +298,7 @@ func (m Model) renderQuestionRow(row questionRow, number, numWidth, indent, widt
 	if focused {
 		labelStyle = accent.Bold(true)
 	}
-	line := chevron +
-		styleMuted.Render(fmt.Sprintf("%*d. ", numWidth, number)) +
-		labelStyle.Render(label)
+	line := chevron + number + labelStyle.Render(label)
 	if suffix != "" {
 		line += accent.Render(suffix)
 	}
@@ -307,6 +323,35 @@ func (m Model) renderQuestionRow(row questionRow, number, numWidth, indent, widt
 		out = append(out, indentLines([]string{styleMuted.Render(desc)}, indent)...)
 	}
 	return out
+}
+
+// questionRowCheckbox is the marker between a row's number and its label, or
+// empty for a row that carries none. A multi-select question boxes *every*
+// answer row, ticked or not; a single-select one marks only the answer chosen.
+// That difference is the whole point of the column: the two questions are
+// answered differently, so at a glance they must not look alike.
+func (m Model) questionRowCheckbox(row questionRow) string {
+	q := m.pendingQuestion
+	question, ok := q.question()
+	if !ok || row.chat || row.submit {
+		return ""
+	}
+	g := glyphs()
+	checked := row.option >= 0 && q.selected[q.tab][row.option]
+	if row.custom {
+		// The user's own words are one more thing selected, so the box follows
+		// the text: typing an answer ticks it, clearing it unticks it.
+		checked = strings.TrimSpace(q.custom[q.tab]) != ""
+	}
+	switch {
+	case question.MultiSelect && checked:
+		return g.checked
+	case question.MultiSelect:
+		return g.unchecked
+	case checked && !row.custom:
+		return g.checked
+	}
+	return ""
 }
 
 // questionCustomFieldMaxLines caps the inline text field so a multi-line draft
@@ -418,6 +463,9 @@ func (m Model) questionHint() string {
 	case q.singlePage():
 		return "↑↓ or 1-9 pick  enter answers  esc declines"
 	default:
+		if question, ok := q.question(); ok && question.MultiSelect {
+			return "space or 1-9 toggle  " + questionSubmitRow + " records  tab/←→ switch tab  esc declines"
+		}
 		return "↑↓ or 1-9 pick  enter records  tab/←→ switch tab  esc declines"
 	}
 }
@@ -473,6 +521,11 @@ func questionAnswerSummary(q *questionForm, i int) string {
 		}
 	}
 	if len(labels) == 0 {
+		// A submitted-empty question is answered, so it must not read like one
+		// the user never opened.
+		if q.committed[i] {
+			return "(none of these)"
+		}
 		return "(not answered)"
 	}
 	return strings.Join(labels, ", ")

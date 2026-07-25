@@ -682,26 +682,41 @@ func TestQuestionModal_SingleQuestionAnswerSubmits(t *testing.T) {
 	}
 }
 
-// A multi-select question must be able to come back with more than one answer.
-// Task 05 gives it checkbox rows and a space toggle; until then enter toggles,
-// and the question gets a Submit tab because picking an option cannot mean
-// "and I am done".
-func TestQuestionModal_MultiSelectAccumulatesAnswers(t *testing.T) {
-	form := agent.AskUserForm{Questions: []agent.AskUserQuestion{{
+// --- multi-select ---
+
+// multiSelect is the mockup's question: checkboxes, a free-text entry, and the
+// Submit row that is the only way to finish it.
+func multiSelect() agent.AskUserForm {
+	return agent.AskUserForm{Questions: []agent.AskUserQuestion{{
 		Header:      "Features",
 		Question:    "Which features?",
 		Options:     opts("Search", "Preview", "Notes"),
 		MultiSelect: true,
+		AllowCustom: true,
 	}}}
+}
+
+// openMultiSelect delivers a form through the agent path, so the tests below
+// can assert what the blocked tool call did or did not receive.
+func openMultiSelect(t *testing.T, form agent.AskUserForm) (tui.Model, tui.AskUserHandleForTesting) {
+	t.Helper()
 	m := tui.NewModelForTesting()
 	m.MarkReadyAndTrustedForTesting()
 	m.SetDimensionsForTesting(100, 40)
 	m.SetThinkingForTesting(true)
-	m, handle := m.DeliverAskUserForTesting(form)
+	return m.DeliverAskUserForTesting(form)
+}
 
-	m = pressQuestion(t, m, key("enter"), key("down"), key("down"), key("enter"))
+// A multi-select question must be able to come back with more than one answer,
+// and it gets a Submit tab because picking an option cannot mean "and I am
+// done". Selections come back in option order however they were ticked: the
+// review page and the tool result must not shuffle with the user's clicks.
+func TestQuestionModal_MultiSelectAccumulatesAnswersInOptionOrder(t *testing.T) {
+	m, handle := openMultiSelect(t, multiSelect())
+
+	m = pressQuestion(t, m, key("down"), key("down"), key(" "), key("up"), key("up"), key(" "))
 	if _, _, ok := handle.Answered(); ok {
-		t.Fatal("a multi-select question must not submit on the first pick")
+		t.Fatal("a multi-select question must not submit on a toggle")
 	}
 	m = pressQuestion(t, m, key("tab"), key("enter")) // Submit tab, then send
 
@@ -713,7 +728,152 @@ func TestQuestionModal_MultiSelectAccumulatesAnswers(t *testing.T) {
 		t.Fatalf("expected both picks to come back, got %+v", answers)
 	}
 	if answers[0].Selected[0] != "Search" || answers[0].Selected[1] != "Notes" {
-		t.Fatalf("unexpected selection: %+v", answers[0].Selected)
+		t.Fatalf("want the answers in option order, got %+v", answers[0].Selected)
+	}
+}
+
+// The two question shapes are answered differently, so they must not look
+// alike: a multi-select boxes every answer row, a single-select boxes none.
+// Submit sits under the last option unnumbered, and the numbering carries on
+// past it to the chat exit.
+func TestQuestionModal_MultiSelectRendersCheckboxesAndSubmitRow(t *testing.T) {
+	restore := tui.UseASCIIGlyphsForTesting(false)
+	defer restore()
+
+	m := openForm(t, multiSelect())
+	m = pressQuestion(t, m, key(" "))
+	view := plainForm(m)
+	for _, want := range []string{
+		"❯ 1. ● Search",
+		"  2. ○ Preview",
+		"  3. ○ Notes",
+		"  4. ○ Type something.",
+		"       Submit",
+		"  5. Chat about this",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("want a row reading %q:\n%s", want, view)
+		}
+	}
+
+	single := plainForm(openForm(t, oneQuestion("Which one?", true, opts("Search", "Preview")...)))
+	if strings.ContainsAny(single, "○") || strings.Contains(single, "Submit") {
+		t.Fatalf("a single-select question takes neither checkboxes nor a Submit row:\n%s", single)
+	}
+}
+
+// Every key that touches an option row toggles it — nothing on the page except
+// Submit finishes the question, so a user who meant to tick three boxes can
+// never answer with one by reflex.
+func TestQuestionModal_MultiSelectKeysToggleAndOnlySubmitCommits(t *testing.T) {
+	m, handle := openMultiSelect(t, multiSelect())
+
+	// enter, space and the digits all toggle the same box off and on.
+	for _, keys := range [][]tea.KeyPressMsg{{key("enter")}, {key(" ")}, {key("1")}} {
+		m = pressQuestion(t, m, keys...)
+		if !m.QuestionAnsweredForTesting(0) {
+			t.Fatalf("%v should have ticked the focused box", keys)
+		}
+		m = pressQuestion(t, m, keys...)
+		if m.QuestionAnsweredForTesting(0) {
+			t.Fatalf("%v should have unticked it again", keys)
+		}
+	}
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("toggling must never send the form")
+	}
+
+	// The Submit row records the question and leaves the tab where it was.
+	m = pressQuestion(t, m, key("1"), key("down"), key("down"), key("down"), key("down"), key("enter"))
+	if _, _, ok := handle.Answered(); ok {
+		t.Fatal("the Submit row records the question; the Submit tab sends the form")
+	}
+	if got := m.QuestionTabForTesting(); got != 0 {
+		t.Fatalf("recording an answer must not move the tab, got %d", got)
+	}
+}
+
+// Submitting a multi-select question with nothing ticked is an answer — "none
+// of these" — and the model has to be able to tell it from a question the user
+// never opened.
+func TestQuestionModal_MultiSelectEmptySubmitIsNotASkip(t *testing.T) {
+	form := multiSelect()
+	form.Questions = append(form.Questions, agent.AskUserQuestion{
+		Header: "Rollout", Question: "How should I ship it?", Options: opts("Now", "Later"),
+	})
+	m, handle := openMultiSelect(t, form)
+
+	// Down to the Submit row (three options, the free-text entry), commit it,
+	// then send the form with the second question untouched.
+	m = pressQuestion(t, m, key("down"), key("down"), key("down"), key("down"), key("enter"))
+	if !m.QuestionAnsweredForTesting(0) {
+		t.Fatal("an empty commit still answers the question")
+	}
+	m = pressQuestion(t, m, key("tab"), key("tab"), key("enter"))
+
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("expected the form to submit, got (%v, %v)", err, ok)
+	}
+	if len(answers[0].Selected) != 0 {
+		t.Fatalf("nothing was ticked: %+v", answers[0])
+	}
+	if answers[0].Skipped {
+		t.Fatal("an explicit empty answer must not come back as a skip")
+	}
+	if !answers[1].Skipped {
+		t.Fatal("the question the user never opened is the skipped one")
+	}
+}
+
+// The free-text entry is one more thing in the selection set, not an answer
+// that replaces the boxes: its checkbox follows the text, and space takes it
+// back out.
+func TestQuestionModal_MultiSelectCustomTextJoinsTheSelection(t *testing.T) {
+	restore := tui.UseASCIIGlyphsForTesting(false)
+	defer restore()
+	m, handle := openMultiSelect(t, multiSelect())
+
+	m = pressQuestion(t, m, key(" "), key("4"))
+	if !m.QuestionEditingForTesting() {
+		t.Fatal("the free-text row opens the inline field")
+	}
+	m.SetTextareaValueForTesting("keyboard macros")
+	m = pressQuestion(t, m, key("enter"))
+	if view := plainForm(m); !strings.Contains(view, "● Type something.") {
+		t.Fatalf("a typed answer ticks its box:\n%s", view)
+	}
+
+	m = pressQuestion(t, m, key("tab"), key("enter"))
+	answers, err, ok := handle.Answered()
+	if !ok || err != nil {
+		t.Fatalf("expected the form to submit, got (%v, %v)", err, ok)
+	}
+	if len(answers[0].Selected) != 1 || answers[0].Selected[0] != "Search" {
+		t.Fatalf("typing an answer must not clear the ticked options: %+v", answers[0])
+	}
+	if answers[0].Custom != "keyboard macros" {
+		t.Fatalf("the typed answer must come back verbatim: %+v", answers[0])
+	}
+}
+
+// Space on a free-text row that already holds an answer unticks it. It is the
+// only way back out of that box, since enter reopens the field to edit it.
+func TestQuestionModal_MultiSelectSpaceClearsCustomText(t *testing.T) {
+	m := openForm(t, multiSelect())
+	m = pressQuestion(t, m, key("4"))
+	m.SetTextareaValueForTesting("keyboard macros")
+	m = pressQuestion(t, m, key("enter"))
+	if got := m.QuestionCustomForTesting(0); got != "keyboard macros" {
+		t.Fatalf("expected the typed answer to be recorded, got %q", got)
+	}
+
+	m = pressQuestion(t, m, key(" "))
+	if got := m.QuestionCustomForTesting(0); got != "" {
+		t.Fatalf("space must untick the typed answer, got %q", got)
+	}
+	if m.QuestionEditingForTesting() {
+		t.Fatal("unticking must not reopen the field")
 	}
 }
 
@@ -803,6 +963,37 @@ func TestQuestionModal_FormBlockFitsTheInputBox(t *testing.T) {
 		if !strings.Contains(block, "Parser") {
 			t.Fatalf("%dx%d: the focused option must stay visible:\n%s", size.w, size.h, block)
 		}
+	}
+}
+
+// The way to finish a multi-select question is pinned along with the way out of
+// the form: an option list that scrolled Submit away would leave the user with
+// nothing on the page that answers the question.
+func TestQuestionModal_LongMultiSelectPinsSubmit(t *testing.T) {
+	form := agent.AskUserForm{Questions: []agent.AskUserQuestion{{
+		Header:      "Features",
+		Question:    "Which features?",
+		Options:     opts("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "last"),
+		MultiSelect: true,
+		AllowCustom: true,
+	}}}
+	m := tui.NewModelForTesting()
+	m.MarkReadyAndTrustedForTesting()
+	m.SetDimensionsForTesting(80, 30)
+	m.SetPendingAskUserFormForTesting(form)
+	m = m.RecalcLayoutForTesting()
+
+	view := plainForm(m)
+	if !strings.Contains(view, "more (↑ ↓ to scroll)") {
+		t.Fatalf("expected the list to be windowed at 30 rows:\n%s", view)
+	}
+	for _, want := range []string{"Submit", "Chat about this", "─────"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("%q must stay pinned under the windowed list:\n%s", want, view)
+		}
+	}
+	if got := lipgloss.Height(m.ViewForTesting()); got > 30 {
+		t.Fatalf("view is %d lines on a 30-row terminal", got)
 	}
 }
 

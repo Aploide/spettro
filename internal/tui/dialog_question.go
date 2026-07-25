@@ -28,6 +28,11 @@ const questionCustomRow = "Type something."
 // a way out of the form and back into the conversation.
 const questionChatRow = "Chat about this"
 
+// questionSubmitRow commits a multi-select question. Every other row on such a
+// page is a toggle, so the act of finishing needs a row of its own: without it a
+// user who meant to tick three boxes would answer with the first one.
+const questionSubmitRow = "Submit"
+
 // questionForm is the live state of one ask-user form. The per-question slices
 // are parallel to form.Questions: switching tabs changes an index and nothing
 // else, which is what makes a revisited question come back exactly as it was
@@ -40,6 +45,10 @@ type questionForm struct {
 	selected []map[int]bool // per-question chosen option indices
 	custom   []string       // per-question free text
 	notes    []string       // per-question annotation (task 06)
+	// committed marks a multi-select question the user finished through its
+	// Submit row. It is what separates "I chose none of these" from "I never
+	// looked at this question": both hold an empty selection.
+	committed []bool
 	// editing is set while the active question's free-text entry has the
 	// keyboard; the textarea holds the text until it is committed.
 	editing  bool
@@ -50,12 +59,13 @@ type questionForm struct {
 // recommended option, so the answer the agent would pick is one keypress away.
 func newQuestionForm(msg askUserRequestMsg) *questionForm {
 	q := &questionForm{
-		form:     msg.form,
-		cursor:   make([]int, len(msg.form.Questions)),
-		selected: make([]map[int]bool, len(msg.form.Questions)),
-		custom:   make([]string, len(msg.form.Questions)),
-		notes:    make([]string, len(msg.form.Questions)),
-		response: msg.response,
+		form:      msg.form,
+		cursor:    make([]int, len(msg.form.Questions)),
+		selected:  make([]map[int]bool, len(msg.form.Questions)),
+		custom:    make([]string, len(msg.form.Questions)),
+		notes:     make([]string, len(msg.form.Questions)),
+		committed: make([]bool, len(msg.form.Questions)),
+		response:  msg.response,
 	}
 	for i, question := range msg.form.Questions {
 		q.selected[i] = map[int]bool{}
@@ -69,43 +79,68 @@ func newQuestionForm(msg askUserRequestMsg) *questionForm {
 	return q
 }
 
-// Row kinds outside the agent's options. Both are negative so `option` stays
+// Row kinds outside the agent's options. All are negative so `option` stays
 // the index into AskUserQuestion.Options for everything the agent supplied.
 const (
 	questionRowOptionCustom = -1
 	questionRowOptionChat   = -2
+	questionRowOptionSubmit = -3
 )
 
 // questionRow is one row of the answer list: an agent option, the client's
-// free-text entry, or the chat escape hatch.
+// free-text entry, the multi-select Submit action, or the chat escape hatch.
 type questionRow struct {
 	// option indexes the question's Options, or is one of the questionRowOption*
 	// constants for the client's own rows.
 	option      int
 	label       string
 	description string
+	// number is the digit hotkey the row answers to, or 0 for a row the list
+	// leaves unnumbered.
+	number      int
 	recommended bool
 	custom      bool
 	chat        bool
+	submit      bool
 }
 
 // questionRows is the answer list for one question: the agent's options in
-// order, the free-text entry when the question allows one, and last — below the
-// rule the renderer draws — the chat escape hatch, which is always offered.
+// order, the free-text entry when the question allows one, the Submit action
+// when the question is multi-select, and last — below the rule the renderer
+// draws — the chat escape hatch, which is always offered.
 func questionRows(q agent.AskUserQuestion) []questionRow {
-	rows := make([]questionRow, 0, len(q.Options)+2)
+	rows := make([]questionRow, 0, len(q.Options)+3)
+	number := 0
+	next := func() int { number++; return number }
 	for i, opt := range q.Options {
 		rows = append(rows, questionRow{
 			option:      i,
 			label:       opt.Label,
 			description: opt.Description,
+			number:      next(),
 			recommended: opt.IsRecommended,
 		})
 	}
 	if q.AllowCustom || len(q.Options) == 0 {
-		rows = append(rows, questionRow{option: questionRowOptionCustom, label: questionCustomRow, custom: true})
+		rows = append(rows, questionRow{option: questionRowOptionCustom, label: questionCustomRow, number: next(), custom: true})
 	}
-	return append(rows, questionRow{option: questionRowOptionChat, label: questionChatRow, chat: true})
+	// Submit carries no number: the mockup indents it under the last option and
+	// runs the numbering on to the chat exit below it. It is an action on the
+	// answers, not one of them, so it is not something a digit picks either.
+	if q.MultiSelect {
+		rows = append(rows, questionRow{option: questionRowOptionSubmit, label: questionSubmitRow, submit: true})
+	}
+	return append(rows, questionRow{option: questionRowOptionChat, label: questionChatRow, number: next(), chat: true})
+}
+
+// questionRowByNumber resolves a digit hotkey to the row that shows it.
+func questionRowByNumber(rows []questionRow, number int) int {
+	for i, row := range rows {
+		if row.number == number {
+			return i
+		}
+	}
+	return -1
 }
 
 // question returns the question the active tab points at, or false on the
@@ -124,12 +159,14 @@ func (q *questionForm) onSubmitTab() bool { return q.tab >= len(q.form.Questions
 func (q *questionForm) tabCount() int { return len(q.form.Questions) + 1 }
 
 // answered reports whether question i has something to send back. An untouched
-// question is not "answered by default": the model is told it was skipped.
+// question is not "answered by default": the model is told it was skipped. A
+// multi-select question the user submitted empty *is* answered — they said none
+// of the options apply.
 func (q *questionForm) answered(i int) bool {
 	if i < 0 || i >= len(q.form.Questions) {
 		return false
 	}
-	return len(q.selected[i]) > 0 || strings.TrimSpace(q.custom[i]) != ""
+	return q.committed[i] || len(q.selected[i]) > 0 || strings.TrimSpace(q.custom[i]) != ""
 }
 
 // complete reports whether every question has an answer, which is what the
@@ -155,9 +192,8 @@ func (q *questionForm) firstUnanswered() int {
 }
 
 // choose records an answer: one option replaces the previous choice, but a
-// multi-select question accumulates them (task 05 gives those rows checkboxes
-// and a space toggle; until then enter is the toggle, so a question the agent
-// marked multi-select can still come back with more than one answer).
+// multi-select question toggles the box instead, accumulating as many as the
+// user ticks.
 func (q *questionForm) choose(question, option int) {
 	if q.form.Questions[question].MultiSelect {
 		if q.selected[question][option] {
@@ -172,6 +208,8 @@ func (q *questionForm) choose(question, option int) {
 }
 
 // answers renders the collected state into the shape the agent tool reads.
+// Selections come out in option order, never in the order they were ticked, so
+// the same set of boxes always produces the same answer.
 func (q *questionForm) answers() []agent.AskUserAnswer {
 	out := make([]agent.AskUserAnswer, 0, len(q.form.Questions))
 	for i, question := range q.form.Questions {
@@ -185,7 +223,7 @@ func (q *questionForm) answers() []agent.AskUserAnswer {
 				answer.Selected = append(answer.Selected, opt.Label)
 			}
 		}
-		answer.Skipped = len(answer.Selected) == 0 && answer.Custom == ""
+		answer.Skipped = !q.committed[i] && len(answer.Selected) == 0 && answer.Custom == ""
 		out = append(out, answer)
 	}
 	return out
@@ -257,13 +295,21 @@ func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		return m.activateQuestionRow(rows, q.cursor[q.tab]), nil
+	case "space":
+		// Checkbox rows toggle with space, as they do everywhere else in the
+		// TUI. Only on a multi-select page: on a single-select one the same
+		// keypress would answer the question outright, and a stray space is not
+		// a decision.
+		if question.MultiSelect {
+			return m.toggleQuestionRow(rows, q.cursor[q.tab]), nil
+		}
 	default:
 		// The mockups number every row, so the digits have to work: 1-9 jumps
 		// to that row and picks it in one keypress. A tenth row (eight options,
 		// the free-text entry and the chat exit) is reachable by cursor only —
 		// "0" for a tenth item reads as a typo, not a shortcut.
 		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-			if idx := int(key[0] - '1'); idx < len(rows) {
+			if idx := questionRowByNumber(rows, int(key[0]-'0')); idx >= 0 {
 				q.cursor[q.tab] = idx
 				return m.activateQuestionRow(rows, idx), nil
 			}
@@ -284,6 +330,8 @@ func (m Model) activateQuestionRow(rows []questionRow, idx int) Model {
 	switch {
 	case row.chat:
 		return m.chatAboutQuestion()
+	case row.submit:
+		return m.commitQuestion()
 	case row.custom:
 		q.editing = true
 		m.ta.Reset()
@@ -295,9 +343,52 @@ func (m Model) activateQuestionRow(rows []questionRow, idx int) Model {
 	if q.singlePage() {
 		return m.submitQuestionForm()
 	}
+	if question, ok := q.question(); ok && question.MultiSelect {
+		// A ticked box is not an answer yet, so say what finishes the question:
+		// otherwise the Submit row under the list reads as decoration.
+		m.showBanner("tick as many as apply, then "+questionSubmitRow, "info")
+		return m
+	}
 	// Settled: no auto-advance. The selection is recorded, the tab's glyph
 	// flips, and the cursor stays put so revising an answer never means
 	// arrowing back to it.
+	m.showBanner(questionRecordedBanner(), "info")
+	return m
+}
+
+// toggleQuestionRow is what `space` does on a multi-select page: the same thing
+// enter does, except on the two rows where "toggle" would mean something else.
+// The chat exit is a way out of the form rather than a checkbox, and must not be
+// taken by a stray space; a free-text row that already holds an answer unticks
+// it instead of reopening the field, which is the only way to take that answer
+// back out of the selection set.
+func (m Model) toggleQuestionRow(rows []questionRow, idx int) Model {
+	q := m.pendingQuestion
+	if idx < 0 || idx >= len(rows) {
+		return m
+	}
+	switch row := rows[idx]; {
+	case row.chat:
+		return m
+	case row.custom && strings.TrimSpace(q.custom[q.tab]) != "":
+		q.custom[q.tab] = ""
+		m.showBanner("your own answer was removed from the selection", "info")
+		return m
+	}
+	return m.activateQuestionRow(rows, idx)
+}
+
+// commitQuestion records a multi-select question's selection set as its answer.
+// Committing an empty set is allowed and is *not* a skip: "none of these" is a
+// decision, and the model is told which of the two it was given. It never moves
+// the active tab — the form is still sent from the Submit chip in the strip.
+func (m Model) commitQuestion() Model {
+	q := m.pendingQuestion
+	q.committed[q.tab] = true
+	if len(q.selected[q.tab]) == 0 && strings.TrimSpace(q.custom[q.tab]) == "" {
+		m.showBanner("recorded: none of these — "+glyphs().submit+" Submit to send", "info")
+		return m
+	}
 	m.showBanner(questionRecordedBanner(), "info")
 	return m
 }

@@ -196,6 +196,30 @@ func TestFormatAskUserAnswers(t *testing.T) {
 	}
 }
 
+// "None of these" is an answer to a multi-select question. It carries no
+// content, so the consumer says so by clearing Skipped, and the model has to
+// read it as a decision rather than as the silence of a question never opened.
+func TestFormatAskUserAnswers_ExplicitEmptyAnswerIsNotASkip(t *testing.T) {
+	form := AskUserForm{Questions: []AskUserQuestion{
+		{Header: "Checks", Question: "Which checks?", MultiSelect: true},
+		{Header: "Rollout", Question: "How to ship?"},
+	}}
+	out, err := formatAskUserAnswers(form, []AskUserAnswer{
+		{Header: "Checks", Skipped: false},
+		{Header: "Rollout", Skipped: true},
+	})
+	if err != nil {
+		t.Fatalf("an explicitly empty answer is an answer, so the form is answered: %v", err)
+	}
+	lines := strings.Split(out, "\n")
+	if !strings.Contains(lines[0], askUserNoneMarker) {
+		t.Fatalf("want the none-of-these marker, got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], askUserSkippedMarker) {
+		t.Fatalf("the untouched question must still read as skipped: %q", lines[1])
+	}
+}
+
 // A form nobody answered is an error, not a result the model can mistake for
 // agreement with its recommendation.
 func TestFormatAskUserAnswers_NothingAnsweredIsAnError(t *testing.T) {

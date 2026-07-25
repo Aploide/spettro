@@ -133,6 +133,11 @@ const askUserMultiSelectHint = "(more than one answer is allowed — pick one, o
 // one in the tool result, so the model does not read silence as a default.
 const askUserSkippedMarker = "(not answered)"
 
+// askUserNoneMarker is the other empty answer: the user was shown a
+// multi-select question and submitted it having ticked nothing. The model must
+// be able to tell "none of these apply" from "I never answered that".
+const askUserNoneMarker = "(none of the options)"
+
 // QuestionByQuestion adapts a single-question consumer into a form callback by
 // walking the form in order. An error from any question fails the whole form:
 // declining a question declines the interaction, which is what every existing
@@ -301,8 +306,11 @@ func alignAskUserAnswers(form AskUserForm, answers []AskUserAnswer) []AskUserAns
 			break
 		}
 	}
-	// Skipped is derived, not trusted: "answered" is exactly "said something",
-	// so a consumer cannot report a selection and a skip at the same time.
+	// An answer with content is never a skip: a consumer cannot report a
+	// selection and a skip at the same time. The reverse is left to the
+	// consumer, because it is the one thing content cannot express — a user who
+	// was shown a multi-select question and ticked nothing *answered* it, and
+	// says so by clearing Skipped on an empty answer.
 	for i := range out {
 		selected := make([]string, 0, len(out[i].Selected))
 		for _, label := range out[i].Selected {
@@ -313,7 +321,9 @@ func alignAskUserAnswers(form AskUserForm, answers []AskUserAnswer) []AskUserAns
 		out[i].Selected = selected
 		out[i].Custom = strings.TrimSpace(out[i].Custom)
 		out[i].Notes = strings.TrimSpace(out[i].Notes)
-		out[i].Skipped = len(selected) == 0 && out[i].Custom == "" && out[i].Notes == ""
+		if len(selected) > 0 || out[i].Custom != "" || out[i].Notes != "" {
+			out[i].Skipped = false
+		}
 	}
 	return out
 }
@@ -332,8 +342,14 @@ func formatAskUserAnswers(form AskUserForm, answers []AskUserAnswer) (string, er
 			parts = append(parts, strconv.Quote(a.Custom))
 		}
 		text := askUserSkippedMarker
-		if len(parts) > 0 {
+		switch {
+		case len(parts) > 0:
 			text = strings.Join(parts, ", ")
+			answered = true
+		case !a.Skipped:
+			// The user answered a multi-select question by choosing nothing.
+			// That is a decision about the options, not silence about them.
+			text = askUserNoneMarker
 			answered = true
 		}
 		if note := strings.TrimSpace(a.Notes); note != "" {
