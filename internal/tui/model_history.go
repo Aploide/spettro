@@ -255,23 +255,22 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				return agent.ShellApprovalDeny, ctx.Err()
 			}
 		},
-		// The inline picker answers one question at a time, so the form is
-		// walked question by question through the shared adapter (tasks 03-07
-		// replace the picker with a form modal that renders the whole form).
-		AskUser: agent.QuestionByQuestion(func(ctx context.Context, req agent.AskUserRequest) (string, error) {
+		// The whole form goes to the modal at once: it renders every question
+		// as a tab and sends one answer per question back (dialog_question.go).
+		AskUser: func(ctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
 			respCh := make(chan askUserResponse, 1)
 			select {
-			case askUserCh <- askUserRequestMsg{request: req, response: respCh}:
+			case askUserCh <- askUserRequestMsg{form: form, response: respCh}:
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return nil, ctx.Err()
 			}
 			select {
 			case resp := <-respCh:
-				return resp.answer, resp.err
+				return resp.answers, resp.err
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return nil, ctx.Err()
 			}
-		}),
+		},
 	}
 
 	return m, tea.Batch(

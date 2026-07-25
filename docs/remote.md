@@ -172,7 +172,7 @@ All events share the envelope:
 | `tool` | Any tool started/finished | `name`, `status` (`running`/`success`/`error`), `agent`, `args`/`args_raw`, `output` |
 | `banner` | UI banner shown (info/warn/error/success) | `text`, `level` |
 | `approval_request` | Shell approval is needed | `command`, `tool_id`, `segments`, `reason` |
-| `ask_user` | The agent invoked `ask-user` | `question`, `options`, `context`, `default`, `allow_free_response` |
+| `ask_user` | The agent invoked `ask-user` | `question`, `options`, `context`, `default`, `allow_free_response` — one event per question when the agent asked several at once |
 | `commit` / `commit_error` | Auto-commit agent finished | `message` / `error` |
 | `search` / `search_error` | Repo searcher finished | `result` / `error` |
 | `remote_command` | Remote client sent a slash command | `command` |

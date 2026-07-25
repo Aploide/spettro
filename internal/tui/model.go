@@ -217,14 +217,16 @@ type shellApprovalResponse struct {
 	err      error
 }
 
+// askUserRequestMsg carries a whole form: every question the agent asked in one
+// tool call is put to the user together, and every answer comes back together.
 type askUserRequestMsg struct {
-	request  agent.AskUserRequest
+	form     agent.AskUserForm
 	response chan askUserResponse
 }
 
 type askUserResponse struct {
-	answer string
-	err    error
+	answers []agent.AskUserAnswer
+	err     error
 }
 
 type queuedPrompt struct {
@@ -358,17 +360,19 @@ type Model struct {
 	// (screen cell coordinates); released selections are copied via OSC 52.
 	textSel textSelection
 
-	liveTools       []ToolItem
-	currentTool     *ToolItem
-	toolCh          chan agent.ToolTrace
-	streamCh        chan agent.StreamChunk
-	usageCh         chan agent.UsageEvent
-	approvalCh      chan shellApprovalRequestMsg
-	askUserCh       chan askUserRequestMsg
-	cancelAgent     context.CancelFunc
-	pendingAuth     *shellApprovalRequestMsg
-	pendingQuestion *askUserRequestMsg
-	// questionQueue holds questions that arrived while another one was on
+	liveTools   []ToolItem
+	currentTool *ToolItem
+	toolCh      chan agent.ToolTrace
+	streamCh    chan agent.StreamChunk
+	usageCh     chan agent.UsageEvent
+	approvalCh  chan shellApprovalRequestMsg
+	askUserCh   chan askUserRequestMsg
+	cancelAgent context.CancelFunc
+	pendingAuth *shellApprovalRequestMsg
+	// pendingQuestion is the form the question modal is showing, nil when no
+	// form is open. It owns the whole interaction: see dialog_question.go.
+	pendingQuestion *questionForm
+	// questionQueue holds forms that arrived while another one was on
 	// screen — parallel tool calls, or a second agent question raised while
 	// the user was still typing an answer. They are asked in arrival order as
 	// each is answered; none is ever dropped, because every one of them has a
@@ -378,8 +382,6 @@ type Model struct {
 	// approvalDiffExpanded toggles (ctrl+o) the full diff in a file-write /
 	// file-edit approval prompt; collapsed shows the first lines only.
 	approvalDiffExpanded bool
-	questionCursor       int
-	questionFreeform     bool
 	progressNote         string
 	pendingPrompts       []queuedPrompt
 	awaitingInstead      bool

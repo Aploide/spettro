@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"spettro/internal/agent"
+)
 
 // TestActiveModalSingle verifies each flag maps to its modal when it is the
 // only one set (the common single-modal case must be unambiguous).
@@ -17,6 +21,12 @@ func TestActiveModalSingle(t *testing.T) {
 		{"resume", func(m *Model) { m.showResume = true }, modalResume},
 		{"memory-review", func(m *Model) { m.showMemoryReview = true }, modalMemoryReview},
 		{"connect", func(m *Model) { m.showConnect = true }, modalConnect},
+		{"question", func(m *Model) {
+			m.pendingQuestion = newQuestionForm(askUserRequestMsg{
+				form:     agent.AskUserForm{Questions: []agent.AskUserQuestion{{Header: "H", Question: "Q?"}}},
+				response: make(chan askUserResponse, 1),
+			})
+		}, modalQuestion},
 		{"selector", func(m *Model) { m.showSelector = true }, modalSelector},
 		{"setup", func(m *Model) { m.showSetup = true }, modalSetup},
 	}
@@ -49,6 +59,22 @@ func TestActiveModalPrecedence(t *testing.T) {
 	if got := m.activeModal(); got != modalOnboarding {
 		t.Fatalf("onboarding should take precedence over resume, got %v", got)
 	}
+
+	// A question blocks a tool call, so it outranks any picker the user left
+	// open — but not the startup gates, which decide whether the run happens.
+	m = NewModelForTesting()
+	m.pendingQuestion = newQuestionForm(askUserRequestMsg{
+		form:     agent.AskUserForm{Questions: []agent.AskUserQuestion{{Header: "H", Question: "Q?"}}},
+		response: make(chan askUserResponse, 1),
+	})
+	m.showSelector = true
+	if got := m.activeModal(); got != modalQuestion {
+		t.Fatalf("a pending question should outrank the selector, got %v", got)
+	}
+	m.showTrust = true
+	if got := m.activeModal(); got != modalTrust {
+		t.Fatalf("trust should still gate a pending question, got %v", got)
+	}
 }
 
 // TestActiveModalEveryRoutedModalHasConsistentView guards against the three
@@ -56,7 +82,7 @@ func TestActiveModalPrecedence(t *testing.T) {
 // be renderable by View (or, for modalSetup, intentionally fall through). We
 // assert View does not panic and returns non-empty output for each.
 func TestActiveModalViewDoesNotPanic(t *testing.T) {
-	for _, mod := range []modal{modalTrust, modalLogin, modalOnboarding, modalResume, modalMemoryReview, modalConnect, modalSelector, modalSetup, modalNone} {
+	for _, mod := range []modal{modalTrust, modalLogin, modalOnboarding, modalQuestion, modalResume, modalMemoryReview, modalConnect, modalSelector, modalSetup, modalNone} {
 		m := NewModelForTesting()
 		m.ready = true
 		m.width, m.height = 80, 24
@@ -68,6 +94,11 @@ func TestActiveModalViewDoesNotPanic(t *testing.T) {
 			m.showLogin = true
 		case modalOnboarding:
 			m.showOnboarding = true
+		case modalQuestion:
+			m.pendingQuestion = newQuestionForm(askUserRequestMsg{
+				form:     agent.AskUserForm{Questions: []agent.AskUserQuestion{{Header: "H", Question: "Q?"}}},
+				response: make(chan askUserResponse, 1),
+			})
 		case modalResume:
 			m.showResume = true
 		case modalMemoryReview:

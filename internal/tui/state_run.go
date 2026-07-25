@@ -23,7 +23,7 @@ func (m *Model) stopAgent() {
 		}
 	}
 	if m.pendingQuestion != nil {
-		answerAskUser(*m.pendingQuestion, askUserResponse{err: fmt.Errorf("cancelled")})
+		m.pendingQuestion.reply(askUserResponse{err: fmt.Errorf("cancelled")})
 	}
 	m.discardQuestionQueue(fmt.Errorf("cancelled"))
 	m.thinking = false
@@ -37,8 +37,6 @@ func (m *Model) stopAgent() {
 	m.pendingAuth = nil
 	m.pendingQuestion = nil
 	m.approvalCursor = 0
-	m.questionCursor = 0
-	m.questionFreeform = false
 	m.progressNote = ""
 	m.activePrompt = nil
 	m.activeAgentID = ""

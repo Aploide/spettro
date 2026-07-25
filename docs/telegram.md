@@ -73,7 +73,7 @@ When messaging the bot:
 | --- | --- |
 | Plain text (no leading `/`) | Treated as a new prompt for the active agent. |
 | `/plan ...`, `/approve`, `/models ...`, etc. | Treated as a Spettro slash command (subject to the usual "not while thinking" rules). |
-| Plain text **while Spettro is awaiting an ask-user answer** | Routed as the answer to the pending dialog. Spettro confirms in the TUI. |
+| Plain text **while Spettro is awaiting an ask-user answer** | Routed as the answer to the question currently on screen. Spettro confirms in the TUI. When the agent asked several questions at once, the next unanswered one is sent to the chat and the form is submitted after the last. |
 | `/cancel` (or `/stop`) | Interrupt the currently running agent (equivalent to pressing Esc). |
 | `/whoami` | Print the bot's identity and allowlist size. |
 | `/help`, `/start` | Print the bot-side cheat sheet. |

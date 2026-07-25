@@ -1,0 +1,552 @@
+package tui
+
+// The ask-user question modal: state, key handling and the queue of forms
+// waiting their turn. Rendering lives in dialog_question_view.go.
+//
+// The agent asks a *form* — up to four questions put to the user together —
+// so the modal owns the screen while one is open rather than squeezing into
+// the input box. Every question keeps its own cursor, selection and typed
+// text, so moving between tabs never costs the user an answer.
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+
+	tea "charm.land/bubbletea/v2"
+
+	"spettro/internal/agent"
+)
+
+// questionCustomRow is the client-supplied free-text entry appended to a
+// question's options. It is not one of the agent's answers, so it sits below
+// the separator and outside the option cap.
+const questionCustomRow = "Type something."
+
+// questionForm is the live state of one ask-user form. The per-question slices
+// are parallel to form.Questions: switching tabs changes an index and nothing
+// else, which is what makes a revisited question come back exactly as it was
+// left.
+type questionForm struct {
+	form agent.AskUserForm
+	// tab indexes form.Questions; len(form.Questions) is the Submit tab.
+	tab      int
+	cursor   []int          // per-question row cursor
+	selected []map[int]bool // per-question chosen option indices
+	custom   []string       // per-question free text
+	notes    []string       // per-question annotation (task 06)
+	// editing is set while the active question's free-text entry has the
+	// keyboard; the textarea holds the text until it is committed.
+	editing  bool
+	response chan askUserResponse
+}
+
+// newQuestionForm arms the per-question state and focuses each question's
+// recommended option, so the answer the agent would pick is one keypress away.
+func newQuestionForm(msg askUserRequestMsg) *questionForm {
+	q := &questionForm{
+		form:     msg.form,
+		cursor:   make([]int, len(msg.form.Questions)),
+		selected: make([]map[int]bool, len(msg.form.Questions)),
+		custom:   make([]string, len(msg.form.Questions)),
+		notes:    make([]string, len(msg.form.Questions)),
+		response: msg.response,
+	}
+	for i, question := range msg.form.Questions {
+		q.selected[i] = map[int]bool{}
+		for j, opt := range question.Options {
+			if opt.IsRecommended {
+				q.cursor[i] = j
+				break
+			}
+		}
+	}
+	return q
+}
+
+// questionRow is one line of the answer list: an agent option or the client's
+// free-text entry.
+type questionRow struct {
+	// option indexes the question's Options; -1 marks the free-text entry.
+	option      int
+	label       string
+	description string
+	recommended bool
+	custom      bool
+}
+
+// questionRows is the answer list for one question: the agent's options in
+// order, then the free-text entry when the question allows one.
+func questionRows(q agent.AskUserQuestion) []questionRow {
+	rows := make([]questionRow, 0, len(q.Options)+1)
+	for i, opt := range q.Options {
+		rows = append(rows, questionRow{
+			option:      i,
+			label:       opt.Label,
+			description: opt.Description,
+			recommended: opt.IsRecommended,
+		})
+	}
+	if q.AllowCustom || len(q.Options) == 0 {
+		rows = append(rows, questionRow{option: -1, label: questionCustomRow, custom: true})
+	}
+	return rows
+}
+
+// question returns the question the active tab points at, or false on the
+// Submit tab.
+func (q *questionForm) question() (agent.AskUserQuestion, bool) {
+	if q.tab < 0 || q.tab >= len(q.form.Questions) {
+		return agent.AskUserQuestion{}, false
+	}
+	return q.form.Questions[q.tab], true
+}
+
+// onSubmitTab reports whether the trailing ✔ Submit chip is active.
+func (q *questionForm) onSubmitTab() bool { return q.tab >= len(q.form.Questions) }
+
+// tabCount is the number of chips in the strip: one per question plus Submit.
+func (q *questionForm) tabCount() int { return len(q.form.Questions) + 1 }
+
+// answered reports whether question i has something to send back. An untouched
+// question is not "answered by default": the model is told it was skipped.
+func (q *questionForm) answered(i int) bool {
+	if i < 0 || i >= len(q.form.Questions) {
+		return false
+	}
+	return len(q.selected[i]) > 0 || strings.TrimSpace(q.custom[i]) != ""
+}
+
+// complete reports whether every question has an answer, which is what the
+// Submit tab warns about when it does not.
+func (q *questionForm) complete() bool {
+	for i := range q.form.Questions {
+		if !q.answered(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// firstUnanswered returns the index of the first question still waiting for an
+// answer, or -1 when the form is complete.
+func (q *questionForm) firstUnanswered() int {
+	for i := range q.form.Questions {
+		if !q.answered(i) {
+			return i
+		}
+	}
+	return -1
+}
+
+// choose records an answer: one option replaces the previous choice, but a
+// multi-select question accumulates them (task 05 gives those rows checkboxes
+// and a space toggle; until then enter is the toggle, so a question the agent
+// marked multi-select can still come back with more than one answer).
+func (q *questionForm) choose(question, option int) {
+	if q.form.Questions[question].MultiSelect {
+		if q.selected[question][option] {
+			delete(q.selected[question], option)
+			return
+		}
+		q.selected[question][option] = true
+		return
+	}
+	q.selected[question] = map[int]bool{option: true}
+	q.custom[question] = ""
+}
+
+// answers renders the collected state into the shape the agent tool reads.
+func (q *questionForm) answers() []agent.AskUserAnswer {
+	out := make([]agent.AskUserAnswer, 0, len(q.form.Questions))
+	for i, question := range q.form.Questions {
+		answer := agent.AskUserAnswer{
+			Header: question.Header,
+			Custom: strings.TrimSpace(q.custom[i]),
+			Notes:  strings.TrimSpace(q.notes[i]),
+		}
+		for j, opt := range question.Options {
+			if q.selected[i][j] {
+				answer.Selected = append(answer.Selected, opt.Label)
+			}
+		}
+		answer.Skipped = len(answer.Selected) == 0 && answer.Custom == ""
+		out = append(out, answer)
+	}
+	return out
+}
+
+// reply unblocks the tool call this form belongs to. Every exit from the modal
+// goes through it, so a form can never be dismissed while its run waits.
+func (q *questionForm) reply(resp askUserResponse) {
+	answerAskUser(askUserRequestMsg{form: q.form, response: q.response}, resp)
+}
+
+// singlePage reports a form that is one question with one answer. It renders
+// without the tab strip and answering it submits: there is no second question
+// to move to, so making the user visit a Submit tab would be chrome for its
+// own sake. A multi-select question is not a single page even when it is
+// alone — picking an option cannot mean "and I am done".
+func (q *questionForm) singlePage() bool {
+	return len(q.form.Questions) == 1 && !q.form.Questions[0].MultiSelect
+}
+
+// --- key handling ---
+
+func (m Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	q := m.pendingQuestion
+	if q == nil {
+		return m, nil
+	}
+	if q.editing {
+		return m.updateQuestionCustom(msg)
+	}
+	switch msg.String() {
+	case "left", "shift+tab":
+		if q.tab > 0 {
+			q.tab--
+		}
+		return m.focusQuestionTab(), nil
+	case "right", "tab":
+		if q.tab < q.tabCount()-1 {
+			q.tab++
+		}
+		return m.focusQuestionTab(), nil
+	case "esc":
+		// Declining is all-or-nothing: a partial answer is a Submit-tab
+		// action, never a side effect of backing out.
+		return m.rejectAskUser("question declined"), nil
+	}
+	if q.onSubmitTab() {
+		if msg.String() == "enter" {
+			return m.submitQuestionForm(), nil
+		}
+		return m, nil
+	}
+	question, _ := q.question()
+	rows := questionRows(question)
+	if len(rows) == 0 {
+		return m, nil
+	}
+	if q.cursor[q.tab] >= len(rows) {
+		q.cursor[q.tab] = len(rows) - 1
+	}
+	switch msg.String() {
+	case "up", "ctrl+p":
+		if q.cursor[q.tab] > 0 {
+			q.cursor[q.tab]--
+		}
+	case "down", "ctrl+n":
+		if q.cursor[q.tab] < len(rows)-1 {
+			q.cursor[q.tab]++
+		}
+	case "enter":
+		row := rows[q.cursor[q.tab]]
+		if row.custom {
+			q.editing = true
+			m.ta.Reset()
+			m.ta.SetValue(q.custom[q.tab])
+			m.showBanner("type your answer and press enter", "info")
+			return m, nil
+		}
+		q.choose(q.tab, row.option)
+		if q.singlePage() {
+			return m.submitQuestionForm(), nil
+		}
+		// Settled: no auto-advance. The selection is recorded, the tab's
+		// glyph flips, and the cursor stays put so revising an answer never
+		// means arrowing back to it.
+		m.showBanner(questionRecordedBanner(), "info")
+	}
+	return m, nil
+}
+
+// focusQuestionTab opens the free-text entry when the tab the user just landed
+// on has nothing to pick from: with no option list to arrow through, the
+// keyboard belongs in the textarea rather than behind one more enter. A tab
+// whose answer was already typed shows it instead, so navigating past a
+// finished question does not reopen it.
+func (m Model) focusQuestionTab() Model {
+	q := m.pendingQuestion
+	question, ok := q.question()
+	if !ok || len(question.Options) > 0 || strings.TrimSpace(q.custom[q.tab]) != "" {
+		return m
+	}
+	q.editing = true
+	m.ta.Reset()
+	return m
+}
+
+// updateQuestionCustom handles the free-text entry: the textarea holds the
+// draft until enter commits it to the active question.
+func (m Model) updateQuestionCustom(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	q := m.pendingQuestion
+	switch msg.String() {
+	case "enter":
+		text := strings.TrimSpace(m.ta.Value())
+		if text == "" {
+			m.showBanner("type your answer, then press enter", "warn")
+			return m, nil
+		}
+		q.custom[q.tab] = text
+		if question, ok := q.question(); ok && !question.MultiSelect {
+			q.selected[q.tab] = map[int]bool{}
+		}
+		q.editing = false
+		m.ta.Reset()
+		if q.singlePage() {
+			return m.submitQuestionForm(), nil
+		}
+		m.showBanner(questionRecordedBanner(), "info")
+		return m, nil
+	case "esc":
+		question, _ := q.question()
+		q.editing = false
+		m.ta.Reset()
+		if len(question.Options) > 0 {
+			m.showBanner("choose an option or press esc again to decline", "info")
+			return m, nil
+		}
+		return m.rejectAskUser("question declined"), nil
+	default:
+		var taCmd tea.Cmd
+		m.ta, taCmd = m.ta.Update(msg)
+		return m, taCmd
+	}
+}
+
+// questionRecordedBanner says what a recorded answer does next, in the glyph
+// set the terminal can actually draw.
+func questionRecordedBanner() string {
+	return "answer recorded — tab to the next question, or " + glyphs().submit + " Submit"
+}
+
+// --- delivery ---
+
+// answerAskUser delivers a reply to the tool call blocked on this form.
+// The response channel is buffered and read exactly once, so a non-blocking
+// send is enough — and a second send (a race between, say, a Telegram answer
+// and a keypress) is dropped rather than deadlocking the UI.
+func answerAskUser(msg askUserRequestMsg, resp askUserResponse) {
+	select {
+	case msg.response <- resp:
+	default:
+	}
+}
+
+// presentQuestion makes a form the active one. Everything that targets "the
+// form on screen" — the modal, the desktop notification, the remote/Telegram
+// answer expectation — is armed here, so a queued form stays invisible to
+// those surfaces until its turn.
+func (m Model) presentQuestion(msg askUserRequestMsg) Model {
+	m.pendingQuestion = newQuestionForm(msg)
+	m.ta.Reset()
+	m = m.focusQuestionTab()
+	banner := "agent is waiting for your answer"
+	if n := len(m.questionQueue); n > 0 {
+		banner = fmt.Sprintf("%s (%d more after this)", banner, n)
+	}
+	m.showBanner(banner, "info")
+	m.notifyIfUnfocused("Agent is waiting for your answer")
+	m.publishQuestionRemote()
+	return m
+}
+
+// publishQuestionRemote pushes the question the user is being asked to the
+// remote/Telegram surfaces, which can only carry one at a time. Task 08 gives
+// them the whole form; until then they see the active question, and answering
+// it moves them to the next one that still needs an answer.
+func (m Model) publishQuestionRemote() {
+	q := m.pendingQuestion
+	if q == nil {
+		return
+	}
+	question, ok := q.question()
+	if !ok {
+		return
+	}
+	options := make([]string, 0, len(question.Options))
+	for _, opt := range question.Options {
+		options = append(options, opt.Label)
+	}
+	def := ""
+	for _, opt := range question.Options {
+		if opt.IsRecommended {
+			def = opt.Label
+			break
+		}
+	}
+	m.publishRemote("ask_user", map[string]any{
+		"question":            question.Question,
+		"options":             options,
+		"context":             q.form.Context,
+		"default":             def,
+		"allow_free_response": question.AllowCustom || len(question.Options) == 0,
+	})
+}
+
+// advanceQuestionQueue clears the form just answered and promotes the next one
+// the agent asked while the user was busy.
+func (m Model) advanceQuestionQueue() Model {
+	m.pendingQuestion = nil
+	m.ta.Reset()
+	m.telegramClearAnswerExpectations()
+	if len(m.questionQueue) == 0 {
+		return m
+	}
+	next := m.questionQueue[0]
+	m.questionQueue = m.questionQueue[1:]
+	return m.presentQuestion(next)
+}
+
+// discardQuestionQueue answers every waiting form with err, so no tool call is
+// left blocked when the run they belong to goes away.
+func (m *Model) discardQuestionQueue(err error) {
+	for _, queued := range m.questionQueue {
+		answerAskUser(queued, askUserResponse{err: err})
+	}
+	m.questionQueue = nil
+}
+
+// submitQuestionForm sends the answers collected so far. Questions left
+// untouched come back marked skipped rather than defaulted (task 07 adds the
+// review page's warning before this can happen by accident).
+func (m Model) submitQuestionForm() Model {
+	q := m.pendingQuestion
+	if q == nil {
+		return m
+	}
+	q.reply(askUserResponse{answers: q.answers()})
+	banner := "answer sent"
+	if !q.complete() {
+		banner = "answers sent — unanswered questions were marked skipped"
+	}
+	m.showBanner(banner, "info")
+	m = m.advanceQuestionQueue()
+	m.refreshViewport()
+	return m
+}
+
+// rejectAskUser declines the whole form: nothing is partially delivered.
+func (m Model) rejectAskUser(banner string) Model {
+	if q := m.pendingQuestion; q != nil {
+		q.reply(askUserResponse{err: fmt.Errorf("user declined to answer")})
+	}
+	m.showBanner(banner, "warn")
+	m = m.advanceQuestionQueue()
+	m.refreshViewport()
+	return m
+}
+
+// answerQuestionRemotely records free text sent from a surface that cannot
+// navigate the form (Telegram today) against the question it was shown. Unlike
+// the TUI it *does* advance: the remote user has no other way to reach the
+// next question, and stopping on an answered one would strand the form.
+func (m Model) answerQuestionRemotely(text, banner string) Model {
+	q := m.pendingQuestion
+	if q == nil {
+		return m
+	}
+	if q.onSubmitTab() {
+		q.tab = max(len(q.form.Questions)-1, 0)
+	}
+	question, ok := q.question()
+	if !ok {
+		return m
+	}
+	labels := make([]string, 0, len(question.Options))
+	for _, opt := range question.Options {
+		labels = append(labels, opt.Label)
+	}
+	if idx := indexOfLabel(labels, text); idx >= 0 {
+		q.choose(q.tab, idx)
+	} else {
+		q.custom[q.tab] = strings.TrimSpace(text)
+		q.selected[q.tab] = map[int]bool{}
+	}
+	if next := q.firstUnanswered(); next >= 0 {
+		q.tab = next
+		m.showBanner(banner+" — next question sent", "info")
+		m.publishQuestionRemote()
+		return m
+	}
+	m.showBanner(banner, "info")
+	return m.submitQuestionForm()
+}
+
+// indexOfLabel resolves a reply to one of the agent's options, so a remote user
+// naming an option answers with it instead of as free text.
+func indexOfLabel(labels []string, text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return -1
+	}
+	for i, label := range labels {
+		if strings.EqualFold(text, strings.TrimSpace(label)) {
+			return i
+		}
+	}
+	return -1
+}
+
+// --- glyphs ---
+
+// questionGlyphSet is the symbol vocabulary of the question modal, picked once
+// so the tab strip, the option rows, the preview pane and the review page can
+// never disagree about what a checkbox looks like.
+type questionGlyphSet struct {
+	unchecked   string
+	checked     string
+	submit      string
+	cursor      string
+	recommended string
+	warn        string
+}
+
+var (
+	questionGlyphsUnicode = questionGlyphSet{
+		// ○/● rather than ☐/☒: the boxed glyphs draw as hairlines in most
+		// terminal fonts, and the filled circle is what the rest of the TUI
+		// already uses for a checked row (see the storage dialog).
+		unchecked: "○", checked: "●", submit: "✓", cursor: "❯", recommended: "●", warn: "⚠",
+	}
+	questionGlyphsASCII = questionGlyphSet{
+		unchecked: "[ ]", checked: "[x]", submit: ">", cursor: ">", recommended: "*", warn: "!",
+	}
+)
+
+// questionGlyphOverride forces a set in tests; nil means detect.
+var questionGlyphOverride *questionGlyphSet
+
+// glyphs returns the symbol set this terminal can render. The codebase has no
+// capability probe, and the terminfo databases do not describe glyph coverage,
+// so the locale is the signal available: a non-UTF-8 locale cannot encode the
+// box-drawing symbols at all.
+var glyphs = func() func() questionGlyphSet {
+	detect := sync.OnceValue(func() questionGlyphSet {
+		if localeIsUTF8() {
+			return questionGlyphsUnicode
+		}
+		return questionGlyphsASCII
+	})
+	return func() questionGlyphSet {
+		if questionGlyphOverride != nil {
+			return *questionGlyphOverride
+		}
+		return detect()
+	}
+}()
+
+func localeIsUTF8() bool {
+	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		v := strings.ToLower(os.Getenv(key))
+		if v == "" {
+			continue
+		}
+		return strings.Contains(v, "utf-8") || strings.Contains(v, "utf8")
+	}
+	// No locale set at all: assume the modern default rather than degrading
+	// every terminal that simply does not export one.
+	return true
+}

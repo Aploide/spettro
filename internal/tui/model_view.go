@@ -387,62 +387,6 @@ func (m Model) viewMentionPalette(width int) string {
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
 
-// renderAskUserPrompt draws the agent's question inside the input box. Every
-// line is wrapped or truncated to the box's inner width, and the option list is
-// windowed to askUserBlockBudget: the height this returns is what recalcLayout
-// reserves, so a line that silently wrapped — or one option too many — would
-// push the whole layout past the bottom of the terminal.
-func (m Model) renderAskUserPrompt() string {
-	if m.pendingQuestion == nil {
-		return ""
-	}
-	req := m.pendingQuestion.request
-	innerW := max(m.paneWidth()-6, 20)
-	budget := m.askUserBlockBudget()
-
-	head := wrapPlainLines("  "+strings.TrimSpace(req.Question), innerW)
-	head = append(head, wrapPlainLines("  "+strings.TrimSpace(req.Context), innerW)...)
-	// Answering this one brings up the next, so say so rather than letting a
-	// second prompt appear out of nowhere.
-	if n := len(m.questionQueue); n > 0 {
-		head = append(head, "  ↓ "+plural(n, "more question")+" waiting")
-	}
-
-	options := askUserOptions(req)
-	if m.questionFreeform || len(options) == 0 {
-		// Prompt line + textarea + footer sit below the question.
-		head = clampTextLines(head, max(budget-2-lipgloss.Height(m.ta.View()), 1), innerW)
-		lines := styleLines(head)
-		lines = append(lines, styleMuted.Render("  type your answer and press enter:"))
-		lines = append(lines, m.ta.View())
-		lines = append(lines, styleMuted.Render("  esc declines"))
-		return strings.Join(lines, "\n")
-	}
-
-	// Reserve the picker title, the footer, one option row, and the line the
-	// "… N more" marker takes when the list has to be windowed.
-	head = clampTextLines(head, max(budget-4, 1), innerW)
-	rows := askUserPickerRows(req)
-	for i := range rows {
-		// The row prefix takes 4 columns and the badge follows the label.
-		rows[i].Label = truncateLabel(rows[i].Label, max(innerW-6-lipgloss.Width(rows[i].Badge), 8))
-	}
-	visible, cursor, hidden := windowPickerRows(rows, m.questionCursor, budget-len(head)-2)
-
-	lines := styleLines(head)
-	lines = append(lines, m.renderAnnotatedPicker(
-		"Choose an answer",
-		visible,
-		cursor,
-		m.currentColor(),
-	))
-	if hidden > 0 {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("    … %d more (↑ ↓ to scroll)", hidden)))
-	}
-	lines = append(lines, styleMuted.Render("  enter selects  esc declines"))
-	return strings.Join(lines, "\n")
-}
-
 // wrapPlainLines word-wraps unstyled text to width and returns one entry per
 // terminal line, so callers can count and cut lines before styling them —
 // measuring styled output is what lets a wrapped line escape the layout's
@@ -469,14 +413,6 @@ func clampTextLines(lines []string, maxLines, width int) []string {
 	last := len(lines) - 1
 	lines[last] = truncateLabel(lines[last], max(width-2, 4)) + " …"
 	return lines
-}
-
-func styleLines(lines []string) []string {
-	out := make([]string, 0, len(lines)+4)
-	for _, line := range lines {
-		out = append(out, styleMuted.Render(line))
-	}
-	return out
 }
 
 func (m Model) viewInput(width int) string {
@@ -509,7 +445,7 @@ func (m Model) viewInput(width int) string {
 		))
 		lines = append(lines, styleMuted.Render("  enter selects  esc keeps typing"))
 	} else if m.pendingQuestion != nil {
-		lines = append(lines, m.renderAskUserPrompt())
+		lines = append(lines, m.renderQuestionForm())
 	} else if m.pendingAuth != nil {
 		cmd := formatApprovalCommandLabel(m.pendingAuth.request.Command)
 		lines = append(lines, styleWarn.Render("  "+cmd))

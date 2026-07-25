@@ -468,7 +468,7 @@ func (m Model) handleTelegramSubmission(req telegram.SubmitRequest) (tea.Model, 
 
 	// Free-text answer to a pending ask-user dialog.
 	if req.Kind == telegram.SubmitAnswer && m.pendingQuestion != nil {
-		m = m.resolveAskUser(text, fmt.Sprintf("answered via Telegram (%s)", req.From))
+		m = m.answerQuestionRemotely(text, fmt.Sprintf("answered via Telegram (%s)", req.From))
 		sendTelegramReply(reply, telegram.SubmitResponse{Accepted: true, Note: "answered ask-user dialog"})
 		m.refreshViewport()
 		return m, nil

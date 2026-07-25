@@ -125,9 +125,13 @@ a one-question form, so custom agent files that use it keep working.
 Answers come back one line per question, `<header>: <answer>`: multi-select
 answers comma-joined, the user's own words quoted verbatim, and a question the
 user skipped explicitly marked as unanswered so the agent cannot read silence as
-agreement with its recommendation. Surfaces that can only put one question at a
-time to the user (the TUI picker, the ACP transports, remote/Telegram) walk the
-form through one shared adapter rather than each reimplementing the loop.
+agreement with its recommendation. The TUI shows the whole form at once, in the
+input box so the conversation stays readable behind it: one tab per question,
+`tab` / `←→` between them, `enter` to record an answer and a trailing
+`✓ Submit` tab that sends them together (`esc` declines the form). Surfaces that
+can only put one question at a time to the user (the ACP transports,
+remote/Telegram) walk the form through one shared adapter rather than each
+reimplementing the loop.
 
 ## Validation rules
 
