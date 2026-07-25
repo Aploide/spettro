@@ -68,7 +68,7 @@ func (t *turnState) onUsage(ev agent.UsageEvent, contextWindow int) {
 		UsageUpdate: &acpsdk.SessionUsageUpdate{
 			Size: contextWindow,
 			Used: ev.ContextTokens,
-			Meta: map[string]any{"spettro.dev/tokensUsed": ev.TotalTokens},
+			Meta: map[string]any{"spettro.app/tokensUsed": ev.TotalTokens},
 		},
 	})
 }
