@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"spettro/internal/compact"
 )
@@ -170,7 +171,21 @@ func Path() (string, error) {
 	return filepath.Join(home, ".spettro", "config.json"), nil
 }
 
+// configMu serializes the read-modify-write cycles below. Several front-ends
+// touch the config concurrently — the ACP bridge in particular services
+// independent extension requests on their own goroutines — and Update's
+// load/mutate/save was previously racy in two ways: concurrent writers shared
+// one temp filename (so one's rename destroyed the other's), and interleaved
+// updates silently dropped each other's changes.
+var configMu sync.Mutex
+
 func LoadOrCreate() (UserConfig, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	return loadOrCreateLocked()
+}
+
+func loadOrCreateLocked() (UserConfig, error) {
 	p, err := Path()
 	if err != nil {
 		return UserConfig{}, err
@@ -185,7 +200,7 @@ func LoadOrCreate() (UserConfig, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			cfg = Default()
-			if err := Save(cfg); err != nil {
+			if err := saveLocked(cfg); err != nil {
 				return UserConfig{}, err
 			}
 			return cfg, nil
@@ -200,7 +215,7 @@ func LoadOrCreate() (UserConfig, error) {
 	var changed bool
 	cfg, changed = normalize(cfg)
 	if changed {
-		if err := Save(cfg); err != nil {
+		if err := saveLocked(cfg); err != nil {
 			return UserConfig{}, err
 		}
 	}
@@ -231,7 +246,13 @@ func Load() (UserConfig, error) {
 
 // LoadFull reads persisted config plus encrypted API keys into a single struct.
 func LoadFull() (UserConfig, error) {
-	cfg, err := LoadOrCreate()
+	configMu.Lock()
+	defer configMu.Unlock()
+	return loadFullLocked()
+}
+
+func loadFullLocked() (UserConfig, error) {
+	cfg, err := loadOrCreateLocked()
 	if err != nil {
 		return UserConfig{}, err
 	}
@@ -244,9 +265,14 @@ func LoadFull() (UserConfig, error) {
 }
 
 // Update loads the latest persisted config, applies mut, saves it, and returns
-// the updated in-memory view including API keys.
+// the updated in-memory view including API keys. The whole cycle holds
+// configMu, so concurrent callers can't read the same base config and then
+// overwrite each other's field changes.
 func Update(mut func(*UserConfig) error) (UserConfig, error) {
-	cfg, err := LoadFull()
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	cfg, err := loadFullLocked()
 	if err != nil {
 		return UserConfig{}, err
 	}
@@ -255,19 +281,26 @@ func Update(mut func(*UserConfig) error) (UserConfig, error) {
 			return UserConfig{}, err
 		}
 	}
-	if err := Save(cfg); err != nil {
+	if err := saveLocked(cfg); err != nil {
 		return UserConfig{}, err
 	}
 	return cfg, nil
 }
 
 func Save(cfg UserConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	return saveLocked(cfg)
+}
+
+func saveLocked(cfg UserConfig) error {
 	p, err := Path()
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create global config dir: %w", err)
 	}
 
@@ -279,9 +312,27 @@ func Save(cfg UserConfig) error {
 		return fmt.Errorf("encode config: %w", err)
 	}
 
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// A unique temp file per write, not a fixed "config.json.tmp": two writers
+	// sharing that one path meant the first rename moved the file out from
+	// under the second, which then failed with ENOENT and took an otherwise
+	// healthy config read down with it.
+	tmp, err := os.CreateTemp(dir, "config-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write temp config: %w", err)
 	}
-	return os.Rename(tmp, p)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("secure temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	return os.Rename(tmpName, p)
 }
