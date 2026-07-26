@@ -29,6 +29,8 @@ import (
 	"sync"
 	"time"
 
+	"spettro/internal/platform"
+
 	"spettro/internal/storage"
 )
 
@@ -128,6 +130,15 @@ func OpenWith(globalDir, projectPath string, opts Options) (*Checkpointer, error
 	if opts.Disabled {
 		c.disabled = true
 		return c, fmt.Errorf("checkpointing disabled by config")
+	}
+	// Every operation in this package is a git invocation, so on a platform
+	// without exec the feature does not exist. Answer before touching the
+	// filesystem: the caller gets the same disabled Checkpointer it gets when
+	// git is missing, whose snapshot and restore paths are already no-ops, so
+	// nothing downstream needs a second platform check.
+	if !platform.CanExec() {
+		c.disabled = true
+		return c, fmt.Errorf("checkpointing disabled: %s", platform.ExecUnavailableReason())
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		c.disabled = true

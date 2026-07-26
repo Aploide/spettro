@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"spettro/internal/platform"
 )
 
 // ServerConfig describes one language server. LSP works with zero config:
@@ -171,6 +173,15 @@ var (
 // on. The nil result is also cached, so unconfigured workspaces pay one stat
 // per lookup at most.
 func ForWorkspace(root string) *Manager {
+	// A language server is a spawned process, so on a platform without exec
+	// there is nothing to manage. Returning nil here is not a new failure
+	// mode: it is the same path an unconfigured workspace already takes, and
+	// every caller (diagnostics after an edit, the LSP tools) is written to
+	// degrade silently on it. Answering before the config load also stops a
+	// user-supplied lsp.json from being read as a promise we cannot keep.
+	if !platform.CanExec() {
+		return nil
+	}
 	root = filepath.Clean(root)
 	regMu.Lock()
 	defer regMu.Unlock()

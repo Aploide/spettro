@@ -25,6 +25,7 @@ import (
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/models"
+	"spettro/internal/platform"
 	"spettro/internal/provider"
 	"spettro/internal/sandbox"
 	"spettro/internal/spettro"
@@ -59,6 +60,16 @@ func Run(ctx context.Context, opts Options) error {
 	logOut := opts.Log
 	if logOut == nil {
 		logOut = os.Stderr
+	}
+
+	// One line, once per session, naming the degraded mode. On iOS this is
+	// the host app's only visible signal that the missing shell/git/LSP tools
+	// are a deliberate platform gate rather than a broken bootstrap — it
+	// arrives on the same log channel the app already surfaces (the bridge's
+	// OnLog), and it is what package 10's device checklist looks for first.
+	// Desktop prints nothing: the condition is a build-time constant.
+	if !platform.CanExec() {
+		fmt.Fprintf(logOut, "capabilities: %s — shell, terminal, git, hooks and language servers are disabled; file tools are unaffected\n", platform.ExecUnavailableReason())
 	}
 
 	store, err := storage.New(opts.CWD)

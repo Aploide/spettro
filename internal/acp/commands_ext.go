@@ -20,6 +20,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/hooks"
 	"spettro/internal/jobs"
+	"spettro/internal/platform"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 )
@@ -39,13 +40,26 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 	case "/tasks":
 		return acpTasksText(b, s, input, fields), false, true
 
+	// The three exec-dependent commands stay dispatchable even where they are
+	// not advertised (availableCommands drops them), so a user who types one
+	// from muscle memory or a saved macro gets the reason rather than having
+	// the text fall through to the model as a prompt.
 	case "/jobs":
+		if !platform.CanExec() {
+			return "background jobs are unavailable: " + platform.ExecUnavailableReason(), false, true
+		}
 		return acpJobsText(fields), false, true
 
 	case "/hooks":
+		if !platform.CanExec() {
+			return "hooks are unavailable: " + platform.ExecUnavailableReason(), false, true
+		}
 		return acpHooksText(s.cwd), false, true
 
 	case "/diff":
+		if !platform.CanExec() {
+			return "/diff is unavailable: it reads the working tree with git, and " + platform.ExecUnavailableReason(), false, true
+		}
 		return acpDiffText(s.cwd, fields), false, true
 
 	case "/ultra":

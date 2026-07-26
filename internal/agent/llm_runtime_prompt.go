@@ -123,6 +123,14 @@ func buildSystemString(cfg toolLoopConfig) string {
 	if slices.Contains(cfg.AllowedTools, "comment") {
 		base += "\n- Use the comment tool to report meaningful progress steps."
 	}
+	// Last, so it is the final thing the model reads before the task. On a
+	// platform with no exec this is the single most consequential fact about
+	// the environment, and the tool list alone does not explain the absence.
+	// noExecSystemPrompt is a constant, so the byte-stability contract above
+	// still holds.
+	if cfg.NoExec {
+		base += noExecSystemPrompt
+	}
 	return base
 }
 
@@ -306,7 +314,12 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 // a registered native schema. Tools without a schema entry (e.g. manifest/MCP
 // tools) are omitted; the caller decides whether to fall back to text protocol
 // when the resulting slice is empty.
-func buildToolSpecs(allowedTools []string) []provider.ToolSpec {
+//
+// canExec false swaps in the no-exec description for the handful of surviving
+// tools whose shipped wording promises subprocess-backed abilities (see
+// noExecToolDescs). It does not filter: the exec-dependent tools are already
+// gone from allowedTools by the time runToolLoop calls this.
+func buildToolSpecs(allowedTools []string, canExec bool) []provider.ToolSpec {
 	seen := map[string]struct{}{}
 	var out []provider.ToolSpec
 	for _, name := range allowedTools {
@@ -321,6 +334,11 @@ func buildToolSpecs(allowedTools []string) []provider.ToolSpec {
 		schema, hasSchema := builtinNativeToolSchemas[name]
 		if !hasDesc || !hasSchema {
 			continue
+		}
+		if !canExec {
+			if alt, ok := noExecToolDescs[name]; ok {
+				desc = alt
+			}
 		}
 		seen[name] = struct{}{}
 		out = append(out, provider.ToolSpec{Name: name, Description: desc, Schema: schema})

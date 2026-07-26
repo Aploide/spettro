@@ -11,6 +11,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/jobs"
 	"spettro/internal/memory"
+	"spettro/internal/platform"
 	"spettro/internal/provider"
 )
 
@@ -43,6 +44,34 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "permissions", Description: "show/set permission level and debug", Input: hintInput("[yolo|restricted|ask-first] | debug <on|off>")},
 }
 
+// execDependentCommands are the advertised commands whose entire subject
+// matter is subprocess execution: background shell jobs, the shell hooks the
+// user configures, and the git working-tree diff. On a platform that cannot
+// exec, each one can only ever answer "nothing here", which reads to the user
+// as a broken feature rather than an absent one.
+var execDependentCommands = map[string]struct{}{
+	"jobs":  {},
+	"hooks": {},
+	"diff":  {},
+}
+
+// availableCommands returns the command list to advertise for this platform.
+// The client renders exactly what it is given, so this is also what decides
+// whether a slash command appears in the host app's command palette.
+func availableCommands(canExec bool) []acpsdk.AvailableCommand {
+	if canExec {
+		return acpAvailableCommands
+	}
+	out := make([]acpsdk.AvailableCommand, 0, len(acpAvailableCommands))
+	for _, c := range acpAvailableCommands {
+		if _, blocked := execDependentCommands[c.Name]; blocked {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func hintInput(hint string) *acpsdk.AvailableCommandInput {
 	return &acpsdk.AvailableCommandInput{Unstructured: &acpsdk.UnstructuredCommandInput{Hint: hint}}
 }
@@ -55,7 +84,7 @@ func (b *bridge) announceCommands(ctx context.Context, sid acpsdk.SessionId) {
 		SessionId: sid,
 		Update: acpsdk.SessionUpdate{
 			AvailableCommandsUpdate: &acpsdk.SessionAvailableCommandsUpdate{
-				AvailableCommands: acpAvailableCommands,
+				AvailableCommands: availableCommands(platform.CanExec()),
 			},
 		},
 	})

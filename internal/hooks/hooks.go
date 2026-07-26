@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"spettro/internal/platform"
 )
 
 type Event string
@@ -81,7 +83,34 @@ type RunResult struct {
 	Stderr      string
 }
 
+// Available reports whether hooks can run at all on this platform. A hook is
+// by definition an arbitrary shell command, so it needs subprocess execution;
+// there is no degraded mode.
+func Available() bool { return platform.CanExec() }
+
+// unavailableIssue is the single ValidationIssue reported in place of the
+// configured rules when hooks cannot run. Surfacing it as an issue rather
+// than dropping the rules silently means `/hooks` tells the user why their
+// configuration is inert instead of showing an empty list.
+func unavailableIssue() ValidationIssue {
+	return ValidationIssue{
+		Source:  "platform",
+		Message: "hooks are disabled: " + platform.ExecUnavailableReason(),
+	}
+}
+
+// LoadEffective merges the global and project hook configurations into the
+// rule set for cwd.
+//
+// On a platform that cannot exec it returns no rules at all. That is the
+// point of the gate: every hook event is invoked on the turn's critical path
+// (runSessionStartHooks and runPreToolHooks abort the run on error), so a
+// configuration left in place on iOS would turn every prompt into an
+// immediate failure the user has no way to act on from the device.
 func LoadEffective(cwd string) (EffectiveConfig, error) {
+	if !Available() {
+		return EffectiveConfig{Issues: []ValidationIssue{unavailableIssue()}}, nil
+	}
 	globalPath, err := globalHooksPath()
 	if err != nil {
 		return EffectiveConfig{}, err
@@ -148,6 +177,14 @@ func Match(rule EffectiveRule, toolID string) bool {
 }
 
 func Run(ctx context.Context, rule EffectiveRule, input RunInput) (RunResult, error) {
+	// Defense in depth behind LoadEffective's gate: a caller holding a rule
+	// from somewhere else must not be able to fail a turn here. An empty
+	// result with no error reads downstream as "the hook had no opinion",
+	// which is the correct degradation — a hook that cannot run must not
+	// block the tool call it was meant to observe.
+	if !Available() {
+		return RunResult{}, nil
+	}
 	timeout := rule.TimeoutSec
 	if timeout <= 0 {
 		timeout = 15

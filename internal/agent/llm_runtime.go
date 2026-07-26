@@ -21,6 +21,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/hooks"
+	"spettro/internal/platform"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 	"spettro/internal/skills"
@@ -188,6 +189,13 @@ type toolLoopConfig struct {
 	// message is appended to the conversation as a user turn so the model sees
 	// it before its next step. Top-level runs only — sub-agents never get one.
 	Steering *SteeringQueue
+	// NoExec records that this platform cannot spawn subprocesses. Callers
+	// never set it: runToolLoop derives it from platform.CanExec() and has
+	// already stripped the exec-dependent tools from AllowedTools by the time
+	// anything reads it. It exists as a field rather than a direct
+	// platform.CanExec() call inside the prompt builders so the no-exec
+	// prompt and tool descriptions are testable on a desktop host.
+	NoExec bool
 }
 
 // traceID is the agent identity stamped on emitted ToolTraces: the unique
@@ -398,6 +406,22 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		return toolLoopResult{}, fmt.Errorf("empty task")
 	}
 
+	// Platform capability gate. runToolLoop is the single choke point every
+	// agent entry point funnels through — LLMAgent.Run, the planner, the
+	// explorer, LLMCoder.Execute, ultra fan-out and delegated sub-agents — so
+	// gating here covers the whole product with one check. Tools that cannot
+	// work are removed from the offered set rather than left to fail (see
+	// execDependentTools), and the system prompt gains a section telling the
+	// model what it is working without.
+	//
+	// Filtering AllowedTools before the alias expansion below also drops the
+	// manifest aliases of the removed tools, so a renamed shell tool cannot
+	// slip back in through ToolPolicies.
+	if !platform.CanExec() {
+		cfg.NoExec = true
+		cfg.AllowedTools = filterExecTools(cfg.AllowedTools, false)
+	}
+
 	var totalTokens int
 	// contextTokens tracks the largest single-step request size, used as the
 	// approximate current context occupancy for the compaction gauge.
@@ -520,7 +544,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// schemas — local OpenAI-compatible servers accept them, and the old
 	// TOOL_CALL text-protocol fallback caused tool-capable local models to
 	// emit unparsed TOOL_CALL strings instead of real tool calls.
-	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
+	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools, !cfg.NoExec)
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
