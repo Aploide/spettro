@@ -42,16 +42,34 @@ func secretsIdentity() (username, home string, err error) {
 			return u.Username, u.HomeDir, nil
 		}
 	}
-	current, err := user.Current()
-	if err != nil {
-		return "", "", fmt.Errorf("resolve current user: %w", err)
-	}
 	home, err = os.UserHomeDir()
 	if err != nil {
 		return "", "", fmt.Errorf("resolve home dir: %w", err)
 	}
+	current, err := user.Current()
+	if err != nil {
+		// No passwd entry for the running uid. This is normal on iOS — and
+		// guaranteed on the Simulator, where the app runs as the host Mac's
+		// uid, which the simulator runtime has never heard of — so getpwuid
+		// fails and every config read would abort before touching a file.
+		//
+		// The home directory is the part that matters, and it is already in
+		// hand: on iOS it is the app container, which is exactly where
+		// ~/.spettro belongs. The username feeds legacySecrets() and nothing
+		// else, and that path exists only to decrypt keys.enc files written by
+		// older desktop versions bound to username|hostname|home — files that
+		// cannot exist inside a fresh app container. Real encryption is bound
+		// to the random master.key stored beside them, so a synthetic name
+		// costs nothing and stays stable across launches and app updates.
+		return fallbackUsername, home, nil
+	}
 	return current.Username, home, nil
 }
+
+// fallbackUsername stands in for the passwd entry on platforms that have none.
+// It must never change: legacySecrets() hashes it, so a different value would
+// silently stop old keys.enc files from being migrated.
+const fallbackUsername = "spettro"
 
 func LoadAPIKeys() (map[string]string, error) {
 	p, err := keysPath()
