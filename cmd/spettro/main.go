@@ -1,3 +1,16 @@
+//go:build !ios
+
+// Command spettro is the desktop CLI: TUI, --acp, --headless and `clean`.
+//
+// It is excluded from GOOS=ios builds. iOS cannot execute a standalone binary,
+// so on iOS the engine is consumed as a library (see the gomobile bridge) and
+// this main package would only ever be dead weight. It also cannot be linked
+// for iOS by a plain `go build ./...`: GOOS=ios always requires external
+// linking, and the invoking clang needs an -isysroot/-arch it does not get
+// from CGO_CFLAGS alone. Keeping the package off the iOS build keeps
+// `GOOS=ios go build ./...` a clean check of the library surface.
+//
+// Every file in this directory must carry the !ios constraint.
 package main
 
 import (

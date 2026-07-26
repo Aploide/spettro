@@ -1,4 +1,8 @@
-//go:build !darwin && !linux
+//go:build (!darwin && !linux) || ios
+
+// iOS is included here even though it is a "darwin" GOOS: see sandbox_darwin.go.
+// On iOS the whole process is already confined by the app sandbox, so reporting
+// "no mechanism" and running unconfined is both accurate and harmless.
 
 package sandbox
 

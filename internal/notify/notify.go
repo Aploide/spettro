@@ -4,25 +4,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Send fires a desktop notification with the given title and body.
-// It is best-effort: errors are silently swallowed so a missing
-// notification daemon never crashes the TUI.
-func Send(title, body string) {
-	switch runtime.GOOS {
-	case "linux":
-		_ = exec.Command("notify-send", "--urgency=low", "--expire-time=5000", title, body).Start()
-	case "darwin":
-		script := fmt.Sprintf(`display notification %q with title %q`, body, title)
-		_ = exec.Command("osascript", "-e", script).Start()
-	}
-}
+// Send fires a best-effort desktop notification; see notify_desktop.go
+// (linux/macOS/windows) and notify_ios.go (no-op).
 
 // Notifier emits user alerts over two channels at once: an OSC 9 terminal
 // escape sequence (rendered as a system notification by iTerm2, WezTerm,

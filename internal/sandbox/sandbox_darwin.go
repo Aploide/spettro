@@ -1,4 +1,8 @@
-//go:build darwin
+//go:build darwin && !ios
+
+// The seatbelt backend is macOS-only. GOOS=ios satisfies the "darwin" build
+// tag, but iOS has no sandbox-exec binary and no ability to exec or re-exec
+// anything, so iOS falls through to sandbox_unsupported.go instead.
 
 package sandbox
 
