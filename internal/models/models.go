@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -106,19 +107,46 @@ func Fetch() (Catalog, error) {
 	return cat, nil
 }
 
-// RefreshBackground starts a goroutine that refreshes the cache once now and
-// then every hour.
+var (
+	refreshMu   sync.Mutex
+	refreshHook func(Catalog)
+	refreshOnce sync.Once
+)
+
+// RefreshBackground refreshes the cache once now and then every hour, calling
+// onRefresh with each new catalog.
+//
+// The refresher is process-wide and started at most once: repeated calls only
+// replace the callback. Desktop front-ends call this exactly once per process,
+// so their behaviour is unchanged; a host that starts and stops the agent
+// repeatedly inside one process (the iOS bridge in spettro/mobile) would
+// otherwise accumulate one forever-running ticker goroutine per start and keep
+// every dead provider manager alive through its callback.
 func RefreshBackground(onRefresh func(Catalog)) {
-	go func() {
-		if cat, err := Fetch(); err == nil && onRefresh != nil {
-			onRefresh(cat)
-		}
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			if cat, err := Fetch(); err == nil && onRefresh != nil {
-				onRefresh(cat)
+	refreshMu.Lock()
+	refreshHook = onRefresh
+	refreshMu.Unlock()
+
+	refreshOnce.Do(func() {
+		go func() {
+			refresh := func() {
+				cat, err := Fetch()
+				if err != nil {
+					return
+				}
+				refreshMu.Lock()
+				hook := refreshHook
+				refreshMu.Unlock()
+				if hook != nil {
+					hook(cat)
+				}
 			}
-		}
-	}()
+			refresh()
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				refresh()
+			}
+		}()
+	})
 }

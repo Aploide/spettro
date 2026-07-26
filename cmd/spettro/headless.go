@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	"spettro/internal/acpserve"
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/models"
@@ -26,19 +27,7 @@ import (
 // spettroInfosToModels converts Spettro backend model entries into provider
 // models tagged with the "spettro" provider.
 func spettroInfosToModels(infos []spettro.ModelInfo) []provider.Model {
-	out := make([]provider.Model, 0, len(infos))
-	for _, mi := range infos {
-		out = append(out, provider.Model{
-			Provider:     spettro.ProviderID,
-			ProviderName: spettro.ProviderName,
-			Name:         mi.ID,
-			DisplayName:  mi.ID,
-			ToolCall:     true,
-			Vision:       mi.Vision,
-			Context:      mi.ContextWindow,
-		})
-	}
-	return out
+	return acpserve.SpettroModels(infos)
 }
 
 func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overrides) {

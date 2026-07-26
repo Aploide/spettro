@@ -22,6 +22,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"spettro/internal/acpserve"
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/jobs"
@@ -200,12 +201,7 @@ func fatal(format string, args ...any) {
 // resolveSandboxPolicy merges CLI overrides and the project manifest into the
 // session's effective sandbox policy.
 func resolveSandboxPolicy(o sandbox.Overrides, manifest config.AgentManifest) (sandbox.Policy, error) {
-	return sandbox.ResolvePolicy(o, sandbox.ManifestPolicy{
-		Mode:      string(manifest.Runtime.SandboxMode),
-		Net:       manifest.Runtime.SandboxNet,
-		AllowDirs: manifest.Runtime.SandboxAllowDirs,
-		ReadDirs:  manifest.Runtime.SandboxAllowReadDirs,
-	})
+	return acpserve.ResolveSandboxPolicy(o, manifest)
 }
 
 // stringListFlag is a repeatable string flag (e.g. --sandbox-allow-dir).
