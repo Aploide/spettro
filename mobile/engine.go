@@ -90,6 +90,35 @@ type Engine struct {
 	stopped bool
 }
 
+// SetHome points $HOME at dir for everything the engine does afterwards:
+// global config, keys.enc, master.key and the agent's own storage all hang off
+// it. Call it before Start; it is idempotent and safe to repeat.
+//
+// The host has to tell us, because the process default is wrong on iOS and
+// wrong in a way that only shows on real hardware. $HOME there is the app's
+// data container, whose root is not writable — only its standard children
+// (Documents, Library, tmp) are — so creating $HOME/.spettro fails with EPERM
+// on a device while succeeding on the Simulator, where the container is an
+// ordinary directory on the Mac.
+//
+// This cannot be done from the host's own setenv: Go snapshots the environment
+// when the runtime initializes, which for a statically linked framework is
+// before any application code runs. Only os.Setenv updates the copy that
+// os.UserHomeDir reads.
+func SetHome(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("spettro: home directory is required")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("spettro: home %q is not usable: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("spettro: home %q is not a directory", dir)
+	}
+	return os.Setenv("HOME", dir)
+}
+
 // Start runs the full ACP bootstrap and serve loop on background goroutines
 // and returns once the engine is accepting input. A bootstrap failure (bad
 // config, unreadable storage) is returned as an error and no handler callback
@@ -100,8 +129,8 @@ type Engine struct {
 // probe local model endpoints, so call it off the UI thread.
 //
 // cwd is the project directory. Per-project state goes to <cwd>/.spettro;
-// global state (config, keys.enc, master.key) goes to $HOME/.spettro, which on
-// iOS is inside the app container.
+// global state (config, keys.enc, master.key) goes to $HOME/.spettro — call
+// SetHome first, because on iOS the default is a directory nothing may write to.
 func Start(cwd string, handler EngineHandler) (*Engine, error) {
 	if handler == nil {
 		return nil, errors.New("spettro: an EngineHandler is required")
