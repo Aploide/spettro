@@ -191,7 +191,16 @@ func (c *Checkpointer) setupAlternates() {
 // only written when the file does not exist yet.
 func (c *Checkpointer) writeDefaultExcludes() {
 	path := filepath.Join(c.gitDir, "info", "exclude")
-	if _, err := os.Stat(path); err == nil {
+	if data, err := os.ReadFile(path); err == nil {
+		// Seed exists (older install): still make sure subagent worktrees are
+		// excluded — each one is a full checkout and would balloon snapshots.
+		if !strings.Contains(string(data), ".spettro/worktrees/") {
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err == nil {
+				_, _ = f.WriteString(".spettro/worktrees/\n")
+				_ = f.Close()
+			}
+		}
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -199,6 +208,7 @@ func (c *Checkpointer) writeDefaultExcludes() {
 	}
 	defaults := strings.Join([]string{
 		"# spettro checkpoint excludes (defaults + files over checkpoint_max_file_mb)",
+		".spettro/worktrees/",
 		"*.iso",
 		"*.img",
 		"*.qcow2",
@@ -267,8 +277,10 @@ func (c *Checkpointer) git(args ...string) (string, error) {
 		"--git-dir=" + c.gitDir,
 		"--work-tree=" + c.project,
 		"-c", "core.bare=false",
-		"-c", "user.name=spettro",
-		"-c", "user.email=spettro@localhost",
+		// Spettro's canonical git identity — keep in sync with
+		// internal/agent/commit_policy.go (this package cannot import it).
+		"-c", "user.name=Spettro",
+		"-c", "user.email=spettro@eyed.to",
 		"-c", "commit.gpgsign=false",
 		"-c", "core.hooksPath=/dev/null",
 		// No reflogs: retention deletes per-checkpoint refs so gc can

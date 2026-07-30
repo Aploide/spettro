@@ -1371,9 +1371,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			Constraints    string `json:"constraints"`
 			ExpectedOutput string `json:"expected_output"`
 			ParentAgentID  string `json:"parent_agent_id"`
+			Isolation      string `json:"isolation"`
 		}
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("agent args: %w", err)
+		}
+		isolation := strings.TrimSpace(args.Isolation)
+		if isolation != "" && isolation != "worktree" {
+			return "", fmt.Errorf("agent: unsupported isolation %q (only \"worktree\")", isolation)
 		}
 		target := strings.TrimSpace(args.Agent)
 		if target == "" {
@@ -1438,13 +1443,23 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if p := r.perm(); p != "" {
 			subSpec.Permission = p
 		}
+		subCWD := r.cwd
+		var workspace *agentWorkspace
+		if isolation == "worktree" {
+			ws, err := r.newSubagentWorkspace(ctx, target)
+			if err != nil {
+				return "", fmt.Errorf("agent: %w", err)
+			}
+			workspace = ws
+			subCWD = ws.subCWD
+		}
 		subAgent := LLMAgent{
 			Spec:            subSpec,
 			PermissionFn:    r.permissionFn,
 			ProviderManager: r.providerMgr,
 			ProviderName:    r.providerName,
 			ModelName:       r.modelName,
-			CWD:             r.cwd,
+			CWD:             subCWD,
 			MaxTokens:       r.maxTokens,
 			Thinking:        r.thinkingLevel,
 			ToolCallback:    r.toolCallback,
@@ -1459,9 +1474,21 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		result, err := subAgent.Run(ctx, subTask)
 		if err != nil {
+			if workspace != nil {
+				// The workspace outlives the (possibly cancelled) run context so
+				// throwaway worktrees still get cleaned up.
+				if kept := workspace.abandon(context.WithoutCancel(ctx)); kept != nil {
+					return "", fmt.Errorf("agent %s: %w (work preserved on branch %s at %s)", target, err, kept.Branch, kept.Path)
+				}
+			}
 			return "", fmt.Errorf("agent %s: %w", target, err)
 		}
-		return marshalSubagentResult(target, result), nil
+		var merge *workspaceMerge
+		if workspace != nil {
+			m := workspace.finalize(context.WithoutCancel(ctx))
+			merge = &m
+		}
+		return marshalSubagentResult(target, result, merge), nil
 	case "ultra":
 		return r.runUltra(ctx, call.Args)
 	default:

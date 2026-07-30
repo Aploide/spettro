@@ -75,6 +75,46 @@ Execution details:
 - Sub-agents never get the `ultra` tool themselves (no recursive
   swarms), and the normal delegation depth limits still apply.
 
+## Workspace isolation (worktrees)
+
+A swarm that *edits* files can crowd the shared checkout: many agents
+writing into one working tree, one `git status` full of everyone's
+changes. Setting `"isolation": "worktree"` on the `ultra` call (or on a
+single `agent` delegation) gives every sub-agent its own workspace
+instead:
+
+1. For each member, Spettro creates a git **worktree** under
+   `.spettro/worktrees/<agent>-<id>/` in the project root, on a fresh
+   **branch named after the sub-agent** (`spettro/code-3-a1b2c3`),
+   forked from the current `HEAD`.
+2. Each sub-agent runs with its cwd inside its own worktree, so
+   concurrent edits never collide and the main checkout stays clean
+   (`.spettro/` is auto-added to `.git/info/exclude`).
+3. When the swarm finishes, the branches are **merged back one at a
+   time, in item order**, into the main checkout; leftover uncommitted
+   work is committed first, with a Conventional Commits message written
+   by the LLM from the diff (same machinery as auto-commit; a stock
+   `spettro: subagent … work` message is the fallback if that fails).
+   After a successful merge the branch and its worktree are **deleted**.
+
+Outcomes per member (visible as `merge="…"` in the `<ultra_result>`
+block and in the `agent` tool's JSON result):
+
+| Status | Meaning |
+| --- | --- |
+| `merged` | branch merged into the main checkout, then deleted |
+| `no_changes` | the agent changed nothing; worktree and branch deleted |
+| `conflict` | the merge conflicted: it was aborted and the **branch and worktree are kept** for manual resolution |
+| `preserved` | the agent failed but left work behind; branch and worktree are kept so nothing is lost |
+| `error` | a git step failed; details in the result |
+
+Kept branches are reported with their paths; resolve them by merging
+manually, then `git worktree remove <path>` and `git branch -D
+<branch>` (leftovers also show up in `/storage`). Worktree isolation
+requires the project to be a git repository with at least one commit.
+Leave `isolation` unset for read-only fan-outs (research, review,
+search) — worktrees would only add overhead there.
+
 ## Observability: watching the swarm
 
 Every swarm member gets a **distinct instance name** — `code#1`,
