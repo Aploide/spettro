@@ -181,6 +181,7 @@ func Inventory(globalDir, projectDir string, opts CleanOptions) Report {
 	r.Classes = append(r.Classes, fileCacheReport(globalDir, "catalog", "models.dev catalog cache (re-fetched on demand)", "catalog.json", true))
 	r.Classes = append(r.Classes, fileCacheReport(globalDir, "memory-inbox", "mined-fact candidates awaiting /memory review", "memory-inbox.json", false))
 	r.Classes = append(r.Classes, projectCacheReport(projectDir))
+	r.Classes = append(r.Classes, projectWorktreesReport(projectDir))
 	r.Classes = append(r.Classes, spoolReport())
 	r.Classes = append(r.Classes, protectedReport(globalDir, projectDir))
 
@@ -399,6 +400,47 @@ func projectCacheReport(projectDir string) ClassReport {
 		root:        projectDir,
 		match:       func(p string) bool { return filepath.Base(p) == "cache" },
 	}}
+	return cr
+}
+
+// projectWorktreesReport inventories <project>/.spettro/worktrees/ — isolated
+// subagent workspaces. Normal runs delete these on merge; leftovers are either
+// crash debris or branches kept after a merge conflict, so nothing is
+// preselected: a kept worktree may hold unmerged work. Deleting one here only
+// frees the checkout; git prunes its stale metadata on the next worktree
+// operation (or via `git worktree prune`).
+func projectWorktreesReport(projectDir string) ClassReport {
+	root := filepath.Join(projectDir, "worktrees")
+	cr := ClassReport{
+		Name:        "project-worktrees",
+		Description: "leftover subagent worktrees (kept merge conflicts or crash debris; may hold unmerged work)",
+		Class:       ClassCache,
+	}
+	if !dirExists(root) {
+		return cr
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return cr
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, e.Name())
+		size := DirSize(path)
+		cr.Count++
+		cr.Size += size
+		cr.Items = append(cr.Items, Item{
+			ClassName:   "project-worktrees",
+			Label:       path,
+			Path:        path,
+			Size:        size,
+			Preselected: false,
+			root:        projectDir,
+			match:       func(p string) bool { return filepath.Base(filepath.Dir(p)) == "worktrees" },
+		})
+	}
 	return cr
 }
 
