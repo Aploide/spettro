@@ -5,6 +5,7 @@
 - [Custom slash commands](custom-commands.md) — reusable prompts as your own `/commands`
 - [Configuration and storage](configuration.md)
 - [OS sandboxing](sandbox.md) — kernel-level confinement for agent shell commands
+- [Windows notes](windows.md) — install, shell dialect, sandbox and PTY differences
 - [Interactive PTY sessions](pty.md) — pty-start/pty-write/pty-kill: the agent drives REPLs, debuggers, ssh through a real terminal
 - [Architecture overview](architecture.md)
 - [Session Lifecycle](session.md) — auto-save, resume, compact, clear, auto-compact

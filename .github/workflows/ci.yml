@@ -11,8 +11,16 @@ permissions:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    # Windows is a first-class target, and its failure modes are invisible on
+    # Linux: PowerShell command lines, DACL-based permissions, rename-over-open
+    # files, and the sandbox's integrity-level backend are all exercised only
+    # by running the suite on the real OS.
+    name: Test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +33,20 @@ jobs:
         run: go test ./...
 
   build:
-    name: Build check
+    name: Build check / ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -36,4 +56,8 @@ jobs:
           cache: true
 
       - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
         run: go build ./cmd/spettro
