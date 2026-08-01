@@ -9,6 +9,7 @@ import (
 
 	"spettro/internal/pty"
 	"spettro/internal/sandbox"
+	"spettro/internal/shell"
 )
 
 // ptyDefaultWait is how long pty-start and pty-write pause for the process to
@@ -42,7 +43,8 @@ func (r *toolRuntime) runPtyStart(ctx context.Context, toolID string, rawArgs []
 	// Sessions must outlive this tool call: build the command on a background
 	// context so the per-tool timeout doesn't kill it. The same sandbox policy
 	// still wraps the process — the PTY is not a sandbox escape.
-	cmd := sandbox.Command(context.Background(), r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
+	shellName, shellArgs := shell.InteractiveCommandLine(cmdText)
+	cmd := sandbox.Command(context.Background(), r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
 	cmd.Dir = r.cwd
 	sess, err := pty.Default().Start(cmd, cmdText, clampWinDim(args.Cols), clampWinDim(args.Rows))
 	if err != nil {

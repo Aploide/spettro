@@ -72,5 +72,12 @@ pty-kill  {"id": "pty-1"}                          (or rely on session cleanup)
 ## Platform support
 
 Unix only (Linux/macOS, via [creack/pty](https://github.com/creack/pty)).
-On Windows the tools return "unsupported on this platform"; ConPTY support
-is a planned follow-up.
+
+On Windows the tools return "unsupported on this platform". Windows does have
+the necessary primitive in ConPTY, but `creack/pty` does not implement it and
+`os/exec` cannot pass the process attribute list a pseudoconsole is attached
+through — so supporting it means driving `CreateProcess` directly and
+re-implementing stdio plumbing and sandbox token handling by hand. Everything
+else on Windows works normally; agents fall back to `shell-exec` with
+`run_in_background` for long-running commands, which covers dev servers and
+watch builds but not programs that must be driven interactively.
