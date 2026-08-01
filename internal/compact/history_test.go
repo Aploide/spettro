@@ -227,16 +227,30 @@ func TestCompactSummarizerDisablesCache(t *testing.T) {
 	}
 }
 
-func TestCompactOccupancyHintTriggersAuto(t *testing.T) {
-	// Small transcript (under chars/4 pressure) but a large provider-reported
-	// occupancy hint must still trip auto-compaction.
+func TestCompactOccupancyHintIgnoredWhenEstimateIsSmall(t *testing.T) {
+	// A huge provider TotalInput must not alone force compaction while the
+	// local transcript estimate is still tiny (cache-heavy false pressure).
 	msgs := msgsOfLen(10)
 	for i := range msgs {
 		msgs[i].Content = "short"
 	}
 	out, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 100000, false, Config{AutoEnabled: true}, 0, 95000)
+	if err != nil || did {
+		t.Fatalf("occupancy-only pressure must not compact, did=%v err=%v", did, err)
+	}
+	if len(out) != len(msgs) {
+		t.Fatalf("history changed: %d != %d", len(out), len(msgs))
+	}
+}
+
+func TestCompactOccupancyHintFloorsWhenEstimateNearThreshold(t *testing.T) {
+	// Local estimate already near the auto threshold; occupancy may floor it.
+	msgs := msgsOfLen(20)
+	estimate := EstimateHistoryTokens("", msgs)
+	window := int(float64(estimate)/0.80) + 1000 // estimate ~80%+ of effective window
+	out, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, window, false, Config{AutoEnabled: true}, 0, estimate*2)
 	if err != nil || !did {
-		t.Fatalf("expected occupancy hint to trigger compaction, did=%v err=%v", did, err)
+		t.Fatalf("expected near-threshold + occupancy to compact, did=%v err=%v estimate=%d window=%d", did, err, estimate, window)
 	}
 	if len(out) >= len(msgs) {
 		t.Fatalf("history did not shrink: %d >= %d", len(out), len(msgs))

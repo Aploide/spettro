@@ -761,14 +761,17 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if loopAct == loopAbort {
 				return finish(loopStopMessage, false, "")
 			}
-			// Hit the output token ceiling mid-tool-args: arguments are
-			// incomplete/unsafe. Fail every call in the batch without
-			// executing so the model can re-issue them (Pi harness pattern).
+			// Only skip execution when finish_reason=length AND args look
+			// truncated (invalid/empty JSON). A bare length stop with valid
+			// tool args is common (hit the output ceiling after emitting
+			// complete calls) — aborting those batches was killing runs with
+			// synthetic tool errors. Invalid args still fail in execute via
+			// decodeJSONStrict; we just don't nuke the whole sibling batch.
 			var results []parallelResult
-			if resp.FinishReason == provider.FinishReasonLength {
+			if resp.FinishReason == provider.FinishReasonLength && toolBatchArgsTruncated(resp.ToolCalls) {
 				results = failTruncatedToolCalls(internalCalls)
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "model hit max output tokens while emitting tool calls — skipped execution; model should retry with smaller args"})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "model hit max output tokens with truncated tool arguments — skipped execution; model should retry with smaller args"})
 				}
 			} else {
 				results = runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
@@ -886,6 +889,19 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 		r.lastOccupancy = 0
 	}
 	return out, did, err
+}
+
+// toolBatchArgsTruncated reports whether any structured tool call in the batch
+// has empty or invalid JSON arguments — the usual signature of a response cut
+// off mid-tool-use by max_tokens.
+func toolBatchArgsTruncated(calls []provider.NativeTool) bool {
+	for _, tc := range calls {
+		args := bytes.TrimSpace(tc.Args)
+		if len(args) == 0 || !json.Valid(args) {
+			return true
+		}
+	}
+	return false
 }
 
 // failTruncatedToolCalls builds synthetic error results for a tool batch whose

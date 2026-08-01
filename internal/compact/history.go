@@ -76,10 +76,7 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 		cfg = Config{AutoEnabled: true}
 	}
 	estimate := EstimateHistoryTokens(system, msgs)
-	tokensUsed := estimate
-	if occupancyHint > tokensUsed {
-		tokensUsed = occupancyHint
-	}
+	tokensUsed := occupancyTokens(window, cfg, failures, estimate, occupancyHint)
 	if !force {
 		if len(msgs) <= 5 {
 			return msgs, false, nil
@@ -121,10 +118,7 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 	msgs, offloaded := offloadToolResults(msgs, cutEnd)
 	if offloaded > 0 && !force {
 		estimate = EstimateHistoryTokens(system, msgs)
-		tokensUsed = estimate
-		if occupancyHint > tokensUsed {
-			tokensUsed = occupancyHint
-		}
+		tokensUsed = occupancyTokens(window, cfg, failures, estimate, occupancyHint)
 		eval := Evaluate(window, cfg, State{TokensUsed: tokensUsed, ConsecutiveFailures: failures})
 		if !eval.ShouldAutoCompact && !eval.IsError {
 			return msgs, true, nil
@@ -174,6 +168,22 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 	})
 	out = append(out, msgs[cutEnd:]...)
 	return out, true, nil
+}
+
+// occupancyTokens floors the local estimate with a provider-reported occupancy
+// hint, but only when the estimate is already near pressure. A large
+// TotalInput alone (cache-heavy sessions) must not force early compaction.
+func occupancyTokens(window int, cfg Config, failures, estimate, occupancyHint int) int {
+	if occupancyHint <= estimate {
+		return estimate
+	}
+	probe := Evaluate(window, cfg, State{TokensUsed: estimate, ConsecutiveFailures: failures})
+	near := estimate >= probe.WarningThreshold ||
+		(probe.AutoCompactThreshold > 0 && estimate >= probe.AutoCompactThreshold*3/4)
+	if near {
+		return occupancyHint
+	}
+	return estimate
 }
 
 // findCutEnd walks back from the end of msgs until ~keepRecent tokens are
