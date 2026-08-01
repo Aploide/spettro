@@ -11,6 +11,9 @@ import (
 	"sync"
 
 	"spettro/internal/config"
+	"spettro/internal/fsperm"
+	"spettro/internal/homedir"
+	"spettro/internal/safeio"
 )
 
 // keyName is the entry used inside Spettro's encrypted secrets store
@@ -71,7 +74,7 @@ var configMu sync.Mutex
 
 // configPath returns the absolute path to telegram.json.
 func configPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return "", fmt.Errorf("telegram: resolve home dir: %w", err)
 	}
@@ -108,7 +111,7 @@ func SaveConfig(cfg PersistedConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(p)); err != nil {
 		return fmt.Errorf("telegram: ensure config dir: %w", err)
 	}
 	cfg = NormaliseConfig(cfg)
@@ -120,7 +123,7 @@ func SaveConfig(cfg PersistedConfig) error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("telegram: write temp config: %w", err)
 	}
-	return os.Rename(tmp, p)
+	return safeio.Replace(tmp, p)
 }
 
 // UpdateConfig loads telegram.json, applies mut, and writes the result.

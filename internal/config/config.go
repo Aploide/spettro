@@ -9,6 +9,9 @@ import (
 	"sync"
 
 	"spettro/internal/compact"
+	"spettro/internal/fsperm"
+	"spettro/internal/homedir"
+	"spettro/internal/safeio"
 )
 
 type PermissionLevel string
@@ -164,7 +167,7 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 }
 
 func Path() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
@@ -191,7 +194,7 @@ func loadOrCreateLocked() (UserConfig, error) {
 		return UserConfig{}, err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(p)); err != nil {
 		return UserConfig{}, fmt.Errorf("create global config dir: %w", err)
 	}
 
@@ -300,7 +303,7 @@ func saveLocked(cfg UserConfig) error {
 	}
 
 	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(dir); err != nil {
 		return fmt.Errorf("create global config dir: %w", err)
 	}
 
@@ -334,5 +337,5 @@ func saveLocked(cfg UserConfig) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp config: %w", err)
 	}
-	return os.Rename(tmpName, p)
+	return safeio.Replace(tmpName, p)
 }

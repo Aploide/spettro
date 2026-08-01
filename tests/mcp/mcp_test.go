@@ -1,11 +1,13 @@
 package mcp_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"spettro/internal/fsperm"
 	"spettro/internal/mcp"
 )
 
@@ -16,8 +18,16 @@ func writeServers(t *testing.T, cwd, entryPoint string) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"servers":[{"id":"fs","type":"file","entry_point":"` + entryPoint + `"}]}`
-	if err := os.WriteFile(filepath.Join(dir, "mcp_servers.json"), []byte(cfg), 0o600); err != nil {
+	// Marshal rather than concatenate: entryPoint is a real filesystem path,
+	// and on Windows its backslashes are JSON escape sequences ("\Users" is an
+	// invalid \U escape) that silently break the fixture.
+	cfg, err := json.Marshal(map[string]any{
+		"servers": []map[string]string{{"id": "fs", "type": "file", "entry_point": entryPoint}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mcp_servers.json"), cfg, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -27,19 +37,21 @@ func TestSaveAuthUsesOwnerOnlyDir(t *testing.T) {
 	if err := mcp.SaveAuth(cwd, mcp.AuthState{ServerID: "fs", Token: "secret"}); err != nil {
 		t.Fatalf("SaveAuth: %v", err)
 	}
-	dirInfo, err := os.Stat(filepath.Join(cwd, ".spettro"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
-		t.Errorf(".spettro dir perm = %o, want 700", perm)
-	}
-	fileInfo, err := os.Stat(filepath.Join(cwd, ".spettro", "mcp_auth.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fileInfo.Mode().Perm(); perm != 0o600 {
-		t.Errorf("mcp_auth.json perm = %o, want 600", perm)
+	// The auth file holds bearer tokens; neither it nor its directory may be
+	// reachable by another account. Checked through fsperm because Windows
+	// carries this in the DACL, not in Unix mode bits.
+	for _, target := range []string{
+		filepath.Join(cwd, ".spettro"),
+		filepath.Join(cwd, ".spettro", "mcp_auth.json"),
+	} {
+		if _, err := os.Stat(target); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := fsperm.IsOwnerOnly(target); err != nil {
+			t.Errorf("check %s permissions: %v", target, err)
+		} else if !ok {
+			t.Errorf("%s is accessible beyond its owner", target)
+		}
 	}
 }
 

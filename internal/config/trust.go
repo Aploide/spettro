@@ -7,10 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"spettro/internal/fsperm"
+	"spettro/internal/homedir"
+	"spettro/internal/safeio"
 )
 
 func trustedPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
@@ -41,7 +45,7 @@ func saveTrusted(paths []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(p)); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	raw, err := json.Marshal(paths)
@@ -52,7 +56,7 @@ func saveTrusted(paths []string) error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write trusted: %w", err)
 	}
-	return os.Rename(tmp, p)
+	return safeio.Replace(tmp, p)
 }
 
 // IsTrusted reports whether cwd has been permanently trusted.

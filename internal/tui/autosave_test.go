@@ -74,9 +74,15 @@ func TestAutoSaveDebouncedRespectsInterval(t *testing.T) {
 	}
 
 	// Simulate the interval elapsing: the next debounced save should fire.
-	m.lastAutoSaveAt = time.Now().Add(-autoSaveMinInterval - time.Second)
+	//
+	// The assertion is that the timestamp moved past the backdated value,
+	// rather than that it differs from firstSave: the two saves happen a few
+	// microseconds apart, and on a platform whose clock granularity is coarser
+	// than that they can legitimately report the same instant.
+	backdated := time.Now().Add(-autoSaveMinInterval - time.Second)
+	m.lastAutoSaveAt = backdated
 	m.autoSaveDebounced()
-	if m.lastAutoSaveAt.Equal(firstSave) || time.Since(m.lastAutoSaveAt) > autoSaveMinInterval {
+	if !m.lastAutoSaveAt.After(backdated) {
 		t.Fatal("debounced save after interval should fire")
 	}
 }

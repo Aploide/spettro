@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"spettro/internal/homedir"
 )
 
 // Scope selects which memory file an operation targets.
@@ -46,7 +48,7 @@ type Store struct {
 // under the home directory and the per-project file under <cwd>/.spettro.
 func DefaultStore(cwd string) Store {
 	s := Store{}
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := homedir.Dir(); err == nil {
 		s.UserFile = filepath.Join(home, ".spettro", "memory.md")
 	}
 	if strings.TrimSpace(cwd) != "" {

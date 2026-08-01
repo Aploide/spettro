@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"spettro/internal/hooks"
+	"spettro/internal/shell/shelltest"
 )
 
 func hookRule(id string, event hooks.Event, matcher, command string) hooks.EffectiveRule {
@@ -127,14 +128,14 @@ func TestRunPermissionRequestHooks(t *testing.T) {
 
 func TestRunPostToolHooksError(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
-		hookRule("post-ok", hooks.EventPostToolUse, "*", "cat > /dev/null"),
+		hookRule("post-ok", hooks.EventPostToolUse, "*", shelltest.DiscardStdin()),
 	}}}
 	if err := r.runPostToolHooks(context.Background(), "shell-exec", nil, "output"); err != nil {
 		t.Fatal(err)
 	}
 
 	r = &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
-		hookRule("post-fail", hooks.EventPostToolUse, "*", "exit 2"),
+		hookRule("post-fail", hooks.EventPostToolUse, "*", shelltest.Exit(2)),
 	}}}
 	if err := r.runPostToolHooks(context.Background(), "shell-exec", nil, "output"); err == nil {
 		t.Fatal("expected error from failing post hook")

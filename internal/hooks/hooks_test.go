@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"spettro/internal/shell/shelltest"
 )
 
 func TestMatch(t *testing.T) {
@@ -112,7 +114,7 @@ func TestRunPassesInputAndEnv(t *testing.T) {
 	rule := EffectiveRule{Rule: Rule{
 		ID:      "env",
 		Event:   EventPreToolUse,
-		Command: `cat > /dev/null; echo "$SPETTRO_HOOK_EVENT/$SPETTRO_HOOK_TOOL_ID"`,
+		Command: shelltest.Join(shelltest.DiscardStdin(), shelltest.EchoEnvJoined("/", "SPETTRO_HOOK_EVENT", "SPETTRO_HOOK_TOOL_ID")),
 	}}
 	res, err := Run(context.Background(), rule, RunInput{Event: EventPreToolUse, ToolID: "shell-exec"})
 	if err != nil {
@@ -124,7 +126,7 @@ func TestRunPassesInputAndEnv(t *testing.T) {
 }
 
 func TestRunReadsInputFromStdin(t *testing.T) {
-	rule := EffectiveRule{Rule: Rule{ID: "stdin", Event: EventPreToolUse, Command: "cat"}}
+	rule := EffectiveRule{Rule: Rule{ID: "stdin", Event: EventPreToolUse, Command: shelltest.CatStdin()}}
 	args := json.RawMessage(`{"command":"ls"}`)
 	res, err := Run(context.Background(), rule, RunInput{Event: EventPreToolUse, ToolID: "shell-exec", ToolArgs: args})
 	if err != nil {
@@ -162,7 +164,7 @@ echo '{"decision":"Deny","reason":" nope ","updated_args":{"command":"ls -la"}}'
 }
 
 func TestRunNonJSONStdoutIsNotADecision(t *testing.T) {
-	rule := EffectiveRule{Rule: Rule{ID: "plain", Event: EventPostToolUse, Command: "echo just text"}}
+	rule := EffectiveRule{Rule: Rule{ID: "plain", Event: EventPostToolUse, Command: shelltest.Echo("just text")}}
 	res, err := Run(context.Background(), rule, RunInput{Event: EventPostToolUse})
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +178,7 @@ func TestRunNonJSONStdoutIsNotADecision(t *testing.T) {
 }
 
 func TestRunFailureReturnsError(t *testing.T) {
-	rule := EffectiveRule{Rule: Rule{ID: "boom", Event: EventPreToolUse, Command: "echo oops >&2; exit 3"}}
+	rule := EffectiveRule{Rule: Rule{ID: "boom", Event: EventPreToolUse, Command: shelltest.Join(shelltest.EchoStderr("oops"), shelltest.Exit(3))}}
 	res, err := Run(context.Background(), rule, RunInput{Event: EventPreToolUse})
 	if err == nil {
 		t.Fatal("expected error for non-zero exit")
@@ -187,7 +189,7 @@ func TestRunFailureReturnsError(t *testing.T) {
 }
 
 func TestRunTimeout(t *testing.T) {
-	rule := EffectiveRule{Rule: Rule{ID: "slow", Event: EventPreToolUse, Command: "sleep 10", TimeoutSec: 1}}
+	rule := EffectiveRule{Rule: Rule{ID: "slow", Event: EventPreToolUse, Command: shelltest.Sleep(10 * time.Second), TimeoutSec: 1}}
 	start := time.Now()
 	_, err := Run(context.Background(), rule, RunInput{Event: EventPreToolUse})
 	if err == nil {

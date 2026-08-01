@@ -13,6 +13,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"spettro/internal/safeio"
 	"spettro/internal/sandbox"
 )
 
@@ -423,7 +424,7 @@ func backupAndWriteManifest(path string, m AgentManifest) error {
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return fmt.Errorf("write migrated manifest: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := safeio.Replace(tmp, path); err != nil {
 		return fmt.Errorf("replace migrated manifest: %w", err)
 	}
 	return nil

@@ -121,7 +121,9 @@ func TestProjectDir(t *testing.T) {
 	if !strings.HasPrefix(base, "app-") || len(base) != len("app-")+8 {
 		t.Errorf("slug format wrong: %q", base)
 	}
-	if filepath.Dir(filepath.Dir(a)) != "/global" {
-		t.Errorf("not under /global/conversations: %q", a)
+	// Compare against the joined form rather than the literal "/global": on
+	// Windows ProjectDir builds paths with backslashes.
+	if got, want := filepath.Dir(filepath.Dir(a)), filepath.Clean("/global"); got != want {
+		t.Errorf("not under %s/conversations: %q", want, a)
 	}
 }

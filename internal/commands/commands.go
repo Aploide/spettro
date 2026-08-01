@@ -17,6 +17,9 @@ import (
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"spettro/internal/homedir"
+	"spettro/internal/shell"
 )
 
 // Command is one user-defined slash command.
@@ -42,7 +45,7 @@ type Root struct {
 // project last so project entries override on conflict).
 func Roots(cwd string) []Root {
 	var out []Root
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+	if home, err := homedir.Dir(); err == nil && home != "" {
 		out = append(out, Root{Path: filepath.Join(home, ".spettro", "commands"), Scope: "user"})
 	}
 	if cwd != "" {
@@ -181,7 +184,8 @@ func Expand(c Command, args, dir string, allowShell bool) (string, error) {
 	}
 	for _, mt := range matches {
 		ctx, cancel := context.WithTimeout(context.Background(), shellTimeout)
-		cmd := exec.CommandContext(ctx, "sh", "-c", mt[1])
+		interpName, interpArgs := shell.CommandLine(mt[1])
+		cmd := exec.CommandContext(ctx, interpName, interpArgs...)
 		cmd.Dir = dir
 		raw, err := cmd.CombinedOutput()
 		cancel()

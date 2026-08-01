@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"spettro/internal/homedir"
 )
 
 // ServerConfig describes one language server. LSP works with zero config:
@@ -110,7 +112,7 @@ func detectBuiltinServers() map[string]ServerConfig {
 func loadConfig(root string) (Config, bool) {
 	cfg := Config{Servers: detectBuiltinServers()}
 	var paths []string
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := homedir.Dir(); err == nil {
 		paths = append(paths, filepath.Join(home, ".spettro", "lsp.json"))
 	}
 	paths = append(paths, filepath.Join(root, ".spettro", "lsp.json"))

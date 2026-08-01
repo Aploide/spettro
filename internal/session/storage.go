@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"spettro/internal/safeio"
 )
 
 func SessionsDir(globalDir string) string {
@@ -415,11 +417,14 @@ func writeJSON(path string, value any) error {
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return safeio.Replace(tmp, path)
 }
 
 func readJSON(path string, target any) error {
-	data, err := os.ReadFile(path)
+	// safeio.ReadFile, not os.ReadFile: these stores are polled by readers
+	// while other goroutines save them, and on Windows an open that lands
+	// inside the save's rename window fails instead of seeing either version.
+	data, err := safeio.ReadFile(path)
 	if err != nil {
 		return err
 	}

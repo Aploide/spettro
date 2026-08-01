@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"spettro/internal/homedir"
 )
 
 const apiURL = "https://catalog.spettro.app/providers.min.json"
@@ -51,7 +53,7 @@ type Catalog struct {
 
 // cacheFile returns the path to the local JSON cache.
 func cacheFile() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return "", err
 	}

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"spettro/internal/safeio"
 )
 
 // Fact is one memory bullet. Metadata rides in an HTML-comment tail that is
@@ -176,7 +178,7 @@ func (s Store) writeFacts(scope Scope, facts []Fact) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("memory: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := safeio.Replace(tmpName, path); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("memory: %w", err)
 	}

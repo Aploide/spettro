@@ -19,6 +19,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/mcp"
+	"spettro/internal/safeio"
 	"spettro/internal/session"
 )
 
@@ -1077,7 +1078,7 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return safeio.Replace(tmp, path)
 }
 
 // authorizeWriteAccess gates file-write/file-edit on the tool's approval

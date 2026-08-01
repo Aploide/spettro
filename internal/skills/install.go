@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"spettro/internal/homedir"
 )
 
 // InstallOptions controls how a source is installed into the skill library.
@@ -173,7 +175,7 @@ func installRoot(scope Scope, cwd string) (string, error) {
 		}
 		return filepath.Join(cwd, ".spettro", "skills"), nil
 	case ScopeUser, "":
-		home, err := os.UserHomeDir()
+		home, err := homedir.Dir()
 		if err != nil {
 			return "", fmt.Errorf("install: resolve home dir: %w", err)
 		}
@@ -210,10 +212,18 @@ func isLocalDir(source string) bool {
 	if strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../") || strings.HasPrefix(source, "/") {
 		return true
 	}
+	// Windows drive-absolute ("C:\skills") and UNC ("\\host\share") paths, and
+	// the backslash spellings of the relative prefixes above.
+	if filepath.IsAbs(source) || strings.HasPrefix(source, `.\`) || strings.HasPrefix(source, `..\`) {
+		return true
+	}
 	if strings.HasPrefix(source, "~") {
 		return true
 	}
-	if u, err := url.Parse(source); err == nil && u.Scheme != "" {
+	// A single-character scheme is a Windows drive letter, not a URL: every
+	// real scheme is at least two characters, so "C:\src" would otherwise be
+	// parsed as scheme "c" and rejected as a remote source.
+	if u, err := url.Parse(source); err == nil && len(u.Scheme) > 1 {
 		return false
 	}
 	if pathExists(source) {

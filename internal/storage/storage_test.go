@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"spettro/internal/fsperm"
 )
 
 func TestNewCreatesDirs(t *testing.T) {
@@ -27,8 +29,13 @@ func TestNewCreatesDirs(t *testing.T) {
 			t.Errorf("dir %q not created: %v", dir, err)
 		}
 	}
-	if info, _ := os.Stat(s.GlobalDir); info.Mode().Perm() != 0o700 {
-		t.Errorf("global dir perms = %o, want 700", info.Mode().Perm())
+	// The global store holds credentials, so it must not be reachable by other
+	// accounts. Asserted through fsperm rather than on mode bits, which
+	// Windows does not implement.
+	if ok, err := fsperm.IsOwnerOnly(s.GlobalDir); err != nil {
+		t.Errorf("check global dir permissions: %v", err)
+	} else if !ok {
+		t.Error("global dir is accessible beyond its owner")
 	}
 }
 
