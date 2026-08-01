@@ -11,11 +11,15 @@ import (
 	"time"
 
 	"spettro/internal/jobs"
+	"spettro/internal/shell/shelltest"
 )
 
 func TestBackgroundJobLifecycle(t *testing.T) {
 	m := jobs.NewManager()
-	cmd := exec.Command("bash", "-c", "for i in 1 2 3 4 5; do echo tick-$i; sleep 0.05; done; sleep 30")
+	cmd := shelltest.Command(shelltest.Join(
+		shelltest.Repeat(5, 50*time.Millisecond, func(i string) string { return shelltest.EchoVar("tick-", i) }),
+		shelltest.Sleep(30*time.Second),
+	))
 	job, err := m.Start(cmd, "tick loop")
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -74,11 +78,22 @@ func TestBackgroundHTTPServer(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not installed")
+	// Windows spells it "python", and PATH presence is not enough there: a
+	// stock install ships App Execution Alias stubs for both names that resolve
+	// via LookPath, print an advert for the Microsoft Store and exit. Only
+	// running the candidate distinguishes a real interpreter from a stub.
+	python := ""
+	for _, candidate := range []string{"python3", "python"} {
+		if out, err := exec.Command(candidate, "-c", "print('ok')").Output(); err == nil && strings.HasPrefix(string(out), "ok") {
+			python = candidate
+			break
+		}
+	}
+	if python == "" {
+		t.Skip("no working python interpreter")
 	}
 	m := jobs.NewManager()
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("python3 -m http.server %d --bind 127.0.0.1", port))
+	cmd := shelltest.Command(fmt.Sprintf("%s -m http.server %d --bind 127.0.0.1", python, port))
 	job, err := m.Start(cmd, "http.server")
 	if err != nil {
 		t.Fatalf("start: %v", err)

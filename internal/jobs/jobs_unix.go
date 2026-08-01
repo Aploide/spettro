@@ -16,6 +16,10 @@ func detach(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// afterStart has nothing to do on Unix: Setpgid already established the
+// process group before the child ran.
+func afterStart(cmd *exec.Cmd) {}
+
 func kill(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
