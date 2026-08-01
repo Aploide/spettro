@@ -1,6 +1,8 @@
 # OS Sandboxing
 
-Spettro can lock down the commands the agent runs using the operating system's native sandbox mechanisms: **Seatbelt** on macOS and **Landlock** on Linux. It is opt-in, immutable for the lifetime of the session, and invisible to the model. The policy is set only by the operator through CLI flags or `spettro.agents.toml`.
+Spettro can lock down the commands the agent runs using the operating system's native sandbox mechanisms: **Seatbelt** on macOS, **Landlock** on Linux, and **Mandatory Integrity Control** on Windows. It is opt-in, immutable for the lifetime of the session, and invisible to the model. The policy is set only by the operator through CLI flags or `spettro.agents.toml`.
+
+What each platform can actually enforce differs — see [Platform details](#platform-details). In particular, Windows confines writes but not reads, and cannot confine the network at all (a network policy there fails closed rather than running unconfined).
 
 ## Why sandboxing matters
 
@@ -100,9 +102,40 @@ See [`AGENTS.md`](../AGENTS.md) for the full manifest schema.
 - On Linux, sandboxed commands re-exec the Spettro binary itself, which applies Landlock and then `exec()`s the real command. Programs using this package must call `sandbox.RunChildIfRequested()` as the very first thing in `main()`.
 - If the kernel cannot enforce the requested policy, the child exits **126** so an opt-in sandbox never silently runs unconfined.
 
+### Windows (Mandatory Integrity Control)
+
+Windows has no Landlock or Seatbelt equivalent — nothing lets a process declare
+"confine this child to these paths" without touching the objects themselves. The
+backend uses **Mandatory Integrity Control** instead: the command runs on a
+duplicated token lowered to **Low** integrity, which the kernel refuses to let
+write to any object labelled Medium or above (that is, every ordinary file). The
+roots the policy *does* allow are opened back up by labelling them Low.
+
+- Filesystem confinement is enforced by the kernel, like the Unix backends.
+- **Reads are not confined.** MIC is no-write-up only, so a Low process still
+  reads anything its user can read. `read-only` here means "cannot modify project
+  or user files", not "cannot see them".
+- **Network confinement is unavailable.** Sockets are outside MIC's scope, so
+  requesting any `--sandbox-net` value other than `all` makes the command exit
+  **126** with an explanatory message rather than run unconfined. Confining the
+  network would require launching into an AppContainer, which needs a process
+  attribute list `os/exec` cannot pass.
+- `workspace-write` labels the workspace (and any `--sandbox-allow` roots) Low so
+  the command can write there. This is a **persistent change to that directory's
+  security descriptor**. It grants nothing to other users — it only stops MIC from
+  blocking the sandboxed child — but it is visible in `icacls` output and is not
+  undone when the session ends.
+- A Low process cannot write to the ordinary per-user temp directory, so `TEMP`
+  and `TMP` are redirected to a labelled scratch directory under
+  `%LOCALAPPDATA%\spettro\sandbox-temp`. Compilers and package managers that
+  write temp files keep working.
+- `ConfineParent` is not available: a process cannot lower its own integrity level
+  and go on writing its own config and session store. Startup prints a warning and
+  continues; the model's surface is still confined at the shell and file-tool layers.
+
 ### Other platforms
 
-Sandboxing is not implemented on Windows or other Unixes. `sandbox.Available()` returns `false` and commands run unconfined.
+Sandboxing is not implemented on other Unixes. `sandbox.Available()` returns `false` and commands run unconfined.
 
 ## How it looks in the UI
 
