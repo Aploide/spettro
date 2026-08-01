@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+
+	"spettro/internal/compact"
 )
 
 type PermissionLevel string
@@ -49,6 +52,25 @@ type UserConfig struct {
 	SpettroPlan       string `json:"spettro_plan,omitempty"`
 	SpettroPlanStatus string `json:"spettro_plan_status,omitempty"`
 
+	// Notifications: OSC 9 terminal escape (system notification in iTerm2,
+	// WezTerm, Ghostty, Kitty; BEL elsewhere) plus a best-effort desktop
+	// notification. Disabled flag keeps the zero value meaning "on".
+	NotificationsDisabled bool `json:"notifications_disabled,omitempty"`
+	NotifyQuietSec        int  `json:"notify_quiet_sec,omitempty"` // min seconds between notifications; 0 → default (5)
+
+	// Checkpointing (/rewind) shadow-git storage. Zero values fall back to
+	// the checkpoint package defaults (20 MB / 14 days / 5 GB / 2 GB).
+	CheckpointingDisabled   bool `json:"checkpointing_disabled,omitempty"`
+	CheckpointMaxFileMB     int  `json:"checkpoint_max_file_mb,omitempty"`    // files above this are not snapshotted
+	CheckpointRetentionDays int  `json:"checkpoint_retention_days,omitempty"` // prune checkpoints older than this on open
+	CheckpointMaxGB         int  `json:"checkpoint_max_gb,omitempty"`         // shadow-store size cap enforced on open
+	CheckpointWarnGB        int  `json:"checkpoint_warn_gb,omitempty"`        // big-repo warning threshold (no project .git)
+
+	// Storage cleanup (/storage clean, `spettro clean`) session policy. Zero
+	// values fall back to the storage package defaults (30 days / keep 5).
+	CleanSessionAgeDays int `json:"clean_session_age_days,omitempty"` // sessions older than this are clean candidates
+	CleanKeepSessions   int `json:"clean_keep_sessions,omitempty"`    // most recent K sessions per project always survive
+
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited
@@ -61,6 +83,17 @@ type UserConfig struct {
 // suspended (not cleared) while ask-first is selected.
 func (c UserConfig) UltraActive() bool {
 	return c.Ultra && c.Permission != PermissionAskFirst
+}
+
+// CompactConfig maps the user's auto-compaction settings to the compact
+// package's policy struct, so every host (TUI, headless, goal, ACP) hands the
+// same policy to the run loop's in-loop compaction.
+func (c UserConfig) CompactConfig() compact.Config {
+	return compact.Config{
+		AutoEnabled:      c.AutoCompactEnabled,
+		AutoThresholdPct: c.AutoCompactThresholdPct,
+		MaxFailures:      c.AutoCompactMaxFailures,
+	}
 }
 
 func Default() UserConfig {
@@ -114,6 +147,10 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 		cfg.ThinkingLevel = ""
 		changed = true
 	}
+	if cfg.NotifyQuietSec <= 0 {
+		cfg.NotifyQuietSec = 5
+		changed = true
+	}
 	if cfg.GoalShellTimeoutSec <= 0 {
 		cfg.GoalShellTimeoutSec = 600 // 10 minutes for long-running installs/builds
 		changed = true
@@ -134,7 +171,21 @@ func Path() (string, error) {
 	return filepath.Join(home, ".spettro", "config.json"), nil
 }
 
+// configMu serializes the read-modify-write cycles below. Several front-ends
+// touch the config concurrently — the ACP bridge in particular services
+// independent extension requests on their own goroutines — and Update's
+// load/mutate/save was previously racy in two ways: concurrent writers shared
+// one temp filename (so one's rename destroyed the other's), and interleaved
+// updates silently dropped each other's changes.
+var configMu sync.Mutex
+
 func LoadOrCreate() (UserConfig, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	return loadOrCreateLocked()
+}
+
+func loadOrCreateLocked() (UserConfig, error) {
 	p, err := Path()
 	if err != nil {
 		return UserConfig{}, err
@@ -149,7 +200,7 @@ func LoadOrCreate() (UserConfig, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			cfg = Default()
-			if err := Save(cfg); err != nil {
+			if err := saveLocked(cfg); err != nil {
 				return UserConfig{}, err
 			}
 			return cfg, nil
@@ -164,7 +215,7 @@ func LoadOrCreate() (UserConfig, error) {
 	var changed bool
 	cfg, changed = normalize(cfg)
 	if changed {
-		if err := Save(cfg); err != nil {
+		if err := saveLocked(cfg); err != nil {
 			return UserConfig{}, err
 		}
 	}
@@ -195,7 +246,13 @@ func Load() (UserConfig, error) {
 
 // LoadFull reads persisted config plus encrypted API keys into a single struct.
 func LoadFull() (UserConfig, error) {
-	cfg, err := LoadOrCreate()
+	configMu.Lock()
+	defer configMu.Unlock()
+	return loadFullLocked()
+}
+
+func loadFullLocked() (UserConfig, error) {
+	cfg, err := loadOrCreateLocked()
 	if err != nil {
 		return UserConfig{}, err
 	}
@@ -208,9 +265,14 @@ func LoadFull() (UserConfig, error) {
 }
 
 // Update loads the latest persisted config, applies mut, saves it, and returns
-// the updated in-memory view including API keys.
+// the updated in-memory view including API keys. The whole cycle holds
+// configMu, so concurrent callers can't read the same base config and then
+// overwrite each other's field changes.
 func Update(mut func(*UserConfig) error) (UserConfig, error) {
-	cfg, err := LoadFull()
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	cfg, err := loadFullLocked()
 	if err != nil {
 		return UserConfig{}, err
 	}
@@ -219,19 +281,26 @@ func Update(mut func(*UserConfig) error) (UserConfig, error) {
 			return UserConfig{}, err
 		}
 	}
-	if err := Save(cfg); err != nil {
+	if err := saveLocked(cfg); err != nil {
 		return UserConfig{}, err
 	}
 	return cfg, nil
 }
 
 func Save(cfg UserConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	return saveLocked(cfg)
+}
+
+func saveLocked(cfg UserConfig) error {
 	p, err := Path()
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create global config dir: %w", err)
 	}
 
@@ -243,9 +312,27 @@ func Save(cfg UserConfig) error {
 		return fmt.Errorf("encode config: %w", err)
 	}
 
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// A unique temp file per write, not a fixed "config.json.tmp": two writers
+	// sharing that one path meant the first rename moved the file out from
+	// under the second, which then failed with ENOENT and took an otherwise
+	// healthy config read down with it.
+	tmp, err := os.CreateTemp(dir, "config-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write temp config: %w", err)
 	}
-	return os.Rename(tmp, p)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("secure temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	return os.Rename(tmpName, p)
 }

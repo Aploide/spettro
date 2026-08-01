@@ -168,40 +168,20 @@ func TestCoder_AcceptsFinalWithoutTool(t *testing.T) {
 	}
 }
 
-func TestCoder_NudgesWhenPlainTextWithoutFinal(t *testing.T) {
+func TestCoder_PlainTextAfterToolIsFinalAnswer(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n"), 0o644) //nolint:errcheck
 
-	// After using a tool the LLM forgets FINAL → nudge → correct.
+	// With native tool calling, a response without tool calls IS the final answer.
 	srv := scriptedServer(t, []string{
 		`TOOL_CALL {"tool":"file-read","args":{"path":"go.mod"}}`,
-		"I read the file but forgot FINAL.",
-		"FINAL\nActual answer.",
+		"Actual answer.",
 	})
 	result, err := coder(srv, dir).Execute(context.Background(), "Read go.mod.", config.PermissionYOLO, true)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if result.Content != "Actual answer." {
-		t.Errorf("unexpected content: %q", result.Content)
-	}
-}
-
-func TestCoder_BadToolJSON_Recovered(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n"), 0o644) //nolint:errcheck
-
-	// LLM emits malformed JSON → error fed back → LLM corrects itself.
-	srv := scriptedServer(t, []string{
-		`TOOL_CALL {bad json}`,
-		`TOOL_CALL {"tool":"file-read","args":{"path":"go.mod"}}`,
-		"FINAL\nRecovered.",
-	})
-	result, err := coder(srv, dir).Execute(context.Background(), "Read go.mod.", config.PermissionYOLO, true)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if result.Content != "Recovered." {
 		t.Errorf("unexpected content: %q", result.Content)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"spettro/internal/jobs"
 	"spettro/internal/models"
 	"spettro/internal/provider"
+	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
@@ -25,6 +26,13 @@ func main() {
 	// (see internal/sandbox); it must run before any flag parsing. No-op
 	// otherwise.
 	sandbox.RunChildIfRequested()
+
+	// Subcommands run before flag parsing (the flag set below is for the
+	// TUI/headless modes). `spettro clean` works entirely without the TUI.
+	if len(os.Args) > 1 && os.Args[1] == "clean" {
+		runClean(os.Args[2:])
+		return
+	}
 
 	headless := flag.Bool("headless", false, "run as headless HTTP/SSE server (for Android)")
 	acpMode := flag.Bool("acp", false, "run as Agent Client Protocol (ACP) agent over stdio (for editors like Zed)")
@@ -135,7 +143,7 @@ func main() {
 		pm.SetCatalog(cat)
 	}
 	for _, endpoint := range cfg.LocalEndpoints {
-		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
+		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint])
 		if err != nil {
 			continue
 		}
@@ -152,6 +160,10 @@ func main() {
 	// Background shell jobs are detached into their own process groups, so
 	// they would outlive spettro unless killed explicitly on session exit.
 	jobs.Default().KillAll()
+	// Interactive PTY sessions are session state for the same reason.
+	pty.Default().KillAll()
+	// Spooled tool outputs are session state too; delete them with the session.
+	jobs.Spool().Cleanup()
 	if err != nil {
 		fatal("runtime error: %v", err)
 	}

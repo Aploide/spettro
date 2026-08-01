@@ -66,7 +66,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
-	text := truncate(string(out), 12000)
+	text := r.spoolResult(toolID, string(out))
 	if err != nil {
 		return text, fmt.Errorf("command failed: %w", err)
 	}
@@ -88,7 +88,7 @@ func isDelegationRoleAllowed(caller, target config.AgentRole) bool {
 	}
 }
 
-func marshalSubagentResult(agentID string, result RunResult) string {
+func marshalSubagentResult(agentID string, result RunResult, merge *workspaceMerge) string {
 	payload := map[string]any{
 		"agent":            agentID,
 		"status":           "ok",
@@ -98,6 +98,18 @@ func marshalSubagentResult(agentID string, result RunResult) string {
 	}
 	if toolResults := summarizeSubagentToolResults(result.Tools, 6); len(toolResults) > 0 {
 		payload["tool_results"] = toolResults
+	}
+	if merge != nil {
+		ws := map[string]string{"merge_status": merge.Status, "branch": merge.Branch}
+		if merge.Detail != "" {
+			ws["detail"] = merge.Detail
+		}
+		// The worktree path only matters while it still exists (conflict or
+		// error keeps it around for manual resolution).
+		if merge.Status != "merged" && merge.Status != "no_changes" {
+			ws["worktree"] = merge.Path
+		}
+		payload["workspace"] = ws
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -172,7 +172,7 @@ All events share the envelope:
 | `tool` | Any tool started/finished | `name`, `status` (`running`/`success`/`error`), `agent`, `args`/`args_raw`, `output` |
 | `banner` | UI banner shown (info/warn/error/success) | `text`, `level` |
 | `approval_request` | Shell approval is needed | `command`, `tool_id`, `segments`, `reason` |
-| `ask_user` | The agent invoked `ask-user` | `question`, `options`, `context`, `default`, `allow_free_response` |
+| `ask_user` | The agent invoked `ask-user` | `version`, `count`, `active`, `questions[]`, plus the v1 fields `question`, `options`, `context`, `default`, `allow_free_response` describing the question numbered `active` — see [Ask-user forms](#ask-user-forms) |
 | `commit` / `commit_error` | Auto-commit agent finished | `message` / `error` |
 | `search` / `search_error` | Repo searcher finished | `result` / `error` |
 | `remote_command` | Remote client sent a slash command | `command` |
@@ -181,6 +181,80 @@ All events share the envelope:
 
 The `kind` field is also reflected as the `event:` SSE name for clients
 that filter by event name.
+
+### Ask-user forms
+
+The model asks up to four related questions as one form. The `ask_user` event
+carries the whole form and is versioned so a client can tell the two shapes
+apart:
+
+```json
+{
+  "version": 2,
+  "question_id": "q-3",
+  "count": 2,
+  "active": 0,
+  "questions": [
+    {
+      "header": "Database",
+      "question": "Which database?",
+      "options": [
+        { "label": "Postgres", "description": "already provisioned" },
+        { "label": "SQLite", "is_recommended": true }
+      ],
+      "multi_select": false,
+      "allow_free_response": true
+    },
+    {
+      "header": "Checks",
+      "question": "Which checks run before commits?",
+      "options": [{ "label": "go vet" }, { "label": "gofmt" }],
+      "multi_select": true,
+      "allow_free_response": false
+    }
+  ],
+
+  "question": "Which database?",
+  "options": ["Postgres — already provisioned", "SQLite"],
+  "context": "both are already provisioned",
+  "default": "SQLite",
+  "allow_free_response": true
+}
+```
+
+The five fields below the blank line are version 1's, kept so a client written
+before forms existed keeps working. They describe the question at index
+`active` — in the TUI that is the question the user is on, republished as they
+move through the form; in headless mode it is always the first one.
+
+**Who can answer.** `POST /ask-user` resolves a question only when the run is
+driven headlessly (`spettro --headless`), where the remote client *is* the user. In
+TUI mode the question belongs to the person at the terminal: the event is
+published so a remote client can follow along, and `POST /ask-user` answers
+nothing (`404`) — a Telegram reply is the way in from outside. Everything below
+describes the headless case.
+
+A form-aware client sends every answer at once, keyed by header:
+
+```json
+{ "question_id": "q-3", "answers": { "Database": "SQLite", "Checks": "go vet, gofmt" } }
+```
+
+A client that only understands the flat shape sends what it always sent:
+
+```json
+{ "question_id": "q-3", "answer": "SQLite" }
+```
+
+That is read as the answer to the **first** question; the rest are reported to
+the model as unanswered rather than defaulted. An answer naming an option (by
+its label, or by the `label — description` string the flat `options` array
+shows) selects it; anything else is delivered as the user's own words, verbatim.
+A multi-select question takes several option names separated by commas.
+
+Answering is one-shot per `question_id`: a second POST gets `409`, and a
+question whose run was cancelled or interrupted gets `404` because the pending
+answer was already resolved.
 
 ## Quick examples
 
@@ -250,7 +324,9 @@ await fetch(`http://127.0.0.1:${PORT}/interrupt`, {
   permission policy, hooks, approval prompts, and budgets all apply.
   `restricted` and `ask-first` policies still pop their dialogs locally
   inside the TUI; the remote client observes the request via the
-  `approval_request` / `ask_user` events but cannot answer them.
+  `approval_request` / `ask_user` events but cannot answer them. Headless runs
+  have no TUI to answer in, so there `POST /ask-user` is the answer path — see
+  [Ask-user forms](#ask-user-forms).
 - Interrupts coalesce: rapid bursts deliver at most one `remoteInterruptMsg`
   to the program loop until it is consumed.
 - Slow SSE subscribers are skipped rather than backpressuring the TUI.

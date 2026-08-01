@@ -209,7 +209,40 @@ type AgentSpec struct {
 // "let the model see an image" tool: the agent produces images however it
 // likes (its own headless-browser screenshot via shell, a generated chart,
 // an existing asset) and views the file.
+// lspDeepTools are shared between the default manifest and the v6 migration
+// that retrofits them into existing manifests (hover for type info, and
+// rename-symbol for LSP-powered cross-file renames).
+var lspDeepTools = []ToolSpec{
+	{ID: "hover", Name: "LSP Hover", Description: "Type signature and documentation for a symbol via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+	{ID: "rename-symbol", Name: "LSP Rename", Description: "Rename a symbol across the workspace via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
+}
+
+// ptyTools are shared between the default manifest and the v8 migration that
+// retrofits them into existing manifests. pty-start carries the same approval
+// and risk surface as shell-exec; one start approval covers subsequent
+// pty-write input into that session, so pty-write itself needs no approval.
+var ptyTools = []ToolSpec{
+	{ID: "pty-start", Name: "PTY Start", Description: "Start an interactive terminal session under a pseudo-terminal.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
+	{ID: "pty-write", Name: "PTY Write", Description: "Send input to a pty session and read new output.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "high"},
+	{ID: "pty-kill", Name: "PTY Kill", Description: "Terminate a pty session.", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
+}
+
+// toolOutputSpec is shared between the default manifest and the v9 migration
+// that retrofits it into existing manifests. It reads back tool outputs
+// offloaded to the session spool (execution-time truncation and compaction
+// reference stubs point at it), a read-only surface granted alongside
+// file-read.
+var toolOutputSpec = ToolSpec{ID: "tool-output", Name: "Tool Output", Description: "Re-read the full output of an earlier tool call that was offloaded to the session spool.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
+
 var visionToolViewImage = ToolSpec{ID: "view-image", Name: "View Image", Description: "Attach an image file from the workspace so the model can see it (vision models only).", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
+
+// askUserToolSpec is shared between the default manifest and the v10 migration
+// that retrofits the grant into existing manifests. It is the only way an
+// agent can put a question to the human driving it, so it is granted to the
+// agents a person talks to directly (primary/orchestrator roles) and withheld
+// from workers and subagents, whose runs inherit the parent's callback and
+// would interrupt the user mid-orchestration with no context about who asked.
+var askUserToolSpec = ToolSpec{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"}
 
 func DefaultAgentManifest() AgentManifest {
 	m := AgentManifest{
@@ -259,8 +292,9 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
 			{ID: "job-output", Name: "Job Output", Description: "Fetch accumulated output of a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 			{ID: "job-kill", Name: "Job Kill", Description: "Terminate a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
+			toolOutputSpec,
 			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"},
+			askUserToolSpec,
 			{ID: "enter-plan-mode", Name: "Enter Plan Mode", Description: "Switch execution into planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
 			{ID: "exit-plan-mode", Name: "Exit Plan Mode", Description: "Exit planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
 			{ID: "web-search", Name: "Web Search", Description: "Search the web and return result links.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"search", "network"}, RiskLevel: "medium"},
@@ -280,9 +314,9 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "skill-list", Name: "Skill List", Description: "List installed Agent Skills with name + description.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 		},
 		Agents: []AgentSpec{
-			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
-			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
+			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
+			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
 			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
 			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "todo-write", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
 			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
@@ -470,7 +504,197 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 5
 		changed = true
 	}
+	if m.Version < 6 {
+		// v6 introduces the deeper LSP tools (hover, rename-symbol). Existing
+		// manifests get the definitions; agents already trusted with the
+		// references tool get hover, and those also holding file-edit get
+		// rename-symbol.
+		m.ensureLSPDeepTools()
+		m.Version = 6
+		changed = true
+	}
+	if m.Version < 7 {
+		// v7 backs repo-search with the symbol index (ranked definitions).
+		// Grant it to agents already trusted with grep — same read/search
+		// surface — so they can use the cheaper symbol lookup.
+		m.ensureRepoSearchTool()
+		m.Version = 7
+		changed = true
+	}
+	if m.Version < 8 {
+		// v8 introduces interactive PTY sessions (pty-start/write/kill).
+		// Agents already trusted with shell-exec get them: the surface is the
+		// same arbitrary-command trust level, approved through the same path.
+		m.ensurePTYTools()
+		m.Version = 8
+		changed = true
+	}
+	if m.Version < 9 {
+		// v9 introduces the tool-output spool reader used by reference-based
+		// compaction. Agents already trusted with file-read get it: same
+		// read-only surface (it only reads back outputs their own tools
+		// produced).
+		m.ensureToolOutputTool()
+		m.Version = 9
+		changed = true
+	}
+	if m.Version < 10 {
+		// v10 makes ask-user reachable: the tool existed but no shipped agent
+		// could actually call it (the allow-list grant was missing, and the
+		// "ask" action family was missing from the agents that had it), so a
+		// model had no way to put a question to the user at all.
+		m.ensureAskUserTool()
+		m.Version = 10
+		changed = true
+	}
 	return changed
+}
+
+// ensureAskUserTool retrofits the ask-user grant into a manifest that predates
+// v10. The definition is added when absent, and the grant goes to
+// primary/orchestrator agents only — the ones a human converses with directly.
+// Workers and subagents are left alone: their runs inherit the parent's
+// callback, so a question from a nested worker would interrupt the user
+// mid-orchestration with no context about who is asking.
+//
+// Reachability needs both halves: the tool ID on the agent's allow-list AND
+// the "ask" action family on its permitted_actions, since resolveToolPolicies
+// drops an allow-listed tool whose actions the agent does not hold.
+func (m *AgentManifest) ensureAskUserTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == askUserToolSpec.ID {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, askUserToolSpec)
+	}
+	for i := range m.Agents {
+		if !m.Agents[i].IsPrimaryRole() {
+			continue
+		}
+		if !slices.Contains(m.Agents[i].AllowedTools, askUserToolSpec.ID) {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, askUserToolSpec.ID)
+		}
+		// An empty permitted_actions list means "no action filtering at all";
+		// appending to it would narrow the agent to the ask family alone.
+		if len(m.Agents[i].PermittedActions) > 0 && !slices.Contains(m.Agents[i].PermittedActions, "ask") {
+			m.Agents[i].PermittedActions = append(m.Agents[i].PermittedActions, "ask")
+		}
+	}
+}
+
+// ensureToolOutputTool retrofits the tool-output spool reader into a manifest
+// that predates v9: the definition is added when absent, and any agent
+// already holding file-read gets it allowed (identical read trust level, so
+// deliberate restrictions are preserved).
+func (m *AgentManifest) ensureToolOutputTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == toolOutputSpec.ID {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, toolOutputSpec)
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["file-read"] && !allowed["tool-output"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "tool-output")
+		}
+	}
+}
+
+// ensurePTYTools retrofits the pty session tools into a manifest that
+// predates v8: definitions are added when absent, and any agent already
+// holding shell-exec gets all three (identical execute trust level, so
+// deliberate restrictions are preserved).
+func (m *AgentManifest) ensurePTYTools() {
+	have := map[string]bool{}
+	for _, t := range m.Tools {
+		have[t.ID] = true
+	}
+	for _, t := range ptyTools {
+		if !have[t.ID] {
+			m.Tools = append(m.Tools, t)
+		}
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if !allowed["shell-exec"] {
+			continue
+		}
+		for _, t := range ptyTools {
+			if !allowed[t.ID] {
+				m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, t.ID)
+			}
+		}
+	}
+}
+
+// ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool
+// into a manifest that predates v7: the definition is added when absent, and
+// any agent already holding grep gets repo-search allowed (identical
+// read/search trust level, so deliberate restrictions are preserved).
+func (m *AgentManifest) ensureRepoSearchTool() {
+	haveTool := false
+	for _, t := range m.Tools {
+		if t.ID == "repo-search" {
+			haveTool = true
+			break
+		}
+	}
+	if !haveTool {
+		m.Tools = append(m.Tools, ToolSpec{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"})
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["grep"] && !allowed["repo-search"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "repo-search")
+		}
+	}
+}
+
+// ensureLSPDeepTools retrofits hover and rename-symbol into a manifest that
+// predates them, mirroring ensureVisionTools: definitions are added when
+// absent, and allow-lists grow only for agents whose existing tools show the
+// same level of trust (references for hover; references + file-edit for
+// rename-symbol) so deliberate restrictions are preserved.
+func (m *AgentManifest) ensureLSPDeepTools() {
+	have := map[string]bool{}
+	for _, t := range m.Tools {
+		have[t.ID] = true
+	}
+	for _, t := range lspDeepTools {
+		if !have[t.ID] {
+			m.Tools = append(m.Tools, t)
+		}
+	}
+	for i := range m.Agents {
+		allowed := map[string]bool{}
+		for _, id := range m.Agents[i].AllowedTools {
+			allowed[id] = true
+		}
+		if allowed["references"] && !allowed["hover"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "hover")
+		}
+		if allowed["references"] && allowed["file-edit"] && !allowed["rename-symbol"] {
+			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "rename-symbol")
+		}
+	}
 }
 
 // ensureVisionTools retrofits the view-image tool into a manifest that
@@ -783,10 +1007,8 @@ func (m AgentManifest) ToolByID(id string) (ToolSpec, bool) {
 		if t.ID == id {
 			return t, true
 		}
-		for _, alias := range t.Aliases {
-			if alias == id {
-				return t, true
-			}
+		if slices.Contains(t.Aliases, id) {
+			return t, true
 		}
 	}
 	return ToolSpec{}, false

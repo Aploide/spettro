@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"spettro/internal/jobs"
 	"spettro/internal/models"
 	"spettro/internal/provider"
+	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
 	"spettro/internal/spettro"
@@ -29,6 +31,8 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	// Kill detached background shell jobs on exit; they are in their own
 	// process groups and would otherwise outlive the run.
 	defer jobs.Default().KillAll()
+	defer pty.Default().KillAll()
+	defer jobs.Spool().Cleanup()
 
 	store, err := storage.New(cwd)
 	if err != nil {
@@ -56,7 +60,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 		pm.SetCatalog(cat)
 	}
 	for _, endpoint := range cfg.LocalEndpoints {
-		if localModels, err := provider.ProbeLocalServer(context.Background(), endpoint); err == nil {
+		if localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint]); err == nil {
 			pm.AddLocalModels(localModels)
 		}
 	}
@@ -95,10 +99,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	contextWindow := resolveContextWindow(pm, cfg.ActiveProvider, cfg.ActiveModel)
 
 	// Resolve shell timeout from config
-	shellTimeoutSec := 0
-	if cfg.GoalShellTimeoutSec > 0 {
-		shellTimeoutSec = cfg.GoalShellTimeoutSec
-	}
+	shellTimeoutSec := max(cfg.GoalShellTimeoutSec, 0)
 
 	// Get coding agent spec
 	spec, ok := manifest.AgentByID("coding")
@@ -166,6 +167,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			SessionDir:      sessionDir,
 			GoalMode:        true,
 			ContextWindow:   contextWindow,
+			Compact:         cfg.CompactConfig(),
 			ShellTimeoutSec: shellTimeoutSec,
 			ToolCallback: func(tr agent.ToolTrace) {
 				status := "✓"
@@ -178,9 +180,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 				// Auto-approve in headless goal mode (yolo)
 				return agent.ShellApprovalAllowOnce, nil
 			},
-			AskUser: func(ctx context.Context, req agent.AskUserRequest) (string, error) {
+			AskUser: func(ctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
 				// In headless mode, we can't ask the user, so return error
-				return "", fmt.Errorf("cannot ask user in headless mode")
+				return nil, fmt.Errorf("cannot ask user in headless mode")
 			},
 		}
 
@@ -261,10 +263,8 @@ func resolveGoalNoProgressLimit(cfg config.UserConfig) int {
 
 // appendUnique appends a string to a slice only if it's not already present.
 func appendUnique(slice []string, s string) []string {
-	for _, v := range slice {
-		if v == s {
-			return slice
-		}
+	if slices.Contains(slice, s) {
+		return slice
 	}
 	return append(slice, s)
 }

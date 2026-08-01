@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -212,7 +211,7 @@ func ParseNetSpec(s string) (NetPolicy, []uint16, error) {
 	}
 	if rest, ok := strings.CutPrefix(t, "ports:"); ok {
 		var ports []uint16
-		for _, f := range strings.Split(rest, ",") {
+		for f := range strings.SplitSeq(rest, ",") {
 			f = strings.TrimSpace(f)
 			if f == "" {
 				continue
@@ -228,7 +227,7 @@ func ParseNetSpec(s string) (NetPolicy, []uint16, error) {
 		if len(ports) == 0 {
 			return "", nil, fmt.Errorf("net spec %q lists no ports", s)
 		}
-		sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+		slices.Sort(ports)
 		return NetPorts, ports, nil
 	}
 	return "", nil, fmt.Errorf("invalid net policy %q (want all|localhost|none|ports:443,8080)", s)

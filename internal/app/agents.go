@@ -27,6 +27,7 @@ func (a *App) handlePlanning(ctx context.Context, prompt string) error {
 		ToolCallback:    a.printToolProgress,
 		Manifest:        &a.manifest,
 		SessionDir:      a.cliSessionDir(),
+		Compact:         a.cfg.CompactConfig(),
 	}
 	result, err := ag.Run(ctx, prompt)
 	if err != nil {
@@ -60,6 +61,7 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 		ShellApproval:   a.promptShellApproval,
 		Manifest:        &a.manifest,
 		SessionDir:      a.cliSessionDir(),
+		Compact:         a.cfg.CompactConfig(),
 	}
 	ag.Spec.Permission = a.cfg.Permission
 	result, err := ag.Run(ctx, prompt)
@@ -85,6 +87,7 @@ func (a *App) handleChat(ctx context.Context, prompt string) error {
 		ToolCallback:    a.printToolProgress,
 		Manifest:        &a.manifest,
 		SessionDir:      a.cliSessionDir(),
+		Compact:         a.cfg.CompactConfig(),
 	}
 	result, err := ag.Run(ctx, prompt)
 	if err != nil {

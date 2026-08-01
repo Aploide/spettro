@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 func trustedPath() (string, error) {
@@ -60,12 +61,7 @@ func IsTrusted(cwd string) bool {
 	if err != nil {
 		return false
 	}
-	for _, p := range paths {
-		if p == cwd {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(paths, cwd)
 }
 
 // AddTrusted permanently adds cwd to the trusted list.
@@ -74,10 +70,8 @@ func AddTrusted(cwd string) error {
 	if err != nil {
 		return err
 	}
-	for _, p := range paths {
-		if p == cwd {
-			return nil // already trusted
-		}
+	if slices.Contains(paths, cwd) {
+		return nil // already trusted
 	}
 	return saveTrusted(append(paths, cwd))
 }

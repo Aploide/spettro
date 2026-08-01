@@ -70,7 +70,7 @@ func modeConfigOption(s *acpSession) acpsdk.SessionConfigOption {
 			Value: acpsdk.SessionConfigValueId(a.ID),
 		}
 		if a.Description != "" {
-			opt.Description = acpsdk.Ptr(a.Description)
+			opt.Description = new(a.Description)
 		}
 		options = append(options, opt)
 	}
@@ -141,7 +141,7 @@ func modelConfigOption(cfg *config.UserConfig, pm *provider.Manager) acpsdk.Sess
 	return acpsdk.SessionConfigOption{Select: &acpsdk.SessionConfigOptionSelect{
 		Id:           configIDModel,
 		Name:         "Model",
-		Description:  acpsdk.Ptr("Active model for this session"),
+		Description:  new("Active model for this session"),
 		Category:     acpsdk.Ptr(acpsdk.SessionConfigOptionCategoryModel),
 		CurrentValue: acpsdk.SessionConfigValueId(current),
 		Options:      acpsdk.SessionConfigSelectOptions{Grouped: &grouped},
@@ -151,9 +151,9 @@ func modelConfigOption(cfg *config.UserConfig, pm *provider.Manager) acpsdk.Sess
 
 func permissionConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	options := acpsdk.SessionConfigSelectOptionsUngrouped{
-		{Name: "Ask first", Value: acpsdk.SessionConfigValueId(config.PermissionAskFirst), Description: acpsdk.Ptr("Prompt before running tools, edits, or commands")},
-		{Name: "Restricted", Value: acpsdk.SessionConfigValueId(config.PermissionRestricted), Description: acpsdk.Ptr("Allow safe actions; prompt for sensitive ones")},
-		{Name: "YOLO", Value: acpsdk.SessionConfigValueId(config.PermissionYOLO), Description: acpsdk.Ptr("Automatically approve all tool, path, and command requests")},
+		{Name: "Ask first", Value: acpsdk.SessionConfigValueId(config.PermissionAskFirst), Description: new("Prompt before running tools, edits, or commands")},
+		{Name: "Restricted", Value: acpsdk.SessionConfigValueId(config.PermissionRestricted), Description: new("Allow safe actions; prompt for sensitive ones")},
+		{Name: "YOLO", Value: acpsdk.SessionConfigValueId(config.PermissionYOLO), Description: new("Automatically approve all tool, path, and command requests")},
 	}
 	current := string(cfg.Permission)
 	if current == "" {
@@ -162,7 +162,7 @@ func permissionConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	return acpsdk.SessionConfigOption{Select: &acpsdk.SessionConfigOptionSelect{
 		Id:           configIDPermission,
 		Name:         "Permission",
-		Description:  acpsdk.Ptr("How Spettro requests approval for actions"),
+		Description:  new("How Spettro requests approval for actions"),
 		CurrentValue: acpsdk.SessionConfigValueId(current),
 		Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &options},
 		Type:         "select",
@@ -185,7 +185,7 @@ func thinkingConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	return acpsdk.SessionConfigOption{Select: &acpsdk.SessionConfigOptionSelect{
 		Id:           configIDThinking,
 		Name:         "Thinking",
-		Description:  acpsdk.Ptr("Extended-thinking effort"),
+		Description:  new("Extended-thinking effort"),
 		Category:     acpsdk.Ptr(acpsdk.SessionConfigOptionCategoryThoughtLevel),
 		CurrentValue: acpsdk.SessionConfigValueId(current),
 		Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &options},
@@ -199,7 +199,7 @@ func ultraConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	return acpsdk.SessionConfigOption{Boolean: &acpsdk.SessionConfigOptionBoolean{
 		Id:           configIDUltra,
 		Name:         "Ultra",
-		Description:  acpsdk.Ptr("Swarm of parallel sub-agents for hard tasks (works with any model)"),
+		Description:  new("Swarm of parallel sub-agents for hard tasks (works with any model)"),
 		CurrentValue: cfg.Ultra,
 		Type:         "boolean",
 	}}

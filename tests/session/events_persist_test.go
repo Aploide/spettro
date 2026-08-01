@@ -48,7 +48,7 @@ func TestSaveDoesNotClobberAppendedEvents(t *testing.T) {
 	globalDir := t.TempDir()
 	sessionID := "s-events"
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := session.AppendEvent(globalDir, sessionID, session.AgentEvent{
 			At:      time.Now(),
 			Kind:    "tool",

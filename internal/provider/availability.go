@@ -60,8 +60,7 @@ func Classify(err error) FailureKind {
 			return FailureUser
 		}
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); ok {
 		if netErr.Timeout() {
 			return FailureTimeout
 		}

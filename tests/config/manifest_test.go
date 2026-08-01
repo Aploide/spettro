@@ -270,8 +270,10 @@ enabled = true
 	if len(m.Agents) != 2 {
 		t.Fatalf("expected 2 agents, got %d", len(m.Agents))
 	}
-	if len(m.EnabledToolsForAgent("ask")) != 2 {
-		t.Fatalf("expected 2 enabled tools for ask")
+	// Two declared tools plus ask-user, which the v10 migration retrofits into
+	// the manifest and grants to orchestrator/primary agents.
+	if got := len(m.EnabledToolsForAgent("ask")); got != 3 {
+		t.Fatalf("expected 3 enabled tools for ask, got %d", got)
 	}
 }
 
@@ -360,7 +362,7 @@ enabled = true
 	if !changed {
 		t.Fatal("expected migration change flag for v1 manifest")
 	}
-	if m.Version != 5 {
-		t.Fatalf("expected normalized version 5, got %d", m.Version)
+	if m.Version != 10 {
+		t.Fatalf("expected normalized version 10, got %d", m.Version)
 	}
 }

@@ -6,7 +6,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"spettro/internal/indexer"
 )
 
 // SearchAgent searches the repository for files or content.
@@ -14,10 +17,24 @@ type SearchAgent interface {
 	Search(ctx context.Context, cwd, query string) (string, error)
 }
 
-// RepoSearcher walks the repo tree and optionally greps file contents.
-type RepoSearcher struct{}
+// RepoSearcher walks the repo tree and optionally greps file contents. When
+// Index is set and the query looks like a symbol name, ranked definitions
+// from the symbol index are listed before the plain content matches.
+type RepoSearcher struct {
+	Index *indexer.SymbolIndex
+}
 
-func (RepoSearcher) Search(_ context.Context, cwd, query string) (string, error) {
+// NewRepoSearcher returns a searcher backed by the project's symbol index,
+// persisted at <cwd>/.spettro/cache/symbols.json.
+func NewRepoSearcher(cwd string) RepoSearcher {
+	return RepoSearcher{Index: indexer.NewSymbolIndex(cwd, filepath.Join(cwd, ".spettro", "cache", "symbols.json"))}
+}
+
+// identifierRE gates symbol lookups: only bare identifier-shaped queries hit
+// the index; phrases, regexes and paths go straight to the grep path.
+var identifierRE = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+
+func (s RepoSearcher) Search(ctx context.Context, cwd, query string) (string, error) {
 	var files []string
 	err := filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -61,8 +78,40 @@ func (RepoSearcher) Search(_ context.Context, cwd, query string) (string, error)
 		}
 	}
 
+	header := s.symbolHeader(ctx, cwd, query)
 	if len(results) == 0 {
+		if header != "" {
+			return header + fmt.Sprintf("no other matches for %q in %d files", query, len(files)), nil
+		}
 		return fmt.Sprintf("no matches for %q in %d files", query, len(files)), nil
 	}
-	return fmt.Sprintf("%d matches:\n%s", len(results), strings.Join(results, "\n")), nil
+	return header + fmt.Sprintf("%d matches:\n%s", len(results), strings.Join(results, "\n")), nil
+}
+
+// symbolHeader returns a "definitions:" block for identifier-shaped queries,
+// ranked best-first by the symbol index, or "" when the index is disabled or
+// has nothing. Capped so a common name can't drown the content matches.
+func (s RepoSearcher) symbolHeader(ctx context.Context, cwd, query string) string {
+	if s.Index == nil || !identifierRE.MatchString(query) {
+		return ""
+	}
+	syms := s.Index.Lookup(ctx, query)
+	if len(syms) == 0 {
+		return ""
+	}
+	const maxDefs = 20
+	total := len(syms)
+	if len(syms) > maxDefs {
+		syms = syms[:maxDefs]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d definitions:\n", total)
+	for _, sym := range syms {
+		fmt.Fprintf(&b, "%s:%d  %s %s  %s\n", sym.Path, sym.Line, sym.Kind, sym.Name, sym.Signature)
+	}
+	if total > maxDefs {
+		fmt.Fprintf(&b, "... %d more definitions omitted\n", total-maxDefs)
+	}
+	b.WriteString("\n")
+	return b.String()
 }

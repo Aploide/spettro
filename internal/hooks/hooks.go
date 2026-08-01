@@ -133,8 +133,8 @@ func Match(rule EffectiveRule, toolID string) bool {
 	if m == "" || m == "*" {
 		return true
 	}
-	if strings.HasPrefix(m, "re:") {
-		re, err := regexp.Compile(strings.TrimPrefix(m, "re:"))
+	if after, ok := strings.CutPrefix(m, "re:"); ok {
+		re, err := regexp.Compile(after)
 		if err != nil {
 			return false
 		}

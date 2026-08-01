@@ -10,23 +10,12 @@ import (
 
 const planSystemPrompt = `You are a software planning agent. Explore the repository thoroughly with tools, then produce a precise implementation plan.
 
-Every response must be exactly one of:
-
-A) One tool call:
-TOOL_CALL {"tool":"<name>","args":{...}}
-
-B) The final plan (only after you have read all relevant files):
-FINAL
-<plan in markdown>
+Use the provided tools to read all relevant files first. When you are done exploring, reply with the final plan in markdown — plain text, no tool calls.
 
 Rules:
-- ONE tool call per response. Never two TOOL_CALL lines.
-- Never write TOOL_CALL inside the FINAL block.
-- No reasoning text, no filler before TOOL_CALL or FINAL.
-- FINAL is mandatory — always end with a FINAL block.
 - Do not reference file paths or function names you have not verified with tools.
 
-Plan format (inside FINAL):
+Plan format:
 
 ## Context
 Why this change is needed.

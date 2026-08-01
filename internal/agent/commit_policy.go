@@ -4,13 +4,24 @@ import (
 	"strings"
 )
 
+// spettroCommitName/Email is Spettro's git identity: the author of commits it
+// makes autonomously (subagent workspace fallback commits) and the co-author
+// credited on commits it makes on the user's behalf.
+//
+// Keep the email in sync with internal/checkpoint/checkpoint.go (shadow-repo
+// commits) — that package cannot import this one.
+const (
+	spettroCommitName  = "Spettro"
+	spettroCommitEmail = "spettro@eyed.to"
+)
+
 // spettroCoAuthorTrailer is the mandatory Co-Authored-By trailer that Spettro
 // guarantees on every commit it makes — directly via LLMCommitter, or
 // indirectly when an LLM agent issues `git commit` through shell-exec/bash.
 //
 // Keep this string in sync with internal/agent/committer.go and
 // internal/tui/model.go.
-const spettroCoAuthorTrailer = "Co-Authored-By: Spettro <spettro@eyed.to>"
+const spettroCoAuthorTrailer = "Co-Authored-By: " + spettroCommitName + " <" + spettroCommitEmail + ">"
 
 // commitTrailerFlag is the formatted `--trailer "..."` token we inject into
 // rewritten git commit invocations. Single quotes keep the angle brackets safe
@@ -225,7 +236,7 @@ func looksLikeEnvAssignment(t string) bool {
 	if eq <= 0 {
 		return false
 	}
-	for i := 0; i < eq; i++ {
+	for i := range eq {
 		ch := t[i]
 		switch {
 		case ch >= 'A' && ch <= 'Z':

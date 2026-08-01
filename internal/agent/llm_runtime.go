@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -67,16 +68,6 @@ type ShellApprovalRequest struct {
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
 
-type AskUserRequest struct {
-	Question          string
-	Options           []string
-	Context           string
-	DefaultOption     string
-	AllowFreeResponse bool
-}
-
-type AskUserCallback func(context.Context, AskUserRequest) (string, error)
-
 func (c LLMCoder) Execute(ctx context.Context, plan string, level config.PermissionLevel, approved bool) (RunResult, error) {
 	if strings.TrimSpace(plan) == "" {
 		return RunResult{}, fmt.Errorf("empty approved plan")
@@ -94,7 +85,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "glob", "grep", "diagnostics", "references"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "tool-output", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -138,11 +129,21 @@ type toolLoopConfig struct {
 	Messages []provider.Message
 	CWD      string
 	AgentID  string
+	// InstanceID, when set, is the per-instance display name (e.g. "code#3")
+	// stamped on every ToolTrace this run emits, so hosts can tell apart
+	// concurrent sub-agents of the same type. AgentID keeps the manifest spec
+	// ID for prompt/handoff resolution; InstanceID only affects observability.
+	InstanceID string
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+	// Compact is the auto-compaction policy for the in-loop trigger (user
+	// settings: off switch, threshold percent, failure pause). The zero value
+	// means defaults (enabled at 85%), so hosts that don't wire user config
+	// keep auto-compaction on.
+	Compact         compactpkg.Config
 	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
 	LogToolCalls    bool
@@ -161,7 +162,7 @@ type toolLoopConfig struct {
 	// LLM call completes. Only the top-level run sets it; sub-agents stay
 	// silent (their cost surfaces through the parent's tool results).
 	UsageCallback UsageCallback
-	Permission     config.PermissionLevel
+	Permission    config.PermissionLevel
 	// PermissionFn, when set, is consulted on every approval decision instead
 	// of the static Permission snapshot, so the user can change the permission
 	// level (e.g. to yolo) while a run is in flight and have it take effect
@@ -187,6 +188,15 @@ type toolLoopConfig struct {
 	// message is appended to the conversation as a user turn so the model sees
 	// it before its next step. Top-level runs only — sub-agents never get one.
 	Steering *SteeringQueue
+}
+
+// traceID is the agent identity stamped on emitted ToolTraces: the unique
+// per-instance name when one was assigned (swarm members), else the spec ID.
+func (r *toolRuntime) traceID() string {
+	if r.instanceID != "" {
+		return r.instanceID
+	}
+	return r.agentID
 }
 
 type toolCall struct {
@@ -222,6 +232,7 @@ type toolRuntime struct {
 	checkpoint    func(tool string)
 	sessionDir    string
 	agentID       string
+	instanceID    string
 	parentID      string
 
 	delegationDepth      int
@@ -235,9 +246,14 @@ type toolRuntime struct {
 	skillsCatalog        skills.Catalog
 	goalMode             bool
 	shellTimeoutSec      int
-	goalComplete         bool
-	goalSummary          string
-	goalVerified         bool
+	// compactCfg is the auto-compaction policy (zero value → defaults);
+	// compactFailures counts consecutive summarizer failures so the trigger
+	// pauses after MaxFailures instead of burning a failing call every step.
+	compactCfg      compactpkg.Config
+	compactFailures int
+	goalComplete    bool
+	goalSummary     string
+	goalVerified    bool
 
 	// httpClient overrides the hardened SSRF-safe client used by web-fetch,
 	// web-search and download. Nil in production (the safe client is built per
@@ -324,7 +340,7 @@ func (r *toolRuntime) offerFallback(ctx context.Context, failed provider.ModelRe
 		return provider.ModelRef{}, false
 	}
 	switchOpt := fmt.Sprintf("Switch to %s", next)
-	answer, err := r.askUser(ctx, AskUserRequest{
+	answer, err := AskSingleQuestion(ctx, r.askUser, AskUserRequest{
 		Question:      fmt.Sprintf("Model %s is unavailable (%s). Switch to %s for the rest of this run? Note: switching models invalidates the prompt cache.", failed, kind, next),
 		Options:       []string{switchOpt, "Abort"},
 		Context:       truncate(cause.Error(), 300),
@@ -400,6 +416,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 	runtime := toolRuntime{
 		cwd:             cfg.CWD,
+		searcher:        NewRepoSearcher(cfg.CWD),
 		readSet:         map[string]struct{}{},
 		requiredReads:   map[string]struct{}{},
 		permission:      cfg.Permission,
@@ -419,9 +436,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		checkpoint:      cfg.Checkpoint,
 		sessionDir:      cfg.SessionDir,
 		agentID:         cfg.AgentID,
+		instanceID:      cfg.InstanceID,
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
+		compactCfg:      cfg.Compact,
 	}
 	var loopPolicy config.LoopDetectionPolicy
 	if cfg.Manifest != nil {
@@ -495,16 +514,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 	var traces []ToolTrace
 
-	// Detect whether the selected model supports native tool calling and build
-	// the ToolSpec list once (it doesn't change between steps).
-	useNativeTools := cfg.ProviderManager.SupportsToolCalls(cfg.ProviderName(), cfg.ModelName())
-	var nativeToolSpecs []provider.ToolSpec
-	if useNativeTools {
-		nativeToolSpecs = buildToolSpecs(cfg.AllowedTools)
-		if len(nativeToolSpecs) == 0 {
-			useNativeTools = false // no schemas registered for any allowed tool
-		}
-	}
+	// Native tool calling is always used: tool schemas ride on the API request
+	// for every model. The spec list is built once (it doesn't change between
+	// steps). Models whose catalog entry claims no tool support still get the
+	// schemas — local OpenAI-compatible servers accept them, and the old
+	// TOOL_CALL text-protocol fallback caused tool-capable local models to
+	// emit unparsed TOOL_CALL strings instead of real tool calls.
+	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
@@ -541,9 +557,24 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}, nil
 	}
 
+	// fail is the error-path counterpart of finish: it returns the error
+	// together with the conversation accumulated so far, so hosts can keep
+	// the partial history (user task, tool calls and results) as the next
+	// turn's carried prefix instead of losing the whole turn's context.
+	// convMsgs is append-only up to any error point, so it is always a valid
+	// provider prefix (tool calls are never left without their results).
+	fail := func(err error) (toolLoopResult, error) {
+		return toolLoopResult{
+			traces:        traces,
+			tokens:        totalTokens,
+			contextTokens: contextTokens,
+			messages:      convMsgs,
+		}, err
+	}
+
 	// The system prompt is intentionally built once: it must not vary between
 	// steps or the provider-side prompt cache misses on every call.
-	system := buildSystemString(cfg, useNativeTools)
+	system := buildSystemString(cfg)
 
 	// Resilience state: transient provider failures are retried in-loop and an
 	// over-budget context gets one forced compaction attempt, so a single bad
@@ -563,17 +594,25 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for _, s := range cfg.Steering.Drain() {
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: steeringMessagePrefix + s})
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "steering delivered: " + truncate(s, 200)})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "steering delivered: " + truncate(s, 200)})
 				}
 			}
 		}
 		// In-loop compaction: summarize older turns when context pressure
-		// approaches the window. Fires for all runs (the loop is unbounded).
-		// On error, keep convMsgs as-is — never abort a run for compaction.
-		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err == nil {
+		// approaches the window. Fires for all runs (the loop is unbounded),
+		// honoring the user's auto-compact settings via runtime.compactCfg.
+		// On error, keep convMsgs as-is — never abort a run for compaction;
+		// the trigger fires again at the next step until MaxFailures pauses it.
+		beforeTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
+		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err != nil {
+			if cfg.ToolCallback != nil {
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("auto-compaction failed (%s) — continuing; will retry at the next threshold crossing", truncate(err.Error(), 200))})
+			}
+		} else {
 			convMsgs = compacted
 			if did && cfg.ToolCallback != nil {
-				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "compacted working context to stay within the window"})
+				afterTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(afterTokens))})
 			}
 		}
 		// Budget validation: sum system + all messages.
@@ -591,12 +630,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, true); cerr == nil && did {
 					convMsgs = compacted
 					if cfg.ToolCallback != nil {
-						cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
+						cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
 					}
 					continue
 				}
 			}
-			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, err
+			return fail(err)
 		}
 		budgetCompacted = false
 		req := provider.Request{
@@ -605,12 +644,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			MaxTokens: cfg.MaxTokens,
 			Thinking:  cfg.Thinking,
 		}
-		if useNativeTools {
+		if len(nativeToolSpecs) > 0 {
 			req.Tools = nativeToolSpecs
 		}
 		if cfg.ToolCallback != nil {
 			req.OnRateLimit = func(d time.Duration) {
-				cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
+				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
 			}
 		}
 		var demux *streamDemux
@@ -635,7 +674,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		if err != nil {
 			// User cancellation is not retryable — surface it immediately.
 			if ctx.Err() != nil {
-				return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
+				return fail(fmt.Errorf("agent call failed: %w", err))
 			}
 			// Transient failure (5xx/timeout/network): retry the same request a
 			// bounded number of times before considering a fallback model, so a
@@ -643,12 +682,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if sendRetries < maxSendRetries {
 				sendRetries++
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
 				}
 				select {
 				case <-time.After(time.Duration(sendRetries) * 2 * time.Second):
 				case <-ctx.Done():
-					return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, ctx.Err()
+					return fail(ctx.Err())
 				}
 				continue
 			}
@@ -659,11 +698,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				runtime.modelOverride = &next
 				sendRetries = 0
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
 				}
 				continue
 			}
-			return toolLoopResult{traces: traces, tokens: totalTokens, contextTokens: contextTokens}, fmt.Errorf("agent call failed: %w", err)
+			return fail(fmt.Errorf("agent call failed: %w", err))
 		}
 		sendRetries = 0
 		totalTokens += resp.EstimatedTokens
@@ -714,11 +753,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for i, res := range results {
 				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images})
 				toolResults[i] = provider.ToolResult{
-					ID:     resp.ToolCalls[i].ID,
-					Name:   res.name,
-					Output: res.output,
-					IsErr:  res.status == "error",
-					Images: res.images,
+					ID:      resp.ToolCalls[i].ID,
+					Name:    res.name,
+					Output:  res.output,
+					IsErr:   res.status == "error",
+					Images:  res.images,
+					SpoolID: ensureSpooled(res.output),
 				}
 			}
 			// Tool results are appended before any exit check: an assistant
@@ -728,7 +768,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if loopAct == loopNudge {
 				resultsMsg.Content = loopNudgeMessage
 				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
 				}
 			}
 			convMsgs = append(convMsgs, resultsMsg)
@@ -745,96 +785,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			continue
 		}
 
-		// Native-tool path final answer: model returned text with no tool calls.
-		if useNativeTools {
-			if next, ok := runtime.nextRequiredRead(); ok {
-				emitNarration(cfg, main)
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
-				continue
-			}
-			return finish(strings.TrimSpace(main), false, "")
-		}
-
-		// Text protocol path (fallback for models without native tool support).
-		calls, parseErrs := parseAllToolCalls(main)
-		if len(calls) > 0 || len(parseErrs) > 0 {
-			if len(calls) > 0 {
-				emitNarration(cfg, main)
-			}
-			loopAct := runtime.loopDetect.observe(calls, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
-			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			var toolFeedback strings.Builder
-			// The text protocol has no tool_result channel, so tool-produced
-			// images ride on the feedback user message itself (message-level
-			// images work on every provider path).
-			var feedbackImages []string
-			for _, res := range results {
-				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images}
-				traces = append(traces, trace)
-				feedbackImages = append(feedbackImages, res.images...)
-				// The LLM must always receive tool outcomes in the next step, even when
-				// human-facing tool logging is disabled in the manifest.
-				toolFeedback.WriteString(fmt.Sprintf("tool[%s]: %s\n", res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output, runtime.historyLimit(res.name))))
-			}
-			for _, perr := range parseErrs {
-				toolFeedback.WriteString(fmt.Sprintf("parse error: %s — fix the JSON and retry\n", perr))
-			}
-			if loopAct == loopNudge {
-				toolFeedback.WriteString(loopNudgeMessage + "\n")
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
-				}
-			}
-			// Feedback lands in the history before any exit check so the carried
-			// conversation never ends on an unanswered tool request.
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimRight(toolFeedback.String(), "\n"), Images: feedbackImages})
-			if runtime.shouldStop() {
-				return finish(runtime.stopMessage(), false, "")
-			}
-			if runtime.goalIsComplete() {
-				summary := runtime.goalSummary
-				if summary == "" {
-					summary = strings.TrimSpace(main)
-				}
-				return finish(summary, true, summary)
-			}
-			continue
-		}
-
-		if final, ok := parseFinal(main); ok {
-			if next, ok := runtime.nextRequiredRead(); ok {
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before FINAL.", next)})
-				continue
-			}
-			return finish(strings.TrimSpace(final), false, "")
-		}
-
-		// Plain text without FINAL prefix and without a tool call: the model is
-		// narrating. Surface the text as a comment (it IS the model's output)
-		// and keep the loop alive so it can continue working or finalize.
-		if len(allowed) > 0 {
-			// Identical text emitted step after step is also a loop (e.g. the
-			// model keeps restating a plan instead of acting).
-			loopAct := runtime.loopDetect.observe(nil, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
+		// Final answer: model returned text with no tool calls.
+		if next, ok := runtime.nextRequiredRead(); ok {
 			emitNarration(cfg, main)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
-			feedback := "system: your text was shown to the user as a progress comment. Continue with TOOL_CALL, or output FINAL on its own line followed by your final answer when done. Do not write TOOL_CALL as text."
-			if loopAct == loopNudge {
-				feedback += "\n" + loopNudgeMessage
-			}
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: feedback})
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
 			continue
 		}
-		return finish(main, false, "")
+		return finish(strings.TrimSpace(main), false, "")
 	}
 }
 
@@ -850,7 +808,11 @@ func emitNarration(cfg toolLoopConfig, text string) {
 	if text == "" {
 		return
 	}
-	cfg.ToolCallback(ToolTrace{AgentID: cfg.AgentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
+	id := cfg.InstanceID
+	if id == "" {
+		id = cfg.AgentID
+	}
+	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
 }
 
 // compactConv summarizes the older portion of convMsgs into a single
@@ -883,7 +845,24 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			},
 			primary, chain, req, nil)
 	}
-	return compactpkg.CompactHistory(ctx, send, system, msgs, window, force)
+	out, did, err := compactpkg.CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures)
+	// Consecutive-failure bookkeeping: a failing summarizer pauses the auto
+	// trigger after MaxFailures (see compact.Evaluate); any success resets it.
+	if err != nil {
+		r.compactFailures++
+	} else if did {
+		r.compactFailures = 0
+	}
+	return out, did, err
+}
+
+// formatTokens renders a token count compactly for transcript notices
+// ("42k" above a thousand, exact below).
+func formatTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
@@ -908,7 +887,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	for i, call := range calls {
 		if toolCap > 0 && i >= toolCap {
 			results[i] = parallelResult{
-				agentID: r.agentID,
+				agentID: r.traceID(),
 				name:    call.Tool,
 				args:    singleLine(string(call.Args)),
 				output:  fmt.Sprintf("error: too many tool calls in one step (limit %d, batch %d); this call was skipped — emit a smaller batch", toolCap, len(calls)),
@@ -920,7 +899,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			agentCalls++
 			if agentCalls > agentBudget {
 				results[i] = parallelResult{
-					agentID: r.agentID,
+					agentID: r.traceID(),
 					name:    call.Tool,
 					args:    singleLine(string(call.Args)),
 					output:  fmt.Sprintf("error: delegation limit reached (max %d in parallel)", agentBudget),
@@ -935,10 +914,10 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			callArgs := singleLine(string(c.Args))
 			if callback != nil && isMajorOperationTool(c.Tool) {
 				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
-				callback(ToolTrace{AgentID: r.agentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 			}
 			if callback != nil {
-				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Args: callArgs, Status: "running"})
+				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
 			}
 			cctx, sink := withImageSink(ctx)
 			output, err := r.executeWithTimeout(cctx, c, allowed)
@@ -948,7 +927,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				output = "error: " + err.Error()
 			}
 			results[idx] = parallelResult{
-				agentID: r.agentID,
+				agentID: r.traceID(),
 				name:    c.Tool,
 				args:    callArgs,
 				output:  output,
@@ -956,13 +935,13 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				images:  sink.list(),
 			}
 			if callback != nil {
-				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
+				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
 				if isMajorOperationTool(c.Tool) {
 					msg := fmt.Sprintf("Completed %s.", c.Tool)
 					if err != nil {
 						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
 					}
-					callback(ToolTrace{AgentID: r.agentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+					callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 				}
 			}
 		}(i, call)
@@ -995,6 +974,16 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 }
 
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	if blocksOnUserInput(call.Tool) {
+		// The tool is waiting on a person, who may take as long as they take.
+		// A deadline here would cancel the question out from under them and
+		// hand the model a timeout error as if nobody was there — the run must
+		// block until the user actually answers (or declines). The manifest's
+		// timeout_sec bounds tool execution, not human attention.
+		out, err := r.execute(ctx, call, allowed)
+		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
+		return out, err
+	}
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
@@ -1019,6 +1008,13 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	out, err := r.execute(tctx, call, allowed)
 	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
 	return out, err
+}
+
+// blocksOnUserInput reports whether a tool's execution is a wait on the human,
+// not work the agent is doing. Those tools run without a deadline; everything
+// else is bounded by executeWithTimeout.
+func blocksOnUserInput(tool string) bool {
+	return tool == "ask-user"
 }
 
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
@@ -1066,7 +1062,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", err
 		}
 		r.markReadFromSearch(out)
-		return truncate(out, r.historyLimit("repo-search")), nil
+		return r.spoolResult("repo-search", out), nil
 	case "file-read":
 		var args struct {
 			Path      string `json:"path"`
@@ -1090,9 +1086,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Unlock()
 		content := string(data)
 		if args.StartLine > 0 {
+			// Bounded reads are already scoped by the model; plain truncation
+			// keeps the response aligned with the requested line window.
 			content = sliceLines(content, args.StartLine, args.EndLine)
+			return truncate(content, r.historyLimit("file-read")), nil
 		}
-		return truncate(content, r.historyLimit("file-read")), nil
+		return r.spoolResult("file-read", content), nil
 	case "file-write":
 		var args struct {
 			Path    string `json:"path"`
@@ -1150,6 +1149,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
+		r.invalidateSymbolIndex(rel)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
@@ -1170,7 +1170,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
 			return "", fmt.Errorf("grep args: %w", err)
 		}
-		return r.runGrep(ctx, gargs)
+		out, err := r.runGrep(ctx, gargs)
+		if err != nil {
+			return "", err
+		}
+		if gargs.OutputMode == "" || gargs.OutputMode == "content" {
+			return r.spoolResult("grep", out), nil
+		}
+		return out, nil
 	case "ls":
 		var args struct {
 			Path string `json:"path"`
@@ -1245,6 +1252,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runLSPDiagnostics(ctx, call.Args)
 	case "references":
 		return r.runLSPReferences(ctx, call.Args)
+	case "hover":
+		return r.runLSPHover(ctx, call.Args)
+	case "rename-symbol":
+		return r.runLSPRename(ctx, call.Args)
 	case "lsp-restart":
 		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
@@ -1257,7 +1268,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSaveMemory(call.Args)
 	case "todo-write":
 		var args struct {
-			Todos []interface{} `json:"todos"`
+			Todos []any `json:"todos"`
 		}
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("todo-write args: %w", err)
@@ -1268,7 +1279,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		out := make([]session.Todo, 0, len(args.Todos))
 		now := time.Now()
 		for i, item := range args.Todos {
-			m, ok := item.(map[string]interface{})
+			m, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -1285,7 +1296,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			source, _ := m["source"].(string)
 			priority, _ := m["priority"].(string)
 			var deps []string
-			if rawDeps, ok := m["dependencies"].([]interface{}); ok {
+			if rawDeps, ok := m["dependencies"].([]any); ok {
 				for _, d := range rawDeps {
 					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
 						deps = append(deps, strings.TrimSpace(s))
@@ -1321,11 +1332,28 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "send-message":
 		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
+		// Models frequently treat bash-output as the polling tool for background
+		// jobs (job_id + offset) rather than as a bash alias; honor that reading
+		// whenever a job_id is supplied so both conventions work.
+		var probe struct {
+			JobID string `json:"job_id"`
+		}
+		if json.Unmarshal(call.Args, &probe) == nil && strings.TrimSpace(probe.JobID) != "" {
+			return r.runJobOutput(call.Args)
+		}
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "job-output":
 		return r.runJobOutput(call.Args)
+	case "tool-output":
+		return r.runToolOutput(call.Args)
 	case "job-kill":
 		return r.runJobKill(call.Args)
+	case "pty-start":
+		return r.runPtyStart(ctx, call.Tool, call.Args)
+	case "pty-write":
+		return r.runPtyWrite(call.Args)
+	case "pty-kill":
+		return r.runPtyKill(call.Args)
 	case "comment":
 		var args struct {
 			Message string `json:"message"`
@@ -1343,9 +1371,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			Constraints    string `json:"constraints"`
 			ExpectedOutput string `json:"expected_output"`
 			ParentAgentID  string `json:"parent_agent_id"`
+			Isolation      string `json:"isolation"`
 		}
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("agent args: %w", err)
+		}
+		isolation := strings.TrimSpace(args.Isolation)
+		if isolation != "" && isolation != "worktree" {
+			return "", fmt.Errorf("agent: unsupported isolation %q (only \"worktree\")", isolation)
 		}
 		target := strings.TrimSpace(args.Agent)
 		if target == "" {
@@ -1380,13 +1413,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		if strings.TrimSpace(r.agentID) != "" {
 			if caller, ok := r.manifest.AgentByID(r.agentID); ok {
-				allowedHandoff := false
-				for _, id := range caller.Handoffs {
-					if id == target {
-						allowedHandoff = true
-						break
-					}
-				}
+				allowedHandoff := slices.Contains(caller.Handoffs, target)
 				if !allowedHandoff {
 					return "", fmt.Errorf("agent: %q cannot delegate to %q (allowed handoffs: %s)", r.agentID, target, strings.Join(caller.Handoffs, ", "))
 				}
@@ -1416,13 +1443,23 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if p := r.perm(); p != "" {
 			subSpec.Permission = p
 		}
+		subCWD := r.cwd
+		var workspace *agentWorkspace
+		if isolation == "worktree" {
+			ws, err := r.newSubagentWorkspace(ctx, target)
+			if err != nil {
+				return "", fmt.Errorf("agent: %w", err)
+			}
+			workspace = ws
+			subCWD = ws.subCWD
+		}
 		subAgent := LLMAgent{
 			Spec:            subSpec,
 			PermissionFn:    r.permissionFn,
 			ProviderManager: r.providerMgr,
 			ProviderName:    r.providerName,
 			ModelName:       r.modelName,
-			CWD:             r.cwd,
+			CWD:             subCWD,
 			MaxTokens:       r.maxTokens,
 			Thinking:        r.thinkingLevel,
 			ToolCallback:    r.toolCallback,
@@ -1437,9 +1474,21 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		result, err := subAgent.Run(ctx, subTask)
 		if err != nil {
+			if workspace != nil {
+				// The workspace outlives the (possibly cancelled) run context so
+				// throwaway worktrees still get cleaned up.
+				if kept := workspace.abandon(context.WithoutCancel(ctx)); kept != nil {
+					return "", fmt.Errorf("agent %s: %w (work preserved on branch %s at %s)", target, err, kept.Branch, kept.Path)
+				}
+			}
 			return "", fmt.Errorf("agent %s: %w", target, err)
 		}
-		return marshalSubagentResult(target, result), nil
+		var merge *workspaceMerge
+		if workspace != nil {
+			m := workspace.finalize(context.WithoutCancel(ctx))
+			merge = &m
+		}
+		return marshalSubagentResult(target, result, merge), nil
 	case "ultra":
 		return r.runUltra(ctx, call.Args)
 	default:
@@ -1453,7 +1502,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // spurious checkpoint is cheap while a missed one is unrecoverable.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "multi-edit", "shell-exec", "bash":
+	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash", "pty-start", "pty-write":
 		return true
 	}
 	return false
@@ -1642,13 +1691,7 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 		// Filter by type
 		if len(exts) > 0 {
 			ext := strings.ToLower(filepath.Ext(d.Name()))
-			found := false
-			for _, e := range exts {
-				if ext == e {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(exts, ext)
 			if !found {
 				return nil
 			}
@@ -1693,10 +1736,7 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 			// Build context blocks
 			included := make([]bool, len(lines))
 			for _, mi := range matchLines {
-				start := mi - args.Context
-				if start < 0 {
-					start = 0
-				}
+				start := max(mi-args.Context, 0)
 				end := mi + args.Context
 				if end >= len(lines) {
 					end = len(lines) - 1
@@ -1853,9 +1893,18 @@ func realPathEscapes(dir, abs string) bool {
 // by markReadFromSearch to detect ripgrep-style "path:lineno:..." rows.
 var searchLineNumberRE = regexp.MustCompile(`^\d+$`)
 
+// invalidateSymbolIndex drops rel from the repo symbol index after one of the
+// agent's own write tools touched it, so the next repo-search re-parses it
+// even if the filesystem mtime didn't visibly change.
+func (r *toolRuntime) invalidateSymbolIndex(rel string) {
+	if r.searcher.Index != nil {
+		r.searcher.Index.Invalidate(rel)
+	}
+}
+
 func (r *toolRuntime) markReadFromSearch(out string) {
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(out, "\n")
+	for line := range lines {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) < 2 {
 			continue

@@ -29,7 +29,10 @@ an agent uses to actually *read* a page found via `web-search`.
 
 - `url` (required): http/https URL.
 - `max_length` (optional): output character budget. Default 20 000, hard cap
-  50 000. Longer content is cut with a `[content truncated …]` marker.
+  50 000. Longer content is truncated to the per-tool history budget
+  (see `toolOutputHistoryLimit` in `llm_runtime_prompt.go`) and the
+  omitted portion is written to a session-scoped **spool** file so the
+  model can page through it with `job-output {"job_id":"spool:N","offset":Z}`.
 
 ### Output format
 
@@ -74,6 +77,23 @@ Conversion is a three-stage pipeline (`internal/agent/webmarkdown.go`):
    `![alt](url)`, bold/italic/strikethrough, and horizontal rules. All links
    and image sources are resolved to absolute URLs against the final page
    URL; `javascript:` and `data:` targets are dropped.
+
+### Truncation and spooling
+
+When `web-fetch` output exceeds the tool's history budget, the agent runtime
+preserves the full result in a session-scoped spool file on disk. The model
+receives a truncated head with a footer like:
+
+```
+[truncated: 480 of 1050 lines omitted; use job-output {"job_id":"spool:3","offset":4160} to read more]
+```
+
+The model can then call `job-output` with the `spool:N` ID and an `offset` to
+page through the omitted portion. This is the same paging mechanism used by
+other spooled tools (`file-read`, `grep`, `repo-search`, `shell-exec`, `bash`).
+
+Spool files are session state: they are deleted when the session ends (TUI
+exit, `/exit`, or goal completion).
 
 ### Limits and content types
 
@@ -138,6 +158,8 @@ All three tools are registered in the default agent manifest with the
 |---|---|---|---|---|
 | `web-search` | `search`, `network` | required | medium | 30 s |
 | `web-fetch` | `read`, `network` | required | medium | 45 s |
+| `job-output` | `read` | no | low | 10 s |
+| `job-kill` | `execute` | no | low | 10 s |
 | `download` | `write`, `network` | required | high | 180 s |
 
 By default the `coding` and `code` agents get `web-fetch` and `download`; the

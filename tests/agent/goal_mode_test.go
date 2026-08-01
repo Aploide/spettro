@@ -20,7 +20,7 @@ func TestUnboundedLoop_NoStepCap(t *testing.T) {
 	// Each step uses distinct args so the run reads as real progress and the
 	// loop detector (which stops identical repeated calls) does not trip.
 	responses := make([]string, 0, 51)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		responses = append(responses, fmt.Sprintf(`TOOL_CALL {"tool":"comment","args":{"message":"step %d"}}`, i))
 	}
 	responses = append(responses, "FINAL\nAll 50 steps completed successfully.")

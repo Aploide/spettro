@@ -21,7 +21,7 @@ func testBridge(t *testing.T) *bridge {
 // default 128k window's auto-compact threshold.
 func bigHistory(turns, charsPerTurn int) []provider.Message {
 	msgs := make([]provider.Message, 0, turns)
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		role := provider.RoleUser
 		if i%2 == 1 {
 			role = provider.RoleAssistant

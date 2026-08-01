@@ -17,6 +17,9 @@ var (
 	styleCtx     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
 	styleLineNo  = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
 	styleDivider = lipgloss.NewStyle().Foreground(lipgloss.Color("#374151"))
+	// Intra-line emphasis: the changed span within a modified line pair.
+	styleAddHi = lipgloss.NewStyle().Foreground(lipgloss.Color("#6EE7B7")).Background(lipgloss.Color("#064E3B"))
+	styleDelHi = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5")).Background(lipgloss.Color("#7F1D1D"))
 )
 
 // Options controls Render.
@@ -53,7 +56,7 @@ func parseUnified(diffText string) []parsedLine {
 	var out []parsedLine
 	oldNo, newNo := 0, 0
 	inHunk := false
-	for _, line := range strings.Split(strings.TrimRight(diffText, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(diffText, "\n"), "\n") {
 		switch {
 		case strings.HasPrefix(line, "@@"):
 			oldNo, newNo = parseHunkHeader(line)
@@ -84,8 +87,8 @@ func parseUnified(diffText string) []parsedLine {
 
 func parseHunkHeader(line string) (oldStart, newStart int) {
 	// "@@ -12,7 +12,9 @@ optional context"
-	fields := strings.Fields(line)
-	for _, f := range fields {
+	fields := strings.FieldsSeq(line)
+	for f := range fields {
 		if strings.HasPrefix(f, "-") {
 			oldStart = leadingInt(f[1:])
 		} else if strings.HasPrefix(f, "+") {
@@ -194,13 +197,14 @@ func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
 	w := numWidth(parsed)
 	textW := 0
 	if maxW > 0 {
-		textW = maxW - (2*w + 1) - 3 // line numbers + space + sign + space
-		if textW < 8 {
-			textW = 8
-		}
+		textW = max(
+			// line numbers + space + sign + space
+			maxW-(2*w+1)-3, 8)
 	}
 	var out []string
-	for _, l := range parsed {
+	i := 0
+	for i < len(parsed) {
+		l := parsed[i]
 		if l.meta {
 			raw := truncCells(l.raw, maxW)
 			switch {
@@ -209,20 +213,62 @@ func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
 			default:
 				out = append(out, styleMeta.Render(raw))
 			}
+			i++
 			continue
 		}
-		text := truncCells(l.text, textW)
-		nums := styleLineNo.Render(fmtNo(l.oldNo, w)+" "+fmtNo(l.newNo, w)) + " "
-		switch l.kind {
-		case kindAdd:
-			out = append(out, nums+styleAdd.Render("+ "+text))
-		case kindDel:
-			out = append(out, nums+styleDel.Render("- "+text))
-		default:
+		if l.kind == kindContext {
+			text := truncCells(l.text, textW)
+			nums := styleLineNo.Render(fmtNo(l.oldNo, w)+" "+fmtNo(l.newNo, w)) + " "
 			out = append(out, nums+styleCtx.Render("  "+text))
+			i++
+			continue
+		}
+		// Contiguous del run then add run: paired rows get intra-line spans.
+		var dels, adds []parsedLine
+		for i < len(parsed) && !parsed[i].meta && parsed[i].kind == kindDel {
+			dels = append(dels, parsed[i])
+			i++
+		}
+		for i < len(parsed) && !parsed[i].meta && parsed[i].kind == kindAdd {
+			adds = append(adds, parsed[i])
+			i++
+		}
+		delSpans := make([][]span, len(dels))
+		addSpans := make([][]span, len(adds))
+		for r := 0; r < len(dels) && r < len(adds); r++ {
+			delSpans[r], addSpans[r] = pairSpans(dels[r].text, adds[r].text)
+		}
+		for r, d := range dels {
+			nums := styleLineNo.Render(fmtNo(d.oldNo, w)+" "+strings.Repeat(" ", w)) + " "
+			out = append(out, nums+renderBodyLine("- ", d.text, delSpans[r], textW, styleDel, styleDelHi))
+		}
+		for r, a := range adds {
+			nums := styleLineNo.Render(strings.Repeat(" ", w)+" "+fmtNo(a.newNo, w)) + " "
+			out = append(out, nums+renderBodyLine("+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi))
 		}
 	}
 	return out
+}
+
+// pairSpans computes intra-line spans for a del/add row pair, dropping them
+// when they cover a whole side (no information gain over line coloring).
+func pairSpans(oldText, newText string) (oldSpans, newSpans []span) {
+	oldSpans, newSpans = intralineSpans(oldText, newText)
+	if wholeLine(oldSpans, oldText) || wholeLine(newSpans, newText) {
+		return nil, nil
+	}
+	return oldSpans, newSpans
+}
+
+// renderBodyLine truncates a +/- body line to textW cells then styles it,
+// emphasizing the changed spans.
+func renderBodyLine(sign, text string, spans []span, textW int, base, hi lipgloss.Style) string {
+	shown := truncCells(text, textW)
+	if shown != text {
+		// Reserve the trailing "…" from highlighting.
+		spans = clipSpans(spans, len([]rune(shown))-1)
+	}
+	return base.Render(sign) + renderSpans(shown, spans, base, hi)
 }
 
 // renderSideBySide lays out deletions on the left and additions on the right.
@@ -238,13 +284,17 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 	textW := col - w - 2
 
 	divider := styleDivider.Render(" │ ")
-	cell := func(no int, text string, style lipgloss.Style) string {
+	cellSpans := func(no int, text string, spans []span, style, hi lipgloss.Style) string {
 		r := []rune(text)
 		if len(r) > textW {
 			r = append(r[:textW-1:textW-1], '…')
+			spans = clipSpans(spans, textW-1)
 		}
 		pad := textW - len(r)
-		return styleLineNo.Render(fmtNo(no, w)) + " " + style.Render(string(r)) + strings.Repeat(" ", pad)
+		return styleLineNo.Render(fmtNo(no, w)) + " " + renderSpans(string(r), spans, style, hi) + strings.Repeat(" ", pad)
+	}
+	cell := func(no int, text string, style lipgloss.Style) string {
+		return cellSpans(no, text, nil, style, style)
 	}
 	emptyCell := strings.Repeat(" ", col-1)
 
@@ -278,17 +328,18 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 			adds = append(adds, parsed[i])
 			i++
 		}
-		rows := len(dels)
-		if len(adds) > rows {
-			rows = len(adds)
-		}
+		rows := max(len(adds), len(dels))
 		for r := 0; r < rows; r++ {
 			left, right := emptyCell, emptyCell
+			var delSp, addSp []span
+			if r < len(dels) && r < len(adds) {
+				delSp, addSp = pairSpans(dels[r].text, adds[r].text)
+			}
 			if r < len(dels) {
-				left = cell(dels[r].oldNo, dels[r].text, styleDel)
+				left = cellSpans(dels[r].oldNo, dels[r].text, delSp, styleDel, styleDelHi)
 			}
 			if r < len(adds) {
-				right = cell(adds[r].newNo, adds[r].text, styleAdd)
+				right = cellSpans(adds[r].newNo, adds[r].text, addSp, styleAdd, styleAddHi)
 			}
 			out = append(out, left+divider+right)
 		}

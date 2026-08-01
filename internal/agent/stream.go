@@ -190,10 +190,7 @@ func markerPrefix(tok string) bool {
 // partialTagSuffix returns the longest non-empty suffix of s that is a proper
 // prefix of tag, i.e. the part of a tag that may be completed by the next delta.
 func partialTagSuffix(s, tag string) string {
-	max := len(tag) - 1
-	if max > len(s) {
-		max = len(s)
-	}
+	max := min(len(tag)-1, len(s))
 	for n := max; n >= 1; n-- {
 		if strings.HasPrefix(tag, s[len(s)-n:]) {
 			return s[len(s)-n:]

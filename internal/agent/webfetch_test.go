@@ -147,12 +147,12 @@ func TestConvertHTMLPageFallsBackWhenExtractionTooAggressive(t *testing.T) {
 	// A clean page with several sibling sections: extraction that keeps only
 	// one section drops below the 30% threshold, so the full page is kept.
 	var secs []string
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		secs = append(secs, fmt.Sprintf(`<div><p>Standalone section %d with plenty of prose, commas, and general substance to matter.</p></div>`, i))
 	}
 	in := `<html><body>` + strings.Join(secs, "") + `</body></html>`
 	out := convertHTMLPage(in, "https://example.com").Markdown
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if !strings.Contains(out, fmt.Sprintf("Standalone section %d", i)) {
 			t.Fatalf("section %d lost:\n%s", i, out)
 		}
@@ -213,8 +213,8 @@ func TestRunWebFetchTruncatesToBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("web-fetch: %v", err)
 	}
-	if !strings.Contains(out, "[content truncated") {
-		t.Fatalf("expected truncation marker, got %d chars", len(out))
+	if !strings.Contains(out, "[truncated:") || !strings.Contains(out, "job-output") {
+		t.Fatalf("expected spool truncation footer, got %q", out)
 	}
 	if len(out) > 200 {
 		t.Fatalf("output not truncated: %d chars", len(out))

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -29,10 +30,8 @@ func stubLookPath(t *testing.T, found ...string) {
 	t.Helper()
 	orig := lookPath
 	lookPath = func(cmd string) (string, error) {
-		for _, f := range found {
-			if cmd == f {
-				return "/usr/bin/" + cmd, nil
-			}
+		if slices.Contains(found, cmd) {
+			return "/usr/bin/" + cmd, nil
 		}
 		return "", os.ErrNotExist
 	}
@@ -51,7 +50,8 @@ func writeLspJSON(t *testing.T, root string, cfg Config) {
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
+//go:fix inline
+func boolPtr(b bool) *bool { return new(b) }
 
 func TestLoadConfigZeroConfig(t *testing.T) {
 	root := t.TempDir()
@@ -99,7 +99,7 @@ func TestLoadConfigOverride(t *testing.T) {
 
 	// commandless entry with enabled:false disables the detected server
 	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{
-		"go": {Enabled: boolPtr(false)},
+		"go": {Enabled: new(false)},
 	}})
 	if _, ok := loadConfig(root); ok {
 		t.Fatal("disabling the only detected server should mean disabled")

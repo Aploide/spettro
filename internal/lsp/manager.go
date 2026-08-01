@@ -359,18 +359,9 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 	if err != nil {
 		return "", err
 	}
-	var pos Position
-	if line > 0 {
-		pos = Position{Line: line - 1}
-		if character > 0 {
-			pos.Character = character - 1
-		}
-	} else {
-		p, ok := positionOfSymbol(content, symbol)
-		if !ok {
-			return "", fmt.Errorf("symbol %q not found in %s", symbol, absPath)
-		}
-		pos = p
+	pos, err := resolvePosition(content, absPath, symbol, line, character)
+	if err != nil {
+		return "", err
 	}
 	var locs []Location
 	if kind == "definition" {
@@ -389,6 +380,158 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 		fmt.Fprintf(&sb, "%s:%d:%d\n", m.relPath(l.URI), l.Range.Start.Line+1, l.Range.Start.Character+1)
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+// resolvePosition turns the tool's addressing (1-based line/character, or a
+// symbol name to search for) into a zero-based LSP position.
+func resolvePosition(content, absPath, symbol string, line, character int) (Position, error) {
+	if line > 0 {
+		pos := Position{Line: line - 1}
+		if character > 0 {
+			pos.Character = character - 1
+		}
+		return pos, nil
+	}
+	pos, ok := positionOfSymbol(content, symbol)
+	if !ok {
+		return Position{}, fmt.Errorf("symbol %q not found in %s", symbol, absPath)
+	}
+	return pos, nil
+}
+
+// Hover returns the language server's hover text (type signature + docs) for
+// a symbol in absPath, positioned like Lookup. Empty string means the server
+// had nothing to say.
+func (m *Manager) Hover(ctx context.Context, absPath, symbol string, line, character int) (string, error) {
+	c, key, err := m.clientFor(ctx, absPath)
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", err
+	}
+	content := string(raw)
+	uri, _, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	if err != nil {
+		return "", err
+	}
+	pos, err := resolvePosition(content, absPath, symbol, line, character)
+	if err != nil {
+		return "", err
+	}
+	out, err := c.hover(ctx, uri, pos)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// FileChange is one file's proposed content after a rename. The caller (the
+// agent runtime) owns applying it, so permission prompts and checkpointing
+// wrap the write exactly like file-write.
+type FileChange struct {
+	Path string // absolute
+	Rel  string // workspace-relative (or absolute when outside the root)
+	Old  string
+	New  string
+}
+
+// RenameEdits asks the server to rename the symbol at the given position and
+// returns the resulting per-file content changes without touching the disk.
+func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line, character int, newName string) ([]FileChange, error) {
+	c, key, err := m.clientFor(ctx, absPath)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, err
+	}
+	content := string(raw)
+	uri, _, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	if err != nil {
+		return nil, err
+	}
+	pos, err := resolvePosition(content, absPath, symbol, line, character)
+	if err != nil {
+		return nil, err
+	}
+	edits, err := c.rename(ctx, uri, pos, newName)
+	if err != nil {
+		return nil, err
+	}
+	var changes []FileChange
+	for u, es := range edits {
+		if len(es) == 0 {
+			continue
+		}
+		p := uriToPath(u)
+		old, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("rename touches unreadable file %s: %w", p, err)
+		}
+		updated := applyTextEdits(string(old), es)
+		if updated == string(old) {
+			continue
+		}
+		changes = append(changes, FileChange{Path: p, Rel: m.relPath(u), Old: string(old), New: updated})
+	}
+	if len(changes) == 0 {
+		return nil, fmt.Errorf("rename produced no edits")
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Rel < changes[j].Rel })
+	return changes, nil
+}
+
+// applyTextEdits applies non-overlapping LSP text edits to content. Edits are
+// applied bottom-up so earlier offsets stay valid.
+func applyTextEdits(content string, edits []TextEdit) string {
+	type span struct {
+		start, end int
+		text       string
+	}
+	spans := make([]span, 0, len(edits))
+	for _, e := range edits {
+		spans = append(spans, span{
+			start: offsetOfPosition(content, e.Range.Start),
+			end:   offsetOfPosition(content, e.Range.End),
+			text:  e.NewText,
+		})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start > spans[j].start })
+	for _, s := range spans {
+		if s.start < 0 || s.end > len(content) || s.start > s.end {
+			continue
+		}
+		content = content[:s.start] + s.text + content[s.end:]
+	}
+	return content
+}
+
+// offsetOfPosition converts an LSP position (zero-based line, UTF-16 column)
+// to a byte offset into content. Positions past the end clamp to len(content).
+func offsetOfPosition(content string, pos Position) int {
+	offset := 0
+	for line := 0; line < pos.Line; line++ {
+		nl := strings.IndexByte(content[offset:], '\n')
+		if nl < 0 {
+			return len(content)
+		}
+		offset += nl + 1
+	}
+	col := 0
+	for i, r := range content[offset:] {
+		if col >= pos.Character || r == '\n' {
+			return offset + i
+		}
+		if r > 0xFFFF {
+			col += 2 // surrogate pair in UTF-16
+		} else {
+			col++
+		}
+	}
+	return len(content)
 }
 
 // Restart stops the named server (or all servers when name is empty), clears

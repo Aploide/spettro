@@ -135,22 +135,22 @@ func splitFrontmatter(content string) (string, string) {
 		return "", content
 	}
 	rest := normalized[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
+	before, after, ok := strings.Cut(rest, "\n---")
+	if !ok {
 		return "", content
 	}
-	body := rest[end+len("\n---"):]
+	body := after
 	if i := strings.Index(body, "\n"); i >= 0 {
 		body = body[i+1:]
 	} else {
 		body = ""
 	}
-	return rest[:end], body
+	return before, body
 }
 
 // frontmatterValue extracts a simple `key: value` line from frontmatter.
 func frontmatterValue(front, key string) string {
-	for _, line := range strings.Split(front, "\n") {
+	for line := range strings.SplitSeq(front, "\n") {
 		k, v, ok := strings.Cut(line, ":")
 		if ok && strings.TrimSpace(strings.ToLower(k)) == key {
 			return strings.Trim(strings.TrimSpace(v), `"'`)

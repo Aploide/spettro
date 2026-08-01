@@ -33,10 +33,7 @@ func hitRateBar(rate float64, width int) string {
 	if rate < 0 {
 		rate = 0
 	}
-	filled := int(rate*float64(width) + 0.5)
-	if filled > width {
-		filled = width
-	}
+	filled := min(int(rate*float64(width)+0.5), width)
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
 

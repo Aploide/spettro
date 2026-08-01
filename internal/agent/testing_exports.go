@@ -2,18 +2,6 @@ package agent
 
 import "context"
 
-func ParseToolCallForTesting(s string) (toolCall, bool, error) {
-	return parseToolCall(s)
-}
-
-func ParseAllToolCallsForTesting(s string) ([]toolCall, []error) {
-	return parseAllToolCalls(s)
-}
-
-func ParseFinalForTesting(s string) (string, bool) {
-	return parseFinal(s)
-}
-
 func StripLeakedToolCallsForTesting(s string) string {
 	return stripLeakedToolCalls(s)
 }
@@ -50,10 +38,6 @@ func AuthorizeShellCommandForTesting(r *toolRuntime, ctx context.Context, comman
 	return r.authorizeShellCommand(ctx, "shell-exec", command)
 }
 
-func BuildToolSchemaSectionForTesting(allowedTools []string) string {
-	return buildToolSchemaSection(allowedTools)
-}
-
 // BuildLoopPromptForTesting concatenates the system string and the initial user
 // message for a minimal config so tests can assert how the cross-turn
 // conversation History is surfaced. The toolLog argument is ignored (tool
@@ -67,7 +51,7 @@ func BuildLoopPromptForTesting(systemPrompt, userTask, history, _ string, _ int)
 		History:      history,
 		CWD:          "/tmp/x",
 	}
-	return buildSystemString(cfg, false) + "\n\n" + buildInitialUserMessage(cfg)
+	return buildSystemString(cfg) + "\n\n" + buildInitialUserMessage(cfg)
 }
 
 // BuildTurnUserMessageForTesting exposes the follow-up-turn user message built

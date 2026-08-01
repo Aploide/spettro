@@ -27,9 +27,16 @@ func (r *toolRuntime) runSaveMemory(args []byte) (string, error) {
 	default:
 		return "", fmt.Errorf("save-memory: invalid scope %q (use \"user\" or \"project\")", payload.Scope)
 	}
-	path, err := memory.DefaultStore(r.cwd).Save(scope, payload.Fact)
+	res, err := memory.DefaultStore(r.cwd).Save(scope, payload.Fact)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("saved to %s memory (%s); it will be loaded into context starting from the next session", scope, path), nil
+	switch res.Outcome {
+	case memory.SavedDuplicate:
+		return fmt.Sprintf("already in %s memory (%s) — refreshed its last-used date instead of duplicating it", scope, res.Path), nil
+	case memory.SavedToInbox:
+		return fmt.Sprintf("a similar %s memory already exists (%q); the new fact was routed to the review inbox as a replacement candidate — the user can resolve it with /memory review", scope, res.Near), nil
+	default:
+		return fmt.Sprintf("saved to %s memory (%s); it will be loaded into context starting from the next session", scope, res.Path), nil
+	}
 }

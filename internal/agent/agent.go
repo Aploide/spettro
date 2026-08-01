@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	compactpkg "spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/memory"
 	"spettro/internal/provider"
@@ -69,7 +71,10 @@ type RunResult struct {
 	// and the final assistant answer. Callers hand it back as the next run's
 	// LLMAgent.Messages so the provider request keeps a byte-stable, growing
 	// prefix — that stability is what makes prompt caching hit and stops
-	// generated tokens from being thrown away between turns.
+	// generated tokens from being thrown away between turns. On a failed or
+	// cancelled run Messages still carries the conversation accumulated up to
+	// the error (the final assistant answer may be missing), so hosts can
+	// preserve context across failed turns.
 	Messages []provider.Message
 }
 
@@ -152,9 +157,9 @@ type LLMAgent struct {
 	// swarm guidance so the agent decomposes hard tasks across many parallel
 	// sub-agents. Read once at run construction (the system prompt must stay
 	// byte-stable per run); ignored on sub-agents.
-	Ultra bool
-	RequiredReads   []string
-	Images          []string // attached to this turn's user message (re-sent every step)
+	Ultra         bool
+	RequiredReads []string
+	Images        []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,
 	// surfaced to the model as a "Conversation so far" section so follow-up
 	// turns have memory. Only consulted when Messages is empty — the degraded
@@ -190,12 +195,20 @@ type LLMAgent struct {
 	SessionDir      string
 	DelegationDepth int
 	ParentAgentID   string
+	// InstanceID, when set, replaces Spec.ID as the agent identity on emitted
+	// ToolTraces (e.g. "code#3" for the third member of an Ultra swarm) so
+	// hosts can tell concurrent same-type sub-agents apart. Prompt, tool, and
+	// handoff resolution still use Spec.ID.
+	InstanceID string
 
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+	// Compact carries the user's auto-compaction settings into the run loop
+	// (typically cfg.CompactConfig()). Zero value → defaults (enabled, 85%).
+	Compact compactpkg.Config
 
 	// Steering, when set, lets the host inject user guidance while the run is
 	// executing: the tool loop drains it at every step boundary and appends
@@ -217,13 +230,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	if a.Ultra && a.DelegationDepth == 0 {
 		// Ultra bypasses role/handoff gating by design: any top-level agent on
 		// any model can fan out. Sub-agents never inherit the tool.
-		hasUltra := false
-		for _, t := range allowedTools {
-			if t == ultraToolID {
-				hasUltra = true
-				break
-			}
-		}
+		hasUltra := slices.Contains(allowedTools, ultraToolID)
 		if !hasUltra {
 			allowedTools = append(allowedTools, ultraToolID)
 		}
@@ -254,6 +261,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Messages:        a.Messages,
 		CWD:             a.CWD,
 		AgentID:         a.Spec.ID,
+		InstanceID:      a.InstanceID,
 		AllowedTools:    allowedTools,
 		ToolPolicies:    policies,
 		LogToolCalls:    logToolCalls,
@@ -279,6 +287,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ParentAgentID:   a.ParentAgentID,
 		GoalMode:        a.GoalMode,
 		ContextWindow:   a.ContextWindow,
+		Compact:         a.Compact,
 		ShellTimeoutSec: a.ShellTimeoutSec,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,
@@ -287,7 +296,10 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Steering:        a.Steering,
 	})
 	if err != nil {
-		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
+		// Preserve the partial conversation so hosts can carry it into the
+		// next turn: a failed or cancelled run must not wipe the context the
+		// user already built up (tool results, steering, prior steps).
+		return RunResult{Messages: res.messages}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
 	}
 	out := strings.TrimSpace(res.content)
 	out = stripLeakedToolCalls(out)

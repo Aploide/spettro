@@ -20,20 +20,21 @@ func scriptedServerWithTokens(t *testing.T, steps []struct {
 	tokens  int
 }) *httptest.Server {
 	t.Helper()
-	var idx int32
+	var idx atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		i := int(atomic.AddInt32(&idx, 1)) - 1
+		i := int(idx.Add(1)) - 1
 		if i >= len(steps) {
 			t.Errorf("unexpected extra request #%d (only %d scripted)", i+1, len(steps))
 			http.Error(w, "no more scripted responses", http.StatusInternalServerError)
 			return
 		}
+		msg, finish := scriptedMessage(t, steps[i].content)
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
 			"id":     "chatcmpl-test",
 			"object": "chat.completion",
 			"choices": []map[string]any{
-				{"index": 0, "message": map[string]any{"role": "assistant", "content": steps[i].content}, "finish_reason": "stop"},
+				{"index": 0, "message": msg, "finish_reason": finish},
 			},
 			"usage": map[string]any{"total_tokens": steps[i].tokens},
 		}

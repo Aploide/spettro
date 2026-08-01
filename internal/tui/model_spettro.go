@@ -290,10 +290,7 @@ func (m Model) viewLogin() string {
 	header := m.viewHeader()
 	mc := m.currentColor()
 	contentH := m.height - 1
-	topPad := contentH * 2 / 5
-	if topPad < 2 {
-		topPad = 2
-	}
+	topPad := max(contentH*2/5, 2)
 
 	var lines []string
 	for i := 0; i < topPad; i++ {

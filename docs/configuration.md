@@ -15,7 +15,7 @@ Spettro uses both project-local and user-global storage.
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
 | `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
-| `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created, never pruned). |
+| `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created; reclaimable via [`/storage clean`](storage.md)). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
 
@@ -51,6 +51,44 @@ Spettro uses both project-local and user-global storage.
 | `ask-first` | Strictest flow; approval-first execution model. |
 | `restricted` | Allows execution with policy checks and approval gating where required. |
 | `yolo` | Least restrictive execution policy. |
+
+## Notifications
+
+When the terminal is unfocused (or a run took more than 10 s), Spettro alerts
+you on run/goal completion, on errors, and when the agent is waiting for a
+command approval or an answer. Alerts go out on two channels at once: an OSC 9
+terminal escape sequence — rendered as a system notification by iTerm2,
+WezTerm, Ghostty, and Kitty; degraded to a terminal bell (BEL) elsewhere — and
+a best-effort desktop notification (`notify-send` on Linux, `osascript` on
+macOS).
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `notifications_disabled` | `false` | Set `true` to turn all notifications off. |
+| `notify_quiet_sec` | `5` | Minimum seconds between notifications; events inside the window are dropped so bursts don't spam. |
+
+## Checkpointing storage
+
+Shadow-git snapshot storage for `/rewind`; see [Checkpointing](checkpointing.md)
+for how each key behaves.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `checkpointing_disabled` | `false` | Set `true` to turn checkpointing (and `/rewind`) off entirely. |
+| `checkpoint_max_file_mb` | `20` | Files larger than this are excluded from snapshots (recorded and surfaced on rewind). |
+| `checkpoint_retention_days` | `14` | Checkpoints older than this are pruned when the shadow repo is opened. |
+| `checkpoint_max_gb` | `5` | If the shadow store still exceeds this after retention, the oldest half of the remaining checkpoints is dropped. |
+| `checkpoint_warn_gb` | `2` | One-time warning threshold for projects without their own `.git` (where snapshots must copy the tree). |
+
+## Storage cleanup
+
+Session policy for `/storage clean` and `spettro clean`; see
+[Storage](storage.md) for the full artifact inventory.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `clean_session_age_days` | `30` | Sessions not updated within this many days become clean candidates. |
+| `clean_keep_sessions` | `5` | The most recent K sessions per project always survive cleanup, regardless of age. |
 
 ### Shell command approvals
 

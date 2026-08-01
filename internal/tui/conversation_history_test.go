@@ -67,7 +67,7 @@ func TestBuildConversationHistory_BoundsOldestFirst(t *testing.T) {
 	m := NewModelForTesting()
 	// Build many large turns so the cap is exceeded. Each ~5KB.
 	big := strings.Repeat("x", 5000)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		role := RoleUser
 		if i%2 == 1 {
 			role = RoleAssistant

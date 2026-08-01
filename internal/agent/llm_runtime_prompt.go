@@ -2,33 +2,14 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
 	"spettro/internal/provider"
 	"spettro/internal/skills"
 )
-
-// summarizeLoopToolResult formats a tool result for the text-protocol history
-// message. outputLimit caps the output chars fed to the model; callers should
-// pass runtime.historyLimit(name) so manifest overrides apply.
-func summarizeLoopToolResult(name, args, status, output string, outputLimit int) string {
-	var parts []string
-	status = strings.TrimSpace(status)
-	if status != "" {
-		parts = append(parts, "status="+status)
-	}
-	if summary := summarizeLoopToolArgs(name, args); summary != "" {
-		parts = append(parts, summary)
-	}
-	output = strings.TrimSpace(output)
-	if output != "" {
-		parts = append(parts, "output="+truncate(output, outputLimit))
-	}
-	return strings.Join(parts, " | ")
-}
 
 // toolOutputHistoryLimit returns the default character cap for a tool's output
 // in model history. These defaults intentionally match the source caps in
@@ -37,10 +18,12 @@ func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
 		return 40000
-	case "repo-search", "grep", "glob", "ls", "diagnostics", "references":
+	case "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover":
 		return 16000
-	case "shell-exec", "bash", "bash-output", "job-output":
+	case "shell-exec", "bash", "bash-output", "job-output", "tool-output", "pty-start", "pty-write":
 		return 8000
+	case "web-fetch":
+		return webFetchDefaultBudget
 	case "agent":
 		return 8000
 	case "ultra":
@@ -121,15 +104,15 @@ func summarizeLoopToolArgs(name, args string) string {
 	return truncate(strings.TrimSpace(args), 120)
 }
 
-// buildSystemString returns the system-role content for the request.
-// When nativeTools is true the TOOL_CALL/FINAL text protocol is omitted because
-// the model receives tool schemas via the API and uses structured tool calls.
+// buildSystemString returns the system-role content for the request. The model
+// always receives tool schemas via the API and uses structured tool calls, so
+// no text protocol is rendered here.
 //
 // The result MUST be byte-for-byte identical for every step of a run (and every
 // turn of a session): the system prompt is the first segment of the provider
 // cache prefix, so any variation invalidates prompt caching for the entire
 // request. Never embed step counters, timestamps, or other per-call state here.
-func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
+func buildSystemString(cfg toolLoopConfig) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
 		base = "You are an assistant."
@@ -137,45 +120,10 @@ func buildSystemString(cfg toolLoopConfig, nativeTools bool) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	commentGuidance := ""
-	for _, tool := range cfg.AllowedTools {
-		if tool == "comment" {
-			if nativeTools {
-				commentGuidance = "\n- Use the comment tool to report meaningful progress steps."
-			} else {
-				commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Plain text you write is shown to the user as a progress comment; output FINAL only when actually done."
-			}
-			break
-		}
+	if slices.Contains(cfg.AllowedTools, "comment") {
+		base += "\n- Use the comment tool to report meaningful progress steps."
 	}
-	if nativeTools {
-		return base + commentGuidance
-	}
-	toolList := strings.Join(cfg.AllowedTools, ", ")
-	schemaSection := buildToolSchemaSection(cfg.AllowedTools)
-	return fmt.Sprintf(`%s
-
-You can use tools iteratively.
-Allowed tools: %s
-%s
-Output protocol (strict):
-1) To call tools (all executed in parallel), output one TOOL_CALL per line:
-TOOL_CALL {"name":"<tool-name>","arguments":{...}}
-TOOL_CALL {"name":"<another>","arguments":{...}}
-2) When done, output exactly:
-FINAL
-<your final answer>
-
-Rules:
-- Known aliases accepted by runtime: tool/args and function{name,arguments}.
-- Use ONLY the field names listed in the tool argument schemas above. Unknown fields will be rejected.
-- For the agent tool, arguments must include {"agent":"<handoff-id>","task":"..."}.
-- Prefer reading/searching before writing.
-- Never edit an existing file unless it has been read first.
-- Creating a brand-new file without reading is allowed.
-- Keep tool args minimal and valid JSON.
-- If a tool fails, adapt and continue.
-%s`, base, toolList, schemaSection, commentGuidance)
+	return base
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation
@@ -234,67 +182,6 @@ func buildTurnUserMessage(cfg toolLoopConfig) string {
 	return sb.String()
 }
 
-// builtinToolSchemas describes the JSON arguments object accepted by every
-// built-in tool dispatched in llm_runtime.go (and friends). The runtime decodes
-// each tool's arguments with json.Decoder.DisallowUnknownFields(), so the LLM
-// MUST use these exact field names. Optional fields are flagged with a `?`.
-//
-// When a manifest exposes additional tools (mcp/script/http), they will simply
-// be omitted from the rendered schema section; the agent prompt should mention
-// their schema separately if needed.
-var builtinToolSchemas = map[string]string{
-	"comment":            `{"message": string}`,
-	"ls":                 `{"path"?: string}`,
-	"file-read":          `{"path": string, "start_line"?: int, "end_line"?: int}`,
-	"file-write":         `{"path": string, "content": string, "append"?: bool}`,
-	"file-edit":          `{"path": string, "old_string"?: string, "new_string"?: string, "replace_all"?: bool, "start_line"?: int, "end_line"?: int, "expected_replacements"?: int, "edits"?: [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
-	"multi-edit":         `{"path": string, "edits": [{"old_string": string, "new_string": string, "replace_all"?: bool}]}`,
-	"glob":               `{"pattern": string, "path"?: string}`,
-	"grep":               `{"pattern": string, "glob"?: string, "type"?: string, "case_insensitive"?: bool, "context"?: int, "output_mode"?: "content"|"files_with_matches"|"count", "max_results"?: int}`,
-	"repo-search":        `{"query": string}`,
-	"sandbox":            `{"action": "status"|"request", "add_writable_dir"?: string, "net"?: "all"|"localhost"|"none"|"ports", "ports"?: [int], "reason"?: string}`,
-	"shell-exec":         `{"command": string, "run_in_background"?: bool}`,
-	"bash":               `{"command": string, "run_in_background"?: bool}`,
-	"bash-output":        `{"command": string, "run_in_background"?: bool}`,
-	"job-output":         `{"job_id": string, "offset"?: int}`,
-	"job-kill":           `{"job_id": string}`,
-	"web-fetch":          `{"url": string, "max_length"?: int}`,
-	"download":           `{"url": string, "path": string, "max_bytes"?: int}`,
-	"web-search":         `{"query": string, "max_results"?: int}`,
-	"view-image":         `{"path": string}`,
-	"grok-image":         `{"prompt": string, "path"?: string, "model"?: string, "n"?: int, "aspect_ratio"?: string, "resolution"?: "1k"|"2k", "response_format"?: "url"|"b64_json"}`,
-	"grok-video":         `{"prompt": string, "path"?: string, "model"?: string, "duration"?: int, "aspect_ratio"?: string, "resolution"?: string, "image_url"?: string, "reference_image_urls"?: [string]}`,
-	"ask-user":           `{"question": string, "options"?: [string], "context"?: string, "default_option"?: string, "allow_free_response"?: bool}`,
-	"agent":              `{"agent": string, "task": string, "constraints"?: string, "expected_output"?: string, "parent_agent_id"?: string}`,
-	"ultra":              `{"description": string, "prompt_template": string, "items": [string], "subagent_type"?: string}`,
-	"save-memory":        `{"fact": string, "scope"?: "user"|"project"}`,
-	"todo-write":         `{"todos": [{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}]}`,
-	"task-create":        `{"id"?: string, "content": string, "status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
-	"task-get":           `{"id": string}`,
-	"task-update":        `{"id": string, "content"?: string, "status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled", "owner"?: string, "source"?: string, "priority"?: string, "dependencies"?: [string]}`,
-	"task-list":          `{"status"?: "pending"|"in_progress"|"completed"|"blocked"|"cancelled"|"ready"}`,
-	"task-delete":        `{"id"?: string, "clear_completed"?: bool}`,
-	"task-stop":          `{"reason"?: string}`,
-	"goal-complete":      `{"summary": string, "verified"?: bool}`,
-	"tool-search":        `{"query": string}`,
-	"skill-list":         `{"query"?: string}`,
-	"skill-read":         `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"activate-skill":     `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"skill-activate":     `{"name"?: string, "skill"?: string, "location"?: string}`,
-	"config":             `{"action": "get"|"set", "key"?: string, "value"?: string, "force"?: bool}`,
-	"mcp-list-resources": `{"server_id": string}`,
-	"mcp-read-resource":  `{"server_id": string, "resource_id": string}`,
-	"mcp-auth":           `{"server_id": string, "token"?: string, "scope"?: string, "expires_at"?: string, "description"?: string}`,
-	"diagnostics":        `{"path"?: string}`,
-	"references":         `{"path": string, "symbol"?: string, "kind"?: "references"|"definition", "line"?: int, "character"?: int}`,
-	"lsp-restart":        `{"server"?: string}`,
-	"enter-plan-mode":    `{"reason"?: string}`,
-	"exit-plan-mode":     `{"reason"?: string}`,
-	"enter-worktree":     `{"path"?: string, "branch"?: string, "allow_dirty"?: bool}`,
-	"exit-worktree":      `{"path": string, "force"?: bool}`,
-	"send-message":       `{"target"?: string, "message": string}`,
-}
-
 // builtinNativeToolDescs and builtinNativeToolSchemas define the description and
 // real JSON Schema for each built-in tool on the native tool-calling path.
 var builtinNativeToolDescs = map[string]string{
@@ -306,18 +193,22 @@ var builtinNativeToolDescs = map[string]string{
 	"multi-edit":         "Apply an ordered list of find/replace edits to one file atomically: each edit sees the result of the previous one, and if any edit fails to match uniquely the whole call fails and the file is untouched.",
 	"glob":               "Find files matching a glob pattern (** for recursive search).",
 	"grep":               "Search files with a regular expression.",
-	"repo-search":        "Semantic full-text search across the repository.",
+	"repo-search":        "Full-text search across the repository. For a symbol name (function, type, class, const) it lists ranked definitions first, then usages.",
 	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
 	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
-	"bash-output":        "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
-	"job-output":         "Fetch accumulated stdout/stderr of a background job. Pass the next_offset from the previous call to read incrementally.",
+	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",
+	"job-output":         "Fetch accumulated stdout/stderr of a background job (job-N) or page through a spooled truncated tool result (spool:N). Pass the next_offset from the previous call to read incrementally.",
 	"job-kill":           "Terminate a background job by ID.",
+	"tool-output":        "Re-read the full output of an earlier tool call that was offloaded to disk (stubs like [offloaded: … tool-output {\"id\":\"spool:N\"}]). Page with offset/limit; pass the next_offset from the previous call to continue.",
+	"pty-start":          "Start an interactive terminal session (REPL, debugger, ssh, watch-mode server) under a pseudo-terminal. Returns a session ID plus the initial screen; drive it with pty-write.",
+	"pty-write":          "Send input to a pty session and return output produced since the last read. Backslash escapes in input are decoded server-side (\\r \\n \\t \\e \\xHH \\uHHHH; \\\\ for a literal backslash), so {\"input\":\"2+2\",\"submit\":true} runs a REPL line and {\"input\":\"\\x03\"} sends Ctrl-C. submit:true appends \\r. Prefer wait_for (return as soon as this literal string, e.g. the prompt \">>> \", appears in new output) over guessing wait_ms. Empty input just polls.",
+	"pty-kill":           "Terminate a pty session (SIGTERM, then SIGKILL) and free it.",
 	"web-fetch":          "Fetch a URL and return its content as readable text/markdown (truncated to a size budget). For binary files use the download tool.",
 	"download":           "Download a URL to a file inside the workspace, subject to a maximum size limit.",
 	"web-search":         "Search the web.",
-	"ask-user":           "Ask the user a question and wait for their answer.",
-	"agent":              "Delegate a task to a named sub-agent.",
-	"ultra":              "Fan a task out across many parallel sub-agents (2-32). prompt_template must contain {{item}}; each item fills the template into one self-contained sub-agent task. Sub-agents cannot see your context or each other, so include file paths, constraints, and expected output in the template. Give every item a distinct, non-overlapping scope; never let two agents touch the same file. Results are returned in input order.",
+	"ask-user":           "Ask the user up to 4 related questions as one form and wait for their answers. Available in every interactive mode (not just planning): use it when a decision is genuinely the user's to make and proceeding on a guess would waste work — never for something you can determine yourself by reading the code. Batch questions that belong to the same decision into one call rather than interrupting repeatedly. Each question takes a short header (the tab label the UI shows), the question line, and up to 8 options; give every option a label plus a one-line description of what choosing it means, mark the one you would pick with is_recommended (the UI highlights and pre-selects it), and set preview when there is concrete content — a snippet, a layout, a config — worth showing beside the option. Set multi_select when several answers can hold at once: there is no exclusivity flag, so phrase those options such that any subset of them reads sensibly — an option that rules the others out has to say so in its own words. Set allow_custom when written input is useful: the user gets a free-text entry and their words come back verbatim, quoted. Answers return one line per question, keyed by header; a question the user skipped is marked as unanswered, so never read silence as agreement with your recommendation, and a multi-select question answered with none of the options is marked as such — that is a decision about them, not silence. The user may also attach a note to any question; it follows the answer as `— note: \"...\"` and can appear on an unanswered question too, where it is context, not a choice.",
+	"agent":              "Delegate a task to a named sub-agent. Set isolation to \"worktree\" when the sub-agent will edit files and you want it sandboxed from the main checkout: it then runs in its own git worktree on a branch named after it (under .spettro/worktrees/), which is merged back and deleted automatically when it finishes; a merge conflict keeps the branch and worktree for manual resolution.",
+	"ultra":              "Fan a task out across many parallel sub-agents (2-32). prompt_template must contain {{item}}; each item fills the template into one self-contained sub-agent task. Sub-agents cannot see your context or each other, so include file paths, constraints, and expected output in the template. Give every item a distinct, non-overlapping scope; never let two agents touch the same file. Results are returned in input order. When sub-agents edit files, set isolation to \"worktree\": each gets its own git worktree and branch under .spettro/worktrees/, and all branches are merged back into the main checkout and deleted after the swarm completes (conflicting branches are kept and reported for manual resolution).",
 	"save-memory":        "Save one short durable fact or user preference to persistent memory; it is loaded into context in future sessions. Use scope \"project\" for facts specific to this repository.",
 	"todo-write":         "Persist the session todo list (flat alias of the task tools; prefer task-create/task-update for dependent tasks).",
 	"task-create":        "Create a task in the persistent session task graph. dependencies lists task IDs that must be completed first; cycles and unknown IDs are rejected.",
@@ -335,6 +226,8 @@ var builtinNativeToolDescs = map[string]string{
 	"config":             "Get or set configuration values.",
 	"diagnostics":        "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
 	"references":         "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+	"hover":              "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
+	"rename-symbol":      "Language-server rename: rename a symbol across the workspace and apply the edits. Position by symbol name or 1-based line/character; reports the files changed.",
 	"lsp-restart":        "Restart a wedged language server (all servers when none named).",
 	"enter-plan-mode":    "Enter plan mode.",
 	"exit-plan-mode":     "Exit plan mode.",
@@ -362,15 +255,19 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"repo-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
 	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
-	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"},"job_id":{"type":"string"},"offset":{"type":"number"}}}`),
 	"job-output":         json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer"}},"required":["job_id"]}`),
 	"job-kill":           json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}`),
+	"tool-output":        json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["id"]}`),
+	"pty-start":          json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"cols":{"type":"integer"},"rows":{"type":"integer"}},"required":["command"]}`),
+	"pty-write":          json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"input":{"type":"string"},"submit":{"type":"boolean","description":"append \\r to submit the input as a line"},"wait_for":{"type":"string","description":"return as soon as this literal string appears in new output (default timeout 10s)"},"wait_ms":{"type":"integer"}},"required":["id"]}`),
+	"pty-kill":           json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
 	"web-fetch":          json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"},"max_length":{"type":"integer"}},"required":["url"]}`),
 	"download":           json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"},"path":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["url","path"]}`),
 	"web-search":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`),
-	"ask-user":           json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"context":{"type":"string"},"default_option":{"type":"string"},"allow_free_response":{"type":"boolean"}},"required":["question"]}`),
-	"agent":              json.RawMessage(`{"type":"object","properties":{"agent":{"type":"string"},"task":{"type":"string"},"constraints":{"type":"string"},"expected_output":{"type":"string"},"parent_agent_id":{"type":"string"}},"required":["agent","task"]}`),
-	"ultra":              json.RawMessage(`{"type":"object","properties":{"description":{"type":"string","description":"short summary of the overall fan-out"},"prompt_template":{"type":"string","description":"task template containing the {{item}} placeholder"},"items":{"type":"array","minItems":2,"maxItems":32,"items":{"type":"string"}},"subagent_type":{"type":"string","description":"worker agent id to run (default: code)"}},"required":["description","prompt_template","items"]}`),
+	"ask-user":           json.RawMessage(`{"type":"object","properties":{"questions":{"type":"array","maxItems":4,"description":"the form: up to 4 questions answered in one interaction","items":{"type":"object","properties":{"header":{"type":"string","description":"short tab label, e.g. \"Focus area\"; must be unique within the form and keys the answer"},"question":{"type":"string","description":"the full question line"},"options":{"type":"array","maxItems":8,"description":"selectable answers; prefer these over an open question","items":{"type":"object","properties":{"label":{"type":"string","description":"the answer as the user reads it"},"description":{"type":"string","description":"one muted line under the label saying what choosing it means"},"preview":{"type":"string","description":"preformatted content (snippet, layout, config) shown beside the option list; kept verbatim, so long lines are clipped rather than wrapped — keep it narrow"},"is_recommended":{"type":"boolean","description":"the answer you would pick; highlighted and pre-selected"}},"required":["label"]}},"multi_select":{"type":"boolean","description":"several answers may be chosen at once; any subset can come back, so phrase the options so every combination of them means something"},"allow_custom":{"type":"boolean","description":"also offer a free-text entry; the typed answer is returned verbatim"}},"required":["question"]}},"context":{"type":"string","description":"one line of background applying to the whole form"},"question":{"type":"string","description":"legacy single-question form; use questions[] instead"},"options":{"type":"array","items":{"type":"string"},"description":"legacy: option labels for the single question"},"default_option":{"type":"string","description":"legacy: the recommended option, matched by label"},"allow_free_response":{"type":"boolean","description":"legacy: allow_custom for the single question"}}}`),
+	"agent":              json.RawMessage(`{"type":"object","properties":{"agent":{"type":"string"},"task":{"type":"string"},"constraints":{"type":"string"},"expected_output":{"type":"string"},"parent_agent_id":{"type":"string"},"isolation":{"type":"string","enum":["worktree"],"description":"run the sub-agent in its own git worktree/branch, auto-merged back when it finishes"}},"required":["agent","task"]}`),
+	"ultra":              json.RawMessage(`{"type":"object","properties":{"description":{"type":"string","description":"short summary of the overall fan-out"},"prompt_template":{"type":"string","description":"task template containing the {{item}} placeholder"},"items":{"type":"array","minItems":2,"maxItems":32,"items":{"type":"string"}},"subagent_type":{"type":"string","description":"worker agent id to run (default: code)"},"isolation":{"type":"string","enum":["worktree"],"description":"give every sub-agent its own git worktree/branch, auto-merged back after the swarm completes; use when sub-agents edit files"}},"required":["description","prompt_template","items"]}`),
 	"save-memory":        json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"scope":{"type":"string","enum":["user","project"]}},"required":["fact"]}`),
 	"todo-write":         json.RawMessage(`{"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["content"]}}},"required":["todos"]}`),
 	"task-create":        json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string"},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["content"]}`),
@@ -388,6 +285,8 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
 	"diagnostics":        json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	"references":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"hover":              json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"rename-symbol":      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"new_name":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path","new_name"]}`),
 	"lsp-restart":        json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
 	"enter-plan-mode":    json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"exit-plan-mode":     json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
@@ -427,37 +326,4 @@ func buildToolSpecs(allowedTools []string) []provider.ToolSpec {
 		out = append(out, provider.ToolSpec{Name: name, Description: desc, Schema: schema})
 	}
 	return out
-}
-
-// buildToolSchemaSection renders a per-tool argument schema section to inject
-// into the system prompt. Tools without a registered built-in schema are
-// skipped (e.g. mcp/script/http tools defined by the manifest); duplicate
-// entries — for example when both a tool and its alias are listed — are
-// rendered once.
-func buildToolSchemaSection(allowedTools []string) string {
-	if len(allowedTools) == 0 {
-		return ""
-	}
-	seen := map[string]struct{}{}
-	var lines []string
-	for _, name := range allowedTools {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		schema, ok := builtinToolSchemas[name]
-		if !ok {
-			continue
-		}
-		if _, dup := seen[name]; dup {
-			continue
-		}
-		seen[name] = struct{}{}
-		lines = append(lines, fmt.Sprintf("- %s arguments: %s", name, schema))
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	sort.Strings(lines)
-	return "\nTool argument schemas (JSON object passed as \"arguments\"; ? marks optional fields):\n" + strings.Join(lines, "\n") + "\n"
 }

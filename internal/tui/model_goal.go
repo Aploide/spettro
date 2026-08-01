@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -298,10 +299,8 @@ func (m Model) workspaceSignature() string {
 
 // appendUnique appends s to slice only if it is not already present.
 func appendUnique(slice []string, s string) []string {
-	for _, v := range slice {
-		if v == s {
-			return slice
-		}
+	if slices.Contains(slice, s) {
+		return slice
 	}
 	return append(slice, s)
 }

@@ -48,6 +48,7 @@ ULTRA MODE (agent swarm) is active. The user enabled Ultra: they want the main w
 - Give each sub-agent a distinct, non-overlapping scope. Sub-agents cannot see your context or each other's work, so each filled prompt must be self-contained: include file paths, constraints, and the expected output.
 - Do not try to conserve the number of agents: decompose work as finely as independence allows (per file, per package, per test suite).
 - Sub-agents run concurrently on disjoint scopes; never assign two agents work that touches the same file.
+- When sub-agents will edit files, set isolation to "worktree": each sub-agent then works in its own git worktree on its own branch (under .spettro/worktrees/), and every branch is merged back into the main checkout and deleted automatically when the swarm finishes. Merge conflicts keep the branch for you to resolve. Leave isolation unset for read-only fan-outs (research, review, search).
 - After the ultra call returns, review the aggregated results, fix or re-dispatch failures, and integrate/verify the final outcome yourself.
 - For trivial single-step tasks, just do them directly — ultra is for parallelizable or hard work.`
 
@@ -56,12 +57,38 @@ type ultraArgs struct {
 	SubagentType   string   `json:"subagent_type"`
 	PromptTemplate string   `json:"prompt_template"`
 	Items          []string `json:"items"`
+	Isolation      string   `json:"isolation"`
 }
 
 type ultraResult struct {
 	item    string
+	name    string // instance name, e.g. "code#3"
 	content string
 	err     error
+	merge   *workspaceMerge // set when the swarm ran with worktree isolation
+}
+
+// emitSwarmTrace publishes a swarm member's lifecycle as an "agent" ToolTrace
+// — the same shape the agent delegation tool produces — so hosts (TUI side
+// panel, ACP clients, session log) track Ultra sub-agents with the machinery
+// they already have. The swarm flag lets hosts render these as swarm members.
+func (r *toolRuntime) emitSwarmTrace(name, item, status, output string) {
+	if r.toolCallback == nil {
+		return
+	}
+	args, _ := json.Marshal(map[string]any{
+		"agent":           name,
+		"task":            item,
+		"parent_agent_id": r.traceID(),
+		"swarm":           true,
+	})
+	r.toolCallback(ToolTrace{
+		AgentID: name,
+		Name:    "agent",
+		Status:  status,
+		Args:    string(args),
+		Output:  truncate(output, 600),
+	})
 }
 
 // resolveUltraTarget picks the sub-agent spec an ultra call runs: the explicit
@@ -173,6 +200,31 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 	if p := r.perm(); p != "" {
 		subSpec.Permission = p
 	}
+	isolation := strings.TrimSpace(args.Isolation)
+	if isolation != "" && isolation != "worktree" {
+		return "", fmt.Errorf("ultra: unsupported isolation %q (only \"worktree\")", isolation)
+	}
+	// With worktree isolation every swarm member gets its own worktree+branch
+	// under .spettro/worktrees/ so parallel edits never collide in the shared
+	// checkout. Workspaces are created up front, serially: concurrent
+	// `git worktree add` calls would contend on the repository locks, and a
+	// creation failure must abort the swarm before any sub-agent launches.
+	var workspaces []*agentWorkspace
+	if isolation == "worktree" {
+		workspaces = make([]*agentWorkspace, len(prompts))
+		for i := range prompts {
+			ws, err := r.newSubagentWorkspace(ctx, fmt.Sprintf("%s#%d", subSpec.ID, i+1))
+			if err != nil {
+				for _, w := range workspaces {
+					if w != nil {
+						w.cleanup(context.WithoutCancel(ctx))
+					}
+				}
+				return "", fmt.Errorf("ultra: %w", err)
+			}
+			workspaces[i] = ws
+		}
+	}
 
 	results := make([]ultraResult, len(prompts))
 	var sem chan struct{}
@@ -184,7 +236,11 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			res := ultraResult{item: strings.TrimSpace(args.Items[idx])}
+			// Every swarm member gets a distinct instance name ("code#3") so
+			// its tool traces — and the lifecycle events below — are
+			// attributable in the TUI side panel and ACP clients.
+			name := fmt.Sprintf("%s#%d", subSpec.ID, idx+1)
+			res := ultraResult{item: strings.TrimSpace(args.Items[idx]), name: name}
 			// Launch ramp: everything past the initial batch is staggered.
 			if idx >= ultraInitialLaunch {
 				delay := time.Duration(idx-ultraInitialLaunch+1) * ultraLaunchInterval
@@ -204,11 +260,38 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 					return
 				}
 			}
-			res.content, res.err = r.runUltraSubagent(ctx, subSpec, prompts[idx])
+			cwd := r.cwd
+			if workspaces != nil {
+				cwd = workspaces[idx].subCWD
+			}
+			r.emitSwarmTrace(name, res.item, "running", "")
+			res.content, res.err = r.runUltraSubagent(ctx, subSpec, name, prompts[idx], cwd)
+			if res.err != nil {
+				r.emitSwarmTrace(name, res.item, "error", res.err.Error())
+			} else {
+				r.emitSwarmTrace(name, res.item, "success", res.content)
+			}
 			results[idx] = res
 		}(i)
 	}
 	wg.Wait()
+	// Fold workspaces back in, one at a time and in input order — merging
+	// into the main checkout is inherently serial. Runs on an uncancellable
+	// context so a mid-swarm cancellation still cleans up (or preserves)
+	// every worktree instead of leaking them.
+	if workspaces != nil {
+		mergeCtx := context.WithoutCancel(ctx)
+		for i := range results {
+			// A cancelled swarm must not merge anything behind the user's
+			// back: preserve whatever work exists and drop empty worktrees.
+			if results[i].err != nil || ctx.Err() != nil {
+				results[i].merge = workspaces[i].abandon(mergeCtx)
+				continue
+			}
+			m := workspaces[i].finalize(mergeCtx)
+			results[i].merge = &m
+		}
+	}
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("ultra: %w", ctx.Err())
 	}
@@ -217,14 +300,15 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 
 // runUltraSubagent runs one sub-agent to completion, retrying transient
 // provider failures (rate limits, availability) with exponential backoff.
-func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpec, task string) (string, error) {
+func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpec, instanceID, task, cwd string) (string, error) {
 	sub := LLMAgent{
 		Spec:            spec,
+		InstanceID:      instanceID,
 		PermissionFn:    r.permissionFn,
 		ProviderManager: r.providerMgr,
 		ProviderName:    r.providerName,
 		ModelName:       r.modelName,
-		CWD:             r.cwd,
+		CWD:             cwd,
 		MaxTokens:       r.maxTokens,
 		Thinking:        r.thinkingLevel,
 		ToolCallback:    r.toolCallback,
@@ -238,7 +322,7 @@ func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpe
 		ParentAgentID:   r.agentID,
 	}
 	var lastErr error
-	for attempt := 0; attempt < ultraMaxAttempts; attempt++ {
+	for attempt := range ultraMaxAttempts {
 		if attempt > 0 {
 			if !ultraSleep(ctx, ultraRetryBase<<(attempt-1)) {
 				return "", ctx.Err()
@@ -272,7 +356,7 @@ func ultraSleep(ctx context.Context, d time.Duration) bool {
 // the single block the main agent sees. Each sub-agent's final message is its
 // entire handoff — nothing else crosses the boundary.
 func renderUltraResults(subagentType string, results []ultraResult) string {
-	completed, failed := 0, 0
+	completed, failed, conflicts := 0, 0, 0
 	var body strings.Builder
 	for i, res := range results {
 		outcome := "completed"
@@ -284,12 +368,31 @@ func renderUltraResults(subagentType string, results []ultraResult) string {
 		} else {
 			completed++
 		}
-		fmt.Fprintf(&body, "<subagent index=%q type=%q item=%q outcome=%q>\n%s\n</subagent>\n",
-			strconv.Itoa(i+1), subagentType, truncate(res.item, 200), outcome, text)
+		name := res.name
+		if name == "" {
+			name = fmt.Sprintf("%s#%d", subagentType, i+1)
+		}
+		mergeAttr := ""
+		if res.merge != nil {
+			mergeAttr = fmt.Sprintf(" merge=%q branch=%q", res.merge.Status, res.merge.Branch)
+			switch res.merge.Status {
+			case "conflict", "error":
+				conflicts++
+				text += fmt.Sprintf("\nmerge %s: branch %q kept at %s\n%s",
+					res.merge.Status, res.merge.Branch, res.merge.Path, truncate(res.merge.Detail, 800))
+			case "preserved":
+				text += fmt.Sprintf("\nunmerged work kept on branch %q at %s", res.merge.Branch, res.merge.Path)
+			}
+		}
+		fmt.Fprintf(&body, "<subagent index=%q name=%q type=%q item=%q outcome=%q%s>\n%s\n</subagent>\n",
+			strconv.Itoa(i+1), name, subagentType, truncate(res.item, 200), outcome, mergeAttr, text)
 	}
 	out := fmt.Sprintf("<ultra_result>\n<summary>completed: %d, failed: %d</summary>\n%s</ultra_result>", completed, failed, body.String())
 	if failed > 0 {
 		out += "\nSome sub-agents failed. Re-dispatch the failed items with a corrected prompt via ultra, or handle them directly."
+	}
+	if conflicts > 0 {
+		out += "\nSome workspace branches could not be merged back. Resolve each kept branch yourself (merge it in the main checkout, fix conflicts, commit), then delete the branch and its worktree (git worktree remove <path>; git branch -D <branch>)."
 	}
 	return out
 }

@@ -23,7 +23,9 @@ Spettro automatically saves the current session to disk as you work:
 
 ### Storage path
 
-Sessions live under `~/.spettro/sessions/`. Each session is identified by a
+Sessions live under `~/.spettro/sessions/`. Old sessions can be reclaimed
+with [`/storage clean`](storage.md), which never touches the active session
+and always keeps the most recent few per project. Each session is identified by a
 project-specific hash combined with a timestamp:
 
 ```
@@ -130,6 +132,32 @@ You can focus the compaction on a specific topic:
 
 This gives the LLM a hint about what to prioritise in the summary.
 
+### Two-stage compaction (reference-based)
+
+Compaction is two-stage. Stage 1 is cheap and lossless-by-reference; stage 2
+is the summarizer.
+
+- **Stage 1 — offload tool results.** Every tool result larger than ~500
+  tokens is already persisted to the session spool at execution time. Before
+  summarizing anything, compaction replaces each such result in the older
+  turns with a short stub that keeps the tool name, an args digest, the size,
+  the ok/error status, and the first/last line:
+
+  ```text
+  [offloaded: re-read with tool-output {"id":"spool:7"}] shell-exec args={"command":"go test ./..."} — 48210 chars, 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
+  ```
+
+  The full output stays on disk and the model can re-read it at any time with
+  the `tool-output` tool (`{"id":"spool:7","offset":0,"limit":4000}`). If
+  offloading alone brings the estimate back under the auto-compact threshold,
+  compaction stops here — no summarizer call, no token spend, nothing lost.
+
+- **Stage 2 — summarize.** If the history is still too large (or on an
+  explicit `/compact`), the older turns are summarized as before, but the
+  summarizer sees the stubs instead of raw truncations and is instructed to
+  carry the `tool-output` IDs into the summary verbatim, so dropped outputs
+  remain re-readable after summarization.
+
 After compaction:
 
 - Token usage and context pressure are reset to zero.
@@ -148,12 +176,27 @@ configured threshold:
 /compact auto status          # check current setting
 ```
 
-When enabled, Spettro runs a compaction after every agent turn if the context
-occupancy is above the threshold percentage (configurable in
-`~/.spettro/config.json`, default 85 %).
+When enabled, Spettro compacts in two places:
 
-Auto-compact uses a failure budget: if compaction fails 3 times in a row, it
-stops retrying until a manual `/compact` succeeds.
+- **Between turns** (TUI and ACP): after an agent turn, if context occupancy
+  is above the threshold percentage.
+- **Inside the run loop** (all modes, including headless and `/goal`): before
+  each model step, the runtime estimates context pressure and, past the
+  threshold, summarizes older turns into a single message while keeping the
+  first turn (the task) and the most recent turns verbatim. A one-line notice
+  ("compacted 42k → 6k tokens …") appears in the transcript. This is what
+  lets long unattended goal runs survive without anyone watching the gauge.
+
+The threshold percentage is configurable in `~/.spettro/config.json`
+(default 85 % of the model's effective window). The `auto_compact_*` settings
+below apply to both triggers.
+
+Auto-compact uses a failure budget: if the summarizer fails 3 times in a row
+(provider errors), auto-compaction pauses instead of burning a failing call
+every step; a successful compaction (e.g. manual `/compact`) resets the
+counter. Failures never abort the run — the runtime warns and retries at the
+next threshold crossing, and an over-budget request still gets one forced
+compaction as a last resort.
 
 ### Configuration
 
@@ -304,3 +347,35 @@ Terminates every running job at once.
   automatically.
 - Jobs survive `/clear` (which only resets the conversation). Use `/jobs kill all`
   to clean up explicitly.
+
+### Tool output spooling
+
+Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
+`bash`, `web-fetch`) are automatically spooled to disk instead of being
+hard-truncated. The model receives a truncated head with a footer containing a
+`spool:N` ID and an offset, and can page through the full result using
+`job-output {"job_id":"spool:N","offset":Z}` or the dedicated `tool-output`
+tool (`{"id":"spool:N","offset":Z,"limit":M}`).
+
+In addition, *every* tool result over ~500 tokens — even ones small enough to
+stay in context untruncated — is written to the spool at execution time. This
+backs reference-based compaction (see [Compact](#compact-compact)): when the
+context fills up, oversized results are swapped for `[offloaded: …]` stubs
+pointing at their spool IDs rather than being lost to summarization.
+
+Spool files are tied to the conversation, not to a single run: they survive
+run end, and are deleted on `/clear` and when the process exits (TUI exit,
+`/exit`).
+
+```text
+# example: model receives truncated grep output with a footer
+[truncated: 12,400 of 13,000 lines omitted; use job-output {"job_id":"spool:2","offset":1800} to read more]
+
+# model pages through the omitted portion
+~> job-output {"job_id":"spool:2","offset":1800}
+<~ spool=spool:2 size=280000 next_offset=9800 (more available)
+# the next chunk of content...
+```
+
+The `bash-output` tool also accepts `job_id` and `offset` fields (in addition
+to `command`), so it can double as a spool reader.

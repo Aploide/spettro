@@ -53,7 +53,7 @@ func TestV5MigrationAddsViewImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !changed || m.Version != 5 {
+	if !changed || m.Version < 5 {
 		t.Fatalf("expected v5 migration to fire (changed=%v version=%d)", changed, m.Version)
 	}
 

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -55,10 +56,10 @@ type SubmitResponse struct {
 // Event is broadcast to every connected /events subscriber and stored in a
 // short replay buffer.
 type Event struct {
-	Seq  uint64                 `json:"seq"`
-	Kind string                 `json:"kind"`
-	At   time.Time              `json:"at"`
-	Data map[string]interface{} `json:"data,omitempty"`
+	Seq  uint64         `json:"seq"`
+	Kind string         `json:"kind"`
+	At   time.Time      `json:"at"`
+	Data map[string]any `json:"data,omitempty"`
 }
 
 // Status is the JSON shape returned by GET /status. It mirrors the bits of
@@ -204,7 +205,7 @@ func (s *Server) Start(preferredPort int) (port int, fellBack bool, err error) {
 			fellBack = true
 		}
 	} else {
-		for i := 0; i < portScanLimit; i++ {
+		for i := range portScanLimit {
 			candidate := DefaultPort + i
 			scanLn, scanErr := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, candidate))
 			if scanErr == nil {
@@ -288,7 +289,7 @@ func (s *Server) Stop() error {
 // Publish records an event in the replay buffer and fans it out to every
 // connected /events subscriber. Slow subscribers are skipped (we never block
 // the TUI).
-func (s *Server) Publish(kind string, data map[string]interface{}) {
+func (s *Server) Publish(kind string, data map[string]any) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -569,7 +570,7 @@ func (s *Server) RequestApproval(ctx context.Context, toolID, command, reason st
 	s.pendingApprovals.Store(toolID, ch)
 	defer s.pendingApprovals.Delete(toolID)
 
-	s.Publish("approval_request", map[string]interface{}{
+	s.Publish("approval_request", map[string]any{
 		"tool_id": toolID,
 		"command": command,
 		"reason":  reason,
@@ -612,26 +613,35 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// RequestAskUser publishes an ask_user event and blocks until the Android
-// client responds via POST /ask-user. ctx cancellation returns empty string.
-func (s *Server) RequestAskUser(ctx context.Context, questionID, question string, options []string, allowFreeResponse bool) (string, error) {
-	ch := make(chan string, 1)
+// AskUserReply is what a client sent back for one ask-user interaction.
+// Answers holds a form's answers keyed by question header; Answer is the single
+// answer a client that does not understand forms sends, which the caller reads
+// as the answer to the question the event described.
+type AskUserReply struct {
+	Answer  string
+	Answers map[string]string
+}
+
+// RequestAskUser publishes an ask_user event and blocks until a client responds
+// via POST /ask-user. data is the event body — built by the caller, which is
+// the side that knows the form — and is published with the question id added.
+// Cancelling ctx returns its error, so the tool call unblocks exactly once
+// whether the user answered, the client vanished, or the run was interrupted.
+func (s *Server) RequestAskUser(ctx context.Context, questionID string, data map[string]any) (AskUserReply, error) {
+	ch := make(chan AskUserReply, 1)
 	s.pendingAskUsers.Store(questionID, ch)
 	defer s.pendingAskUsers.Delete(questionID)
 
-	data := map[string]interface{}{
-		"question_id":         questionID,
-		"question":            question,
-		"options":             options,
-		"allow_free_response": allowFreeResponse,
-	}
-	s.Publish("ask_user", data)
+	event := make(map[string]any, len(data)+1)
+	maps.Copy(event, data)
+	event["question_id"] = questionID
+	s.Publish("ask_user", event)
 
 	select {
-	case answer := <-ch:
-		return answer, nil
+	case reply := <-ch:
+		return reply, nil
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return AskUserReply{}, ctx.Err()
 	}
 }
 
@@ -644,6 +654,11 @@ func (s *Server) handleAskUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		QuestionID string `json:"question_id"`
 		Answer     string `json:"answer"`
+		// Answers is the form shape: one entry per question, keyed by the
+		// header the event published. A client may send both — the flat answer
+		// then applies to the first question, exactly as it does for a client
+		// that only ever sends that.
+		Answers map[string]string `json:"answers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -654,9 +669,9 @@ func (s *Server) handleAskUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no pending ask-user for question_id", http.StatusNotFound)
 		return
 	}
-	ch := val.(chan string)
+	ch := val.(chan AskUserReply)
 	select {
-	case ch <- body.Answer:
+	case ch <- AskUserReply{Answer: body.Answer, Answers: body.Answers}:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		http.Error(w, "question already answered", http.StatusConflict)

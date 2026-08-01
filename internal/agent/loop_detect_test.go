@@ -15,7 +15,7 @@ func call(tool, args string) []toolCall {
 func TestLoopDetectorConsecutiveCallsNudgeThenAbort(t *testing.T) {
 	d := newLoopDetector(config.LoopDetectionPolicy{})
 	// Two identical calls: below the default threshold of 3.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got := d.observe(call("shell", `{"cmd":"go test"}`), ""); got != loopOK {
 			t.Fatalf("step %d: got %v, want loopOK", i, got)
 		}
@@ -26,7 +26,7 @@ func TestLoopDetectorConsecutiveCallsNudgeThenAbort(t *testing.T) {
 	}
 	// After the nudge counters reset: it takes 3 more identical calls to trip
 	// again, and the second trip aborts.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got := d.observe(call("shell", `{"cmd":"go test"}`), ""); got != loopOK {
 			t.Fatalf("post-nudge step %d: got %v, want loopOK", i, got)
 		}
@@ -63,7 +63,7 @@ func TestLoopDetectorWindowRepeats(t *testing.T) {
 
 func TestLoopDetectorDistinctCallsNeverTrip(t *testing.T) {
 	d := newLoopDetector(config.LoopDetectionPolicy{})
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		got := d.observe(call("file-read", fmt.Sprintf(`{"path":"f%d.go"}`, i)), fmt.Sprintf("reading file %d", i))
 		if got != loopOK {
 			t.Fatalf("step %d: got %v, want loopOK", i, got)
@@ -90,7 +90,7 @@ func TestLoopDetectorDisabled(t *testing.T) {
 		t.Fatal("disabled policy must return a nil detector")
 	}
 	// A nil detector must be safe to observe and never trip.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if got := d.observe(call("shell", `{"cmd":"x"}`), "same text"); got != loopOK {
 			t.Fatalf("got %v, want loopOK", got)
 		}

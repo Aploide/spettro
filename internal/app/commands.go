@@ -92,6 +92,7 @@ func (a *App) handleCommand(line string) error {
 			ShellApproval:   a.promptShellApproval,
 			Manifest:        &a.manifest,
 			SessionDir:      a.cliSessionDir(),
+			Compact:         a.cfg.CompactConfig(),
 		}
 		ag.Spec.Permission = a.cfg.Permission
 		result, err := ag.Run(context.Background(), a.pendingPlan)

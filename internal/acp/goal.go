@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -114,7 +115,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(outcome))
 		return acpsdk.PromptResponse{
 			StopReason: acpsdk.StopReasonEndTurn,
-			Meta:       map[string]any{"spettro.dev/tokensUsed": totalTokens},
+			Meta:       map[string]any{"spettro.app/tokensUsed": totalTokens},
 		}, nil
 	}
 
@@ -148,6 +149,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
 			GoalMode:        true,
 			ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
+			Compact:         cfg.CompactConfig(),
 			ShellTimeoutSec: cfg.GoalShellTimeoutSec,
 			Steering:        steering,
 			StreamCallback:  turn.onStream,
@@ -159,10 +161,17 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 				}
 				return turn.requestShellApproval(sctx, ar)
 			},
-			AskUser: turn.askUser,
+			AskUser: turn.askForm,
 		}
 
 		result, err := ag.Run(ctx, task)
+		// Adopt the run's structured conversation even when it failed or was
+		// cancelled: the partial history (this iteration's tool calls and
+		// results) is valid context for the retry / next iteration, and
+		// dropping it would restart the goal's context from scratch.
+		if len(result.Messages) > 0 {
+			history = result.Messages
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
@@ -189,9 +198,6 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 		retries = 0
 		totalTokens += result.TokensUsed
-		if len(result.Messages) > 0 {
-			history = result.Messages
-		}
 		if result.Content != "" {
 			turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content + "\n"))
 		}
@@ -219,10 +225,8 @@ func goalNoProgressLimit(cfg config.UserConfig) int {
 
 // appendUnique appends s to slice only if it is not already present.
 func appendUnique(slice []string, s string) []string {
-	for _, v := range slice {
-		if v == s {
-			return slice
-		}
+	if slices.Contains(slice, s) {
+		return slice
 	}
 	return append(slice, s)
 }

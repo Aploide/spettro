@@ -98,7 +98,7 @@ func fetchChecksums(ctx context.Context, url string) (map[string]string, error) 
 		return nil, err
 	}
 	out := map[string]string{}
-	for _, line := range strings.Split(string(body), "\n") {
+	for line := range strings.SplitSeq(string(body), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			continue

@@ -2,7 +2,6 @@ package acp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +27,21 @@ type bridge struct {
 
 	mu       sync.Mutex
 	sessions map[string]*acpSession
+
+	// clientCaps / clientExtensions are what the client declared at
+	// initialize: its core capabilities (elicitation in particular) and the
+	// `_spettro/*` methods it serves. Both gate the agent-question transports
+	// in question.go.
+	clientCaps       acpsdk.ClientCapabilities
+	clientExtensions map[string]bool
+	// questionTransport overrides the client request surface used by agent
+	// questions. Nil in production (the SDK connection is used); tests set it.
+	questionTransport questionTransport
+
+	// logins holds the in-flight Spettro Subscription device-flow login, if
+	// any. It is connection-scoped rather than session-scoped: signing in is
+	// an account-level act that every session on this bridge observes.
+	logins loginRegistry
 }
 
 // acpSession is the per-conversation state. Mutable fields are guarded by the
@@ -89,11 +103,32 @@ func newBridge(opts Options) *bridge {
 }
 
 func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
+	// Record what the client can do before any capability gating: agent
+	// questions pick their transport from the extension surface the client
+	// mirrors back and from its elicitation capability (see question.go).
+	b.mu.Lock()
+	b.clientCaps = params.ClientCapabilities
+	b.clientExtensions = parseClientExtensions(params.Meta)
+	b.mu.Unlock()
+
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		// Advertise the `_spettro/*` extension surface (see ext.go) so a
+		// native client can detect it at handshake and fall back to
+		// "configure this in the TUI" against an older CLI instead of
+		// calling methods that would come back method-not-found.
+		// `clientMethods` is the other direction: methods this agent will
+		// call on a client that mirrors them back.
+		Meta: map[string]any{
+			metaExtensionsKey: map[string]any{
+				"version":       extensionsVersion,
+				"methods":       extensionMethods,
+				"clientMethods": extensionClientMethods,
+			},
+		},
 		AgentInfo: &acpsdk.Implementation{
 			Name:    "spettro",
-			Title:   acpsdk.Ptr("Spettro"),
+			Title:   new("Spettro"),
 			Version: version.App,
 		},
 		AgentCapabilities: acpsdk.AgentCapabilities{
@@ -112,7 +147,7 @@ func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 				Terminal: &acpsdk.AuthMethodTerminalInline{
 					Id:   "spettro-setup",
 					Name: "Configure a provider",
-					Description: acpsdk.Ptr(
+					Description: new(
 						"Launch Spettro's own interactive TUI (no --acp flag) and " +
 							"run /models to add a provider API key; ACP sessions " +
 							"reuse that stored configuration.",
@@ -318,7 +353,18 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	}
 
 	if strings.HasPrefix(trimmedTask, "/") {
-		if fields := strings.Fields(trimmedTask); fields[0] == "/goal" {
+		// /plan <task> runs the plan agent on the task as a one-shot turn
+		// (mirrors the TUI); bare /plan is a mode switch handled by the
+		// extended slash-command set below.
+		if fields := strings.Fields(trimmedTask); fields[0] == "/plan" && len(fields) > 1 {
+			b.mu.Lock()
+			if _, ok := s.manifest.AgentByID("plan"); ok {
+				s.agentID = "plan"
+			}
+			b.mu.Unlock()
+			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
+			task = trimmedTask
+		} else if fields[0] == "/goal" {
 			if strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")) == "stop" {
 				// /goal stop while a goal turn is running: cancel that run.
 				b.mu.Lock()
@@ -349,7 +395,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			return b.handleCompactCommand(ctx, s, &cfg, turn, trimmedTask)
 		}
 		b.mu.Lock()
-		reply, _, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
+		reply, modeChanged, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
+		if !handled {
+			reply, modeChanged, handled = handleExtendedSlashCommand(b, s, &cfg, b.opts.Providers, trimmedTask)
+		}
+		_ = modeChanged
 		var options []acpsdk.SessionConfigOption
 		if handled {
 			options = buildConfigOptions(s, &cfg, b.opts.Providers)
@@ -447,6 +497,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		SandboxState:    b.opts.SandboxState,
 		SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
 		ContextWindow:   contextWindow,
+		Compact:         cfg.CompactConfig(),
 		Steering:        steering,
 		StreamCallback:  turn.onStream,
 		ToolCallback:    turn.onTool,
@@ -457,17 +508,44 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			turnUsage.CacheWriteTokens += ev.Usage.CacheWriteTokens
 			turn.onUsage(ev, contextWindow)
 		},
-		PermissionFn:    livePermission,
+		PermissionFn: livePermission,
 		ShellApproval: func(sctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			if livePermission() == config.PermissionYOLO {
 				return agent.ShellApprovalAllowOnce, nil
 			}
 			return turn.requestShellApproval(sctx, ar)
 		},
-		AskUser: turn.askUser,
+		// The whole form when the client can take one, question by question when
+		// it cannot. See question_form.go for the ladder.
+		AskUser: turn.askForm,
 	}
 
 	result, runErr := ag.Run(runCtx, task)
+
+	// Preserve whatever context the run produced — even on failure or
+	// cancellation. Losing s.history/s.transcript here is what made a failed
+	// or interrupted turn restart the conversation from scratch.
+	b.mu.Lock()
+	if len(result.Messages) > 0 {
+		s.history = result.Messages
+	}
+	now := time.Now()
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
+	if content := strings.TrimSpace(result.Content); content != "" {
+		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
+	} else if runErr != nil {
+		note := "turn interrupted"
+		if runCtx.Err() == nil {
+			note = "turn failed: " + runErr.Error()
+		}
+		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: "[" + note + "]", At: now})
+	}
+	state := s.persistState()
+	b.mu.Unlock()
+	// Persist so the TUI's /resume and future session/load calls see this
+	// conversation; a save failure must not fail the prompt turn.
+	_ = session.Save(b.opts.GlobalDir, state)
+
 	if runErr != nil {
 		if runCtx.Err() != nil {
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
@@ -481,25 +559,10 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content))
 	}
 
-	b.mu.Lock()
-	if len(result.Messages) > 0 {
-		s.history = result.Messages
-	}
-	now := time.Now()
-	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
-	if result.Content != "" {
-		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
-	}
-	state := s.persistState()
-	b.mu.Unlock()
-	// Persist so the TUI's /resume and future session/load calls see this
-	// conversation; a save failure must not fail the prompt turn.
-	_ = session.Save(b.opts.GlobalDir, state)
-
 	return acpsdk.PromptResponse{
 		StopReason: acpsdk.StopReasonEndTurn,
 		Usage:      turnUsageResponse(turnUsage, result.TokensUsed),
-		Meta:       map[string]any{"spettro.dev/tokensUsed": result.TokensUsed},
+		Meta:       map[string]any{"spettro.app/tokensUsed": result.TokensUsed},
 	}, nil
 }
 
@@ -520,10 +583,10 @@ func turnUsageResponse(u provider.Usage, estimatedTotal int) *acpsdk.Usage {
 		TotalTokens:  total,
 	}
 	if u.CacheReadTokens > 0 {
-		out.CachedReadTokens = acpsdk.Ptr(u.CacheReadTokens)
+		out.CachedReadTokens = new(u.CacheReadTokens)
 	}
 	if u.CacheWriteTokens > 0 {
-		out.CachedWriteTokens = acpsdk.Ptr(u.CacheWriteTokens)
+		out.CachedWriteTokens = new(u.CacheWriteTokens)
 	}
 	return out
 }
@@ -534,7 +597,7 @@ func (t *turnState) requestShellApproval(ctx context.Context, ar agent.ShellAppr
 	title := "Run shell command: " + ar.Command
 	update := acpsdk.ToolCallUpdate{
 		ToolCallId: t.openToolCallID(ar.ToolID),
-		Title:      acpsdk.Ptr(title),
+		Title:      new(title),
 		Kind:       acpsdk.Ptr(acpsdk.ToolKindExecute),
 		Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
 		RawInput:   map[string]any{"command": ar.Command, "reason": ar.Reason},
@@ -564,52 +627,8 @@ func (t *turnState) requestShellApproval(ctx context.Context, ar agent.ShellAppr
 	}
 }
 
-// askUser maps the ask-user tool onto session/request_permission, the only
-// stable interactive request ACP offers. Options become permission choices;
-// free-form input is not representable, so option-less questions fail with a
-// hint the model can act on.
-func (t *turnState) askUser(ctx context.Context, ar agent.AskUserRequest) (string, error) {
-	if len(ar.Options) == 0 {
-		if ar.DefaultOption != "" {
-			return ar.DefaultOption, nil
-		}
-		return "", errors.New("this client cannot answer free-form questions; proceed with your best judgment or offer explicit options")
-	}
-	opts := make([]acpsdk.PermissionOption, 0, len(ar.Options))
-	for i, o := range ar.Options {
-		opts = append(opts, acpsdk.PermissionOption{
-			OptionId: acpsdk.PermissionOptionId(fmt.Sprintf("opt-%d", i)),
-			Name:     o,
-			Kind:     acpsdk.PermissionOptionKindAllowOnce,
-		})
-	}
-	title := ar.Question
-	if ar.Context != "" {
-		title += " — " + ar.Context
-	}
-	resp, err := t.bridge.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
-		SessionId: t.sessionID,
-		ToolCall: acpsdk.ToolCallUpdate{
-			ToolCallId: t.nextToolCallID("ask"),
-			Title:      acpsdk.Ptr(title),
-			Kind:       acpsdk.Ptr(acpsdk.ToolKindThink),
-			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
-		},
-		Options: opts,
-	})
-	if err != nil {
-		return "", err
-	}
-	if resp.Outcome.Cancelled != nil || resp.Outcome.Selected == nil {
-		return "", errors.New("user did not answer")
-	}
-	for i, o := range ar.Options {
-		if string(resp.Outcome.Selected.OptionId) == fmt.Sprintf("opt-%d", i) {
-			return o, nil
-		}
-	}
-	return "", errors.New("user did not answer")
-}
+// Agent questions (the ask-user tool) live in question.go: turnState.askUser
+// negotiates the extension / `_meta` / elicitation transports there.
 
 // Unsupported optional capabilities.
 

@@ -17,18 +17,19 @@ curl -sSfL https://raw.githubusercontent.com/aploide/spettro/main/install.sh | s
 
 Installs to `~/.local/bin` by default (no `sudo` needed); set `INSTALL_DIR` to override. Self-updates (`/update` in the TUI, or the built-in update check) write in place to that same directory, so they never need `sudo` either.
 
-It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via `TOOL_CALL` and an `agent` tool, plus specialized orchestrator/worker roles (plan, coding, ask, explore, code, git, test, review, docs).
+It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via native tool calls and an `agent` tool, plus specialized orchestrator/worker roles (plan, coding, ask, explore, code, git, test, review, docs).
 
 ## Highlights
 
 - Configurable multi-agent system via `spettro.agents.toml` and `agents/*.md`
-- Parallel `TOOL_CALL` spawning of sub-agents
+- Parallel native tool-call spawning of sub-agents
 - Permission policies: `ask-first`, `restricted`, `yolo`
 - Live tool traces in planning/coding runs
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Normalized [thinking/reasoning levels](docs/thinking.md) across providers (`/thinking off|low|medium|high|x-high|max`)
 - [Ultra mode](docs/ultra.md) — fan hard tasks out across a swarm of parallel sub-agents (`/ultra`, any model)
+- [Interactive PTY sessions](docs/pty.md) — the agent drives REPLs, debuggers, and ssh through a real terminal
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
 

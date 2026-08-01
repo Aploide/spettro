@@ -269,7 +269,7 @@ func isTableSeparator(line string) bool {
 		return false
 	}
 	inner := strings.TrimPrefix(strings.TrimSuffix(trim, "|"), "|")
-	for _, cell := range strings.Split(inner, "|") {
+	for cell := range strings.SplitSeq(inner, "|") {
 		clean := strings.TrimSpace(cell)
 		if clean == "" {
 			continue
@@ -366,7 +366,10 @@ func renderTable(tableLines []string, width int) string {
 				rendered = styleText.Render(rendered)
 			}
 			padding := strings.Repeat(" ", colWidths[j]-len(cell))
-			b.WriteString(" " + rendered + padding + " ")
+			b.WriteString(" ")
+			b.WriteString(rendered)
+			b.WriteString(padding)
+			b.WriteString(" ")
 			b.WriteString(border.Render("│"))
 		}
 		return b.String()

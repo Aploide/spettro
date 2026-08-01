@@ -172,6 +172,12 @@ type ToolResult struct {
 	// user turn with image parts. Only populated when the active model
 	// supports vision (the tool runtime gates attachment).
 	Images []string
+	// SpoolID references the full output persisted to the session spool
+	// ("spool:<n>") when the output exceeded the offload floor at execution
+	// time. Compaction uses it to replace the in-context output with a short
+	// stub the model can re-read via the tool-output tool. Never sent to
+	// providers (adapters build their wire payloads field by field).
+	SpoolID string `json:"spool_id,omitempty"`
 }
 
 // Message is one turn in a structured conversation.

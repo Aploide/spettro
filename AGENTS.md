@@ -21,11 +21,17 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `3`. Pre-v3 manifests
-  are migrated on load (with a `.bak` backup): the previously inert
-  `sandbox_mode = "workspace-write"` default is rewritten to `full-access`
-  because the field is now enforced — re-set it explicitly if you want the
-  OS sandbox.
+- `version` (int, required): schema version, currently `10`. Older manifests
+  are migrated on load (with a `.bak` backup): v3 rewrites the previously
+  inert `sandbox_mode = "workspace-write"` default to `full-access` (the
+  field is now enforced — re-set it explicitly if you want the OS sandbox);
+  later versions retrofit new built-in tools (v5 `view-image`, v6
+  `hover`/`rename-symbol`, v7 `repo-search`, v8 the
+  `pty-start`/`pty-write`/`pty-kill` interactive terminal tools, granted to
+  agents that already hold `shell-exec`, v9 `tool-output` for agents that
+  already hold `file-read`, v10 `ask-user`). Each retrofit widens only
+  allow-lists that already show the same level of trust, so a deliberately
+  restricted agent is never opened up.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
@@ -88,6 +94,44 @@ This file lets you define, in one place:
 - `permission_rules`: optional agent-scoped policy rules
 - `handoffs`: list of target agent IDs
 - `enabled`: boolean
+
+`allowed_tools` and `permitted_actions` are both filters: a tool is callable
+only when its ID is allow-listed *and* the agent holds at least one of the
+tool's `permitted_actions`. An allow-listed tool whose action family the agent
+lacks is silently unavailable to the model.
+
+### Asking the user a question
+
+`ask-user` is the only way an agent can put a decision back to the person
+driving it. It is granted to the agents a human converses with directly — the
+`primary` and `orchestrator` roles, i.e. `plan`, `coding`, and `ask` in the
+default manifest — and withheld from workers and subagents (`code` included):
+their runs inherit the parent's callback, so a nested worker's question would
+interrupt the user mid-orchestration with no context about who is asking.
+
+Granting it to another agent takes both halves: `"ask-user"` in
+`allowed_tools` and `"ask"` in `permitted_actions`.
+
+One call carries a **form**, not a single question: an ordered list of up to 4
+questions, each with a short `header` (the tab label, unique within the form and
+the key the answer comes back under), the question line, up to 8 options
+(`label`, optional `description` and `preview`, `is_recommended`), a
+`multi_select` flag and an `allow_custom` free-text entry. Both caps are hard —
+an over-cap form is rejected with an error the model can correct, never
+truncated. The older flat payload (`question` + `options: [...]` +
+`default_option` + `allow_free_response`) is still accepted and normalised into
+a one-question form, so custom agent files that use it keep working.
+
+Answers come back one line per question, `<header>: <answer>`: multi-select
+answers comma-joined, the user's own words quoted verbatim, and a question the
+user skipped explicitly marked as unanswered so the agent cannot read silence as
+agreement with its recommendation. The TUI shows the whole form at once, in the
+input box so the conversation stays readable behind it: one tab per question,
+`tab` / `←→` between them, `enter` to record an answer and a trailing
+`✓ Submit` tab that sends them together (`esc` declines the form). Surfaces that
+can only put one question at a time to the user (the ACP transports,
+remote/Telegram) walk the form through one shared adapter rather than each
+reimplementing the loop.
 
 ## Validation rules
 

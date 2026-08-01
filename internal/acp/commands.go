@@ -9,6 +9,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/memory"
 	"spettro/internal/provider"
 )
@@ -32,6 +33,14 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "memory", Description: "show, add to, or clear persistent memory", Input: hintInput("[show | add [user|project] <fact> | clear [user|project|all]]")},
 	{Name: "compact", Description: "summarize older history to free context", Input: hintInput("[auto <status|on|off>]")},
 	{Name: "clear", Description: "clear conversation history"},
+	{Name: "stats", Description: "show session token usage and prompt-cache metrics"},
+	{Name: "tasks", Description: "manage session tasks", Input: hintInput("[list|add|done|set|show|rm|clear]")},
+	{Name: "jobs", Description: "list or kill background shell jobs", Input: hintInput("[list] | kill <id>|all")},
+	{Name: "hooks", Description: "list effective runtime hooks"},
+	{Name: "diff", Description: "show diffs of files modified this session", Input: hintInput("[path ...]")},
+	{Name: "ultra", Description: "toggle Ultra swarm mode", Input: hintInput("[on|off]")},
+	{Name: "plan", Description: "switch to plan mode", Input: hintInput("[task]")},
+	{Name: "permissions", Description: "show/set permission level and debug", Input: hintInput("[yolo|restricted|ask-first] | debug <on|off>")},
 }
 
 func hintInput(hint string) *acpsdk.AvailableCommandInput {
@@ -108,7 +117,12 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		}
 		return "model set to " + fields[1], false, true
 
-	case "/permission", "/permissions":
+	case "/permissions":
+		// The richer variant (summary + debug toggle) lives in the extended
+		// command set; route it there instead of the bare setter below.
+		return "", false, false
+
+	case "/permission":
 		if len(fields) < 2 {
 			return "usage: /permission <yolo|restricted|ask-first>  (current: " + string(cfg.Permission) + ")", false, true
 		}
@@ -187,6 +201,9 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 
 	case "/clear":
 		s.history = nil
+		// Spooled tool outputs are only reachable through the cleared
+		// history's references; drop them with the conversation.
+		jobs.Spool().Cleanup()
 		return "conversation history cleared", false, true
 	}
 	return "", false, false
@@ -240,11 +257,18 @@ func handleMemoryCommand(cwd string, args []string) string {
 		if fact == "" {
 			return "usage: /memory add [user|project] <fact>"
 		}
-		path, err := store.Save(scope, fact)
+		res, err := store.Save(scope, fact)
 		if err != nil {
 			return "memory save failed: " + err.Error()
 		}
-		return fmt.Sprintf("saved to %s memory (%s) — active from the next session", scope, path)
+		switch res.Outcome {
+		case memory.SavedDuplicate:
+			return fmt.Sprintf("already in %s memory — refreshed its last-used date", scope)
+		case memory.SavedToInbox:
+			return fmt.Sprintf("similar %s memory exists (%q) — new fact routed to the review inbox (/memory review)", scope, res.Near)
+		default:
+			return fmt.Sprintf("saved to %s memory (%s) — active from the next session", scope, res.Path)
+		}
 
 	case "clear":
 		scopes := []memory.Scope{memory.ScopeUser, memory.ScopeProject}
@@ -297,4 +321,12 @@ const acpHelpText = `commands:
   /memory clear [user|project|all]    erase saved memory
   /compact              summarize older history to free context window space
   /compact auto <status|on|off>       manage automatic compaction
-  /clear                clear conversation history`
+  /clear                clear conversation history
+  /stats                show session token usage and prompt-cache hit rate
+  /tasks [list|add|done|set|show|rm|clear]   manage session tasks
+  /jobs [list] | /jobs kill <id>|all  background shell jobs
+  /hooks                list effective runtime hooks
+  /diff [path...]       diffs of files modified this session
+  /ultra [on|off]       toggle Ultra swarm mode
+  /plan [task]          switch to plan mode
+  /permissions          show/set permission level, debug details`

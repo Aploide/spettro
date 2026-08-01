@@ -17,8 +17,11 @@ type localModelsResp struct {
 }
 
 // ProbeLocalServer contacts baseURL/v1/models and returns the available models.
-// Returns an error if the server is unreachable or the response is invalid.
-func ProbeLocalServer(ctx context.Context, baseURL string) ([]Model, error) {
+// apiKey is optional: servers started with authentication (llama-server
+// --api-key, vLLM, remote LM Studio, …) get it as a Bearer token; pass "" for
+// open servers. Returns an error if the server is unreachable or the response
+// is invalid.
+func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if !strings.HasPrefix(baseURL, "http") {
 		baseURL = "http://" + baseURL
@@ -29,6 +32,9 @@ func ProbeLocalServer(ctx context.Context, baseURL string) ([]Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -36,6 +42,12 @@ func ProbeLocalServer(ctx context.Context, baseURL string) ([]Model, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		if apiKey == "" {
+			return nil, fmt.Errorf("server requires an API key (HTTP %d)", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("server rejected the API key (HTTP %d)", resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned HTTP %d", resp.StatusCode)
 	}
@@ -80,6 +92,12 @@ func LocalProviderName(baseURL string) string {
 		return "LM Studio"
 	case strings.HasSuffix(s, ":11434"):
 		return "Ollama"
+	case strings.HasSuffix(s, ":8080"):
+		return "llama.cpp"
+	case strings.HasSuffix(s, ":8888"):
+		return "Unsloth"
+	case strings.HasSuffix(s, ":8000"):
+		return "vLLM"
 	default:
 		return "Local endpoint"
 	}
