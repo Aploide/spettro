@@ -31,7 +31,7 @@ Model metadata is loaded from `https://models.dev/api.json` and cached locally.
 
 ## 3) Work with the agent system
 
-Spettro starts with `default_agent` from manifest (default: `plan`).
+Spettro starts with `default_agent` from manifest (default: `coding`).
 
 - Explore first with `glob`/`grep`/`file-read`.
 - Spawn sub-agents in parallel via the native `agent` tool (multiple calls in one response run concurrently).

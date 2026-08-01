@@ -91,7 +91,7 @@ func TestCompactHistoryNeverSplitsToolCallFromResult(t *testing.T) {
 func TestCompactHistoryWithPolicyDisabledIsNoOp(t *testing.T) {
 	msgs := msgsOfLen(20) // well over pressure for a 1000-token window
 	cfg := Config{AutoEnabled: false, AutoThresholdPct: 85, MaxFailures: 3}
-	out, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 0)
+	out, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 0, 0)
 	if err != nil || did {
 		t.Fatalf("expected no-op with auto compaction disabled, did=%v err=%v", did, err)
 	}
@@ -103,7 +103,7 @@ func TestCompactHistoryWithPolicyDisabledIsNoOp(t *testing.T) {
 func TestCompactHistoryWithPolicyDisabledStillForces(t *testing.T) {
 	msgs := msgsOfLen(10)
 	cfg := Config{AutoEnabled: false, AutoThresholdPct: 85, MaxFailures: 3}
-	_, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1_000_000, true, cfg, 0)
+	_, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1_000_000, true, cfg, 0, 0)
 	if err != nil || !did {
 		t.Fatalf("force must bypass the off switch, did=%v err=%v", did, err)
 	}
@@ -112,17 +112,17 @@ func TestCompactHistoryWithPolicyDisabledStillForces(t *testing.T) {
 func TestCompactHistoryWithPolicyPausesAfterFailures(t *testing.T) {
 	msgs := msgsOfLen(20)
 	cfg := Config{AutoEnabled: true, AutoThresholdPct: 85, MaxFailures: 3}
-	if _, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 3); err != nil || did {
+	if _, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 3, 0); err != nil || did {
 		t.Fatalf("expected pause at MaxFailures, did=%v err=%v", did, err)
 	}
-	if _, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 2); err != nil || !did {
+	if _, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, cfg, 2, 0); err != nil || !did {
 		t.Fatalf("expected compaction below MaxFailures, did=%v err=%v", did, err)
 	}
 }
 
 func TestCompactHistoryWithPolicyZeroConfigDefaultsOn(t *testing.T) {
 	msgs := msgsOfLen(20)
-	_, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, Config{}, 0)
+	_, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 1000, false, Config{}, 0, 0)
 	if err != nil || !did {
 		t.Fatalf("zero-value config must keep auto compaction on, did=%v err=%v", did, err)
 	}
@@ -160,7 +160,7 @@ func TestCompactStage1OffloadSkipsSummarizer(t *testing.T) {
 	}
 	// Window sized so the estimate exceeds the auto threshold only because of
 	// the ~715KB tool result; once offloaded, the rest is far below it.
-	out, did, err := CompactHistoryWithPolicy(context.Background(), send, "", msgs, 200000, false, Config{AutoEnabled: true}, 0)
+	out, did, err := CompactHistoryWithPolicy(context.Background(), send, "", msgs, 200000, false, Config{AutoEnabled: true}, 0, 0)
 	if err != nil || !did {
 		t.Fatalf("expected stage-1 compaction, did=%v err=%v", did, err)
 	}
@@ -196,7 +196,7 @@ func TestCompactStage2CarriesStubsIntoPrompt(t *testing.T) {
 	}
 	// Tiny window: stage 1 alone cannot get under threshold, so the
 	// summarizer runs and must see the stub, not a raw truncation.
-	out, did, err := CompactHistoryWithPolicy(context.Background(), send, "", msgs, 500, false, Config{AutoEnabled: true}, 0)
+	out, did, err := CompactHistoryWithPolicy(context.Background(), send, "", msgs, 500, false, Config{AutoEnabled: true}, 0, 0)
 	if err != nil || !did {
 		t.Fatalf("expected two-stage compaction, did=%v err=%v", did, err)
 	}
@@ -208,6 +208,38 @@ func TestCompactStage2CarriesStubsIntoPrompt(t *testing.T) {
 	}
 	if len(out) >= len(msgs) {
 		t.Fatal("history did not shrink after stage 2")
+	}
+}
+
+func TestCompactSummarizerDisablesCache(t *testing.T) {
+	msgs := msgsOfLen(20)
+	var sawDisable bool
+	send := func(_ context.Context, req provider.Request) (provider.Response, error) {
+		sawDisable = req.DisableCache
+		return provider.Response{Content: "summary"}, nil
+	}
+	_, did, err := CompactHistoryWithPolicy(context.Background(), send, "", msgs, 500, false, Config{AutoEnabled: true}, 0, 0)
+	if err != nil || !did {
+		t.Fatalf("expected compaction, did=%v err=%v", did, err)
+	}
+	if !sawDisable {
+		t.Fatal("summarizer request must set DisableCache to protect the main session cache")
+	}
+}
+
+func TestCompactOccupancyHintTriggersAuto(t *testing.T) {
+	// Small transcript (under chars/4 pressure) but a large provider-reported
+	// occupancy hint must still trip auto-compaction.
+	msgs := msgsOfLen(10)
+	for i := range msgs {
+		msgs[i].Content = "short"
+	}
+	out, did, err := CompactHistoryWithPolicy(context.Background(), fakeSend("s"), "", msgs, 100000, false, Config{AutoEnabled: true}, 0, 95000)
+	if err != nil || !did {
+		t.Fatalf("expected occupancy hint to trigger compaction, did=%v err=%v", did, err)
+	}
+	if len(out) >= len(msgs) {
+		t.Fatalf("history did not shrink: %d >= %d", len(out), len(msgs))
 	}
 }
 

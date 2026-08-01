@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"spettro/internal/jobs"
 )
@@ -14,6 +15,13 @@ import (
 // later replace the in-context copy with a reference stub (see
 // internal/compact stage 1) without losing information.
 const offloadFloor = 2000
+
+// Pi-style dual firebreaks for tool output in model history. Whichever limit
+// is hit first wins. Matches packages/agent truncate.ts defaults.
+const (
+	defaultMaxOutputBytes = 50 * 1024
+	defaultMaxOutputLines = 2000
+)
 
 // spoolFooterIDRe extracts the spool ID from the deterministic truncation
 // footer written by spoolTruncate, so already-spooled outputs are not written
@@ -55,15 +63,39 @@ func (r *toolRuntime) spoolResult(toolName, out string) string {
 }
 
 func spoolIfLarge(out string, budget int, keepTail bool) string {
-	if budget <= 0 || len(out) <= budget {
+	if budget <= 0 {
+		budget = defaultMaxOutputBytes
+	}
+	if !needsTruncate(out, budget, defaultMaxOutputLines) {
 		return out
 	}
 	id, err := jobs.Spool().Add(out)
 	if err != nil {
 		// Spooling is best-effort; fall back to plain truncation.
-		return truncate(out, budget)
+		return truncateToBudget(out, budget, defaultMaxOutputLines, keepTail)
 	}
 	return spoolTruncate(out, budget, keepTail, id)
+}
+
+func needsTruncate(out string, budget, maxLines int) bool {
+	if budget > 0 && len(out) > budget {
+		return true
+	}
+	if maxLines > 0 && countLines(out) > maxLines {
+		return true
+	}
+	return false
+}
+
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if strings.HasSuffix(s, "\n") {
+		return n
+	}
+	return n + 1
 }
 
 // spoolTruncate keeps the head (and, when keepTail is set, the tail) of out
@@ -71,34 +103,41 @@ func spoolIfLarge(out string, budget int, keepTail bool) string {
 // a pure function of (out, budget, keepTail), so truncation is deterministic
 // for a given output and prompt-cache prefixes stay stable.
 func spoolTruncate(out string, budget int, keepTail bool, id string) string {
-	headBudget := budget - spoolFooterReserve
+	bodyBudget := budget - spoolFooterReserve
+	if bodyBudget < 0 {
+		bodyBudget = 0
+	}
+	headBudget := bodyBudget
 	tailBudget := 0
+	headLines := defaultMaxOutputLines
+	tailLines := 0
 	if keepTail {
-		tailBudget = headBudget / 4
+		tailBudget = bodyBudget / 4
 		headBudget -= tailBudget
+		tailLines = defaultMaxOutputLines / 4
+		headLines -= tailLines
 	}
 	if headBudget < 0 {
 		headBudget = 0
 	}
-
-	head := out[:min(headBudget, len(out))]
-	// Snap to line boundaries so we never hand the model half a line.
-	if i := strings.LastIndexByte(head, '\n'); i > 0 {
-		head = head[:i+1]
+	if headLines < 1 {
+		headLines = 1
 	}
+
+	head := takeHead(out, headBudget, headLines)
 	tail := ""
-	if tailBudget > 0 && len(out)-tailBudget > len(head) {
-		tail = out[len(out)-tailBudget:]
-		if i := strings.IndexByte(tail, '\n'); i >= 0 && i < len(tail)-1 {
-			tail = tail[i+1:]
+	if keepTail && tailBudget > 0 {
+		tail = takeTail(out, tailBudget, tailLines)
+		if len(head)+len(tail) >= len(out) {
+			// Head+tail cover the whole output — nothing omitted.
+			return out
 		}
 	}
 
-	totalLines := strings.Count(out, "\n") + 1
-	omitted := out[len(head) : len(out)-len(tail)]
-	omittedLines := strings.Count(omitted, "\n")
-	if len(omitted) > 0 && !strings.HasSuffix(omitted, "\n") && tail == "" {
-		omittedLines++
+	totalLines := countLines(out)
+	omittedLines := totalLines - countLines(head) - countLines(tail)
+	if omittedLines < 0 {
+		omittedLines = 0
 	}
 
 	footer := fmt.Sprintf(
@@ -109,6 +148,91 @@ func spoolTruncate(out string, budget int, keepTail bool, id string) string {
 		return head + footer
 	}
 	return head + footer + "\n" + tail
+}
+
+func truncateToBudget(out string, budget, maxLines int, keepTail bool) string {
+	if keepTail {
+		return takeTail(out, budget, maxLines)
+	}
+	return takeHead(out, budget, maxLines)
+}
+
+// takeHead keeps complete lines from the start until byte or line limit.
+func takeHead(out string, maxBytes, maxLines int) string {
+	if maxBytes <= 0 || maxLines <= 0 {
+		return ""
+	}
+	if !needsTruncate(out, maxBytes, maxLines) {
+		return out
+	}
+	var b strings.Builder
+	lines := 0
+	start := 0
+	for start < len(out) && lines < maxLines {
+		nl := strings.IndexByte(out[start:], '\n')
+		end := len(out)
+		if nl >= 0 {
+			end = start + nl + 1
+		}
+		line := out[start:end]
+		if b.Len()+len(line) > maxBytes {
+			break
+		}
+		b.WriteString(line)
+		lines++
+		start = end
+		if nl < 0 {
+			break
+		}
+	}
+	return b.String()
+}
+
+// takeTail keeps complete lines from the end until byte or line limit.
+func takeTail(out string, maxBytes, maxLines int) string {
+	if maxBytes <= 0 || maxLines <= 0 || out == "" {
+		return ""
+	}
+	if !needsTruncate(out, maxBytes, maxLines) {
+		return out
+	}
+	// Work backwards by lines without allocating the full split when possible.
+	trimmed := strings.TrimRight(out, "\n")
+	parts := strings.Split(trimmed, "\n")
+	var kept []string
+	bytes := 0
+	for i := len(parts) - 1; i >= 0 && len(kept) < maxLines; i-- {
+		line := parts[i]
+		add := len(line)
+		if len(kept) > 0 {
+			add++ // newline joiner
+		}
+		if bytes+add > maxBytes {
+			break
+		}
+		kept = append(kept, line)
+		bytes += add
+	}
+	if len(kept) == 0 {
+		// Single oversized line: take a UTF-8-safe suffix.
+		return suffixBytes(out, maxBytes)
+	}
+	// Reverse kept (it was collected end→start).
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	return strings.Join(kept, "\n")
+}
+
+func suffixBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	start := len(s) - maxBytes
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return s[start:]
 }
 
 // groupDigits formats n with thousands separators (12400 -> "12,400").

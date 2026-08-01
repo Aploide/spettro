@@ -251,7 +251,11 @@ type toolRuntime struct {
 	// pauses after MaxFailures instead of burning a failing call every step.
 	compactCfg      compactpkg.Config
 	compactFailures int
-	goalComplete    bool
+	// lastOccupancy is the provider-reported total input tokens from the most
+	// recent LLM call (Usage.TotalInput). Floors the chars/4 estimate so
+	// auto-compaction tracks real occupancy when the backend reports usage.
+	lastOccupancy int
+	goalComplete  bool
 	goalSummary     string
 	goalVerified    bool
 
@@ -615,11 +619,19 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(afterTokens))})
 			}
 		}
-		// Budget validation: sum system + all messages.
-		allContent := make([]string, 0, 1+len(convMsgs))
+		// Budget validation: same surface as EstimateHistoryTokens (content +
+		// tool calls/results). Counting only m.Content under-counted the
+		// real request and let oversized tool payloads slip past.
+		allContent := make([]string, 0, 1+len(convMsgs)*2)
 		allContent = append(allContent, system)
 		for _, m := range convMsgs {
 			allContent = append(allContent, m.Content)
+			for _, tc := range m.ToolCalls {
+				allContent = append(allContent, tc.Name, string(tc.Args))
+			}
+			for _, tr := range m.ToolResults {
+				allContent = append(allContent, tr.Output)
+			}
 		}
 		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
 			// Over budget (e.g. an oversized tool result blew up the history):
@@ -712,6 +724,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		if resp.EstimatedTokens > contextTokens {
 			contextTokens = resp.EstimatedTokens
 		}
+		if occ := resp.Usage.TotalInput(); occ > 0 {
+			runtime.lastOccupancy = occ
+			if occ > contextTokens {
+				contextTokens = occ
+			}
+		}
 		if cfg.UsageCallback != nil {
 			cfg.UsageCallback(UsageEvent{
 				StepTokens:    resp.EstimatedTokens,
@@ -743,7 +761,18 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if loopAct == loopAbort {
 				return finish(loopStopMessage, false, "")
 			}
-			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			// Hit the output token ceiling mid-tool-args: arguments are
+			// incomplete/unsafe. Fail every call in the batch without
+			// executing so the model can re-issue them (Pi harness pattern).
+			var results []parallelResult
+			if resp.FinishReason == provider.FinishReasonLength {
+				results = failTruncatedToolCalls(internalCalls)
+				if cfg.ToolCallback != nil {
+					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "model hit max output tokens while emitting tool calls — skipped execution; model should retry with smaller args"})
+				}
+			} else {
+				results = runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			}
 			convMsgs = append(convMsgs, provider.Message{
 				Role:      provider.RoleAssistant,
 				Content:   main,
@@ -845,15 +874,34 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			},
 			primary, chain, req, nil)
 	}
-	out, did, err := compactpkg.CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures)
+	out, did, err := compactpkg.CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures, r.lastOccupancy)
 	// Consecutive-failure bookkeeping: a failing summarizer pauses the auto
 	// trigger after MaxFailures (see compact.Evaluate); any success resets it.
 	if err != nil {
 		r.compactFailures++
 	} else if did {
 		r.compactFailures = 0
+		// Compaction rewrote history; occupancy hint is stale until the next
+		// provider call reports a fresh TotalInput.
+		r.lastOccupancy = 0
 	}
 	return out, did, err
+}
+
+// failTruncatedToolCalls builds synthetic error results for a tool batch whose
+// arguments were cut off by a max-output-tokens finish. Nothing is executed.
+func failTruncatedToolCalls(calls []toolCall) []parallelResult {
+	const msg = "tool call aborted: model output was truncated (finish_reason=length); re-issue with smaller arguments"
+	out := make([]parallelResult, len(calls))
+	for i, c := range calls {
+		out[i] = parallelResult{
+			name:   c.Tool,
+			args:   string(c.Args),
+			status: "error",
+			output: msg,
+		}
+	}
+	return out
 }
 
 // formatTokens renders a token count compactly for transcript notices

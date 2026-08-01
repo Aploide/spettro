@@ -447,6 +447,12 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		allParts = append(allParts, req.System)
 		for _, m := range req.Messages {
 			allParts = append(allParts, m.Content)
+			for _, tc := range m.ToolCalls {
+				allParts = append(allParts, tc.Name, string(tc.Args))
+			}
+			for _, tr := range m.ToolResults {
+				allParts = append(allParts, tr.Output)
+			}
 		}
 	} else {
 		allParts = append(allParts, req.Prompt)

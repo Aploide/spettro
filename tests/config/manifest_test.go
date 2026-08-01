@@ -30,8 +30,8 @@ func TestDefaultAgentManifestIsValid(t *testing.T) {
 	if err := m.Validate(); err != nil {
 		t.Fatalf("default manifest should validate: %v", err)
 	}
-	if m.DefaultAgent != "plan" {
-		t.Fatalf("expected plan as default agent, got %q", m.DefaultAgent)
+	if m.DefaultAgent != "coding" {
+		t.Fatalf("expected coding as default agent, got %q", m.DefaultAgent)
 	}
 	coding, ok := m.AgentByID("coding")
 	if !ok {

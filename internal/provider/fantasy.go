@@ -51,6 +51,7 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 		Usage:           usageFromFantasy(resp.Usage),
+		FinishReason:    FinishReason(resp.FinishReason),
 	}, nil
 }
 
@@ -75,10 +76,11 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 	}
 
 	var (
-		textSB    strings.Builder
-		usage     fantasy.Usage
-		streamErr error
-		toolCalls []NativeTool
+		textSB       strings.Builder
+		usage        fantasy.Usage
+		streamErr    error
+		toolCalls    []NativeTool
+		finishReason FinishReason
 	)
 	for part := range stream {
 		switch part.Type {
@@ -99,6 +101,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 			toolCalls = append(toolCalls, NativeTool{ID: part.ID, Name: part.ToolCallName, Args: args})
 		case fantasy.StreamPartTypeFinish:
 			usage = part.Usage
+			finishReason = FinishReason(part.FinishReason)
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
 				streamErr = part.Error
@@ -119,6 +122,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 		Usage:           usageFromFantasy(usage),
+		FinishReason:    finishReason,
 	}, nil
 }
 
@@ -216,7 +220,7 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 				prompt = append(prompt, fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: parts})
 			}
 		}
-		if isAnthropicAPI(providerName, apiKind) {
+		if isAnthropicAPI(providerName, apiKind) && !req.DisableCache {
 			// Two cache breakpoints: the system prompt and the final message.
 			// Marking the FINAL message caches the whole request — including
 			// the newest tool results, which are often the largest blocks — so
@@ -224,6 +228,8 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 			// (Anthropic looks the prefix up from previously-written
 			// breakpoints, so moving the marker forward each step is the
 			// intended incremental pattern.)
+			// Utility calls (compaction) set DisableCache so they neither write
+			// into nor steal the main session's KV cache.
 			cc := anthropicEphemeralOpts()
 			prompt[0].ProviderOptions = cc
 			if len(prompt) >= 2 {

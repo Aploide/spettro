@@ -10,6 +10,12 @@ const (
 	autoBufferTokens        = 13000
 	blockingBufferTokens    = 3000
 	reservedOutputTokens    = 20000
+	// keepRecentTokens is how much of the conversation tail stays verbatim
+	// after a compaction (Pi-style). Older turns are summarized.
+	defaultKeepRecentTokens = 20000
+	// keepRecentTokensForce is the smaller tail kept on explicit /compact or
+	// budget-recovery force so a mid-sized history still shrinks.
+	defaultKeepRecentTokensForce = 8000
 )
 
 type Config struct {

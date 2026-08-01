@@ -136,7 +136,7 @@ See [`AGENTS.md`](../AGENTS.md) for full schema and validation.
 
 ```toml
 version = 3
-default_agent = "plan"
+default_agent = "coding"
 
 [runtime]
 default_permission = "ask-first"

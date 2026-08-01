@@ -1,9 +1,9 @@
 version = 10
-default_agent = 'plan'
+default_agent = 'coding'
 
 [metadata]
 name = 'Spettro workspace agents'
-description = 'Lean orchestrator/worker setup for Spettro.'
+description = 'Coding-first agent pack: inline by default, workers on demand.'
 
 [runtime]
 default_permission = 'ask-first'
@@ -796,7 +796,7 @@ enabled = true
 [[agents]]
 id = 'coding'
 name = 'Coding'
-description = 'Coding orchestrator that delegates implementation and verification.'
+description = 'Primary coding agent; works inline by default, delegates only for isolated or parallel subtasks.'
 skill = 'implementation'
 mode = 'orchestrator'
 role = 'primary'

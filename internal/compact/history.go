@@ -33,38 +33,58 @@ func EstimateHistoryTokens(system string, msgs []provider.Message) int {
 	return budget.EstimateTokens(allContent...)
 }
 
+func estimateMessageTokens(m provider.Message) int {
+	parts := []string{m.Content}
+	for _, tc := range m.ToolCalls {
+		parts = append(parts, tc.Name, string(tc.Args))
+	}
+	for _, tr := range m.ToolResults {
+		parts = append(parts, tr.Output)
+	}
+	return budget.EstimateTokens(parts...)
+}
+
 // CompactHistory summarizes the older portion of msgs into a single synthetic
 // message when the estimated request size approaches the context window (or
 // unconditionally when force is set, for explicit /compact). Preserves the
-// first user turn (the task) and the most recent turns verbatim, replacing
-// the middle with a model-produced summary. Returns the (possibly shortened)
-// slice, whether it compacted, and any error.
+// first user turn (the task) and a recent token-budgeted tail verbatim,
+// replacing the middle with a model-produced summary. Returns the (possibly
+// shortened) slice, whether it compacted, and any error.
 //
 // It applies the default auto-compaction policy (enabled, 85%). Callers that
 // carry a user-configured policy should use CompactHistoryWithPolicy.
 func CompactHistory(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool) ([]provider.Message, bool, error) {
-	return CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, Config{}, 0)
+	return CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, Config{}, 0, 0)
 }
 
 // CompactHistoryWithPolicy is CompactHistory with an explicit auto-compaction
-// policy and the caller's consecutive-failure count. A zero-value cfg means
-// "use defaults" (auto enabled at the default threshold); a non-zero cfg is
-// honored as-is, so AutoEnabled=false disables the automatic trigger entirely
-// (force still works). When failures has reached cfg.MaxFailures the
-// automatic trigger pauses, matching Evaluate's semantics.
-func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool, cfg Config, failures int) ([]provider.Message, bool, error) {
+// policy, the caller's consecutive-failure count, and an optional
+// occupancyHint (provider-reported total input tokens from the last request).
+// When occupancyHint > 0 it floors the estimate used for the auto trigger so
+// compaction tracks real provider occupancy instead of chars/4 alone.
+//
+// A zero-value cfg means "use defaults" (auto enabled at the default
+// threshold); a non-zero cfg is honored as-is, so AutoEnabled=false disables
+// the automatic trigger entirely (force still works). When failures has
+// reached cfg.MaxFailures the automatic trigger pauses, matching Evaluate's
+// semantics.
+func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool, cfg Config, failures int, occupancyHint int) ([]provider.Message, bool, error) {
 	if window <= 0 {
 		window = 128000 // sane default so compaction always has a threshold
 	}
 	if cfg == (Config{}) {
 		cfg = Config{AutoEnabled: true}
 	}
+	estimate := EstimateHistoryTokens(system, msgs)
+	tokensUsed := estimate
+	if occupancyHint > tokensUsed {
+		tokensUsed = occupancyHint
+	}
 	if !force {
 		if len(msgs) <= 5 {
 			return msgs, false, nil
 		}
-		estimate := EstimateHistoryTokens(system, msgs)
-		eval := Evaluate(window, cfg, State{TokensUsed: estimate, ConsecutiveFailures: failures})
+		eval := Evaluate(window, cfg, State{TokensUsed: tokensUsed, ConsecutiveFailures: failures})
 		// IsError acts as a backstop trigger only while auto compaction is on
 		// and not paused after repeated failures; with the off switch set, the
 		// run proceeds untouched (the budget validator's forced compaction
@@ -74,29 +94,20 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 		}
 	}
 
-	// Keep the first user turn (task) and the last K turns verbatim. A forced
-	// compact keeps a shorter tail so an explicit /compact frees space even in
-	// mid-sized conversations.
-	keepLast := 4
+	keepRecent := defaultKeepRecentTokens
 	if force {
-		keepLast = 2
+		keepRecent = defaultKeepRecentTokensForce
 	}
-	cutEnd := len(msgs) - keepLast
+	cutEnd := findCutEnd(msgs, keepRecent)
 	if cutEnd <= 1 {
-		return msgs, false, nil
-	}
-	// Never split an assistant ToolCalls message from its following user
-	// ToolResults message. Move the boundary forward (into the kept tail)
-	// until it lands on a safe cut point.
-	for cutEnd > 1 {
-		if len(msgs[cutEnd-1].ToolCalls) > 0 && cutEnd < len(msgs) {
-			cutEnd++
-			continue
+		// History fits inside keepRecent (common in tests / small windows).
+		// Fall back to a turn-count cut so a fired trigger still frees space.
+		keepLast := 4
+		if force {
+			keepLast = 2
 		}
-		break
-	}
-	if cutEnd <= 1 || cutEnd >= len(msgs)+1 {
-		return msgs, false, nil
+		cutEnd = len(msgs) - keepLast
+		cutEnd = safeCutEnd(msgs, cutEnd)
 	}
 	if cutEnd <= 1 {
 		return msgs, false, nil
@@ -109,8 +120,12 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 	// call; an explicit /compact (force) always proceeds to stage 2.
 	msgs, offloaded := offloadToolResults(msgs, cutEnd)
 	if offloaded > 0 && !force {
-		estimate := EstimateHistoryTokens(system, msgs)
-		eval := Evaluate(window, cfg, State{TokensUsed: estimate, ConsecutiveFailures: failures})
+		estimate = EstimateHistoryTokens(system, msgs)
+		tokensUsed = estimate
+		if occupancyHint > tokensUsed {
+			tokensUsed = occupancyHint
+		}
+		eval := Evaluate(window, cfg, State{TokensUsed: tokensUsed, ConsecutiveFailures: failures})
 		if !eval.ShouldAutoCompact && !eval.IsError {
 			return msgs, true, nil
 		}
@@ -139,7 +154,11 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 		}
 	}
 
-	resp, err := send(ctx, provider.Request{Prompt: sb.String(), MaxTokens: 0})
+	resp, err := send(ctx, provider.Request{
+		Prompt:       sb.String(),
+		MaxTokens:    0,
+		DisableCache: true, // one-off utility call — don't pollute the main session cache
+	})
 	if err != nil {
 		return msgs, false, fmt.Errorf("compaction summarizer: %w", err)
 	}
@@ -147,7 +166,7 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 	if summary == "" {
 		return msgs, false, fmt.Errorf("compaction: empty summary")
 	}
-	out := make([]provider.Message, 0, 2+keepLast)
+	out := make([]provider.Message, 0, 2+(len(msgs)-cutEnd))
 	out = append(out, msgs[0])
 	out = append(out, provider.Message{
 		Role:    provider.RoleUser,
@@ -155,6 +174,48 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 	})
 	out = append(out, msgs[cutEnd:]...)
 	return out, true, nil
+}
+
+// findCutEnd walks back from the end of msgs until ~keepRecent tokens are
+// retained, then returns the exclusive end index of the region to summarize
+// (msgs[1:cutEnd]). Returns <=1 when the whole history fits in keepRecent
+// (caller may fall back to a turn-count cut).
+func findCutEnd(msgs []provider.Message, keepRecent int) int {
+	if len(msgs) <= 2 {
+		return 0
+	}
+	if keepRecent <= 0 {
+		keepRecent = defaultKeepRecentTokens
+	}
+	acc := 0
+	cutEnd := 1
+	for i := len(msgs) - 1; i >= 1; i-- {
+		acc += estimateMessageTokens(msgs[i])
+		if acc >= keepRecent {
+			cutEnd = i
+			break
+		}
+	}
+	return safeCutEnd(msgs, cutEnd)
+}
+
+// safeCutEnd moves cutEnd forward past any assistant ToolCalls boundary so a
+// tool-call message is never separated from its following ToolResults.
+func safeCutEnd(msgs []provider.Message, cutEnd int) int {
+	if cutEnd <= 1 {
+		return 0
+	}
+	for cutEnd > 1 && cutEnd < len(msgs) {
+		if len(msgs[cutEnd-1].ToolCalls) > 0 {
+			cutEnd++
+			continue
+		}
+		break
+	}
+	if cutEnd <= 1 || cutEnd >= len(msgs) {
+		return 0
+	}
+	return cutEnd
 }
 
 // offloadFloor is the minimum tool-result size (bytes, ~500 tokens) worth

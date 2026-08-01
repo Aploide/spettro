@@ -37,12 +37,12 @@ See [AGENTS.md](../AGENTS.md) for schema details (`version = 2`, `[runtime]`, `[
 
 ## Orchestration contract (orchestrators vs workers)
 
-Spettro deliberately splits the agent roster into **orchestrators** (`plan`, `coding`, `ask`) and **workers** (`explore`, `code`, `git`, `test`, `review`, `docs`). The orchestration contract is:
+Spettro splits the agent roster into **primaries** (`coding`, `ask`), an **orchestrator** (`plan`), and **workers** (`explore`, `code`, `git`, `test`, `review`, `docs`). The default agent is `coding`.
 
-- Orchestrators are coordinators. They decompose the user's request and spawn workers via the `agent` tool, preferring parallel batches (the runtime allows up to 4 concurrent sub-agents per step). Their prompts in `agents/planning.md`, `agents/coding.md`, and `agents/chat.md` enforce "delegate first".
-- `plan` is enforced at the manifest level: it has **no** direct read tools (`glob`/`grep`/`file-read`/`ls`). Discovery must go through an `explore` worker. The corresponding contract tests live in `tests/config/manifest_test.go`.
-- `coding` keeps its raw write/exec tools as an emergency escape hatch, but the prompt strongly discourages using them directly. The expected default path is `coding → {explore, docs}` (parallel) `→ code` (impl) `→ {test, review}` (parallel) `→ git`.
-- Workers are individual contributors. `agents/code.md` is the dedicated `code` worker prompt; the orchestrator-style `agents/coding.md` is used only by the `coding` orchestrator. Workers do not re-delegate (and `code` is the only worker that has the `agent` tool, gated by handoffs).
+- `coding` works **inline by default** (read/edit/shell itself) and only delegates for genuinely isolated or parallel subtasks. This avoids paying an explore/worker hop tax on routine edits.
+- `plan` is the multi-phase orchestrator (`/agent plan`). It has **no** direct read tools (`glob`/`grep`/`file-read`/`ls`); discovery must go through an `explore` worker. Contract tests live in `tests/config/manifest_test.go`.
+- `ask` is the read-only Q&A primary; it may spawn `explore`/`docs` for broader research.
+- Workers are individual contributors. `agents/code.md` is the dedicated `code` worker prompt. Workers do not re-delegate (and `code` is the only worker that has the `agent` tool, gated by handoffs).
 - The runtime's `agent` dispatch already validates role + handoff compatibility (`isDelegationRoleAllowed` in `internal/agent/llm_runtime_shell.go`), so workers can't accidentally spawn an orchestrator.
 
 ## Provider abstraction
