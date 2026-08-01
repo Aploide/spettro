@@ -2,6 +2,7 @@ package update
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -16,12 +17,27 @@ import (
 	"strings"
 )
 
-// binaryName is the single executable packed inside each release tarball
+// binaryName is the single executable packed inside each release archive
 // (see .github/workflows/release.yml).
-const binaryName = "spettro"
+func binaryName() string {
+	if runtime.GOOS == "windows" {
+		return "spettro.exe"
+	}
+	return "spettro"
+}
+
+// archiveExt is the container each platform's release is published in. Windows
+// gets .zip because it has no bundled tar-aware unpacker for users who fetch a
+// release by hand, and because Explorer opens zips natively.
+func archiveExt() string {
+	if runtime.GOOS == "windows" {
+		return "zip"
+	}
+	return "tar.gz"
+}
 
 func assetName(version string) string {
-	return fmt.Sprintf("spettro_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("spettro_%s_%s_%s.%s", version, runtime.GOOS, runtime.GOARCH, archiveExt())
 }
 
 // Apply downloads the release archive matching the running OS/arch, verifies
@@ -125,7 +141,7 @@ func downloadToTemp(ctx context.Context, url, dir string) (path string, sum stri
 		return "", "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	f, err := os.CreateTemp(dir, ".spettro-update-*.tar.gz")
+	f, err := os.CreateTemp(dir, ".spettro-update-*."+archiveExt())
 	if err != nil {
 		return "", "", err
 	}
@@ -139,9 +155,17 @@ func downloadToTemp(ctx context.Context, url, dir string) (path string, sum stri
 	return f.Name(), hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// extractBinary pulls the binaryName entry out of the tar.gz archive at
-// archivePath into a new executable temp file inside dir.
+// extractBinary pulls the binaryName entry out of the release archive at
+// archivePath into a new executable temp file inside dir, picking the
+// unpacker that matches this platform's release format.
 func extractBinary(archivePath, dir string) (string, error) {
+	if archiveExt() == "zip" {
+		return extractBinaryZip(archivePath, dir)
+	}
+	return extractBinaryTarGz(archivePath, dir)
+}
+
+func extractBinaryTarGz(archivePath, dir string) (string, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return "", err
@@ -158,62 +182,59 @@ func extractBinary(archivePath, dir string) (string, error) {
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("archive has no %s entry", binaryName)
+			return "", fmt.Errorf("archive has no %s entry", binaryName())
 		}
 		if err != nil {
 			return "", err
 		}
-		if filepath.Base(hdr.Name) != binaryName || hdr.Typeflag != tar.TypeReg {
+		if filepath.Base(hdr.Name) != binaryName() || hdr.Typeflag != tar.TypeReg {
 			continue
 		}
+		return writeExtracted(tr, dir)
+	}
+}
 
-		out, err := os.CreateTemp(dir, ".spettro-new-*")
+func extractBinaryZip(archivePath, dir string) (string, error) {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+
+	for _, entry := range zr.File {
+		if filepath.Base(entry.Name) != binaryName() || entry.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := entry.Open()
 		if err != nil {
 			return "", err
 		}
-		if _, err := io.Copy(out, tr); err != nil {
-			out.Close()
-			os.Remove(out.Name())
-			return "", err
-		}
-		if err := out.Chmod(0o755); err != nil {
-			out.Close()
-			os.Remove(out.Name())
-			return "", err
-		}
-		out.Close()
-		return out.Name(), nil
+		defer rc.Close()
+		return writeExtracted(rc, dir)
 	}
+	return "", fmt.Errorf("archive has no %s entry", binaryName())
 }
 
-// replaceExecutable installs newPath as target. Renaming is atomic and,
-// crucially, safe to do onto a currently-running executable on Unix (the
-// running process keeps its old inode open until it exits); a same-directory
-// temp file (see downloadToTemp/extractBinary) keeps this a same-filesystem
-// rename in the common case. If rename isn't possible we fall back to a
-// copy onto a fresh inode: the target is unlinked first, never truncated in
-// place — on macOS, rewriting an existing executable's inode leaves the
-// kernel's cached code signature stale and the binary is SIGKILLed at launch.
-func replaceExecutable(newPath, target string) error {
-	if err := os.Rename(newPath, target); err == nil {
-		return nil
-	}
-	src, err := os.Open(newPath)
+// writeExtracted copies the release binary into a fresh temp file next to the
+// installed one, so the later install can be a same-filesystem rename.
+func writeExtracted(src io.Reader, dir string) (string, error) {
+	out, err := os.CreateTemp(dir, ".spettro-new-*")
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer src.Close()
-	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-		return err
+	fail := func(err error) (string, error) {
+		out.Close()
+		os.Remove(out.Name())
+		return "", err
 	}
-	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
-	if err != nil {
-		return err
+	if _, err := io.Copy(out, src); err != nil {
+		return fail(err)
 	}
-	defer dst.Close()
-	if _, err := io.Copy(dst, src); err != nil {
-		return err
+	// A no-op on Windows, where executability comes from the file extension.
+	if err := out.Chmod(0o755); err != nil {
+		return fail(err)
 	}
-	os.Remove(newPath)
-	return nil
+	out.Close()
+	return out.Name(), nil
 }
+
