@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -9,12 +10,17 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/jobs"
+	"spettro/internal/shell/shelltest"
 )
 
 func TestShellExecSpoolsAndJobOutputPages(t *testing.T) {
 	t.Cleanup(jobs.Spool().Cleanup)
 	r := &toolRuntime{cwd: t.TempDir(), permission: config.PermissionYOLO, readSet: map[string]struct{}{}}
-	out, err := r.runShellTool(context.Background(), "shell-exec", []byte(`{"command":"seq 1 20000 | awk '{print \"log line \" $1}'"}`), "shell-exec")
+	args, err := json.Marshal(map[string]string{"command": shelltest.ManyLines("log line ", 20000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.runShellTool(context.Background(), "shell-exec", args, "shell-exec")
 	if err != nil {
 		t.Fatalf("shell-exec: %v", err)
 	}

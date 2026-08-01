@@ -10,8 +10,11 @@ import (
 	"strings"
 
 	"spettro/internal/config"
+	"spettro/internal/fsperm"
 	"spettro/internal/jobs"
+	"spettro/internal/safeio"
 	"spettro/internal/sandbox"
+	"spettro/internal/shell"
 )
 
 func isBlockedCommand(cmd string) bool {
@@ -51,7 +54,8 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 		// Detached jobs must outlive this tool call: build the command on a
 		// background context so the per-tool timeout doesn't kill it. The same
 		// sandbox policy still wraps the process.
-		cmd := sandbox.Command(context.Background(), r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
+		shellName, shellArgs := shell.CommandLine(cmdText)
+		cmd := sandbox.Command(context.Background(), r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
 		cmd.Dir = r.cwd
 		job, err := jobs.Default().Start(cmd, cmdText)
 		if err != nil {
@@ -63,7 +67,8 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// level. The policy is set once at startup (CLI flags / manifest) and is
 	// not visible to the model: blocked operations surface as ordinary command
 	// failures, with no hint that a sandbox exists.
-	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, "bash", "-lc", cmdText)
+	shellName, shellArgs := shell.CommandLine(cmdText)
+	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
 	text := r.spoolResult(toolID, string(out))
@@ -564,12 +569,12 @@ func saveAllowedCommandSet(cwd string, set map[string]struct{}) error {
 	// This file records which shell commands the user pre-approved for the
 	// project, so it is owner-only (0o600) like the other ~/.spettro secrets
 	// stores rather than world-readable.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("create .spettro dir: %w", err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write allowed commands temp: %w", err)
 	}
-	return os.Rename(tmp, path)
+	return safeio.Replace(tmp, path)
 }
