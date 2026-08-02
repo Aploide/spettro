@@ -16,7 +16,13 @@ func testGitRepo(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	dir := t.TempDir()
+	// Resolved, because git reports the toplevel with symlinks resolved and
+	// t.TempDir sits under a symlink on macOS (/var -> /private/var). Without
+	// this the test compares two spellings of the same directory.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
