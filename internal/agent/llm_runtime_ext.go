@@ -20,6 +20,7 @@ import (
 	"spettro/internal/diff"
 	"spettro/internal/mcp"
 	"spettro/internal/safeio"
+	"spettro/internal/sandbox"
 	"spettro/internal/session"
 )
 
@@ -1095,7 +1096,7 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath,
 	// deliberately generic so it reads as an ordinary filesystem denial.
 	if pol := r.sandboxPolicy(); pol.FSEnforced() {
 		abs := filepath.Join(r.cwd, filepath.FromSlash(relPath))
-		if !pol.WritablePath(abs, r.cwd, []string{os.TempDir()}) {
+		if !pol.WritablePath(abs, r.cwd, sandbox.WritableTempDirs()) {
 			return fmt.Errorf("%s: %s is not writable", toolID, relPath)
 		}
 	}

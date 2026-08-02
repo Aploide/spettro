@@ -111,6 +111,10 @@ func (m *Manager) Start(cmd *exec.Cmd, command string) (*Job, error) {
 			job.exitInfo = "exit status 0"
 		}
 		job.mu.Unlock()
+		// Release whatever the platform attached in afterStart. Marking the
+		// job done first keeps Kill from racing the release: it skips jobs
+		// that are no longer running.
+		afterWait(cmd)
 	}()
 	return job, nil
 }

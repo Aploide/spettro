@@ -21,6 +21,14 @@ self-update (`/update`) does not need it either.
 | `-NoPathUpdate` | Do not touch the user `PATH`. |
 | `-BaseUrl <url>` | Fetch the release assets from a mirror. |
 
+Flags need the script on disk — `irm … | iex` pipes source into the interpreter
+and has nowhere to put arguments:
+
+```powershell
+irm https://raw.githubusercontent.com/aploide/spettro/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -InstallDir D:\tools\spettro -Version v1.2.3
+```
+
 Re-running the installer over a **running** spettro works: Windows will not let
 an executing image be overwritten, but it does allow it to be renamed, so the
 current build is moved aside and deleted on the next run. `/update` uses the

@@ -53,6 +53,16 @@ func capabilities() Capabilities {
 	return c
 }
 
+// writableTempDirs lists the scratch roots a confined child may write to:
+// /tmp, which nearly everything hardcodes, plus whatever TMPDIR points at.
+func writableTempDirs() []string {
+	dirs := []string{"/tmp"}
+	if td := os.TempDir(); td != "" && td != "/tmp" {
+		dirs = append(dirs, td)
+	}
+	return dirs
+}
+
 func wrap(ctx context.Context, p Policy, workspaceDir, name string, args ...string) *exec.Cmd {
 	self, err := os.Executable()
 	if err != nil || self == "" {
@@ -107,10 +117,7 @@ func runChildIfRequested() {
 			os.Stderr.WriteString("spettro sandbox: kernel lacks Landlock (Linux 5.13+ required for filesystem sandboxing)\n")
 			os.Exit(126)
 		}
-		rw := []string{"/tmp", "/dev"}
-		if td := os.TempDir(); td != "" {
-			rw = append(rw, td)
-		}
+		rw := append([]string{"/dev"}, writableTempDirs()...)
 		if p.FS == FSWorkspaceWrite && spec.Workspace != "" {
 			rw = append(rw, spec.Workspace)
 		}

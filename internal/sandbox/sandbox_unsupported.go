@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"os/exec"
 )
 
@@ -14,6 +15,10 @@ func available() bool { return false }
 func capabilities() Capabilities {
 	return Capabilities{Mechanism: "none", Detail: "unsupported platform"}
 }
+
+// writableTempDirs has no confinement to agree with here; report the system
+// temp dir so the file tools behave as they always have.
+func writableTempDirs() []string { return []string{os.TempDir()} }
 
 func wrap(ctx context.Context, _ Policy, _ string, name string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)

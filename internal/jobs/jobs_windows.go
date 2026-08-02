@@ -81,10 +81,59 @@ func afterStart(cmd *exec.Cmd) {
 	jobObjectMu.Unlock()
 }
 
-// kill terminates the job's whole process tree. The handle is deliberately
-// retained for the lifetime of a job that ends on its own: holding it is what
-// lets KILL_ON_JOB_CLOSE reap stragglers when the process exits, and the
-// number of live handles is bounded by the number of jobs a session starts.
+// afterWait releases the job object once the interpreter has exited. The usual
+// case is an empty job — nothing outlived the shell — and the handle is closed
+// straight away rather than held for the rest of the session.
+//
+// When children did outlive their parent the handle is deliberately kept: it is
+// what makes KILL_ON_JOB_CLOSE terminate them when spettro exits, so a dev
+// server started by a wrapper script cannot be left holding a port. Those are
+// the only entries that outlive their job, and there is at most one per job.
+func afterWait(cmd *exec.Cmd) {
+	jobObjectMu.Lock()
+	defer jobObjectMu.Unlock()
+	handle, ok := jobObjects[cmd]
+	if !ok || jobHasLiveProcesses(handle) {
+		return
+	}
+	delete(jobObjects, cmd)
+	windows.CloseHandle(handle)
+}
+
+// jobHasLiveProcesses reports whether any process remains in the job. An
+// unreadable count is treated as "yes", which keeps the handle and so the old
+// behaviour.
+func jobHasLiveProcesses(handle windows.Handle) bool {
+	var info jobBasicAccountingInformation
+	var retlen uint32
+	err := windows.QueryInformationJobObject(
+		handle,
+		windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+		&retlen,
+	)
+	runtime.KeepAlive(&info)
+	if err != nil {
+		return true
+	}
+	return info.ActiveProcesses > 0
+}
+
+// jobBasicAccountingInformation mirrors
+// JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, which x/sys/windows does not declare.
+type jobBasicAccountingInformation struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+// kill terminates the job's whole process tree.
 func kill(cmd *exec.Cmd) error {
 	jobObjectMu.Lock()
 	handle, ok := jobObjects[cmd]

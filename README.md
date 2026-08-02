@@ -25,7 +25,14 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/aploide/spettro/main/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\Programs\spettro` and adds it to your user `PATH` — no elevation, so `/update` works in place too. Use `-InstallDir` to override, `-Version` to pin a release, and `-NoPathUpdate` to leave `PATH` alone. See [`docs/windows.md`](docs/windows.md) for what differs on Windows.
+Installs to `%LOCALAPPDATA%\Programs\spettro` and adds it to your user `PATH` — no elevation, so `/update` works in place too. See [`docs/windows.md`](docs/windows.md) for what differs on Windows.
+
+The piped form above takes no arguments. To pass `-InstallDir` (install elsewhere), `-Version` (pin a release) or `-NoPathUpdate` (leave `PATH` alone), download the script and run it:
+
+```powershell
+irm https://raw.githubusercontent.com/aploide/spettro/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -InstallDir D:\tools\spettro -Version v1.2.3 -NoPathUpdate
+```
 
 It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via native tool calls and an `agent` tool, plus specialized orchestrator/worker roles (plan, coding, ask, explore, code, git, test, review, docs).
 

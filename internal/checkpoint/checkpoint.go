@@ -282,7 +282,8 @@ func (c *Checkpointer) git(args ...string) (string, error) {
 		"-c", "user.name=Spettro",
 		"-c", "user.email=spettro@eyed.to",
 		"-c", "commit.gpgsign=false",
-		"-c", "core.hooksPath=/dev/null",
+		// os.DevNull, not a literal: the empty-file spelling is NUL on Windows.
+		"-c", "core.hooksPath=" + os.DevNull,
 		// No reflogs: retention deletes per-checkpoint refs so gc can
 		// collect the objects; a reflog would keep them reachable forever.
 		"-c", "core.logAllRefUpdates=false",
@@ -290,8 +291,8 @@ func (c *Checkpointer) git(args ...string) (string, error) {
 	cmd := exec.Command("git", full...)
 	cmd.Dir = c.project
 	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
 	)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err

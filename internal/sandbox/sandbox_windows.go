@@ -89,7 +89,7 @@ func wrap(ctx context.Context, p Policy, workspaceDir, name string, args ...stri
 		}
 	}
 
-	token, err := lowIntegrityToken()
+	token, err := sharedLowIntegrityToken()
 	if err != nil {
 		return failCommand(ctx, "create low-integrity token: "+err.Error())
 	}
@@ -145,6 +145,32 @@ func sanitizeForCmdEcho(message string) string {
 		}
 		return r
 	}, message)
+}
+
+// tokenMu guards the process-wide low-integrity token.
+var (
+	tokenMu     sync.Mutex
+	sharedToken windows.Token
+)
+
+// sharedLowIntegrityToken returns the process-wide Low token, building it on
+// first use. The token depends on nothing but the current process identity, so
+// one serves every sandboxed command — and it has to be shared: a token handed
+// to SysProcAttr.Token is never closed by os/exec, so minting one per command
+// would leak a handle per shell call for the life of the session.
+// CreateProcessAsUser does not consume the handle, so reuse is safe.
+func sharedLowIntegrityToken() (windows.Token, error) {
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+	if sharedToken != 0 {
+		return sharedToken, nil
+	}
+	token, err := lowIntegrityToken()
+	if err != nil {
+		return 0, err
+	}
+	sharedToken = token
+	return sharedToken, nil
 }
 
 // lowIntegrityToken duplicates the current process token and lowers its
@@ -233,14 +259,25 @@ func allowLowIntegrityWrites(dir string) error {
 	return nil
 }
 
-// lowIntegrityScratchDir returns a spettro-owned temp directory the sandboxed
-// child may write to, creating and labelling it on first use.
-func lowIntegrityScratchDir() (string, error) {
+// writableTempDirs reports the scratch dir the sandboxed child's TEMP and TMP
+// are redirected to. The real per-user temp directory is deliberately absent:
+// it sits at Medium integrity and a Low child cannot write it, so the file
+// tools must refuse it too or they would grant what the shell layer denies.
+func writableTempDirs() []string { return []string{scratchDirPath()} }
+
+// scratchDirPath is the spettro-owned temp directory for sandboxed children.
+func scratchDirPath() string {
 	base := os.Getenv("LOCALAPPDATA")
 	if strings.TrimSpace(base) == "" {
 		base = os.TempDir()
 	}
-	dir := filepath.Join(base, "spettro", "sandbox-temp")
+	return filepath.Join(base, "spettro", "sandbox-temp")
+}
+
+// lowIntegrityScratchDir returns a spettro-owned temp directory the sandboxed
+// child may write to, creating and labelling it on first use.
+func lowIntegrityScratchDir() (string, error) {
+	dir := scratchDirPath()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

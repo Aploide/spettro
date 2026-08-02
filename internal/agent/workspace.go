@@ -56,7 +56,8 @@ type workspaceMerge struct {
 // workspaceGit runs git with user hooks and commit signing disabled so local
 // configuration cannot break or intercept the automated workspace lifecycle.
 func workspaceGit(ctx context.Context, dir string, args ...string) (string, error) {
-	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"}
+	// os.DevNull, not a literal: the empty-file spelling is NUL on Windows.
+	base := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "commit.gpgsign=false"}
 	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()

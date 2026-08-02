@@ -545,13 +545,13 @@ func (m *Manager) Restart(name string) string {
 		m.mu.Unlock()
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	var stopped []string
+	var closing []*Client
 	for key, c := range m.clients {
 		if name != "" && key != name {
 			continue
 		}
-		c.Close()
+		closing = append(closing, c)
 		delete(m.clients, key)
 		stopped = append(stopped, key)
 	}
@@ -560,6 +560,12 @@ func (m *Manager) Restart(name string) string {
 	} else {
 		delete(m.broken, name)
 	}
+	m.mu.Unlock()
+
+	// Close waits for the server to exit, which a wedged server can drag out
+	// to its full timeout. The clients are already unregistered, so do that
+	// waiting outside the lock rather than stalling every other LSP call.
+	closeAll(closing)
 	sort.Strings(stopped)
 	if len(stopped) == 0 {
 		return "no matching running lsp server; it will start on next use"
@@ -572,8 +578,9 @@ func (m *Manager) Restart(name string) string {
 // later ForWorkspace(root) builds a fresh manager.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	closing := make([]*Client, 0, len(m.clients))
 	for key, c := range m.clients {
-		c.Close()
+		closing = append(closing, c)
 		delete(m.clients, key)
 	}
 	root := m.root
@@ -584,6 +591,37 @@ func (m *Manager) Shutdown() {
 		delete(registry, root)
 	}
 	regMu.Unlock()
+
+	closeAll(closing)
+}
+
+// ShutdownAll stops every server started in this process. Call it on session
+// exit: a live server holds handles on workspace files, which on Windows
+// blocks the delete-or-replace done by /update, checkpoint restore and any
+// later run in the same directory.
+func ShutdownAll() {
+	regMu.Lock()
+	managers := make([]*Manager, 0, len(registry))
+	for _, m := range registry {
+		if m != nil {
+			managers = append(managers, m)
+		}
+	}
+	regMu.Unlock()
+
+	for _, m := range managers {
+		m.Shutdown()
+	}
+}
+
+// closeAll shuts down clients concurrently: each Close waits on its own
+// server, and one slow exit should not be paid serially by the rest.
+func closeAll(clients []*Client) {
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Go(c.Close)
+	}
+	wg.Wait()
 }
 
 // ServerKeys lists configured servers for error messages / discoverability.
