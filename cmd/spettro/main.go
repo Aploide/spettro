@@ -12,6 +12,7 @@ import (
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/jobs"
+	"spettro/internal/lsp"
 	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/pty"
@@ -164,6 +165,9 @@ func main() {
 	pty.Default().KillAll()
 	// Spooled tool outputs are session state too; delete them with the session.
 	jobs.Spool().Cleanup()
+	// Language servers hold handles on workspace files; stop them before the
+	// /update relaunch below tries to replace anything.
+	lsp.ShutdownAll()
 	if err != nil {
 		fatal("runtime error: %v", err)
 	}

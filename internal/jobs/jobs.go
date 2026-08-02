@@ -94,6 +94,9 @@ func (m *Manager) Start(cmd *exec.Cmd, command string) (*Job, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// Platforms that can only group a process once it exists (Windows Job
+	// Objects) attach here; Unix already did the work in detach.
+	afterStart(cmd)
 	m.mu.Lock()
 	m.jobs[id] = job
 	m.mu.Unlock()
@@ -108,6 +111,10 @@ func (m *Manager) Start(cmd *exec.Cmd, command string) (*Job, error) {
 			job.exitInfo = "exit status 0"
 		}
 		job.mu.Unlock()
+		// Release whatever the platform attached in afterStart. Marking the
+		// job done first keeps Kill from racing the release: it skips jobs
+		// that are no longer running.
+		afterWait(cmd)
 	}()
 	return job, nil
 }

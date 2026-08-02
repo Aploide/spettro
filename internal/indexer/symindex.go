@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"spettro/internal/ignore"
+	"spettro/internal/safeio"
 )
 
 // Build/scan bounds. The index must never make repo-search slower than plain
@@ -259,6 +260,6 @@ func (x *SymbolIndex) saveCache() {
 	// session, never a failed search.
 	tmp := x.cachePath + ".tmp"
 	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, x.cachePath)
+		_ = safeio.Replace(tmp, x.cachePath)
 	}
 }

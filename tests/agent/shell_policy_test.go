@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"spettro/internal/agent"
+	"spettro/internal/fsperm"
 )
 
 func TestNormalizeCommand(t *testing.T) {
@@ -67,19 +68,15 @@ func TestAllowedCommandSetRoundTrip(t *testing.T) {
 
 	// The approved-command list is owner-only, consistent with the other
 	// ~/.spettro stores; it must not be world-readable.
-	info, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("stat allowed commands: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("allowed_commands.json perm = %o, want 600", perm)
-	}
-	dirInfo, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		t.Fatalf("stat .spettro dir: %v", err)
-	}
-	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
-		t.Fatalf(".spettro dir perm = %o, want 700", perm)
+	for _, target := range []string{path, filepath.Dir(path)} {
+		if ok, err := fsperm.IsOwnerOnly(target); err != nil {
+			t.Fatalf("check %s permissions: %v", target, err)
+		} else if !ok {
+			t.Fatalf("%s is accessible beyond its owner", target)
+		}
 	}
 }
 

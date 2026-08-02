@@ -1,10 +1,11 @@
 package jobs
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"spettro/internal/shell/shelltest"
 )
 
 func TestJobOutputRingBuffer(t *testing.T) {
@@ -70,7 +71,7 @@ func waitDone(t *testing.T, j *Job) {
 
 func TestManagerStartAndReap(t *testing.T) {
 	m := NewManager()
-	job, err := m.Start(exec.Command("sh", "-c", "echo out; echo err >&2"), "echo test")
+	job, err := m.Start(shelltest.Command(shelltest.Join(shelltest.Echo("out"), shelltest.EchoStderr("err"))), "echo test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestManagerStartAndReap(t *testing.T) {
 
 func TestManagerKill(t *testing.T) {
 	m := NewManager()
-	job, err := m.Start(exec.Command("sleep", "30"), "sleep 30")
+	job, err := m.Start(shelltest.Command(shelltest.Sleep(30*time.Second)), "sleep 30")
 	if err != nil {
 		t.Fatal(err)
 	}

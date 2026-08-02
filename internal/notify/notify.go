@@ -17,11 +17,24 @@ import (
 func Send(title, body string) {
 	switch runtime.GOOS {
 	case "linux":
-		_ = exec.Command("notify-send", "--urgency=low", "--expire-time=5000", title, body).Start()
+		startAndReap(exec.Command("notify-send", "--urgency=low", "--expire-time=5000", title, body))
 	case "darwin":
 		script := fmt.Sprintf(`display notification %q with title %q`, body, title)
-		_ = exec.Command("osascript", "-e", script).Start()
+		startAndReap(exec.Command("osascript", "-e", script))
+	case "windows":
+		sendPlatform(title, body)
 	}
+}
+
+// startAndReap launches a notification helper without blocking the caller, and
+// waits for it on a goroutine so the finished process is released. Skipping
+// the wait would leak a zombie per notification on Unix and an open process
+// handle per notification on Windows, over a session that can run for hours.
+func startAndReap(cmd *exec.Cmd) {
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	go func() { _ = cmd.Wait() }()
 }
 
 // Notifier emits user alerts over two channels at once: an OSC 9 terminal

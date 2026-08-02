@@ -68,11 +68,16 @@ func TestMediaCaption_FormatsByTool(t *testing.T) {
 // TestMediaAbsolutePath_ResolvesRelativeAgainstCwd asserts the same path
 // rules the dispatcher uses to find generated assets on disk.
 func TestMediaAbsolutePath_ResolvesRelativeAgainstCwd(t *testing.T) {
-	cwd := "/tmp/project"
+	// Absolute-ness is platform-defined: "/abs/path" is rooted but not
+	// absolute on Windows, where a path needs a drive or UNC prefix. Build
+	// both from the same t.TempDir so the test states the rule rather than one
+	// platform's spelling of it.
+	cwd := t.TempDir()
+	absolute := filepath.Join(t.TempDir(), "abs", "path", "foo.png")
 	if got := tui.MediaAbsolutePathForTesting(cwd, "assets/foo.png"); got != filepath.Join(cwd, "assets", "foo.png") {
 		t.Fatalf("relative resolution: %q", got)
 	}
-	if got := tui.MediaAbsolutePathForTesting(cwd, "/abs/path/foo.png"); got != "/abs/path/foo.png" {
+	if got := tui.MediaAbsolutePathForTesting(cwd, absolute); got != absolute {
 		t.Fatalf("absolute path should pass through: %q", got)
 	}
 	if got := tui.MediaAbsolutePathForTesting("", "x.png"); got != "x.png" {

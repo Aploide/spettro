@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"spettro/internal/config"
+	"spettro/internal/homedir"
 	"spettro/internal/storage"
 )
 
@@ -28,7 +29,7 @@ func runClean(args []string) {
 	if err != nil {
 		fatal("cwd error: %v", err)
 	}
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		fatal("home dir error: %v", err)
 	}

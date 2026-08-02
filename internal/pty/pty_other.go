@@ -7,8 +7,12 @@ import (
 	"os/exec"
 )
 
-// Supported reports whether this platform can allocate PTYs. Windows ConPTY
-// support is a follow-up; for now the tools report unsupported.
+// Supported reports whether this platform can allocate PTYs. Windows has the
+// necessary primitive in ConPTY, but wiring it up means driving CreateProcess
+// directly — os/exec cannot pass the process attribute list a pseudoconsole is
+// attached through — and therefore re-implementing sandbox token handling and
+// stdio plumbing by hand. Until that is done and proven, the pty tools report
+// unsupported here rather than offering a session that half works.
 func Supported() bool { return false }
 
 func (m *Manager) Start(cmd *exec.Cmd, command string, cols, rows uint16) (*Session, error) {

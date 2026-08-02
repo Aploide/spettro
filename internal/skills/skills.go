@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"spettro/internal/homedir"
 )
 
 // SkillFilename is the canonical name of the skill manifest file.
@@ -110,7 +112,7 @@ func SearchRoots(cwd string, opts LookupOptions) []Root {
 		)
 	}
 	if opts.IncludeUser {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := homedir.Dir(); err == nil {
 			roots = append(roots,
 				Root{Path: filepath.Join(home, ".spettro", "skills"), Source: SourceSpettro, Scope: ScopeUser},
 				Root{Path: filepath.Join(home, ".agents", "skills"), Source: SourceAgents, Scope: ScopeUser},

@@ -3,11 +3,13 @@ package agent
 import (
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
 
 	"spettro/internal/provider"
+	"spettro/internal/shell"
 	"spettro/internal/skills"
 )
 
@@ -153,7 +155,29 @@ func buildInitialUserMessage(cfg toolLoopConfig) string {
 	}
 	sb.WriteString("\n\nWorking directory:\n")
 	sb.WriteString(cfg.CWD)
+	sb.WriteString("\n\nEnvironment:\n")
+	sb.WriteString(environmentBrief())
 	return sb.String()
+}
+
+// environmentBrief tells the model which OS and shell dialect its command
+// lines will actually be executed by. Without it the model defaults to POSIX
+// pipelines everywhere, which on a PowerShell host fail in confusing ways
+// (`2>/dev/null` redirects to a file named "null", `&&` is a parse error).
+func environmentBrief() string {
+	lines := []string{
+		"- OS: " + runtime.GOOS + "/" + runtime.GOARCH,
+		"- Shell for shell-exec/bash tools: " + shell.Describe(),
+		"- Path separator: " + string(filepath.Separator),
+	}
+	if shell.Dialect() == shell.KindPowerShell {
+		lines = append(lines,
+			"- Write PowerShell, not POSIX sh: no `&&`/`||` chaining in Windows PowerShell 5.1 (use `;` or separate calls),",
+			"  redirect with `2>$null` not `2>/dev/null`, and prefer cmdlets (Get-ChildItem, Select-String) over ls/grep.",
+			"- Native exit codes are propagated, so a failing command still reports failure.",
+		)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // buildTurnUserMessage returns the user turn appended when a structured prior

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"spettro/internal/homedir"
 )
 
 // Candidate is a drafted memory entry awaiting user review. Nothing in the
@@ -36,7 +38,7 @@ type Inbox struct {
 // Candidates from every project share one inbox; project-scope candidates
 // carry their ProjectPath.
 func DefaultInbox() Inbox {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return Inbox{}
 	}

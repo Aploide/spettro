@@ -11,11 +11,28 @@ Spettro is a terminal-first multi-agent coding assistant written in Go.
 
 # Quick install
 
+macOS and Linux:
+
 ```bash
 curl -sSfL https://raw.githubusercontent.com/aploide/spettro/main/install.sh | sh
 ```
 
 Installs to `~/.local/bin` by default (no `sudo` needed); set `INSTALL_DIR` to override. Self-updates (`/update` in the TUI, or the built-in update check) write in place to that same directory, so they never need `sudo` either.
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/aploide/spettro/main/install.ps1 | iex
+```
+
+Installs to `%LOCALAPPDATA%\Programs\spettro` and adds it to your user `PATH` — no elevation, so `/update` works in place too. See [`docs/windows.md`](docs/windows.md) for what differs on Windows.
+
+The piped form above takes no arguments. To pass `-InstallDir` (install elsewhere), `-Version` (pin a release) or `-NoPathUpdate` (leave `PATH` alone), download the script and run it:
+
+```powershell
+irm https://raw.githubusercontent.com/aploide/spettro/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -InstallDir D:\tools\spettro -Version v1.2.3 -NoPathUpdate
+```
 
 It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via native tool calls and an `agent` tool, plus specialized orchestrator/worker roles (plan, coding, ask, explore, code, git, test, review, docs).
 
@@ -118,6 +135,7 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 - [Custom slash commands](docs/custom-commands.md) — save reusable prompts as your own `/commands`
 - [Configuration and storage](docs/configuration.md)
 - [OS sandboxing](docs/sandbox.md)
+- [Windows notes](docs/windows.md) — install, shell, sandbox and PTY differences
 - [Architecture overview](docs/architecture.md)
 - [Remote control plane](docs/remote.md)
 - [Agent Client Protocol (editor integration)](docs/acp.md)

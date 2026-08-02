@@ -58,13 +58,23 @@ func confineParent(writableRoots []string) error {
 // confinement: user data and secrets live here. System paths stay readable.
 var darwinHomeRoots = []string{"/Users", "/home"}
 
+// writableTempDirs lists the scratch roots a confined child may write to.
+// TMPDIR is a per-user folder on macOS, and /tmp is the symlink to
+// /private/tmp that seatbelt matches on its resolved spelling.
+func writableTempDirs() []string {
+	dirs := []string{"/tmp", "/private/tmp"}
+	if td := os.TempDir(); td != "" {
+		dirs = append(dirs, td)
+	}
+	return dirs
+}
+
 func wrap(ctx context.Context, p Policy, workspaceDir, name string, args ...string) *exec.Cmd {
-	profile := seatbeltProfile(p, workspaceDir, []string{
-		os.TempDir(),
-		"/private/tmp",
+	profile := seatbeltProfile(p, workspaceDir, append(
+		writableTempDirs(),
 		"/private/var/folders",
 		"/dev",
-	}, darwinHomeRoots)
+	), darwinHomeRoots)
 	full := append([]string{"-p", profile, name}, args...)
 	return exec.CommandContext(ctx, "sandbox-exec", full...)
 }

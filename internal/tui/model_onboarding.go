@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"spettro/internal/config"
+	"spettro/internal/homedir"
 	"spettro/internal/provider"
 	"spettro/internal/spettro"
 )
@@ -327,7 +327,7 @@ func (m Model) viewOnboardingKeyEntry() string {
 	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
 	inputLine := promptStyle.Render(">") + " " + m.ta.View()
 
-	home, _ := os.UserHomeDir()
+	home, _ := homedir.Dir()
 	keysPath := filepath.Join(home, ".spettro", "keys.enc")
 
 	var lines []string
@@ -387,7 +387,7 @@ func (m Model) viewOnboardingVerifying() string {
 		lipgloss.NewStyle().Foreground(mc).Render("▌")
 	spinLine := lipgloss.NewStyle().Foreground(mc).Render(spinFrame+" ") + barStr
 
-	home, _ := os.UserHomeDir()
+	home, _ := homedir.Dir()
 	keysPath := filepath.Join(home, ".spettro", "keys.enc")
 
 	var lines []string

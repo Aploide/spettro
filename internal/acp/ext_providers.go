@@ -155,8 +155,8 @@ type ConnectProviderParams struct {
 
 // ConnectProviderResult reports the outcome of a connect attempt.
 type ConnectProviderResult struct {
-	Connected  bool   `json:"connected"`
-	ModelCount int    `json:"modelCount"`
+	Connected  bool `json:"connected"`
+	ModelCount int  `json:"modelCount"`
 	// ActiveModel is set when Activate was requested and a model was chosen.
 	ActiveModel string `json:"activeModel,omitempty"`
 }

@@ -175,7 +175,10 @@ func TestHandleCommand_SkillWhereLists8Roots(t *testing.T) {
 		t.Fatal("expected /skill where to produce a system message")
 	}
 	last := msgs[len(msgs)-1].Content
-	for _, fragment := range []string{".spettro/skills", ".agents/skills", ".claude/skills", ".openai/skills"} {
+	// The listing shows real filesystem paths, so the separator is the
+	// platform's; compare against the joined spelling rather than a literal.
+	for _, dir := range []string{".spettro", ".agents", ".claude", ".openai"} {
+		fragment := filepath.Join(dir, "skills")
 		if !strings.Contains(last, fragment) {
 			t.Errorf("expected /skill where output to contain %q, got %q", fragment, last)
 		}

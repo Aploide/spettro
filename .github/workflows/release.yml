@@ -23,6 +23,10 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -40,18 +44,31 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           ARCHIVE_NAME="spettro_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          # Windows ships spettro.exe in a .zip: Windows has no bundled
+          # tar-aware unpacker for a hand-download, and internal/update picks
+          # its unpacker from the same per-OS convention.
+          BINARY=spettro
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY=spettro.exe
+          fi
           go build \
             -trimpath \
             -ldflags="-s -w -X spettro/internal/version.App=${VERSION}" \
-            -o spettro \
+            -o "${BINARY}" \
             ./cmd/spettro
-          tar -czf "${ARCHIVE_NAME}.tar.gz" spettro
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -q "${ARCHIVE_NAME}.zip" "${BINARY}"
+          else
+            tar -czf "${ARCHIVE_NAME}.tar.gz" "${BINARY}"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: spettro_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: "*.tar.gz"
+          path: |
+            *.tar.gz
+            *.zip
           retention-days: 1
 
   release:
@@ -66,7 +83,9 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > checksums.txt
+        # Both archive kinds go in one checksums.txt: install.sh, install.ps1
+        # and internal/update all look their own asset up by name.
+        run: sha256sum *.tar.gz *.zip > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -74,4 +93,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/checksums.txt

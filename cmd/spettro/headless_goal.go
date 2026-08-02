@@ -13,6 +13,7 @@ import (
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/jobs"
+	"spettro/internal/lsp"
 	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/pty"
@@ -33,6 +34,8 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	defer jobs.Default().KillAll()
 	defer pty.Default().KillAll()
 	defer jobs.Spool().Cleanup()
+	// Language servers keep workspace files open for as long as they run.
+	defer lsp.ShutdownAll()
 
 	store, err := storage.New(cwd)
 	if err != nil {

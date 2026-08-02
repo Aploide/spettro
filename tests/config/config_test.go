@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"spettro/internal/config"
+	"spettro/internal/fsperm"
 )
 
 func TestLoadOrCreateRoundTrip(t *testing.T) {
@@ -60,12 +61,13 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 	}
 
 	p := filepath.Join(tmpHome, ".spettro", "config.json")
-	info, err := os.Stat(p)
-	if err != nil {
+	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("stat config: %v", err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("expected private permissions, got %o", info.Mode().Perm())
+	if ok, err := fsperm.IsOwnerOnly(p); err != nil {
+		t.Fatalf("check config permissions: %v", err)
+	} else if !ok {
+		t.Fatal("config.json is accessible beyond its owner")
 	}
 
 	raw, err := os.ReadFile(p)

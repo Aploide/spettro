@@ -61,7 +61,6 @@ package sandbox
 
 import (
 	"context"
-	"os"
 	"os/exec"
 )
 
@@ -95,6 +94,13 @@ func Command(ctx context.Context, p Policy, workspaceDir, name string, args ...s
 	return exec.CommandContext(ctx, name, args...)
 }
 
+// WritableTempDirs returns the scratch roots a sandboxed child may write to on
+// this platform. The in-process file tools pass it to Policy.WritablePath so
+// they allow exactly what the kernel layer allows: on Windows the child's TEMP
+// is redirected to a spettro-owned directory, so os.TempDir() would be the
+// wrong answer on both counts — denied for the shell, allowed for the tools.
+func WritableTempDirs() []string { return writableTempDirs() }
+
 // ConfineParent applies a write-confinement backstop to the spettro process
 // itself: the parent (and the in-process file tools it runs) may write only
 // under writableRoots plus the system temp dirs; reads and network stay open.
@@ -125,7 +131,8 @@ func parentWritableRoots(writableRoots []string) []string {
 	for _, d := range writableRoots {
 		add(d)
 	}
-	add(os.TempDir())
-	add("/tmp")
+	for _, d := range writableTempDirs() {
+		add(d)
+	}
 	return out
 }

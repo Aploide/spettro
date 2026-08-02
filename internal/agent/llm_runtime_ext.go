@@ -19,6 +19,8 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/mcp"
+	"spettro/internal/safeio"
+	"spettro/internal/sandbox"
 	"spettro/internal/session"
 )
 
@@ -1077,7 +1079,7 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return safeio.Replace(tmp, path)
 }
 
 // authorizeWriteAccess gates file-write/file-edit on the tool's approval
@@ -1094,7 +1096,7 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath,
 	// deliberately generic so it reads as an ordinary filesystem denial.
 	if pol := r.sandboxPolicy(); pol.FSEnforced() {
 		abs := filepath.Join(r.cwd, filepath.FromSlash(relPath))
-		if !pol.WritablePath(abs, r.cwd, []string{os.TempDir()}) {
+		if !pol.WritablePath(abs, r.cwd, sandbox.WritableTempDirs()) {
 			return fmt.Errorf("%s: %s is not writable", toolID, relPath)
 		}
 	}

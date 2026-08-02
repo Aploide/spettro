@@ -16,6 +16,10 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/scrypt"
+
+	"spettro/internal/fsperm"
+	"spettro/internal/homedir"
+	"spettro/internal/safeio"
 )
 
 type encryptedSecrets struct {
@@ -46,7 +50,7 @@ func secretsIdentity() (username, home string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("resolve current user: %w", err)
 	}
-	home, err = os.UserHomeDir()
+	home, err = homedir.Dir()
 	if err != nil {
 		return "", "", fmt.Errorf("resolve home dir: %w", err)
 	}
@@ -187,7 +191,7 @@ func saveAPIKeys(keys map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(p)); err != nil {
 		return fmt.Errorf("create global config dir: %w", err)
 	}
 
@@ -231,7 +235,7 @@ func saveAPIKeys(keys map[string]string) error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write encrypted keys temp: %w", err)
 	}
-	return os.Rename(tmp, p)
+	return safeio.Replace(tmp, p)
 }
 
 func deriveKey(salt []byte) ([]byte, error) {
@@ -268,7 +272,7 @@ func machineSecret() (string, error) {
 		return "", fmt.Errorf("generate master key: %w", err)
 	}
 	secret := base64.StdEncoding.EncodeToString(raw)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(p)); err != nil {
 		return "", fmt.Errorf("create global config dir: %w", err)
 	}
 	if err := os.WriteFile(p, []byte(secret), 0o600); err != nil {

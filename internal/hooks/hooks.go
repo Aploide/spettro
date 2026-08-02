@@ -13,6 +13,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"spettro/internal/homedir"
+	"spettro/internal/shell"
 )
 
 type Event string
@@ -156,7 +159,8 @@ func Run(ctx context.Context, rule EffectiveRule, input RunInput) (RunResult, er
 	defer cancel()
 
 	raw, _ := json.Marshal(input)
-	cmd := exec.CommandContext(runCtx, "bash", "-lc", rule.Command)
+	hookShell, hookArgs := shell.CommandLine(rule.Command)
+	cmd := exec.CommandContext(runCtx, hookShell, hookArgs...)
 	cmd.Stdin = bytes.NewReader(raw)
 	cmd.Env = append(os.Environ(),
 		"SPETTRO_HOOK_EVENT="+string(input.Event),
@@ -246,7 +250,7 @@ func mergeKey(r EffectiveRule) string {
 }
 
 func globalHooksPath() (string, error) {
-	h, err := os.UserHomeDir()
+	h, err := homedir.Dir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home: %w", err)
 	}

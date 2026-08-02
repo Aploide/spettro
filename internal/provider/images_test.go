@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
-"spettro/internal/models"
+	"spettro/internal/models"
 )
 
 func writeTestImage(t *testing.T) string {

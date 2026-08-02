@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"spettro/internal/fsperm"
+	"spettro/internal/homedir"
 )
 
 type Store struct {
@@ -12,7 +15,7 @@ type Store struct {
 }
 
 func New(cwd string) (*Store, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
@@ -31,7 +34,7 @@ func (s *Store) Ensure() error {
 	if err := os.MkdirAll(s.ProjectDir, 0o755); err != nil {
 		return fmt.Errorf("create project storage dir: %w", err)
 	}
-	if err := os.MkdirAll(s.GlobalDir, 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(s.GlobalDir); err != nil {
 		return fmt.Errorf("create global storage dir: %w", err)
 	}
 	return nil

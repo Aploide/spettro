@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"spettro/internal/fsperm"
+	"spettro/internal/safeio"
 )
 
 // maxFileResourceBytes bounds how much a single file-type MCP resource read may
@@ -100,7 +103,7 @@ func SaveAuth(cwd string, state AuthState) error {
 	path := authPath(cwd)
 	// The auth file holds bearer tokens, so keep its directory owner-only
 	// (0o700) like the other ~/.spettro secret stores.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := fsperm.SecureMkdirAll(filepath.Dir(path)); err != nil {
 		return err
 	}
 
@@ -127,7 +130,7 @@ func SaveAuth(cwd string, state AuthState) error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return safeio.Replace(tmp, path)
 }
 
 func LoadAuth(cwd string, serverID string) (AuthState, bool, error) {

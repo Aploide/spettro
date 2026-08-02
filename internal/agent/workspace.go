@@ -56,7 +56,8 @@ type workspaceMerge struct {
 // workspaceGit runs git with user hooks and commit signing disabled so local
 // configuration cannot break or intercept the automated workspace lifecycle.
 func workspaceGit(ctx context.Context, dir string, args ...string) (string, error) {
-	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"}
+	// os.DevNull, not a literal: the empty-file spelling is NUL on Windows.
+	base := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "commit.gpgsign=false"}
 	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -159,13 +160,28 @@ func newAgentWorkspace(ctx context.Context, cwd, name string) (*agentWorkspace, 
 	}
 	// Preserve the parent's position inside the repo: an agent delegated from
 	// <root>/pkg/api should start in <worktree>/pkg/api, not the tree root.
+	// cwd is resolved first because git reports the toplevel with symlinks
+	// already resolved (/private/var/... for a cwd under /var/... on macOS);
+	// comparing the two raw would make every path look like an escape and
+	// silently drop the subagent at the tree root.
 	w.subCWD = w.path
-	if rel, err := filepath.Rel(root, cwd); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+	realCWD, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		realCWD = filepath.Clean(cwd)
+	}
+	if rel, err := filepath.Rel(root, realCWD); err == nil && !pathEscapesWS(rel) {
 		if sub := filepath.Join(w.path, rel); dirExistsWS(sub) {
 			w.subCWD = sub
 		}
 	}
 	return w, nil
+}
+
+// pathEscapesWS reports whether a relative path leaves its base, or is the
+// base itself. A plain strings.HasPrefix(rel, "..") would also reject a real
+// directory named "..foo", so the separator is part of the test.
+func pathEscapesWS(rel string) bool {
+	return rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func dirExistsWS(path string) bool {

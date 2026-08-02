@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Diagnostic is the subset of the LSP diagnostic payload the agent needs.
@@ -180,7 +181,10 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 	return c, nil
 }
 
-// Close terminates the server process. Safe to call multiple times.
+// Close terminates the server process. Safe to call multiple times. It waits
+// (briefly) for the process to actually exit: on Windows a live server keeps
+// handles on workspace files, so anything that deletes or replaces them right
+// after a restart fails while the old process lingers.
 func (c *Client) Close() {
 	select {
 	case <-c.closed:
@@ -190,6 +194,10 @@ func (c *Client) Close() {
 	_ = c.stdin.Close()
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
+	}
+	select {
+	case <-c.closed:
+	case <-time.After(5 * time.Second):
 	}
 }
 

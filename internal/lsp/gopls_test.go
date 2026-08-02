@@ -43,6 +43,9 @@ func TestGoplsDiagnosticsAndReferences(t *testing.T) {
 	if m == nil {
 		t.Fatal("manager not created despite config")
 	}
+	// gopls holds the workspace open; on Windows TempDir cleanup fails if it
+	// is still running.
+	t.Cleanup(m.Shutdown)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
