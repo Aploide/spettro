@@ -102,6 +102,21 @@ func Exit(code int) string {
 	return fmt.Sprintf("exit %d", code)
 }
 
+// Exec is a command line that runs the program at path with args, quoted for
+// the host dialect. PowerShell needs the call operator: a quoted path on its
+// own is an expression, and the shell would echo it instead of running it.
+func Exec(path string, args ...string) string {
+	quote, parts := shQuote, []string{}
+	if shell.Dialect() == shell.KindPowerShell {
+		quote, parts = psQuote, []string{"&"}
+	}
+	parts = append(parts, quote(path))
+	for _, a := range args {
+		parts = append(parts, quote(a))
+	}
+	return strings.Join(parts, " ")
+}
+
 // Repeat is a command line that runs body for each integer in [1,n], pausing
 // by gap between iterations. Body is produced by fn, which receives the
 // interpreter's expression for the loop variable.
