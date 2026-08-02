@@ -3,6 +3,7 @@ package fsperm_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"spettro/internal/fsperm"
@@ -62,6 +63,13 @@ func TestWideOpenPathIsNotOwnerOnly(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0o666); err != nil {
 		t.Fatal(err)
 	}
+	// Chmod rather than rely on the creation mode: a restrictive umask would
+	// strip the group and other bits and leave nothing for IsOwnerOnly to
+	// report on, making this test pass or fail on the ambient umask instead of
+	// on the behaviour it is meant to pin down.
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
 	ok, err := fsperm.IsOwnerOnly(path)
 	if err != nil {
 		t.Fatalf("IsOwnerOnly: %v", err)
@@ -71,10 +79,17 @@ func TestWideOpenPathIsNotOwnerOnly(t *testing.T) {
 	}
 }
 
-// Restricting the directory rather than every individual write is only sound
-// if files created inside it come out owner-only on their own. That property
-// is what the secrets stores rely on, so assert it directly.
-func TestFilesCreatedInSecureDirInheritOwnerOnly(t *testing.T) {
+// Securing the directory rather than every individual write is what keeps the
+// secrets stores tractable, but the two platforms buy that with different
+// mechanisms and only one of them touches the file itself. On Windows the
+// directory's DACL is inheritable, so a file created inside starts out
+// owner-only on its own. Unix has no such inheritance — a new file's mode comes
+// from its creation mode and the process umask — so what protects a secret
+// there is that no other account can traverse a 0700 directory to reach it;
+// the write sites additionally pass 0600 themselves. Assert the guarantee the
+// host actually makes, since asserting the Windows one everywhere just made
+// the result depend on the umask the suite happened to run under.
+func TestSecureDirProtectsFilesCreatedInside(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), ".spettro")
 	if err := fsperm.SecureMkdirAll(dir); err != nil {
 		t.Fatalf("SecureMkdirAll: %v", err)
@@ -84,12 +99,16 @@ func TestFilesCreatedInSecureDirInheritOwnerOnly(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("token"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	ok, err := fsperm.IsOwnerOnly(secret)
+	guarded, what := dir, "the directory holding a secret is reachable by others"
+	if runtime.GOOS == "windows" {
+		guarded, what = secret, "a file created inside a secured directory is readable by others"
+	}
+	ok, err := fsperm.IsOwnerOnly(guarded)
 	if err != nil {
 		t.Fatalf("IsOwnerOnly: %v", err)
 	}
 	if !ok {
-		t.Error("a file created inside a secured directory is readable by others")
+		t.Error(what)
 	}
 }
 

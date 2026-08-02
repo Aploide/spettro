@@ -72,8 +72,7 @@ func resolve() resolved {
 // its file name, so both "pwsh" and "C:\Program Files\PowerShell\7\pwsh.exe"
 // are understood.
 func classify(spec string) resolved {
-	base := strings.ToLower(filepath.Base(spec))
-	base = strings.TrimSuffix(base, filepath.Ext(base))
+	base := baseName(spec)
 	switch base {
 	case "pwsh", "powershell":
 		return resolved{path: spec, name: base, kind: KindPowerShell}
@@ -82,6 +81,20 @@ func classify(spec string) resolved {
 	default:
 		return resolved{path: spec, name: base, kind: KindPOSIX}
 	}
+}
+
+// baseName reduces an interpreter spec to its bare, lower-cased name.
+// filepath.Base alone is not enough: it only honours the separator of the
+// platform it was compiled for, so on a Unix build a Windows spec like
+// `C:\Program Files\PowerShell\7\pwsh.exe` would come back whole and classify
+// as a POSIX shell. Both separators are always recognised, which keeps
+// classification a property of the spec instead of the host reading it.
+func baseName(spec string) string {
+	if i := strings.LastIndexAny(spec, `/\`); i >= 0 {
+		spec = spec[i+1:]
+	}
+	spec = strings.ToLower(spec)
+	return strings.TrimSuffix(spec, filepath.Ext(spec))
 }
 
 // Dialect reports the dialect command lines must be written in on this host.
