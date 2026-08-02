@@ -142,7 +142,7 @@ func ManyLines(prefix string, n int) string {
 // dialects.
 func Join(cmdlines ...string) string { return strings.Join(cmdlines, "\n") }
 
-// psQuote renders s as a PowerShell single-quoted literal, where '' is the
+// psQuote renders s as a PowerShell single-quoted literal, where ” is the
 // only escape.
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 

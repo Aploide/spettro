@@ -237,4 +237,3 @@ func writeExtracted(src io.Reader, dir string) (string, error) {
 	out.Close()
 	return out.Name(), nil
 }
-
