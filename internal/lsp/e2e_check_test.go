@@ -22,6 +22,9 @@ func TestZeroConfigClangd(t *testing.T) {
 	if m == nil {
 		t.Fatal("expected auto-detected manager with zero config")
 	}
+	// clangd keeps handles on the workspace (its .cache/clangd index), which
+	// makes the TempDir cleanup fail on Windows unless it is gone first.
+	t.Cleanup(m.Shutdown)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := m.DiagnosticsForFile(ctx, dir+"/bad.c")

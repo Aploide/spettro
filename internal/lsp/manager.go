@@ -567,6 +567,25 @@ func (m *Manager) Restart(name string) string {
 	return fmt.Sprintf("restarted lsp server(s): %s (respawn on next use)", strings.Join(stopped, ", "))
 }
 
+// Shutdown stops every server owned by this workspace and drops the manager
+// from the registry, releasing the workspace files the servers hold open. A
+// later ForWorkspace(root) builds a fresh manager.
+func (m *Manager) Shutdown() {
+	m.mu.Lock()
+	for key, c := range m.clients {
+		c.Close()
+		delete(m.clients, key)
+	}
+	root := m.root
+	m.mu.Unlock()
+
+	regMu.Lock()
+	if reg, ok := registry[root]; ok && reg == m {
+		delete(registry, root)
+	}
+	regMu.Unlock()
+}
+
 // ServerKeys lists configured servers for error messages / discoverability.
 func (m *Manager) ServerKeys() []string {
 	m.mu.Lock()
