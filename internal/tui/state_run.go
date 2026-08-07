@@ -45,6 +45,10 @@ func (m *Model) stopAgent() {
 		m.goalResumeAfterCompact = false
 		m.pushSystemMsg("goal abandoned by user")
 	}
+	if m.activeLoop != nil {
+		m.activeLoop = nil // Clear loop on user interrupt (stop/Esc)
+		m.pushSystemMsg("loop stopped by user interrupt")
+	}
 }
 
 func (m *Model) pushSystemMsg(content string) {

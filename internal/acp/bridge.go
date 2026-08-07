@@ -75,6 +75,9 @@ type acpSession struct {
 	// lastGoal is the outcome summary of the most recent /goal run, surfaced
 	// by /goal status.
 	lastGoal string
+	// lastLoop is the outcome summary of the most recent /loop run, surfaced
+	// by /loop status.
+	lastLoop string
 	// running / runCancel track the in-flight prompt turn. The agent runs
 	// under a session-owned context detached from the SDK's request context
 	// (the SDK cancels that as soon as ANY new prompt arrives for the
@@ -390,6 +393,32 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			turn.ctx = runCtx
 			b.ensureContextHeadroom(runCtx, s, &cfg, turn)
 			return b.runGoalCommand(runCtx, s, &cfg, turn, trimmedTask)
+		} else if fields[0] == "/loop" {
+			if strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/loop")) == "stop" {
+				// /loop stop while a loop turn is running: cancel that run.
+				b.mu.Lock()
+				cancel := s.runCancel
+				b.mu.Unlock()
+				if cancel != nil {
+					cancel()
+					_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+						SessionId: params.SessionId,
+						Update:    acpsdk.UpdateAgentMessageText("loop stopped"),
+					})
+					return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+				}
+			}
+			runCtx, finish, ok := b.beginRun(ctx, s)
+			if !ok {
+				// A loop/run is already in flight: treat "/loop <text>" sent
+				// mid-turn as steering for it (minus the command prefix).
+				return b.steerRunningTurn(ctx, s, params.SessionId,
+					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/loop")))
+			}
+			defer finish()
+			turn.ctx = runCtx
+			b.ensureContextHeadroom(runCtx, s, &cfg, turn)
+			return b.runLoopCommand(runCtx, s, &cfg, turn, trimmedTask)
 		}
 		if fields := strings.Fields(trimmedTask); fields[0] == "/compact" {
 			return b.handleCompactCommand(ctx, s, &cfg, turn, trimmedTask)

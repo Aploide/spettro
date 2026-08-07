@@ -339,6 +339,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+	case loopTickMsg:
+		return m.handleLoopTick(msg)
 	case agentTickMsg:
 		m.tickCount++
 		for _, a := range m.parallelAgents {

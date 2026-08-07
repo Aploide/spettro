@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -102,13 +103,37 @@ type Client struct {
 	closeErr error
 }
 
+// fileURI converts an absolute path into a file:// URI. Windows drive paths
+// need a leading slash (file:///C:/x — file://C:/x would make the drive the
+// URI authority, i.e. a UNC host, which servers then resolve as a network
+// path) and a canonical uppercase drive letter so URIs built here compare
+// equal to server-published URIs after canonicalization.
 func fileURI(path string) string {
-	return "file://" + filepath.ToSlash(path)
+	p := filepath.ToSlash(path)
+	if len(p) >= 2 && p[1] == ':' && isDriveLetter(p[0]) {
+		p = "/" + strings.ToUpper(p[:1]) + p[1:]
+	}
+	return "file://" + p
 }
 
+// uriToPath is the inverse of fileURI, tolerant of the variants servers emit
+// for the same file: percent-encoding (file:///c%3A/x) and lowercase drive
+// letters (clangd lowercases them).
 func uriToPath(uri string) string {
 	p := strings.TrimPrefix(uri, "file://")
+	if strings.Contains(p, "%") {
+		if dec, err := url.PathUnescape(p); err == nil {
+			p = dec
+		}
+	}
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' && isDriveLetter(p[1]) {
+		p = strings.ToUpper(p[1:2]) + p[2:]
+	}
 	return filepath.FromSlash(p)
+}
+
+func isDriveLetter(c byte) bool {
+	return ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z')
 }
 
 // startClient spawns the server process, wires the reader loop, and completes
@@ -279,9 +304,13 @@ func (c *Client) dispatch(msg rpcMessage) {
 		if json.Unmarshal(msg.Params, &params) != nil {
 			return
 		}
+		// Canonicalize: servers echo their own URI form (percent-encoded or
+		// lowercase drive on Windows), which must land under the same key the
+		// syncFile URI uses or waitDiagnostics never sees the publish.
+		uri := fileURI(uriToPath(params.URI))
 		c.diagMu.Lock()
-		c.diags[params.URI] = params.Diagnostics
-		c.diagGen[params.URI]++
+		c.diags[uri] = params.Diagnostics
+		c.diagGen[uri]++
 		c.diagMu.Unlock()
 		c.diagCond.Broadcast()
 	case msg.Method != "":

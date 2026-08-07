@@ -764,6 +764,14 @@ func (m Model) statusBarMessage() string {
 		}
 		return styleSuccess.Render(fmt.Sprintf("◈ %s · %s · %s · %s", obj, progress, elapsed, state))
 	}
+	if l := m.activeLoop; l != nil {
+		state := fmt.Sprintf("next in %s", max(time.Until(l.NextAt).Round(time.Second), 0))
+		if m.thinking {
+			state = "running"
+		}
+		return styleSuccess.Render(fmt.Sprintf("↻ %s · every %s · iter %d · %s",
+			truncateLabel(l.Prompt, 40), l.Interval, l.Iteration, state))
+	}
 	if m.thinking {
 		return styleMuted.Render(m.runTicker())
 	}

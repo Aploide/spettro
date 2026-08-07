@@ -35,6 +35,9 @@ var allCommands = []commandDef{
 	{"/memory curate", "LLM pass over saved memory: propose merges, rewrites, deletions for review"},
 	{"/plan", "switch plan mode or run plan task"},
 	{"/goal", "run autonomously until an objective is met (no step/token limits)"},
+	{"/loop", "run a prompt or command on a recurring interval  usage: /loop <time> <prompt>"},
+	{"/loop stop", "stop the active loop"},
+	{"/loop status", "show the active loop's schedule and iterations"},
 	{"/permissions", "show/set permission level"},
 	{"/remote", "start loopback HTTP control plane on 127.0.0.1 (optional :PORT)"},
 	{"/remote local", "start LAN HTTP control plane on 0.0.0.0 (optional :PORT)"},
@@ -98,7 +101,7 @@ var thinkCommands = []commandDef{
 // completion menu always opens the second-level selector instead of running.
 func requiresParam(cmd string) bool {
 	switch strings.ToLower(strings.TrimSpace(cmd)) {
-	case "/think", "/thinking", "/permission", "/permissions":
+	case "/think", "/thinking", "/permission", "/permissions", "/loop":
 		return true
 	case "/jobs kill":
 		// Needs a job ID (or "all"); executing bare would just error.
@@ -225,6 +228,13 @@ func isInstantCommand(input string) bool {
 			return sub == "stop" || sub == "status"
 		}
 		return false
+	case "/loop":
+		// /loop stop and /loop status are instant; /loop <t> <p> starts a run.
+		if len(fields) == 2 {
+			sub := strings.ToLower(fields[1])
+			return sub == "stop" || sub == "status"
+		}
+		return false
 	case "/compact":
 		// /compact auto <...> and /compact policy only read or toggle config.
 		// /compact (no args) and /compact <focus> trigger an LLM compaction run.
@@ -258,6 +268,9 @@ const helpText = `commands:
   /goal <obj>   run autonomously until the objective is met
   /goal stop    abandon the active goal
   /goal status  show goal iteration / progress / elapsed
+  /loop <t> <p> run a prompt or command every <t> (e.g. /loop 5m check CI)
+  /loop stop    stop the recurring loop
+  /loop status  show loop schedule, iterations, next run
   /tasks         manage tasks (list/add/done/set/show)
   /mcp           manage MCP resources (list/read/auth)
   /skill         manage Agent Skills (list/install/uninstall/info/enable/disable)

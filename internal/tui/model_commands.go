@@ -222,6 +222,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handlePlanCommand(input)
 	case "/goal":
 		return m.handleGoalCommand(input)
+	case "/loop":
+		return m.handleLoopCommand(input)
 	case "/permissions":
 		return m.handlePermissionsCommand(input)
 	case "/rewind":

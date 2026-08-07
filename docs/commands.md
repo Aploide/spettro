@@ -16,6 +16,9 @@
 | `/goal stop` | Abandon the active goal and cancel any in-flight run. |
 | `/goal status` | Show the current goal's iteration count, no-progress counter, and elapsed time. |
 | `/goal resume` | Resume an unfinished goal from a loaded session. |
+| `/loop <time> <prompt>` | Run a prompt (or slash command) on a recurring interval, e.g. `/loop 5m check CI status` or `/loop 30m /compact`. Intervals use duration syntax (`30s`, `5m`, `1h30m`, minimum `10s`); the first run fires immediately. A firing that lands while a run is still in progress is skipped, not queued. |
+| `/loop stop` | Stop the recurring loop (an in-flight iteration keeps running; `Esc` interrupts it). |
+| `/loop status` | Show the active loop's prompt, interval, iteration count, and next firing. |
 | `/permission <ask-first\|restricted\|yolo>` | Set execution policy. |
 | `/permissions [ask-first\|restricted\|yolo]` | Show or set policy alias. |
 | `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
@@ -94,7 +97,7 @@
 | `Ctrl+T` | Toggle text-select mode (mouse capture on/off). |
 | `Up` / `Down` | Navigate command suggestions and dialogs. |
 | `Tab` | Move selection in dialogs/palettes. |
-| `Esc` | Interrupt the current agent run (stops and abandons goals). |
+| `Esc` | Interrupt the current agent run (stops and abandons goals and loops). |
 | `Esc Esc` | Open the rewind checkpoint picker (when idle). See [Checkpointing](checkpointing.md). |
 
 ## Notes
