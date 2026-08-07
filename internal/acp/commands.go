@@ -30,6 +30,7 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "budget", Description: "set token budget per request", Input: hintInput("<n|0>")},
 	{Name: "thinking", Description: "set extended-thinking level", Input: hintInput("off|low|medium|high|x-high|max")},
 	{Name: "goal", Description: "work autonomously toward an objective", Input: hintInput("<objective> | status")},
+	{Name: "loop", Description: "run a prompt on a recurring interval", Input: hintInput("<interval> <prompt> | stop | status")},
 	{Name: "memory", Description: "show, add to, or clear persistent memory", Input: hintInput("[show | add [user|project] <fact> | clear [user|project|all]]")},
 	{Name: "compact", Description: "summarize older history to free context", Input: hintInput("[auto <status|on|off>]")},
 	{Name: "clear", Description: "clear conversation history"},
@@ -316,6 +317,7 @@ const acpHelpText = `commands:
   /budget [n|0]         set token budget per request (0 = unlimited)
   /think <level>        set extended-thinking level (off|low|medium|high|x-high|max)
   /goal <objective>     work autonomously until the objective is met (/goal status)
+  /loop <t> <prompt>    run a prompt every <t> until stopped (/loop stop | status)
   /memory [show]        show persistent memory (user + project)
   /memory add [user|project] <fact>   save one fact to persistent memory
   /memory clear [user|project|all]    erase saved memory

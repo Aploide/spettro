@@ -546,6 +546,15 @@ type Model struct {
 	// flight during a goal run. The compactDoneMsg handler checks it to resume
 	// the goal loop after a successful compaction.
 	goalResumeAfterCompact bool
+
+	// activeLoop is non-nil while a /loop schedule is active. The loop persists
+	// across agent runs (resetRunState does NOT clear it); it is cleared by
+	// /loop stop or a user interrupt of an in-flight run.
+	activeLoop *loopState
+
+	// loopSeq numbers loops so timer ticks scheduled by a stopped or replaced
+	// loop can be recognized and dropped.
+	loopSeq int
 }
 
 func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState) Model {

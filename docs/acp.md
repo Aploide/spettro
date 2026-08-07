@@ -94,7 +94,7 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   the client as a structured payload; see [Agent questions](#agent-questions)
   below for the transports, the payload, and the answer shape.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
-  `/thinking`, `/goal`, `/memory`, `/compact`, and `/clear` are advertised to
+  `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, and `/clear` are advertised to
   the client (`available_commands_update`). Config commands resolve in one
   turn without invoking the model; `/models` with no argument lists the
   connected models, and `/models provider:model [api_key]` switches the
@@ -103,7 +103,9 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `review`, and `mine` sub-commands remain TUI-only. `/compact [auto
   <status|on|off>]` summarizes older history to free context window space.
   `/goal <objective>` runs the autonomous goal loop inside the prompt turn
-  — cancel the turn to stop it. Anything else needing a TUI dialog
+  — cancel the turn to stop it. `/loop <time> <prompt>` re-runs the prompt on
+  the given interval inside the prompt turn the same way; `/loop stop` or the
+  editor's cancel ends it. Anything else needing a TUI dialog
   (`/skill`, `/mcp`, ...) is not available over ACP yet. `/resume` is
   intentionally not advertised: the editor's own session picker drives
   `session/load` instead (see below).
@@ -115,8 +117,8 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   mime) next to the text output, so editors render the screenshot inline in
   the tool-call card.
 - **Cancellation** — `session/cancel` interrupts the running turn; the turn
-  ends with the `cancelled` stop reason. `/goal stop` sent as a new prompt
-  also cancels a running goal turn.
+  ends with the `cancelled` stop reason. `/goal stop` and `/loop stop` sent
+  as new prompts also cancel a running goal/loop turn.
 - **Mid-run steering** — a `session/prompt` sent while a turn is already
   executing does not kill or replace the run: it is delivered to the running
   agent as steering, injected as a user message at the agent's next step
