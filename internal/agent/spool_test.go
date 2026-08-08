@@ -199,6 +199,32 @@ func TestRunToolOutputReadsBackWithOffsetAndLimit(t *testing.T) {
 	}
 }
 
+func TestSpoolIfLargeTruncatesByLineCount(t *testing.T) {
+	t.Cleanup(jobs.Spool().Cleanup)
+	var b strings.Builder
+	for i := 1; i <= defaultMaxOutputLines+500; i++ {
+		fmt.Fprintf(&b, "L%04d\n", i)
+	}
+	out := b.String()
+	// Byte size is well under 50KB, so the line firebreak must be what cuts.
+	if len(out) >= defaultMaxOutputBytes {
+		t.Fatalf("fixture too large in bytes (%d); use shorter lines", len(out))
+	}
+	got := spoolIfLarge(out, defaultMaxOutputBytes, false)
+	if got == out {
+		t.Fatal("expected line-limit truncation")
+	}
+	if countLines(got) > defaultMaxOutputLines+2 { // footer may add a non-content line
+		t.Fatalf("truncated output has too many lines: %d", countLines(got))
+	}
+	if !spoolFooterRe.MatchString(got) {
+		t.Fatal("missing spool footer after line truncation")
+	}
+	if !strings.HasPrefix(got, "L0001\n") {
+		t.Fatalf("head not preserved: %q", got[:40])
+	}
+}
+
 func TestSpoolSurvivesRunEndUntilCleanup(t *testing.T) {
 	t.Cleanup(jobs.Spool().Cleanup)
 	id := ensureSpooled(strings.Repeat("z", 3000))

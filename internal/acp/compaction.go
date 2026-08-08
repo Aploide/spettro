@@ -106,7 +106,7 @@ func (b *bridge) compactSession(ctx context.Context, s *acpSession, cfg *config.
 	send := func(ctx context.Context, req provider.Request) (provider.Response, error) {
 		return b.opts.Providers.Send(ctx, cfg.ActiveProvider, cfg.ActiveModel, req)
 	}
-	compacted, did, err := compact.CompactHistoryWithPolicy(ctx, send, "", history, b.sessionWindow(cfg), force, cfg.CompactConfig(), failures)
+	compacted, did, err := compact.CompactHistoryWithPolicy(ctx, send, "", history, b.sessionWindow(cfg), force, cfg.CompactConfig(), failures, 0)
 	if err != nil {
 		b.mu.Lock()
 		s.autoCompactFailures++

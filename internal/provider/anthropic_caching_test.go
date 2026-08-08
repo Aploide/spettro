@@ -110,6 +110,24 @@ func TestNonAnthropicNoCache(t *testing.T) {
 	}
 }
 
+func TestDisableCacheSkipsAnthropicBreakpoints(t *testing.T) {
+	req := Request{
+		System: "system",
+		Messages: []Message{
+			{Role: RoleUser, Content: "turn1"},
+			{Role: RoleAssistant, Content: "reply1"},
+			{Role: RoleUser, Content: "summarize please"},
+		},
+		DisableCache: true,
+	}
+	call := buildFantasyCall("anthropic", models.APIAnthropic, "claude-sonnet-4-5", req)
+	for _, msg := range call.Prompt {
+		if cc := fantasyanthropic.GetCacheControl(msg.ProviderOptions); cc != nil {
+			t.Fatal("DisableCache must omit cache_control breakpoints")
+		}
+	}
+}
+
 // buildAnthropicParams mirrors the params construction in AnthropicAdapter.Send
 // without making a real API call, for unit-testing the request shape.
 func buildAnthropicParams(a AnthropicAdapter, req Request) anthropic.MessageNewParams {

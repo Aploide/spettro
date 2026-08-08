@@ -212,6 +212,10 @@ type Request struct {
 	// Tools, when non-empty, enables native tool calling for capable backends.
 	// On the text-protocol path this field is left nil.
 	Tools []ToolSpec
+	// DisableCache skips Anthropic prompt-cache breakpoints. Used for one-off
+	// utility calls (compaction summarizer) so they don't write into / steal
+	// the main session's KV cache.
+	DisableCache bool
 	// OnStream, when non-nil, requests incremental token streaming. The
 	// provider invokes it (synchronously, on the calling goroutine) as text and
 	// reasoning deltas arrive. Streaming is best-effort: paths that cannot
@@ -222,6 +226,20 @@ type Request struct {
 	// overflow tier's 429/Retry-After) instead of surfacing it as an error.
 	OnRateLimit func(time.Duration)
 }
+
+// FinishReason explains why the model stopped generating. Empty/unknown when
+// the backend did not report one.
+type FinishReason string
+
+const (
+	FinishReasonStop          FinishReason = "stop"
+	FinishReasonLength        FinishReason = "length"
+	FinishReasonContentFilter FinishReason = "content-filter"
+	FinishReasonToolCalls     FinishReason = "tool-calls"
+	FinishReasonError         FinishReason = "error"
+	FinishReasonOther         FinishReason = "other"
+	FinishReasonUnknown       FinishReason = "unknown"
+)
 
 type Response struct {
 	Content         string
@@ -234,6 +252,9 @@ type Response struct {
 	Model    string
 	// ToolCalls is populated on the native tool-calling path.
 	ToolCalls []NativeTool
+	// FinishReason is why generation stopped. When FinishReasonLength and
+	// ToolCalls are both set, tool args may be truncated and must not run.
+	FinishReason FinishReason
 }
 
 type Adapter interface {

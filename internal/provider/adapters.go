@@ -191,7 +191,9 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 	if len(req.Messages) > 0 {
 		if req.System != "" {
 			sysBlock := anthropic.TextBlockParam{Text: req.System}
-			sysBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			if !req.DisableCache {
+				sysBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
 			params.System = []anthropic.TextBlockParam{sysBlock}
 		}
 		// Images attach to the CURRENT turn (last user message), never the
@@ -224,12 +226,14 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 		// Second cache breakpoint on the final message (the system block holds
 		// the first): the next request extends this exact prefix, so marking
 		// the newest content is what makes the follow-up call a cache read.
-		if n := len(msgs); n > 0 {
-			final := &msgs[n-1]
-			if k := len(final.Content); k > 0 {
-				last := &final.Content[k-1]
-				if last.OfText != nil {
-					last.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		if !req.DisableCache {
+			if n := len(msgs); n > 0 {
+				final := &msgs[n-1]
+				if k := len(final.Content); k > 0 {
+					last := &final.Content[k-1]
+					if last.OfText != nil {
+						last.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
 				}
 			}
 		}

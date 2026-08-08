@@ -13,23 +13,18 @@ import (
 	"spettro/internal/skills"
 )
 
-// toolOutputHistoryLimit returns the default character cap for a tool's output
-// in model history. These defaults intentionally match the source caps in
-// execute() so the model always sees what it just read.
+// toolOutputHistoryLimit returns the default byte cap for a tool's output in
+// model history. Read/search/shell tools share Pi-style ~50KB firebreaks
+// (also enforced as a 2000-line cap in spoolTruncate). Smaller caps stay on
+// coordination tools whose full payload the parent must keep cheap.
 func toolOutputHistoryLimit(name string) int {
 	switch name {
-	case "file-read":
-		return 40000
-	case "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover":
-		return 16000
-	case "shell-exec", "bash", "bash-output", "job-output", "tool-output", "pty-start", "pty-write":
-		return 8000
-	case "web-fetch":
-		return webFetchDefaultBudget
+	case "file-read", "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover",
+		"shell-exec", "bash", "bash-output", "job-output", "tool-output", "pty-start", "pty-write",
+		"rename-symbol", "web-fetch", "ultra":
+		return defaultMaxOutputBytes
 	case "agent":
 		return 8000
-	case "ultra":
-		return 32000
 	default:
 		return 2000
 	}
