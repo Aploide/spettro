@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/creack/pty v1.1.24
+	github.com/dop251/goja v0.0.0-20260822123354-58e940e0d230
 	github.com/google/uuid v1.6.0
 	github.com/landlock-lsm/go-landlock v0.8.1
 	github.com/openai/openai-go/v3 v3.4.0
@@ -54,7 +55,6 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
-	github.com/dop251/goja v0.0.0-20260822123354-58e940e0d230 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
@@ -83,17 +83,17 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
-	go.opentelemetry.io/otel/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.opentelemetry.io/otel v1.44.0 // indirect
+	go.opentelemetry.io/otel/metric v1.44.0 // indirect
+	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	golang.org/x/image v0.41.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.271.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/grpc v1.82.1 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/grpc v1.83.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 )
