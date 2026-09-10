@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"spettro/internal/agent"
 )
 
@@ -46,32 +48,37 @@ func TestLiveUsageUpdatesWithoutDoubleCounting(t *testing.T) {
 	}
 }
 
-// TestRunTickerShowsElapsedAndTokens verifies the live status-bar ticker:
-// visible while a run streams, absent when idle.
-func TestRunTickerShowsElapsedAndTokens(t *testing.T) {
+// TestWorkingIndicatorShowsElapsedAndTokens verifies the live readout that
+// replaced the status-bar ticker: visible above the input while a run
+// streams, absent when idle, and gone from the status bar entirely.
+func TestWorkingIndicatorShowsElapsedAndTokens(t *testing.T) {
 	m := NewModelForTesting()
 
-	if msg := m.statusBarMessage(); msg != "" {
-		t.Fatalf("idle status bar should be empty, got %q", msg)
+	if ind := m.viewWorkingIndicator(80); ind != "" {
+		t.Fatalf("idle indicator should be empty, got %q", ind)
 	}
 
 	m.thinking = true
-	m.agentStartAt = time.Now().Add(-5 * time.Second)
+	m.agentStartAt = time.Now().Add(-158 * time.Second)
+	m.workingVerb = "Unravelling"
 	out, _ := m.update(usageEventMsg{event: agent.UsageEvent{
 		StepTokens: 1200, TotalTokens: 1200, ContextTokens: 1200,
 	}})
 	m = out.(Model)
 
-	msg := m.statusBarMessage()
-	if !strings.Contains(msg, "1.2k tok") {
-		t.Fatalf("ticker missing token count: %q", msg)
+	ind := ansi.Strip(m.viewWorkingIndicator(80))
+	if !strings.Contains(ind, "Unravelling…") {
+		t.Fatalf("indicator missing the run's verb: %q", ind)
 	}
-	if !strings.Contains(msg, "5s") {
-		t.Fatalf("ticker missing elapsed time: %q", msg)
+	if !strings.Contains(ind, "(2m 38s · ↓ 1.2k tokens)") {
+		t.Fatalf("indicator missing elapsed/tokens: %q", ind)
+	}
+	if msg := m.statusBarMessage(); msg != "" {
+		t.Fatalf("the ticker must be gone from the status bar, got %q", msg)
 	}
 
 	m.thinking = false
-	if msg := m.statusBarMessage(); msg != "" {
-		t.Fatalf("ticker should clear when idle, got %q", msg)
+	if ind := m.viewWorkingIndicator(80); ind != "" {
+		t.Fatalf("indicator should clear when idle, got %q", ind)
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/theme"
 )
 
 func (m Model) openSelector(prefix string) Model {
@@ -170,14 +171,14 @@ func (m Model) viewSelector() string {
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 		)
 	}
 
 	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
 	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
 	filterLine := promptStyle.Render(">") + " " +
-		lipgloss.NewStyle().Foreground(colorText).Render(m.selFilter) +
+		lipgloss.NewStyle().Foreground(theme.Current().Text).Render(m.selFilter) +
 		cursor
 
 	var rows []string
@@ -194,7 +195,7 @@ func (m Model) viewSelector() string {
 				provLabel = mod.Provider
 			}
 			rows = append(rows, lipgloss.NewStyle().
-				Foreground(colorMuted).Bold(true).
+				Foreground(theme.Current().TextMuted).Bold(true).
 				Render("  ─ "+provLabel))
 		}
 
@@ -222,18 +223,18 @@ func (m Model) viewSelector() string {
 				label += "  " + tag
 			}
 			rows = append(rows, lipgloss.NewStyle().
-				Background(colorSelBg).
-				Foreground(colorText).
+				Background(theme.Current().BgSelection).
+				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
 				Render(label))
 		} else {
 			prefix := "  "
-			nameStyle := lipgloss.NewStyle().Foreground(colorMuted)
-			tagStyle := lipgloss.NewStyle().Foreground(colorDim)
+			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
+			tagStyle := lipgloss.NewStyle().Foreground(theme.Current().TextDim)
 			var badges string
 			if isFav {
-				badges += lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("★ ")
+				badges += lipgloss.NewStyle().Foreground(theme.Current().WarningSoft).Render("★ ")
 			}
 			if isCurrent {
 				badges += lipgloss.NewStyle().Foreground(mc).Render("● ")
@@ -280,6 +281,6 @@ func (m Model) viewSelector() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }

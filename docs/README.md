@@ -25,6 +25,7 @@
 - [Remote control plane](remote.md)
 - [Agent Client Protocol (editor integration)](acp.md)
 - [Telegram relay](telegram.md)
+- [Themes (dark, light, auto)](theme.md) — `/theme`, `SPETTRO_THEME`, light-terminal palette
 - [Extended thinking levels](thinking.md)
 - [Ultra mode (agent swarm)](ultra.md) — `/ultra`, parallel sub-agent fan-out for hard tasks
 - [Workflows](workflows.md) — `ultracode`, deterministic multi-agent orchestration scripts

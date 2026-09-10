@@ -23,6 +23,7 @@ const (
 	modalStorageClean
 	modalConnect
 	modalSelector
+	modalThemePicker
 	modalSetup
 )
 
@@ -56,6 +57,8 @@ func (m Model) activeModal() modal {
 		return modalConnect
 	case m.showSelector:
 		return modalSelector
+	case m.showThemePicker:
+		return modalThemePicker
 	case m.showSetup:
 		return modalSetup
 	default:
@@ -89,5 +92,6 @@ var modalHandlers = map[modal]modalHandler{
 	modalStorageClean: {update: Model.updateStorageClean, view: Model.viewStorageClean},
 	modalConnect:      {update: Model.updateConnect, view: Model.viewConnect},
 	modalSelector:     {update: Model.updateSelector, view: Model.viewSelector},
+	modalThemePicker:  {update: Model.updateThemePicker, view: Model.viewThemePicker},
 	modalSetup:        {update: Model.updateSetup},
 }

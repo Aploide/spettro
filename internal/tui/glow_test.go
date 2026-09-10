@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 func TestHighlightUltracodePreservesVisibleText(t *testing.T) {
@@ -136,19 +138,64 @@ func TestUltracodeSweepProducesAHotSpot(t *testing.T) {
 
 // Every cell carries a tint dark enough to keep the text legible on top of it.
 func TestUltracodeTintStaysDark(t *testing.T) {
+	pinTheme(t, theme.Dark())
 	n := len("ultracode")
 	for frame := range int(ultracodeSweepFrames) {
 		for i := range n {
 			_, bg, _ := ultracodeCellColor(i, n, frame)
-			var r, g, b int
-			if _, err := fmt.Sscanf(bg, "#%02X%02X%02X", &r, &g, &b); err != nil {
-				t.Fatalf("bad background %q: %v", bg, err)
-			}
-			if lum := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b); lum > 96 {
+			if lum := lumaOfHex(t, bg); lum > 96 {
 				t.Fatalf("tint at cell %d frame %d is too bright (%s, luma %.0f)", i, frame, bg, lum)
 			}
 		}
 	}
+}
+
+// The glow reads as a lit object on the page, so it is anchored to the theme's
+// own ground rather than to a fixed near-black: switching themes has to reach
+// an animation that is already running, and on a light terminal the tint must
+// be a pale wash rather than the dark slab the dark theme paints.
+func TestUltracodeGlowFollowsTheTheme(t *testing.T) {
+	pinTheme(t, theme.Dark())
+	dark := highlightUltracode("ultracode", 0)
+
+	pinTheme(t, theme.Light())
+	light := highlightUltracode("ultracode", 0)
+	if light == dark {
+		t.Fatal("the glow did not repaint when the theme changed")
+	}
+	if stripANSIForTest(light) != "ultracode" {
+		t.Fatalf("visible text changed under the light theme: %q", stripANSIForTest(light))
+	}
+
+	n := len("ultracode")
+	for frame := range int(ultracodeSweepFrames) {
+		for i := range n {
+			_, bg, _ := ultracodeCellColor(i, n, frame)
+			// Comfortably clear of the dark theme's ceiling above: any value
+			// in between would mean the tint had stopped tracking the ground.
+			if lum := lumaOfHex(t, bg); lum < 150 {
+				t.Fatalf("light tint at cell %d frame %d is too dark (%s, luma %.0f)", i, frame, bg, lum)
+			}
+		}
+	}
+}
+
+// pinTheme installs a palette for one test and restores the dark default
+// afterwards, so a theme-sensitive test cannot leak its palette into the rest
+// of the package.
+func pinTheme(t *testing.T, p theme.Palette) {
+	t.Helper()
+	theme.SetPalette(p)
+	t.Cleanup(func() { theme.SetPalette(theme.Dark()) })
+}
+
+func lumaOfHex(t *testing.T, hex string) float64 {
+	t.Helper()
+	var r, g, b int
+	if _, err := fmt.Sscanf(hex, "#%02X%02X%02X", &r, &g, &b); err != nil {
+		t.Fatalf("bad colour %q: %v", hex, err)
+	}
+	return 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
 }
 
 func TestPlanLabelMaxIsSlow(t *testing.T) {
@@ -176,10 +223,11 @@ func TestPlanLabelMaxIsSlow(t *testing.T) {
 }
 
 func TestSampleRampLoops(t *testing.T) {
-	if a, b := sampleRamp(ultracodeRamp, 0), sampleRamp(ultracodeRamp, 1); a != b {
+	ramp := ultracodeRamp(theme.Dark())
+	if a, b := sampleRamp(ramp, 0), sampleRamp(ramp, 1); a != b {
 		t.Fatalf("ramp is not seamless: %v vs %v", a, b)
 	}
-	if a, b := sampleRamp(ultracodeRamp, 0.25), sampleRamp(ultracodeRamp, 1.25); a != b {
+	if a, b := sampleRamp(ramp, 0.25), sampleRamp(ramp, 1.25); a != b {
 		t.Fatalf("ramp does not repeat: %v vs %v", a, b)
 	}
 }

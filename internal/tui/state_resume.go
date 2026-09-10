@@ -10,6 +10,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 )
 
 func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
@@ -271,12 +272,12 @@ func (m Model) viewResume() string {
 		var timeStyle, previewStyle lipgloss.Style
 		if isSelected {
 			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			timeStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
-			previewStyle = lipgloss.NewStyle().Foreground(colorMuted)
+			timeStyle = lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true)
+			previewStyle = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 		} else {
 			prefix = "  "
-			timeStyle = lipgloss.NewStyle().Foreground(colorMuted)
-			previewStyle = lipgloss.NewStyle().Foreground(colorDim)
+			timeStyle = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
+			previewStyle = lipgloss.NewStyle().Foreground(theme.Current().TextDim)
 		}
 		prefixWidth := lipgloss.Width(prefix)
 		timeWidth := lipgloss.Width(timeStr) + 2
@@ -316,7 +317,7 @@ func (m Model) viewResume() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }
 
@@ -362,8 +363,8 @@ func (m Model) updateTrust(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) viewTrust() string {
 	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ confirm folder trust")
-	pathStyle := lipgloss.NewStyle().Foreground(colorText).Bold(true)
-	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))
+	pathStyle := lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true)
+	warnStyle := lipgloss.NewStyle().Foreground(theme.Current().WarningSoft)
 
 	options := []string{
 		"Yes, trust this session",
@@ -377,10 +378,10 @@ func (m Model) viewTrust() string {
 		var style lipgloss.Style
 		if i == m.trustCursor {
 			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			style = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			style = lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true)
 		} else {
 			prefix = "  "
-			style = lipgloss.NewStyle().Foreground(colorMuted)
+			style = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 		}
 		optLines = append(optLines, prefix+style.Render(fmt.Sprintf("%d  %s", i+1, opt)))
 	}
@@ -416,6 +417,6 @@ func (m Model) viewTrust() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }

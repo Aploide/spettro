@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 // ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ func (m Model) renderAttachmentChips(mc color.Color) string {
 		}
 		chip := lipgloss.NewStyle().
 			Foreground(mc).
-			Background(lipgloss.Color("#1F2937")).
+			Background(theme.Current().BgCodeInline).
 			PaddingLeft(1).PaddingRight(1).
 			Render(label)
 		chips = append(chips, chip)

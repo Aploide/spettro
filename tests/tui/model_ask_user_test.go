@@ -925,7 +925,10 @@ func TestQuestionModal_SpacingYieldsToRows(t *testing.T) {
 
 	short := tui.NewModelForTesting()
 	short.MarkReadyAndTrustedForTesting()
-	short.SetDimensionsForTesting(120, 24)
+	// 16 rows, not 24: the eye art moved into the scrollback, so the frame's
+	// fixed chrome is eight rows cheaper and the squeeze starts that much
+	// later.
+	short.SetDimensionsForTesting(120, 16)
 	short.SetPendingAskUserFormForTesting(form)
 	short = short.RecalcLayoutForTesting()
 	block := short.ViewQuestionForTesting()
@@ -981,21 +984,21 @@ func TestQuestionModal_LongMultiSelectPinsSubmit(t *testing.T) {
 	}}}
 	m := tui.NewModelForTesting()
 	m.MarkReadyAndTrustedForTesting()
-	m.SetDimensionsForTesting(80, 30)
+	m.SetDimensionsForTesting(80, 22)
 	m.SetPendingAskUserFormForTesting(form)
 	m = m.RecalcLayoutForTesting()
 
 	view := plainForm(m)
 	if !strings.Contains(view, "more (↑ ↓ to scroll)") {
-		t.Fatalf("expected the list to be windowed at 30 rows:\n%s", view)
+		t.Fatalf("expected the list to be windowed at 22 rows:\n%s", view)
 	}
 	for _, want := range []string{"Submit", "Chat about this", "─────"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("%q must stay pinned under the windowed list:\n%s", want, view)
 		}
 	}
-	if got := lipgloss.Height(m.ViewForTesting()); got > 30 {
-		t.Fatalf("view is %d lines on a 30-row terminal", got)
+	if got := lipgloss.Height(m.ViewForTesting()); got > 22 {
+		t.Fatalf("view is %d lines on a 22-row terminal", got)
 	}
 }
 
@@ -1442,7 +1445,7 @@ func TestQuestionModal_NarrowTerminalStacksThenHidesThePreview(t *testing.T) {
 		t.Fatalf("the stacked pane must keep the preview's own alignment:\n%s", stacked)
 	}
 
-	tiny := plainForm(openPreview(t, 46, 24, previewForm(previewSketch)))
+	tiny := plainForm(openPreview(t, 46, 16, previewForm(previewSketch)))
 	if strings.Contains(tiny, "╭") {
 		t.Fatalf("a terminal this small must drop the pane:\n%s", tiny)
 	}

@@ -54,6 +54,16 @@
 - Enable diagnostics with `/permissions debug on`.
 - Use `/permissions` to inspect active rules and recent decisions.
 
+## Text is unreadable on a light terminal
+
+- Run `/theme light`. It repaints immediately and persists the choice.
+- Run bare `/theme` to open the picker and preview each palette, and to see what Spettro detected and which source decided it.
+- `auto` degrades to the dark palette whenever the terminal's background cannot
+  be determined — a terminal that ignores the OSC 11 query and sets no
+  `COLORFGBG`, output redirected to a file, or `TERM=dumb`.
+- To force a palette without saving it, set `SPETTRO_THEME=light` (or `dark`).
+- See [Themes](theme.md) for the full precedence and detection rules.
+
 ## Reset local state
 
 If needed, remove local Spettro state:

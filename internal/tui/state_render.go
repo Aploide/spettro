@@ -13,6 +13,7 @@ import (
 
 	"spettro/internal/diff"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 )
 
 const autoSaveMinInterval = 2 * time.Second
@@ -102,6 +103,13 @@ func (m *Model) autoSave() {
 // full session rewrite.
 func (m *Model) refreshViewport() {
 	m.vp.SetContent(m.renderMessages())
+	if len(m.messages) == 0 {
+		// A fresh session is nothing but the logo and the hint; scrolling to
+		// the bottom of that would crop the art from the top on a short
+		// terminal, which is exactly the screen that should look welcoming.
+		m.vp.GotoTop()
+		return
+	}
 	m.vp.GotoBottom()
 }
 
@@ -149,7 +157,7 @@ func renderThinkingBlock(text string, width int, live bool) string {
 	if width < 10 {
 		width = 10
 	}
-	thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
+	thinkStyle := lipgloss.NewStyle().Foreground(theme.Current().TextDim).Italic(true)
 	header := "  thinking"
 	if live {
 		header += " …"
@@ -200,7 +208,7 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	switch msg.Role {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-		text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
+		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(msg.Content)
 		var entry strings.Builder
 		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
@@ -236,7 +244,7 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 			})
 		}
 		return lipgloss.NewStyle().
-			Foreground(colorMuted).
+			Foreground(theme.Current().TextMuted).
 			PaddingLeft(4).
 			Width(m.paneWidth() - 4).
 			Render(msg.Content)
@@ -278,8 +286,14 @@ func messageRenderKey(msg ChatMessage) uint64 {
 }
 
 func (m *Model) renderMessages() string {
+	// The logo opens the scrollback rather than sitting above it, so it
+	// scrolls out of the way as the conversation grows. It is recomputed on
+	// every call — it is not a ChatMessage and never enters the block cache —
+	// which is what lets a mode or theme switch repaint it.
+	banner := m.eyesBanner()
+
 	if len(m.messages) == 0 {
-		return styleMuted.Render("  no messages yet — type a prompt or /help")
+		return banner + "\n\n" + styleMuted.Render("  no messages yet — type a prompt or /help")
 	}
 
 	mc := m.currentColor()
@@ -296,7 +310,8 @@ func (m *Model) renderMessages() string {
 	}
 	next := make(map[uint64]string, len(m.messages))
 
-	parts := make([]string, 0, len(m.messages))
+	parts := make([]string, 0, len(m.messages)+1)
+	parts = append(parts, banner)
 	for _, msg := range m.messages {
 		key := messageRenderKey(msg)
 		block, ok := next[key]
@@ -320,8 +335,14 @@ func (m *Model) renderMessages() string {
 	return strings.Join(parts, "\n\n")
 }
 
+// eyesBanner is the static logo block that opens the scrollback. It is sized
+// to the viewport rather than the pane (recalcLayout's vpW), because that is
+// the width it is centred inside.
+func (m Model) eyesBanner() string {
+	return renderEyesStatic(m.mode, max(m.paneWidth()-2, 10))
+}
+
 func (m Model) recalcLayout() Model {
-	eyesH := len(eyesActing)
 	headerH := 1
 	sepH := 2
 	statusH := 1
@@ -355,7 +376,7 @@ func (m Model) recalcLayout() Model {
 		}
 	}
 
-	fixed := headerH + eyesH + sepH + inputH + statusH + parallelH
+	fixed := headerH + sepH + inputH + statusH + parallelH + m.workingIndicatorHeight()
 	contentH := max(m.height-fixed, 3)
 	vpW := max(m.paneWidth()-2, 10)
 

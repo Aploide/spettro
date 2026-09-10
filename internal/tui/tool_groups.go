@@ -12,6 +12,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/pty"
+	"spettro/internal/theme"
 )
 
 func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Color) string {
@@ -25,8 +26,8 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 		return ""
 	}
 	bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
-	errStyle := lipgloss.NewStyle().Foreground(colorError)
-	outputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563")).Italic(true)
+	errStyle := lipgloss.NewStyle().Foreground(theme.Current().Error)
+	outputStyle := lipgloss.NewStyle().Foreground(theme.Current().TextFaint).Italic(true)
 	var lines []string
 
 	i := 0

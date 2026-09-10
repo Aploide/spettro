@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 // The Ultra swarm gets its own bordered block rather than sharing the plain
@@ -78,7 +80,7 @@ func (s swarmSummary) titleLine(budget int) string {
 	if lipgloss.Width(prefix)+1+lipgloss.Width(headline) > budget {
 		headline = s.compactHeadline()
 	}
-	return lipgloss.NewStyle().Bold(true).Foreground(colorWarn).Render(prefix) + " " +
+	return lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Warning).Render(prefix) + " " +
 		styleMuted.Render(truncateLabel(headline, max(4, budget-lipgloss.Width(prefix)-1)))
 }
 
@@ -131,7 +133,7 @@ func (m Model) swarmSummaryLines(width, rows int) []string {
 	if len(s.types) == 1 {
 		title += " · " + s.types[0]
 	}
-	head := lipgloss.NewStyle().Bold(true).Foreground(colorWarn).
+	head := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Warning).
 		Render("⚡ " + truncateLabel(title, max(10, budget/3)))
 
 	// A finished swarm collapses to one line: nothing is moving, and the
@@ -177,7 +179,7 @@ func (m Model) renderSwarmBlock(width, rows int) string {
 	return lipgloss.NewStyle().
 		Width(width-2).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
+		BorderForeground(theme.Current().Border).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 }

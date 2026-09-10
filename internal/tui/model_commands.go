@@ -29,6 +29,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/mode", "/next":
 		m.mode = nextAgent(m.manifest, m.mode)
 		m.persistUIState()
+		m.refreshViewport()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 		m.publishRemoteState("mode_change")
 	case "/login":
@@ -231,6 +232,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleLoopCommand(input)
 	case "/permissions":
 		return m.handlePermissionsCommand(input)
+	case "/theme":
+		return m.handleThemeCommand(input)
 	case "/rewind":
 		return m.openRewind()
 	case "/checkpoints":

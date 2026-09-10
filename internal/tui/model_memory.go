@@ -11,6 +11,7 @@ import (
 	"spettro/internal/memory"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 )
 
 // memoryMineDoneMsg reports a finished background mining run.
@@ -205,10 +206,10 @@ func (m Model) viewMemoryReview() string {
 			// Selected candidate: header line, then the FULL fact word-wrapped
 			// so the user can read exactly what they are approving.
 			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			header := prefix + lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(scope)
+			header := prefix + lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true).Render(scope)
 			rows = append(rows, header)
 			fact := lipgloss.NewStyle().
-				Foreground(colorText).
+				Foreground(theme.Current().Text).
 				Width(max(8, contentW-4)).
 				Render(c.Fact)
 			for line := range strings.SplitSeq(fact, "\n") {
@@ -223,9 +224,9 @@ func (m Model) viewMemoryReview() string {
 			continue
 		}
 		prefix := "  "
-		scopeStyled := lipgloss.NewStyle().Foreground(colorMuted).Render(scope)
+		scopeStyled := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render(scope)
 		budget := max(8, contentW-len(prefix)-len(scope)-1)
-		rows = append(rows, prefix+scopeStyled+" "+lipgloss.NewStyle().Foreground(colorDim).Render(truncateLabel(c.Fact, budget)))
+		rows = append(rows, prefix+scopeStyled+" "+lipgloss.NewStyle().Foreground(theme.Current().TextDim).Render(truncateLabel(c.Fact, budget)))
 	}
 
 	hint := styleMuted.Render("↑↓ navigate  a/enter approve  d discard  esc close")
@@ -247,7 +248,7 @@ func (m Model) viewMemoryReview() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }
 
@@ -386,9 +387,9 @@ func (m Model) viewMemoryCurate() string {
 		label := fmt.Sprintf("[%s] %s %s", it.Scope, it.Op.Action, strings.Join(it.Op.IDs, ","))
 		if i == m.memoryCurateCursor {
 			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-			rows = append(rows, prefix+lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(label))
+			rows = append(rows, prefix+lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true).Render(label))
 			if it.Op.Text != "" {
-				text := lipgloss.NewStyle().Foreground(colorText).Width(max(8, contentW-4)).Render("→ " + it.Op.Text)
+				text := lipgloss.NewStyle().Foreground(theme.Current().Text).Width(max(8, contentW-4)).Render("→ " + it.Op.Text)
 				for line := range strings.SplitSeq(text, "\n") {
 					rows = append(rows, "    "+line)
 				}
@@ -398,7 +399,7 @@ func (m Model) viewMemoryCurate() string {
 			}
 			continue
 		}
-		rows = append(rows, "  "+lipgloss.NewStyle().Foreground(colorDim).Render(truncateLabel(label, max(8, contentW-2))))
+		rows = append(rows, "  "+lipgloss.NewStyle().Foreground(theme.Current().TextDim).Render(truncateLabel(label, max(8, contentW-2))))
 	}
 
 	hint := styleMuted.Render("↑↓ navigate  a/enter apply  d skip  esc close")
@@ -420,6 +421,6 @@ func (m Model) viewMemoryCurate() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }

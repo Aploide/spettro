@@ -38,6 +38,7 @@ func (m Model) updatePlanApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = "coding"
 			m.persistUIState()
+			m.refreshViewport()
 			plan := m.pendingPlan
 			m.pendingPlan = ""
 			return m.runAgentApproved(spec, plan, nil, nil, true)

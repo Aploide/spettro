@@ -6,20 +6,41 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
-// Palette matches internal/tui's styles.go so diffs read as part of the UI.
+// themedStyle builds a lipgloss style from the palette that is active at the
+// moment text is rendered. The diff palette cannot be frozen in package-level
+// vars the way it used to be: a /theme switch has to repaint diffs that were
+// already produced, and this package is built before any theme is resolved.
+type themedStyle func(theme.Palette) lipgloss.Style
+
+// Render resolves the current theme, so every call site keeps reading like a
+// plain lipgloss.Style. themedStyle also satisfies styler, which is what the
+// span renderer takes.
+func (s themedStyle) Render(strs ...string) string {
+	return s(theme.Current()).Render(strs...)
+}
+
+// Palette roles mirror internal/tui's so diffs read as part of the UI.
 var (
-	styleAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
-	styleDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
-	styleHunk    = lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA")).Italic(true)
-	styleMeta    = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-	styleCtx     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
-	styleLineNo  = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
-	styleDivider = lipgloss.NewStyle().Foreground(lipgloss.Color("#374151"))
-	// Intra-line emphasis: the changed span within a modified line pair.
-	styleAddHi = lipgloss.NewStyle().Foreground(lipgloss.Color("#6EE7B7")).Background(lipgloss.Color("#064E3B"))
-	styleDelHi = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5")).Background(lipgloss.Color("#7F1D1D"))
+	styleAdd     = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.Success) })
+	styleDel     = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.Error) })
+	styleHunk    = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.Info).Italic(true) })
+	styleMeta    = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.TextMuted) })
+	styleCtx     = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.TextSubtle) })
+	styleLineNo  = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.DiffLineNo) })
+	styleDivider = themedStyle(func(p theme.Palette) lipgloss.Style { return lipgloss.NewStyle().Foreground(p.DiffDivider) })
+	// Intra-line emphasis: the changed span within a modified line pair. These
+	// paint a background, so the light theme flips them to a pale tint under
+	// dark ink rather than reusing the dark theme's deep box.
+	styleAddHi = themedStyle(func(p theme.Palette) lipgloss.Style {
+		return lipgloss.NewStyle().Foreground(p.DiffAddHiFg).Background(p.DiffAddHiBg)
+	})
+	styleDelHi = themedStyle(func(p theme.Palette) lipgloss.Style {
+		return lipgloss.NewStyle().Foreground(p.DiffDelHiFg).Background(p.DiffDelHiBg)
+	})
 )
 
 // Options controls Render.
@@ -262,7 +283,7 @@ func pairSpans(oldText, newText string) (oldSpans, newSpans []span) {
 
 // renderBodyLine truncates a +/- body line to textW cells then styles it,
 // emphasizing the changed spans.
-func renderBodyLine(sign, text string, spans []span, textW int, base, hi lipgloss.Style) string {
+func renderBodyLine(sign, text string, spans []span, textW int, base, hi styler) string {
 	shown := truncCells(text, textW)
 	if shown != text {
 		// Reserve the trailing "…" from highlighting.
@@ -284,7 +305,7 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 	textW := col - w - 2
 
 	divider := styleDivider.Render(" │ ")
-	cellSpans := func(no int, text string, spans []span, style, hi lipgloss.Style) string {
+	cellSpans := func(no int, text string, spans []span, style, hi styler) string {
 		r := []rune(text)
 		if len(r) > textW {
 			r = append(r[:textW-1:textW-1], '…')
@@ -293,7 +314,7 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 		pad := textW - len(r)
 		return styleLineNo.Render(fmtNo(no, w)) + " " + renderSpans(string(r), spans, style, hi) + strings.Repeat(" ", pad)
 	}
-	cell := func(no int, text string, style lipgloss.Style) string {
+	cell := func(no int, text string, style styler) string {
 		return cellSpans(no, text, nil, style, style)
 	}
 	emptyCell := strings.Repeat(" ", col-1)

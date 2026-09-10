@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -108,7 +107,7 @@ func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []st
 
 func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFiles []string, images []string, approved bool) (tea.Model, tea.Cmd) {
 	m.thinking = true
-	m.agentStartAt = time.Now()
+	m.beginRunIndicator()
 	m.activeAgentID = spec.ID
 	m.publishRemoteState("agent_start")
 	m.refreshModifiedFiles()
@@ -315,6 +314,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 
 func (m Model) runCommitter() (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.beginRunIndicator()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
 	cwd := m.cwd
@@ -337,6 +337,7 @@ func (m Model) runCommitter() (tea.Model, tea.Cmd) {
 
 func (m Model) runSearcher(query string) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.beginRunIndicator()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
 	searcher := m.searcher
@@ -360,6 +361,7 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	m.thinking = true
+	m.beginRunIndicator()
 	m.autoCompactInFlight = auto
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider

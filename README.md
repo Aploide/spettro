@@ -42,6 +42,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Parallel native tool-call spawning of sub-agents
 - Permission policies: `ask-first`, `restricted`, `yolo`
 - Live tool traces in planning/coding runs
+- [Dark, light and auto themes](docs/theme.md) — `/theme`, terminal-background detection, `SPETTRO_THEME`
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Normalized [thinking/reasoning levels](docs/thinking.md) across providers (`/thinking off|low|medium|high|x-high|max`)
@@ -86,6 +87,7 @@ Spettro commands are entered with a leading `/`.
 - `/help` show help text
 - `/exit`, `/quit` quit Spettro
 - `/mode`, `/next` cycle active agent/mode
+- `/theme` opens the colour [theme](docs/theme.md) picker (preview dark / light / auto and apply); `/theme <dark|light|auto>` sets one directly. `auto` detects the terminal background (default). `SPETTRO_THEME` picks the palette at startup
 - `/connect` connect provider or local endpoint
 - `/models [provider:model] [api_key]` open selector or set directly
 - `/permission <ask-first|restricted|yolo>` set execution policy
@@ -142,6 +144,7 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 - [Remote control plane](docs/remote.md)
 - [Agent Client Protocol (editor integration)](docs/acp.md)
 - [Telegram relay](docs/telegram.md)
+- [Themes (dark, light, auto)](docs/theme.md)
 - [Extended thinking levels](docs/thinking.md)
 - [Ultra mode (agent swarm)](docs/ultra.md)
 - [Workflows](docs/workflows.md)

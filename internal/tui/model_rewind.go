@@ -11,6 +11,7 @@ import (
 	"spettro/internal/checkpoint"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 )
 
 // rewindConversation is the conversation blob stored with every checkpoint:
@@ -304,9 +305,9 @@ func (m Model) viewRewind() string {
 		for i, opt := range rewindModes {
 			if i == m.rewindModeCursor {
 				rows = append(rows, lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")+
-					lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(opt))
+					lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true).Render(opt))
 			} else {
-				rows = append(rows, "  "+lipgloss.NewStyle().Foreground(colorMuted).Render(opt))
+				rows = append(rows, "  "+lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render(opt))
 			}
 		}
 		body = strings.Join(rows, "\n")
@@ -325,12 +326,12 @@ func (m Model) viewRewind() string {
 			var timeStyle, previewStyle lipgloss.Style
 			if isSelected {
 				prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
-				timeStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
-				previewStyle = lipgloss.NewStyle().Foreground(colorMuted)
+				timeStyle = lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true)
+				previewStyle = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 			} else {
 				prefix = "  "
-				timeStyle = lipgloss.NewStyle().Foreground(colorMuted)
-				previewStyle = lipgloss.NewStyle().Foreground(colorDim)
+				timeStyle = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
+				previewStyle = lipgloss.NewStyle().Foreground(theme.Current().TextDim)
 			}
 			meta := timeStr + "  " + files
 			budget := max(8, dialogWidth-lipgloss.Width(prefix)-lipgloss.Width(meta)-6)
@@ -362,6 +363,6 @@ func (m Model) viewRewind() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }

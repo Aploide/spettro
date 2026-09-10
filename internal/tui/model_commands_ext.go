@@ -17,6 +17,7 @@ import (
 	"spettro/internal/mcp"
 	"spettro/internal/memory"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 )
 
 func (m Model) handleTasksCommand(input string) (tea.Model, tea.Cmd) {
@@ -226,6 +227,7 @@ func (m Model) handlePlanCommand(input string) (tea.Model, tea.Cmd) {
 	if task == "" {
 		m.mode = "plan"
 		m.persistUIState()
+		m.refreshViewport()
 		m.showBanner("switched to plan mode", "success")
 		m.publishRemoteState("mode_change")
 		return m, nil
@@ -565,4 +567,161 @@ func (m Model) handleMemoryCommand(input string) (tea.Model, tea.Cmd) {
 	}
 	m.showBanner("usage: /memory [show] | /memory edit [user|project] | /memory clear [user|project|all] | /memory mine [n] | /memory review | /memory curate [user|project|all]", "error")
 	return m, nil
+}
+
+// handleThemeCommand opens the theme picker, or applies a theme named as an
+// argument.
+//
+// The bare form also reports three separate facts into the transcript, because
+// in "auto" the selection on its own tells the user nothing about what they are
+// looking at: what was selected, what that resolved to, and which of the four
+// sources decided it.
+func (m Model) handleThemeCommand(input string) (tea.Model, tea.Cmd) {
+	fields := strings.Fields(input)
+	if len(fields) == 1 {
+		// Bare /theme opens the picker rather than printing a report: the
+		// choice is a visual one, and a paragraph describing a palette is a
+		// poor substitute for seeing the UI wearing it. The report is still
+		// pushed, above the overlay, so the "how was this decided" answer
+		// survives closing the dialog.
+		m.pushSystemMsg(m.themeSummary())
+		return m.openThemePicker(), nil
+	}
+	if len(fields) > 2 {
+		m.showBanner("usage: /theme [dark|light|auto]", "error")
+		return m, nil
+	}
+	kind, ok := theme.Parse(fields[1])
+	if !ok {
+		m.showBanner("invalid theme: use dark, light, or auto", "error")
+		return m, nil
+	}
+	return m.applyThemeSelection(kind)
+}
+
+// applyThemeSelection persists a theme choice and puts it into force. Both the
+// picker and the argument form of /theme land here, so the two can never
+// disagree about what choosing a theme entails.
+func (m Model) applyThemeSelection(kind theme.Kind) (tea.Model, tea.Cmd) {
+	if err := m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.Theme = string(kind)
+		return nil
+	}); err != nil {
+		m.showBanner("could not save theme: "+err.Error(), "error")
+		return m, nil
+	}
+
+	// An explicit choice must also close the door on detection: a terminal
+	// may report its background unsolicited long after startup, and that
+	// report would otherwise flip the palette out from under a user who just
+	// picked one. Going back to auto reopens it.
+	m.themeAuto = kind == theme.AutoKind
+	m.themeDetected = false
+	m = m.applyTheme(theme.Seed(kind))
+
+	var cmd tea.Cmd
+	if m.themeAuto && theme.CanQueryTerminal() {
+		// Seeding with no detected background can only consult COLORFGBG or
+		// fall back to dark, so ask the terminal directly; the answer lands
+		// in the BackgroundColorMsg handler, which now has themeAuto set.
+		cmd = tea.RequestBackgroundColor
+	}
+
+	msg := "theme set to " + kind.String()
+	if kind == theme.AutoKind {
+		msg += " (resolved: " + theme.CurrentKind().String() + ")"
+	}
+	if env, ok := theme.Parse(os.Getenv(theme.EnvVar)); ok && env != kind && strings.TrimSpace(os.Getenv(theme.EnvVar)) != "" {
+		// Applied and saved, but the variable is a startup override that this
+		// process has now beaten and the next one will not: say both halves
+		// rather than let the user rediscover either after a restart.
+		m.showBanner(msg+" for this session; "+theme.EnvVar+"="+env.String()+" takes it back on the next start", "info")
+		return m, cmd
+	}
+	m.showBanner(msg, "success")
+	return m, cmd
+}
+
+// themeSummary describes the palette in force and how it came to be chosen.
+func (m Model) themeSummary() string {
+	selected, source := m.themeSelection()
+	rows := []string{
+		fmt.Sprintf("theme: %s (rendering: %s)", selected, theme.CurrentKind()),
+		"selected by: " + source,
+		"resolved by: " + m.themeResolution(selected),
+		"",
+		"usage: /theme <dark|light|auto>",
+	}
+	return strings.Join(rows, "\n")
+}
+
+// themeSelection returns what the user asked for and where the request came
+// from, mirroring theme.Preferred's precedence exactly. This is the selection,
+// not the palette: "auto" is a request to detect, and only theme.CurrentKind()
+// knows what the detection settled on.
+//
+// An unparseable value at any level is *skipped*, not coerced — that is what
+// theme.Parse does and what Preferred acts on — so the report has to keep
+// walking down the chain with it. Stopping at the bad value would name a
+// source that decided nothing, in the one command whose whole job is
+// explaining which source decided.
+func (m Model) themeSelection() (theme.Kind, string) {
+	var ignored []string
+	if env := strings.TrimSpace(os.Getenv(theme.EnvVar)); env != "" {
+		if k, ok := theme.Parse(env); ok {
+			return k, theme.EnvVar + "=" + env + " (environment, this process only)"
+		}
+		ignored = append(ignored, theme.EnvVar+"="+env+" is not a valid theme and was ignored")
+	}
+	if cfgTheme := strings.TrimSpace(m.cfg.Theme); cfgTheme != "" {
+		if k, ok := theme.Parse(cfgTheme); ok {
+			return k, `the "theme" key in your user config` + themeIgnoredNote(ignored)
+		}
+		ignored = append(ignored, `the "theme" key in your user config is `+cfgTheme+`, which is not a valid theme and was ignored`)
+	}
+	if len(ignored) > 0 {
+		return theme.AutoKind, "nothing — " + strings.Join(ignored, "; ")
+	}
+	return theme.AutoKind, `default — neither ` + theme.EnvVar + ` nor the "theme" config key is set`
+}
+
+// themeIgnoredNote appends the values that were skipped on the way down to the
+// source that actually decided, so a typo upstream is visible rather than
+// silently absent from the report.
+func themeIgnoredNote(ignored []string) string {
+	if len(ignored) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(ignored, "; ") + ")"
+}
+
+// themeResolution explains how the selection became the palette on screen.
+func (m Model) themeResolution(selected theme.Kind) string {
+	return themeResolutionText(selected, m.themeDetected, theme.CanQueryTerminal(), os.Getenv("COLORFGBG"))
+}
+
+// themeResolutionText is themeResolution with the environment passed in. It is
+// split out because the branch that credits COLORFGBG is only reachable on a
+// real terminal, which a test binary is not, and an explanation nobody can
+// exercise is an explanation that drifts.
+//
+// The order of the checks is theme.Seed's rather than a reading order: a
+// terminal that cannot be asked for its background is also one whose COLORFGBG
+// was inherited from whatever launched us, and Seed refuses to let a stale
+// variable decide there. Crediting it here would name a source the palette
+// never came from.
+func themeResolutionText(selected theme.Kind, detected, canQuery bool, colorFGBG string) string {
+	if selected != theme.AutoKind {
+		return "nothing to resolve — " + selected.String() + " was chosen explicitly"
+	}
+	if detected {
+		return "the terminal's reported background colour"
+	}
+	if !canQuery {
+		return "the dark fallback — this terminal cannot be asked for its background, and COLORFGBG is not trusted without one"
+	}
+	if _, ok := theme.ColorFGBG(colorFGBG); ok {
+		return "COLORFGBG=" + colorFGBG + " (the terminal has not reported a background)"
+	}
+	return "the dark fallback — the terminal has not answered the background query yet"
 }

@@ -1,3 +1,10 @@
+// Package app is the legacy line-oriented front-end behind internal/ui.
+//
+// Nothing in cmd/spettro constructs an App — the binary dispatches to `clean`,
+// -headless, -acp or the Bubble Tea TUI — so this package's only importer is
+// tests/app, which uses it to exercise the non-TUI command surface. Keep that
+// in mind before spending effort here: the palette seeding below and the
+// theming in internal/ui are parity work for a path no user runs.
 package app
 
 import (
@@ -9,6 +16,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/storage"
+	"spettro/internal/theme"
 	"spettro/internal/ui"
 )
 
@@ -74,6 +82,14 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 	if err != nil {
 		return nil, err
 	}
+
+	// Resolve the palette before the renderer is built. This front-end writes
+	// straight to a writer and has no event loop that could receive a reply to
+	// an OSC 11 background query, so theme.Seed's answer — COLORFGBG, or the
+	// dark fallback — is final and is never revised. Without this the legacy
+	// REPL would render dark regardless of SPETTRO_THEME or the persisted
+	// theme.
+	theme.Set(theme.Seed(theme.Preferred(cfg.Theme)))
 
 	pm := provider.NewManager()
 	pm.SetAPIKeys(cfg.APIKeys)

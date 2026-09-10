@@ -14,6 +14,7 @@ import (
 	"spettro/internal/homedir"
 	"spettro/internal/provider"
 	"spettro/internal/spettro"
+	"spettro/internal/theme"
 )
 
 // spettroOnboardingMarker is the sentinel model name for the synthetic
@@ -240,7 +241,7 @@ func (m Model) viewOnboardingPicker() string {
 	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
 	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
 	filterLine := promptStyle.Render(">") + " " +
-		lipgloss.NewStyle().Foreground(colorText).Render(m.onboarding.filter) +
+		lipgloss.NewStyle().Foreground(theme.Current().Text).Render(m.onboarding.filter) +
 		cursor
 
 	maxListH := max(contentH-topPad-8, 4)
