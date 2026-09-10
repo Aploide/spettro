@@ -28,7 +28,7 @@ import (
 const questionMinContentH = 3
 
 // questionBlockBudget is how many lines the form may occupy inside the input
-// box. Everything else on screen — header, eyes, separators, status bar, the
+// box. Everything else on screen — header, separators, status bar, the
 // box's own border and agent label, the parallel-agent strip — keeps its space,
 // and the conversation pane keeps a minimum. The renderer windows its answer
 // list to fit this; without it a question with many options pushes the input
@@ -40,11 +40,12 @@ func (m Model) questionBlockBudget() int {
 		return math.MaxInt32
 	}
 	paneW := m.paneWidth()
-	// Measure the chrome instead of hard-coding its line counts: the eyes art
-	// and the header change height on their own, and a stale constant here
-	// reappears as an off-by-one row past the bottom of the screen.
+	// Measure the chrome instead of hard-coding its line counts: the header
+	// and the working indicator change height on their own, and a stale
+	// constant here reappears as an off-by-one row past the bottom of the
+	// screen.
 	fixed := lipgloss.Height(m.viewHeader()) +
-		lipgloss.Height(renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)) +
+		m.workingIndicatorHeight() +
 		2 + // the separators bracketing the conversation pane
 		lipgloss.Height(m.viewStatusBar(paneW)) +
 		3 // the input box's border plus the agent label inside it

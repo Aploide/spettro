@@ -134,6 +134,10 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.mode = nextAgent(m.manifest, m.mode)
 		m.persistUIState()
+		// The logo lives in the scrollback now, so it only repaints when the
+		// viewport content is rebuilt — without this the banner keeps the
+		// previous mode's art and accent until the next message lands.
+		m.refreshViewport()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 		m.publishRemoteState("mode_change")
 		return m, nil

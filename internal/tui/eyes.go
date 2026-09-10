@@ -4,8 +4,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-
-	"spettro/internal/theme"
 )
 
 // Eye art from eyes.txt – two states: acting (coding) and planning.
@@ -32,6 +30,10 @@ var eyesPlanning = []string{
 	`⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀`,
 }
 
+// eyeArtWidth is the column width of the braille art; both slices above are
+// drawn on the same grid.
+const eyeArtWidth = 100
+
 // eyeArtFor returns the correct art for the given mode.
 func eyeArtFor(mode string) []string {
 	if isPlanningEyeMode(mode) {
@@ -49,79 +51,66 @@ func isPlanningEyeMode(mode string) bool {
 	}
 }
 
-// renderEyes renders the eye art with animation based on frame counter.
-// frame drives blinking and thinking scan-line effects.
-func renderEyes(mode string, frame int, thinking bool, termWidth int) string {
+// eyeArtInk returns the column range the art actually paints in, ignoring the
+// blank braille gutter both slices are padded with. Centring on the ink rather
+// than on the full grid is what keeps the logo looking centred once the pane
+// is too narrow to show the whole thing.
+func eyeArtInk(art []string) (lead, trail int) {
+	lead, trail = eyeArtWidth, 0
+	for _, raw := range art {
+		runes := []rune(raw)
+		for i, r := range runes {
+			if r == '\u2800' || r == ' ' {
+				continue
+			}
+			lead = min(lead, i)
+			trail = max(trail, i)
+		}
+	}
+	if trail < lead {
+		return 0, eyeArtWidth - 1
+	}
+	return lead, trail
+}
+
+// renderEyesStatic renders the eye art in the current mode's accent colour,
+// with no animation at all. The logo now lives inside the scrollback (see
+// Model.eyesBanner), and the viewport is only re-rendered when its content
+// changes — not on the 50 ms tick — so a frame-driven blink or scan line
+// would stutter instead of animating. Static is also what keeps the render
+// cache's "same input, same bytes" contract honest.
+//
+// It never returns a line wider than width: the viewport does not wrap
+// gracefully, so the art is cropped here rather than left for something
+// downstream to truncate.
+func renderEyesStatic(mode string, width int) string {
 	art := eyeArtFor(mode)
-	n := len(art)
+	style := lipgloss.NewStyle().Foreground(modeColor(mode))
 
-	var lines []string
+	// Wide enough for the whole grid: centre it as drawn, gutter included.
+	lead, trail := 0, eyeArtWidth-1
+	if width <= eyeArtWidth {
+		lead, trail = eyeArtInk(art)
+	}
 
-	if thinking {
-		// Scan-line animation: one row is bright, others fade by distance
-		scanPos := (frame / 2) % (n*2 - 2)
-		if scanPos >= n {
-			scanPos = (n*2 - 2) - scanPos
+	lines := make([]string, len(art))
+	for i, raw := range art {
+		runes := []rune(raw)
+		hi := min(trail+1, len(runes))
+		lo := min(lead, hi)
+		cropped := runes[lo:hi]
+		if len(cropped) > width {
+			cropped = cropped[:width]
 		}
-		// The falloff runs toward the terminal's own ground, so on a light
-		// theme "further from the scan line" means lighter, not darker; the
-		// anchors come from the palette rather than a fade toward black.
-		scan := theme.Current().EyesScan
-		lines = make([]string, n)
-		for i, raw := range art {
-			dist := i - scanPos
-			if dist < 0 {
-				dist = -dist
-			}
-			var s lipgloss.Style
-			switch dist {
-			case 0:
-				s = lipgloss.NewStyle().Foreground(modeColor(mode)).Bold(true)
-			case 1:
-				s = lipgloss.NewStyle().Foreground(scan[0])
-			case 2:
-				s = lipgloss.NewStyle().Foreground(scan[1])
-			default:
-				s = lipgloss.NewStyle().Foreground(scan[2])
-			}
-			lines[i] = s.Render(raw)
-		}
-	} else {
-		// Normal mode: blink cycle every ~8 seconds (at 20fps = 160 frames)
-		cycle := frame % 160
-		blink := theme.Current().EyesBlink
-		var eyeStyle lipgloss.Style
-		switch {
-		case cycle >= 156: // closing
-			eyeStyle = lipgloss.NewStyle().Foreground(blink[2])
-		case cycle >= 152: // half-closed
-			eyeStyle = lipgloss.NewStyle().Foreground(blink[1])
-		case cycle >= 148: // squinting
-			eyeStyle = lipgloss.NewStyle().Foreground(blink[0])
-		default:
-			eyeStyle = lipgloss.NewStyle().Foreground(modeColor(mode))
-		}
-		lines = make([]string, n)
-		for i, raw := range art {
-			lines[i] = eyeStyle.Render(raw)
+		lines[i] = style.Render(string(cropped))
+	}
+
+	if pad := (width - (trail - lead + 1)) / 2; pad > 0 {
+		prefix := strings.Repeat(" ", pad)
+		for i, l := range lines {
+			lines[i] = prefix + l
 		}
 	}
 
-	content := strings.Join(lines, "\n")
-
-	// Center horizontally if terminal is wide enough
-	artWidth := 99 // approximate width of the braille art
-	if termWidth > artWidth+4 {
-		pad := (termWidth - artWidth) / 2
-		if pad > 0 {
-			prefix := strings.Repeat(" ", pad)
-			centered := make([]string, len(lines))
-			for i, l := range lines {
-				centered[i] = prefix + l
-			}
-			content = strings.Join(centered, "\n")
-		}
-	}
-
-	return content
+	return strings.Join(lines, "\n")
 }

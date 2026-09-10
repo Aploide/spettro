@@ -195,6 +195,8 @@ type Palette struct {
 
 	// EyesScan is the thinking scan-line falloff by row distance from the
 	// lit row (distance 1, 2, 3+). The lit row itself is the agent accent.
+	// Retained for the eye art's animated renderers; the TUI draws the logo
+	// statically inside the scrollback and does not read this today.
 	EyesScan [3]color.Color
 	// EyesBlink is the blink cycle: squinting, half-closed, closed.
 	//
@@ -205,6 +207,7 @@ type Palette struct {
 	// to the contrast its dark counterpart has against black (scan
 	// 5.9/2.8/1.5, blink 4.1/2.0/1.2), so the animation reads at the same
 	// strength on either ground instead of washing out on the light one.
+	// Retained alongside EyesScan; not read by the static inline logo.
 	EyesBlink [3]color.Color
 
 	// GlareStops are the four interpolation weights the glare sweep uses to

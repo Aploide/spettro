@@ -633,3 +633,34 @@ func MediaAbsolutePathForTesting(cwd, p string) string {
 func (m Model) RecalcLayoutForTesting() Model {
 	return m.recalcLayout()
 }
+
+// SetRunStartForTesting pins the working indicator's elapsed clock.
+func (m *Model) SetRunStartForTesting(t time.Time) {
+	m.agentStartAt = t
+}
+
+// SetLiveRunTokensForTesting pins the working indicator's token readout.
+func (m *Model) SetLiveRunTokensForTesting(n int) {
+	m.liveRunTokens = n
+}
+
+// SetEyeFrameForTesting pins the animation frame so indicator assertions are
+// deterministic.
+func (m *Model) SetEyeFrameForTesting(frame int) {
+	m.eyeFrame = frame
+}
+
+// SetWorkingVerbForTesting pins the per-run status word.
+func (m *Model) SetWorkingVerbForTesting(verb string) {
+	m.workingVerb = verb
+}
+
+func (m Model) WorkingVerbForTesting() string {
+	return m.workingVerb
+}
+
+// WorkingIndicatorForTesting renders the line drawn above the input box while
+// a run is in flight.
+func (m Model) WorkingIndicatorForTesting(width int) string {
+	return m.viewWorkingIndicator(width)
+}

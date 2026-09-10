@@ -537,7 +537,10 @@ type Model struct {
 	clipboardCounter int    // increments each paste for [Image #N] labelling
 
 	// Notifications (OSC 9 / BEL / desktop)
-	agentStartAt    time.Time
+	agentStartAt time.Time
+	// workingVerb is the status word the working indicator shows for the
+	// current turn, drawn once when the run starts (see beginRunIndicator).
+	workingVerb     string
 	terminalFocused bool
 	notifier        *notify.Notifier
 

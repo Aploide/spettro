@@ -23,10 +23,12 @@ import (
 const approvalDiffCollapsedLines = 16
 
 // approvalDiffChromeLines is everything in the frame besides the diff when an
-// approval dialog is open: header(1) + eyes(8) + separators(2) + status(1) +
-// input box incl. borders(6) + approval label/reason/picker(6) + the 3-line
-// minimum viewport, plus one row of slack.
-const approvalDiffChromeLines = 28
+// approval dialog is open: header(1) + separators(2) + status(1) + the
+// working indicator(1) + input box incl. borders(6) + approval
+// label/reason/picker(6) + the 3-line minimum viewport, plus one row of
+// slack. The eye art no longer costs anything here — it moved into the
+// scrollback.
+const approvalDiffChromeLines = 21
 
 // approvalDiffView renders the diff block of a pending file-write/file-edit
 // approval, sized so the whole input box always fits the terminal. Both
@@ -94,24 +96,32 @@ func (m Model) viewContent() string {
 	statusBar := m.viewStatusBar(paneW)
 	sideW := m.sidePanelWidth()
 
+	// The working indicator sits directly above the input box on every path
+	// that draws one, so a run is visible whether or not the command overlay
+	// is open. It is "" when idle and costs no row then.
+	indicator := m.viewWorkingIndicator(paneW)
+
 	var parts []string
 	if len(m.cmdItems) > 0 {
-		// Overlay spans the full inner area. Fixed costs: header(1)+input(6)+status(1)=8.
-		innerH := max(m.height-8, 4)
+		// Overlay spans the full inner area. Fixed costs: header(1)+input(6)+status(1)=8,
+		// plus the indicator row while a run is in flight.
+		innerH := max(m.height-8-m.workingIndicatorHeight(), 4)
 		overlay := m.viewCmdOverlay(m.vp.Width(), innerH)
-		parts = []string{overlay, inputArea, statusBar}
+		parts = []string{overlay}
 	} else {
-		eyes := renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)
 		sep := m.viewSep(paneW)
 		content := m.vp.View()
-		parts = []string{eyes, sep, content, sep}
+		parts = []string{sep, content, sep}
 		if sideW <= 0 {
 			if pa := m.renderParallelAgents(); pa != "" {
 				parts = append(parts, pa)
 			}
 		}
-		parts = append(parts, inputArea, statusBar)
 	}
+	if indicator != "" {
+		parts = append(parts, indicator)
+	}
+	parts = append(parts, inputArea, statusBar)
 
 	mainPane := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
@@ -354,12 +364,17 @@ func (m Model) viewCmdOverlay(width, height int) string {
 			hint,
 		))
 
-	return lipgloss.Place(width, height,
+	// The dialog has floors of its own (four rows of list plus title, hint,
+	// padding and border), so on a very short terminal Place is handed less
+	// height than the dialog needs and does not clip. MaxHeight makes the
+	// overlay honour the budget viewContent reserved for it instead of
+	// pushing the input box off the bottom of the screen.
+	return lipgloss.NewStyle().MaxHeight(height).Render(lipgloss.Place(width, height,
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
-	)
+	))
 }
 
 func (m Model) viewMentionPalette(width int) string {
@@ -917,22 +932,10 @@ func (m Model) statusBarMessage() string {
 		return styleSuccess.Render(fmt.Sprintf("↻ %s · every %s · iter %d · %s",
 			truncateLabel(l.Prompt, 40), l.Interval, l.Iteration, state))
 	}
-	if m.thinking {
-		return styleMuted.Render(m.runTicker())
-	}
+	// The in-flight run's elapsed/token readout lives above the input box now
+	// (viewWorkingIndicator); the bar keeps banner, goal and loop on the left
+	// and the ctx/cache/jobs cluster on the right.
 	return ""
-}
-
-// runTicker is the live status-bar readout of the in-flight run: elapsed
-// time and tokens streamed so far. Ultra/swarm runs feed the same usage
-// channel, so the ticker covers them too.
-func (m Model) runTicker() string {
-	if m.agentStartAt.IsZero() {
-		return ""
-	}
-	elapsed := time.Since(m.agentStartAt).Round(time.Second)
-	spin := spinnerFrames[m.eyeFrame%len(spinnerFrames)]
-	return fmt.Sprintf("%s %s · %s tok", spin, elapsed, formatTokenCount(m.liveRunTokens))
 }
 
 func renderStatusBanner(text, kind string) string {

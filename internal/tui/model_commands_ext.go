@@ -227,6 +227,7 @@ func (m Model) handlePlanCommand(input string) (tea.Model, tea.Cmd) {
 	if task == "" {
 		m.mode = "plan"
 		m.persistUIState()
+		m.refreshViewport()
 		m.showBanner("switched to plan mode", "success")
 		m.publishRemoteState("mode_change")
 		return m, nil
