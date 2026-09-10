@@ -13,6 +13,7 @@ import (
 
 	"spettro/internal/diff"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 )
 
 const autoSaveMinInterval = 2 * time.Second
@@ -149,7 +150,7 @@ func renderThinkingBlock(text string, width int, live bool) string {
 	if width < 10 {
 		width = 10
 	}
-	thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
+	thinkStyle := lipgloss.NewStyle().Foreground(theme.Current().TextDim).Italic(true)
 	header := "  thinking"
 	if live {
 		header += " …"
@@ -200,7 +201,7 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	switch msg.Role {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-		text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
+		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(msg.Content)
 		var entry strings.Builder
 		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
@@ -236,7 +237,7 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 			})
 		}
 		return lipgloss.NewStyle().
-			Foreground(colorMuted).
+			Foreground(theme.Current().TextMuted).
 			PaddingLeft(4).
 			Width(m.paneWidth() - 4).
 			Render(msg.Content)

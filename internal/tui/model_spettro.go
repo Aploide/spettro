@@ -14,6 +14,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/spettro"
+	"spettro/internal/theme"
 )
 
 // loginState drives the Spettro Subscription device-flow login overlay.
@@ -324,7 +325,7 @@ func (m Model) viewLogin() string {
 			lipgloss.NewStyle().Foreground(mc).Render(spinFrame+" Waiting for you to sign in…"),
 			"",
 			styleMuted.Render("A browser window should have opened. If not, open this URL:"),
-			lipgloss.NewStyle().Foreground(colorText).Render(m.login.browserURL),
+			lipgloss.NewStyle().Foreground(theme.Current().Text).Render(m.login.browserURL),
 			"",
 			styleMuted.Render("esc — cancel"),
 		)

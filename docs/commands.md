@@ -7,6 +7,8 @@
 | `/help` | Show in-app help text. |
 | `/exit`, `/quit` | Quit Spettro. |
 | `/mode`, `/next` | Cycle active manifest agent/mode. |
+| `/theme` | Open the [theme](theme.md) picker: pick dark, light or auto from a list with a live preview panel. Also reports the selection, the palette it resolved to, and which source decided (env / config / detection / default). |
+| `/theme <dark\|light\|auto>` | Switch palette immediately and persist it to `~/.spettro/config.json`. `auto` detects the terminal background and falls back to dark. `SPETTRO_THEME` picks the palette at startup; `/theme` still overrides it for the rest of the session. |
 | `/connect` | Open provider/local-endpoint connect dialog. |
 | `/login` | Sign in to a Spettro subscription (device flow). See [Subscription](subscription.md). |
 | `/logout` | Sign out and remove the saved Spettro subscription key. See [Subscription](subscription.md). |

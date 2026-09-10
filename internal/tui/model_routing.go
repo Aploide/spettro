@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/config"
+	"spettro/internal/theme"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -61,6 +62,23 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pushSystemMsg(msg)
 			}
 			m.refreshViewport()
+		}
+	case tea.BackgroundColorMsg:
+		// The answer to Init's OSC 11 query, and occasionally an unsolicited
+		// report after the user switches their terminal's own theme mid
+		// session. Terminals may send it more than once and may send it long
+		// after the first frames, so the handler stays cheap and idempotent —
+		// and it only applies while the theme is on auto, since an explicit
+		// selection outranks anything the terminal claims.
+		if m.themeAuto {
+			// A nil colour is the parser's documented "could not decode": the
+			// OSC 11 body was malformed, or the terminal answered with
+			// something that is not a colour. Resolve already treats it as
+			// "nothing detected" and falls through to COLORFGBG or dark, so
+			// the flag that records *why* must not claim a detection either —
+			// /theme reads it to explain which source decided.
+			m = m.applyTheme(theme.Resolve(theme.AutoKind, msg.Color))
+			m.themeDetected = msg.Color != nil
 		}
 	case tickMsg:
 		m.eyeFrame++

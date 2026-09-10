@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"image/color"
 	"math"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 
 	"spettro/internal/agent"
+	"spettro/internal/theme"
 )
 
 // Asking for a workflow lights the phrase up in the input box. The point is
@@ -21,15 +23,25 @@ import (
 // magenta into cyan, looping. Sampled as a continuous gradient, not as
 // discrete steps, so the word reads as one moving surface instead of a row of
 // separately-coloured letters.
-var ultracodeRamp = []rgbColor{
-	{0x7C, 0x3A, 0xED},
-	{0xA8, 0x55, 0xF7},
-	{0xE8, 0x79, 0xF9},
-	{0x38, 0xBD, 0xF8},
-	{0x22, 0xD3, 0xEE},
+//
+// It is derived from the palette on every frame rather than cached at package
+// level, because a theme switch has to reach an animation that is already
+// running; five stops is far less work than the render it feeds.
+func ultracodeRamp(p theme.Palette) []rgbColor {
+	ramp := make([]rgbColor, len(p.RampGlow))
+	for i, c := range p.RampGlow {
+		ramp[i] = toRGB(c)
+	}
+	return ramp
 }
 
 type rgbColor struct{ r, g, b float64 }
+
+// toRGB drops a palette colour into the float space the glow interpolates in.
+func toRGB(c color.Color) rgbColor {
+	r, g, b := theme.RGB(c)
+	return rgbColor{float64(r), float64(g), float64(b)}
+}
 
 func (c rgbColor) lerp(o rgbColor, t float64) rgbColor {
 	return rgbColor{
@@ -82,9 +94,10 @@ const (
 // than as coloured text — a foreground-only effect disappears against the
 // surrounding prose at a glance.
 func ultracodeCellColor(i, n, frame int) (fg, bg string, shine float64) {
+	p := theme.Current()
 	width := float64(max(n, 1))
 	drift := float64(frame) / ultracodeDriftFrames
-	base := sampleRamp(ultracodeRamp, drift+float64(i)/(width*1.6))
+	base := sampleRamp(ultracodeRamp(p), drift+float64(i)/(width*1.6))
 
 	// The highlight travels across the word and a little way past both ends.
 	span := width + ultracodeSweepPad*2
@@ -96,11 +109,15 @@ func ultracodeCellColor(i, n, frame int) (fg, bg string, shine float64) {
 		// Cosine falloff: a linear one leaves a visible hard edge on the band.
 		shine = 0.5 * (1 + math.Cos(math.Pi*dist/ultracodeSweepWidth))
 	}
-	lit := base.lerp(rgbColor{0xFF, 0xFF, 0xFF}, shine*0.9)
+	lit := base.lerp(toRGB(p.GlowSpecular), shine*p.GlowShine)
 
-	// The tint stays far darker than the text so the word never loses
-	// legibility against it, whatever the terminal's own background is.
-	glowBG := (rgbColor{0x0B, 0x0B, 0x0D}).lerp(base, 0.16+shine*0.26)
+	// The tint stays close to the theme's own ground — barely off it — so the
+	// word never loses legibility against it, and so the glow reads as a lit
+	// object on the page rather than as a box pasted over it. On a light
+	// terminal that means a pale wash, not a dark slab, which is why the
+	// anchor and the weights come from the palette instead of being fixed
+	// here.
+	glowBG := toRGB(p.BgBase).lerp(base, p.GlowTintBias+shine*p.GlowTintGain)
 	return lit.hex(), glowBG.hex(), shine
 }
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 func (m Model) sidePanelWidth() int {
@@ -74,11 +76,11 @@ func (m Model) sidePanelGitSummary(width int) (string, int) {
 	repo = truncateLabel(repo, max(10, width/2))
 
 	line := strings.Join([]string{
-		lipgloss.NewStyle().Foreground(colorMuted).Render("⎇"),
-		lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(branch),
+		lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("⎇"),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text).Render(branch),
 		styleMuted.Render(repo),
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render(fmt.Sprintf("+%d", added)),
-		lipgloss.NewStyle().Bold(true).Foreground(colorError).Render(fmt.Sprintf("-%d", deleted)),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().SuccessBright).Render(fmt.Sprintf("+%d", added)),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Error).Render(fmt.Sprintf("-%d", deleted)),
 	}, " ")
 	return line, 2
 }
@@ -221,35 +223,36 @@ func (m Model) sidePanelLines(items []sidePanelItem, width int) ([]string, []int
 	selectedRow := 0
 	rowBudget := max(12, width-6)
 	prevAgent := ""
+	pal := theme.Current()
 	for idx, it := range items {
 		agent := activityAgentLabel(it.Agent)
 		if agent != prevAgent {
-			header := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
+			header := lipgloss.NewStyle().Foreground(pal.TextMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
 			lines = append(lines, header)
 			rowToItem = append(rowToItem, -1)
 			prevAgent = agent
 		}
 		prefix := "    "
-		titleStyle := lipgloss.NewStyle().Foreground(colorMuted)
+		titleStyle := lipgloss.NewStyle().Foreground(pal.TextMuted)
 		if idx == cursor {
 			selectedRow = len(lines)
 			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("›   ")
-			titleStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			titleStyle = lipgloss.NewStyle().Foreground(pal.Text).Bold(true)
 		}
-		detailColor := colorDim
+		detailColor := pal.TextDim
 		switch it.Status {
 		case "running":
 			detailColor = m.currentColor()
 		case "error", "failed":
-			detailColor = colorError
+			detailColor = pal.Error
 		case "changed":
-			detailColor = lipgloss.Color("#22C55E")
+			detailColor = pal.SuccessBright
 		default:
 			if it.Kind == "file" {
-				detailColor = lipgloss.Color("#22C55E")
+				detailColor = pal.SuccessBright
 			}
 			if it.Kind == "command" {
-				detailColor = lipgloss.Color("#60A5FA")
+				detailColor = pal.Info
 			}
 		}
 		titleRaw := strings.ReplaceAll(strings.TrimSpace(it.Title), "\n", " ")
@@ -314,7 +317,7 @@ func scrollBlock(content string, height, offset int) (string, int, int) {
 
 func (m Model) sidePanelDetailMeta(selected sidePanelItem) []string {
 	details := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("Details"),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("Details"),
 		styleMuted.Render("type: " + selected.Kind),
 		styleMuted.Render("id: " + selected.ID),
 	}
@@ -359,7 +362,7 @@ func (m Model) sidePanelBudgets(innerHeight, gitRows, detailMetaLines int) (list
 const sidePanelHintRows = 3
 
 func (m Model) sidePanelHintsView() string {
-	sep := styleDim.Render(" • ")
+	sep := styleRule.Render(" • ")
 	line1 := strings.Join([]string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("ctrl+b: panel"),
@@ -429,7 +432,7 @@ func (m Model) viewSidePanel(width int) string {
 			Width(width+2).
 			Height(innerHeight+2).
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(colorBorder).
+			BorderForeground(theme.Current().Border).
 			Padding(0, 1).
 			Render(clampLines(body, innerHeight))
 		return lipgloss.JoinVertical(lipgloss.Left, box, hints)
@@ -480,7 +483,7 @@ func (m Model) viewSidePanel(width int) string {
 		Width(width+2).
 		Height(innerHeight+2).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
+		BorderForeground(theme.Current().Border).
 		Padding(0, 1).
 		Render(content)
 	return lipgloss.JoinVertical(lipgloss.Left, box, hints)

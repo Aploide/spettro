@@ -14,6 +14,7 @@ import (
 	"spettro/internal/jobs"
 	"spettro/internal/pty"
 	"spettro/internal/session"
+	"spettro/internal/theme"
 	"spettro/internal/version"
 )
 
@@ -77,7 +78,7 @@ func (m Model) View() tea.View {
 
 func (m Model) viewContent() string {
 	if !m.ready {
-		return lipgloss.NewStyle().Foreground(colorMuted).Render("\n  loading…")
+		return lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("\n  loading…")
 	}
 
 	// Render the overlay chosen by the single source of truth so View can
@@ -118,7 +119,7 @@ func (m Model) viewContent() string {
 		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
 	}
 	sidePane := m.viewSidePanel(sideW)
-	divider := lipgloss.NewStyle().Foreground(colorBorder).Render("│")
+	divider := lipgloss.NewStyle().Foreground(theme.Current().Border).Render("│")
 	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
@@ -130,7 +131,7 @@ func diagFillTitle(label string, innerWidth int) string {
 	if remaining <= 0 {
 		return label
 	}
-	fill := lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("╱", remaining))
+	fill := lipgloss.NewStyle().Foreground(theme.Current().Rule).Render(strings.Repeat("╱", remaining))
 	return label + " " + fill
 }
 
@@ -143,6 +144,7 @@ func (m Model) viewHeader() string {
 	}
 
 	primaryIDs := primaryAgentIDs(m.manifest)
+	pal := theme.Current()
 	var tabs []string
 	for _, id := range primaryIDs {
 		ag, ok := m.manifest.AgentByID(id)
@@ -153,13 +155,13 @@ func (m Model) viewHeader() string {
 		if ag.ID == m.mode {
 			tabs = append(tabs, lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#0D0D0D")).
+				Foreground(pal.TextOnAccent).
 				Background(agColor).
 				PaddingLeft(1).PaddingRight(1).
 				Render(ag.ID))
 		} else {
 			tabs = append(tabs, lipgloss.NewStyle().
-				Foreground(colorMuted).
+				Foreground(pal.TextMuted).
 				PaddingLeft(1).PaddingRight(1).
 				Render(ag.ID))
 		}
@@ -233,13 +235,13 @@ func (m Model) viewHeader() string {
 	return lipgloss.NewStyle().
 		Width(m.width).
 		MaxWidth(m.width).
-		Background(colorHeaderBg).
+		Background(theme.Current().BgHeader).
 		Render(row)
 }
 
 func (m Model) viewSep(width int) string {
 	return lipgloss.NewStyle().
-		Foreground(colorDim).
+		Foreground(theme.Current().Rule).
 		Render(strings.Repeat("─", width))
 }
 
@@ -255,18 +257,15 @@ func renderPlanLabel(plan string, frame int) string {
 	label := strings.ToUpper(plan)
 	switch plan {
 	case "free":
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9CA3AF")).Render(label)
+		return lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextSubtle).Render(label)
 	case "lite":
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F9FAFB")).Render(label)
+		return lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text).Render(label)
 	case "plus":
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC")).Render(label)
+		return lipgloss.NewStyle().Bold(true).Foreground(theme.Current().PlanPlus).Render(label)
 	case "pro":
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#C4B5FD")).Render(label)
+		return lipgloss.NewStyle().Bold(true).Foreground(theme.Current().PlanPro).Render(label)
 	case "max":
-		rainbow := []color.Color{
-			lipgloss.Color("#FF6B6B"), lipgloss.Color("#FF9E4F"), lipgloss.Color("#FFD93D"),
-			lipgloss.Color("#6BCB77"), lipgloss.Color("#4D96FF"), lipgloss.Color("#C77DFF"),
-		}
+		rainbow := theme.Current().RampRainbow
 		var out strings.Builder
 		for i, ch := range label {
 			c := rainbow[(i+frame/planLabelFrameDivisor)%len(rainbow)]
@@ -274,7 +273,7 @@ func renderPlanLabel(plan string, frame int) string {
 		}
 		return out.String()
 	default:
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9CA3AF")).Render(label)
+		return lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextSubtle).Render(label)
 	}
 }
 
@@ -309,14 +308,14 @@ func (m Model) viewCmdOverlay(width, height int) string {
 		if i == m.cmdCursor {
 			label := fmt.Sprintf("%-16s  %s", cmd.name, desc)
 			rows = append(rows, lipgloss.NewStyle().
-				Background(colorSelBg).
-				Foreground(colorText).
+				Background(theme.Current().BgSelection).
+				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
 				Render(label))
 		} else {
-			nameStyle := lipgloss.NewStyle().Foreground(colorText)
-			descStyle := lipgloss.NewStyle().Foreground(colorMuted)
+			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().Text)
+			descStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 			rows = append(rows, nameStyle.Render(fmt.Sprintf("%-16s", cmd.name))+"  "+descStyle.Render(desc))
 		}
 	}
@@ -359,7 +358,7 @@ func (m Model) viewCmdOverlay(width, height int) string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }
 
@@ -369,25 +368,25 @@ func (m Model) viewMentionPalette(width int) string {
 	}
 	boxW := width - 4
 	innerW := dialogInnerWidth(boxW)
-	titleLabel := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("available files")
+	titleLabel := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render("available files")
 	title := diagFillTitle(titleLabel, innerW)
 	var rows []string
 	for i, item := range m.mentionItems {
 		if i == m.mentionCursor {
 			rows = append(rows, lipgloss.NewStyle().
-				Background(colorSelBg).
-				Foreground(colorText).
+				Background(theme.Current().BgSelection).
+				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
 				Render("› "+item))
 		} else {
-			rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+item))
+			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+item))
 		}
 	}
 	hint := styleMuted.Render("↑↓ navigate  enter inserts mention")
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
+		BorderForeground(theme.Current().Border).
 		Width(boxW + 2).
 		PaddingLeft(2).PaddingRight(2).
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
@@ -479,7 +478,7 @@ func (m Model) viewInput(width int) string {
 				"allow this command?",
 				shellApprovalOptions,
 				m.approvalCursor,
-				lipgloss.Color("#F59E0B"),
+				theme.Current().Warning,
 			))
 		}
 	} else {
@@ -640,7 +639,7 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 	if rows < 1 || len(active) == 0 {
 		return nil
 	}
-	header := lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  agents")
+	header := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("  agents")
 	// The tightest form still says the work exists and where to look.
 	compact := []string{header + styleMuted.Render(fmt.Sprintf("  %d running · ctrl+b", len(active)))}
 	if rows == 1 {
@@ -683,18 +682,20 @@ func (m Model) delegationRow(a parallelAgentEntry) string {
 	if len(task) > 50 {
 		task = task[:47] + "..."
 	}
+	pal := theme.Current()
+	taskStyle := lipgloss.NewStyle().Foreground(pal.TextMuted)
 	switch a.Status {
 	case "running":
 		return "  " + renderGlare(fmt.Sprintf("%-20s %s", label, task), m.eyeFrame, agentColor)
 	case "done":
 		return lipgloss.NewStyle().Foreground(agentColor).Render(fmt.Sprintf("  ● %-18s", label)) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+			taskStyle.Render(task)
 	case "error", "failed":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("  ✗ %-18s", label)) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+		return lipgloss.NewStyle().Foreground(pal.Error).Render(fmt.Sprintf("  ✗ %-18s", label)) +
+			taskStyle.Render(task)
 	default:
-		return lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("  ○ %-18s", label)) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+		return lipgloss.NewStyle().Foreground(pal.TextMuted).Render(fmt.Sprintf("  ○ %-18s", label)) +
+			taskStyle.Render(task)
 	}
 }
 
@@ -729,7 +730,7 @@ func (m Model) todoLines(rows int) []string {
 	if len(ordered) == 0 {
 		return nil
 	}
-	header := lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  todos")
+	header := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("  todos")
 	if completed > 0 {
 		header += styleMuted.Render(fmt.Sprintf("  %d/%d done", completed, completed+len(ordered)))
 	}
@@ -762,11 +763,11 @@ func todoRow(td session.Todo, status string, frame int) string {
 	}
 	switch status {
 	case "in_progress", "running":
-		return "  " + renderGlare(label, frame, lipgloss.Color("#F59E0B"))
+		return "  " + renderGlare(label, frame, theme.Current().Warning)
 	case "blocked", "failed", "cancelled":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  ! ") + styleMuted.Render(label)
+		return lipgloss.NewStyle().Foreground(theme.Current().Error).Render("  ! ") + styleMuted.Render(label)
 	default:
-		return lipgloss.NewStyle().Foreground(colorMuted).Render("  ○ ") + styleMuted.Render(label)
+		return lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  ○ ") + styleMuted.Render(label)
 	}
 }
 
@@ -841,16 +842,17 @@ func (m Model) viewStatusBar(width int) string {
 	left := m.statusBarMessage()
 
 	eval := m.evaluateCompact()
+	pal := theme.Current()
 	// The gauge shows occupancy (how full the window is), not cumulative cost.
 	used := m.contextTokens
 	var ctxColor color.Color
 	switch {
 	case eval.IsError:
-		ctxColor = lipgloss.Color("#EF4444")
+		ctxColor = pal.Error
 	case eval.IsWarning:
-		ctxColor = lipgloss.Color("#F59E0B")
+		ctxColor = pal.Warning
 	default:
-		ctxColor = lipgloss.Color("#6B7280")
+		ctxColor = pal.TextMuted
 	}
 	ctxLabel := fmt.Sprintf("%s / %s ctx", formatTokenCount(used), formatTokenCount(eval.EffectiveWindow))
 	if !m.cfg.AutoCompactEnabled {
@@ -860,9 +862,9 @@ func (m Model) viewStatusBar(width int) string {
 	// Live prompt-cache cue: hit rate of the LAST request. A sudden drop means
 	// the cached prefix broke — visible without running /stats.
 	if label, healthy := m.cacheIndicator(); label != "" {
-		cacheColor := lipgloss.Color("#F59E0B")
+		cacheColor := pal.Warning
 		if healthy {
-			cacheColor = lipgloss.Color("#10B981")
+			cacheColor = pal.Success
 		}
 		right = lipgloss.NewStyle().Foreground(cacheColor).Render(label) + "  " + right
 	}
@@ -871,11 +873,11 @@ func (m Model) viewStatusBar(width int) string {
 		if n > 1 {
 			label += "s"
 		}
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(label) + "  " + right
+		right = lipgloss.NewStyle().Foreground(pal.SuccessBright).Render(label) + "  " + right
 	}
 	if n := pty.Default().RunningCount(); n > 0 {
 		label := fmt.Sprintf("▣ %d pty", n)
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(label) + "  " + right
+		right = lipgloss.NewStyle().Foreground(pal.SuccessBright).Render(label) + "  " + right
 	}
 
 	leftWidth := max(width-lipgloss.Width(right)-2, 0)
@@ -884,7 +886,7 @@ func (m Model) viewStatusBar(width int) string {
 	bar := leftPadded + right + " "
 	return lipgloss.NewStyle().
 		Width(width).
-		Background(colorHeaderBg).
+		Background(pal.BgHeader).
 		PaddingLeft(1).
 		Render(bar)
 }

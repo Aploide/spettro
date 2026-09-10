@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
+	"spettro/internal/theme"
 )
 
 const (
@@ -136,7 +137,7 @@ func (m Model) questionPreviewPane(preview string, width, budget int) []string {
 	}
 	box := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
+		BorderForeground(theme.Current().Border).
 		Width(min(inner+4, width)).
 		PaddingLeft(1).PaddingRight(1).
 		Render(strings.Join(content, "\n"))

@@ -19,6 +19,7 @@ var allCommands = []commandDef{
 	{"/models", "switch model"},
 	{"/connect", "connect a provider"},
 	{"/mode", "cycle mode"},
+	{"/theme", "pick the colour theme (dark/light/auto) with live preview"},
 	{"/approve", "execute pending plan"},
 	{"/permission", "set permission level"},
 	{"/budget", "set token budget per request  usage: /budget <n|0>"},
@@ -215,6 +216,7 @@ func isInstantCommand(input string) bool {
 		"/diff",
 		"/mcp",
 		"/mode", "/next",
+		"/theme",
 		"/remote",
 		"/telegram", "/tg",
 		"/update",
@@ -267,6 +269,8 @@ const helpText = `commands:
   /login         sign in to your Spettro subscription (opens browser)
   /logout        sign out of your Spettro subscription
   /mode          cycle to next mode  (or shift+tab)
+  /theme [t]     show the colour theme, or set it: dark | light | auto
+                 (SPETTRO_THEME overrides it for one process)
   /models        open model selector (connected providers only)
   /models p:m    set model directly
   /connect       connect a provider or local endpoint

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"spettro/internal/pty"
+	"spettro/internal/theme"
 )
 
 // TestRenderPtyLiveTail verifies a running pty tool call renders the live
@@ -32,7 +33,7 @@ func TestRenderPtyLiveTail(t *testing.T) {
 		t.Fatalf("live tail missing session output, got %q", tail)
 	}
 
-	out := renderToolGroups([]ToolItem{{Name: "pty-write", Status: "running", Args: args}}, false, false, colorHeaderBg)
+	out := renderToolGroups([]ToolItem{{Name: "pty-write", Status: "running", Args: args}}, false, false, theme.Current().BgHeader)
 	if !strings.Contains(out, "tail-marker") {
 		t.Fatalf("renderToolGroups missing live tail, got %q", out)
 	}

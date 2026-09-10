@@ -7,6 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 // PrintGoodbye prints the acting eyes and session stats to stdout after the
@@ -36,10 +38,13 @@ func PrintGoodbye(final tea.Model) {
 		return
 	}
 
-	eyeColor := lipgloss.Color("#BD93F9")
-	eyeStyle := lipgloss.NewStyle().Foreground(eyeColor)
-	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-	accentStyle := lipgloss.NewStyle().Foreground(eyeColor)
+	// This prints after the alt-screen is torn down, straight onto the user's
+	// terminal, so it has to read the resolved palette the same way the TUI
+	// did rather than assume a dark ground.
+	p := theme.Current()
+	eyeStyle := lipgloss.NewStyle().Foreground(p.AccentPurple)
+	mutedStyle := lipgloss.NewStyle().Foreground(p.TextMuted)
+	accentStyle := lipgloss.NewStyle().Foreground(p.AccentPurple)
 
 	fmt.Println()
 	for _, line := range eyesActing {

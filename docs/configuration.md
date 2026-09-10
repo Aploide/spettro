@@ -6,7 +6,7 @@ Spettro uses both project-local and user-global storage.
 
 | Path | Purpose |
 | --- | --- |
-| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md). |
+| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md). |
 | `keys.enc` | Encrypted API keys map by provider ID. |
 | `trusted.json` | Permanently trusted project paths. |
 | `models.json` | Cached `models.dev` catalog. |
@@ -51,6 +51,31 @@ Spettro uses both project-local and user-global storage.
 | `ask-first` | Strictest flow; approval-first execution model. |
 | `restricted` | Allows execution with policy checks and approval gating where required. |
 | `yolo` | Least restrictive execution policy. |
+
+## Theme
+
+The TUI palette. See [Themes](theme.md) for detection details and what the
+light palette re-tunes.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `theme` | `""` (treated as `auto`) | `dark`, `light` or `auto`. Written by `/theme`; an unrecognised value is cleared to the default on load. |
+
+Precedence at startup is `SPETTRO_THEME` (environment, never persisted) >
+`theme` in `config.json` > auto-detection > dark. `auto` seeds from `COLORFGBG`
+before the first frame, then asks the terminal itself with an OSC 11 background
+query and revises the palette when the answer arrives; it degrades to dark
+whenever the background cannot be determined — including on a terminal that
+cannot be asked at all, where `COLORFGBG` is an inherited value describing
+whatever launched Spettro rather than Spettro's own terminal.
+
+`SPETTRO_THEME` is a startup override, not a lock: `/theme` still repaints and
+still saves while it is set, and the variable takes the palette back on the next
+start.
+
+```bash
+SPETTRO_THEME=light spettro     # override for one run
+```
 
 ## Notifications
 

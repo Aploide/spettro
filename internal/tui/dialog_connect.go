@@ -12,6 +12,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/theme"
 )
 
 func (m Model) openConnect() Model {
@@ -457,7 +458,7 @@ func (m Model) viewConnect() string {
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 		)
 	}
 
@@ -478,10 +479,10 @@ func (m Model) viewConnect() string {
 		for i, opt := range connectManageOptions {
 			if i == m.connectActionCursor {
 				rows = append(rows, lipgloss.NewStyle().
-					Background(colorSelBg).Foreground(colorText).Bold(true).
+					Background(theme.Current().BgSelection).Foreground(theme.Current().Text).Bold(true).
 					Width(innerW).Render("› "+opt))
 			} else {
-				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+opt))
+				rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+opt))
 			}
 		}
 		inner := lipgloss.JoinVertical(lipgloss.Left,
@@ -500,7 +501,7 @@ func (m Model) viewConnect() string {
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 		)
 	}
 
@@ -515,17 +516,17 @@ func (m Model) viewConnect() string {
 				break
 			}
 		}
-		titleLabel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5555")).Render("◈ remove " + provName)
+		titleLabel := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Danger).Render("◈ remove " + provName)
 		title := diagFillTitle(titleLabel, innerW)
-		warning := lipgloss.NewStyle().Foreground(colorText).Render("Remove this provider and delete its API key?")
+		warning := lipgloss.NewStyle().Foreground(theme.Current().Text).Render("Remove this provider and delete its API key?")
 		var rows []string
 		for i, opt := range connectConfirmOptions {
 			if i == m.connectActionCursor {
 				rows = append(rows, lipgloss.NewStyle().
-					Background(colorSelBg).Foreground(colorText).Bold(true).
+					Background(theme.Current().BgSelection).Foreground(theme.Current().Text).Bold(true).
 					Width(innerW).Render("› "+opt))
 			} else {
-				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+opt))
+				rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+opt))
 			}
 		}
 		inner := lipgloss.JoinVertical(lipgloss.Left,
@@ -537,7 +538,7 @@ func (m Model) viewConnect() string {
 		)
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#FF5555")).
+			BorderForeground(theme.Current().Danger).
 			Width(dialogWidth+2).
 			Padding(1, 2).
 			Render(inner)
@@ -545,7 +546,7 @@ func (m Model) viewConnect() string {
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 		)
 	}
 
@@ -565,10 +566,10 @@ func (m Model) viewConnect() string {
 		for i, opt := range options {
 			if i == m.connectActionCursor {
 				rows = append(rows, lipgloss.NewStyle().
-					Background(colorSelBg).Foreground(colorText).Bold(true).
+					Background(theme.Current().BgSelection).Foreground(theme.Current().Text).Bold(true).
 					Width(innerW).Render("› "+opt))
 			} else {
-				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Render("  "+opt))
+				rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+opt))
 			}
 		}
 		inner := lipgloss.JoinVertical(lipgloss.Left,
@@ -587,7 +588,7 @@ func (m Model) viewConnect() string {
 			lipgloss.Center, lipgloss.Center,
 			dialog,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 		)
 	}
 
@@ -596,7 +597,7 @@ func (m Model) viewConnect() string {
 	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
 	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
 	filterLine := promptStyle.Render(">") + " " +
-		lipgloss.NewStyle().Foreground(colorText).Render(m.connectFilter) +
+		lipgloss.NewStyle().Foreground(theme.Current().Text).Render(m.connectFilter) +
 		cursor
 
 	var rows []string
@@ -606,15 +607,15 @@ func (m Model) viewConnect() string {
 		nowSugg := isSuggested(pi.ID)
 		if i == 0 {
 			if nowSugg {
-				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  ─ suggested"))
+				rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render("  ─ suggested"))
 			} else {
-				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  ─ all providers"))
+				rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render("  ─ all providers"))
 				inSuggested = false
 			}
 		} else if inSuggested && !nowSugg {
 			inSuggested = false
 			rows = append(rows, "")
-			rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  ─ all providers"))
+			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render("  ─ all providers"))
 		}
 
 		isSelected := i == m.connectCursor
@@ -635,16 +636,16 @@ func (m Model) viewConnect() string {
 				label += "  ✓ connected"
 			}
 			rows = append(rows, lipgloss.NewStyle().
-				Background(colorSelBg).
-				Foreground(colorText).
+				Background(theme.Current().BgSelection).
+				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
 				Render(label))
 		} else {
-			nameStyle := lipgloss.NewStyle().Foreground(colorMuted)
+			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 			suffix := ""
 			if isConnected {
-				suffix = "  " + lipgloss.NewStyle().Foreground(colorSuccess).Render("✓ connected")
+				suffix = "  " + lipgloss.NewStyle().Foreground(theme.Current().Success).Render("✓ connected")
 			}
 			rows = append(rows, "  "+nameStyle.Render(name)+suffix)
 		}
@@ -681,6 +682,6 @@ func (m Model) viewConnect() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }

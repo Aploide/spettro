@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 // The workflow panel is a phase tree, not a flat agent list: a workflow's
@@ -20,8 +22,9 @@ func progressBar(width, done, failed, total int) string {
 	if width < 4 {
 		width = 4
 	}
+	pal := theme.Current()
 	if total <= 0 {
-		return lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("░", width))
+		return lipgloss.NewStyle().Foreground(pal.Rule).Render(strings.Repeat("░", width))
 	}
 	doneCells := done * width / total
 	failCells := failed * width / total
@@ -36,9 +39,9 @@ func progressBar(width, done, failed, total int) string {
 	}
 	rest := width - doneCells - failCells
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(colorSuccess).Render(strings.Repeat("█", doneCells)))
-	b.WriteString(lipgloss.NewStyle().Foreground(colorError).Render(strings.Repeat("█", failCells)))
-	b.WriteString(lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("░", rest)))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Success).Render(strings.Repeat("█", doneCells)))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Error).Render(strings.Repeat("█", failCells)))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Rule).Render(strings.Repeat("░", rest)))
 	return b.String()
 }
 
@@ -64,11 +67,11 @@ func truncateAgentName(name string, width int) string {
 func agentStatusGlyph(status string) (string, lipgloss.Style) {
 	switch status {
 	case "running":
-		return "▶", lipgloss.NewStyle().Foreground(colorToolRun)
+		return "▶", lipgloss.NewStyle().Foreground(theme.Current().Info)
 	case "failed":
-		return "✗", lipgloss.NewStyle().Foreground(colorError)
+		return "✗", lipgloss.NewStyle().Foreground(theme.Current().Error)
 	default:
-		return "✓", lipgloss.NewStyle().Foreground(colorSuccess)
+		return "✓", lipgloss.NewStyle().Foreground(theme.Current().Success)
 	}
 }
 
@@ -138,11 +141,11 @@ func (m Model) workflowTreeLines(width, maxRows int) []string {
 	var marker string
 	switch w.Status {
 	case "failed":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorError), "✗"
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Error), "✗"
 	case "running":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorToolRun), "◆"
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Info), "◆"
 	default:
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorSuccess), "✓"
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Success), "✓"
 	}
 
 	running, done, failed, _ := w.counts()
@@ -176,7 +179,7 @@ func (m Model) workflowTreeLines(width, maxRows int) []string {
 		tail = append(tail, "")
 		for _, entry := range lastLogs(w.Logs, 4) {
 			tail = append(tail, styleMuted.Render("  log ")+
-				lipgloss.NewStyle().Foreground(colorText).Render(truncateLabel(entry.Message, budget-7)))
+				lipgloss.NewStyle().Foreground(theme.Current().Text).Render(truncateLabel(entry.Message, budget-7)))
 		}
 	}
 	if w.Status != "running" && w.Summary != "" {
@@ -281,14 +284,14 @@ func (m Model) workflowPhaseGroup(w *workflowRun, phase string, budget int) work
 	// A phase with nothing running and nothing finished has not been reached
 	// yet; it is still listed, dimmed, because knowing what is coming is half
 	// the value of declaring phases up front.
-	glyph, style := "○", lipgloss.NewStyle().Foreground(colorDim)
+	glyph, style := "○", lipgloss.NewStyle().Foreground(theme.Current().TextDim)
 	switch {
 	case pRunning > 0:
-		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(colorToolRun)
+		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Info)
 	case pFailed > 0:
-		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(colorWarn)
+		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Warning)
 	case pDone > 0:
-		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(colorText)
+		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
 	}
 	head := "  " + style.Render(glyph+" "+truncateLabel(title, max(8, budget/2)))
 	if len(agents) > 0 {
@@ -310,7 +313,7 @@ func (m Model) workflowPhaseGroup(w *workflowRun, phase string, budget int) work
 		if a.Cached {
 			detail = "replayed · " + detail
 		}
-		prefix := "    " + iconStyle.Render(icon+" ") + lipgloss.NewStyle().Foreground(colorText).Render(name)
+		prefix := "    " + iconStyle.Render(icon+" ") + lipgloss.NewStyle().Foreground(theme.Current().Text).Render(name)
 		prio := wfRowDone
 		switch a.Status {
 		case "running":
@@ -401,11 +404,11 @@ func (m Model) workflowSummaryLines(width, rows int) []string {
 	var marker string
 	switch w.Status {
 	case "failed":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorError), "✗"
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Error), "✗"
 	case "running":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorToolRun), "◆"
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Info), "◆"
 	default:
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorSuccess), "✓"
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Success), "✓"
 	}
 	head := titleStyle.Render(marker + " " + truncateLabel(w.Name, max(10, budget/3)))
 
@@ -425,7 +428,7 @@ func (m Model) workflowSummaryLines(width, rows int) []string {
 		if pending {
 			phaseBit = styleMuted.Render(" ○ " + truncateLabel(phase, max(6, budget/4)))
 		} else {
-			phaseBit = lipgloss.NewStyle().Bold(true).Foreground(colorToolRun).
+			phaseBit = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Info).
 				Render(" ▸ "+truncateLabel(phase, max(6, budget/4))) +
 				styleMuted.Render(fmt.Sprintf(" %d/%d", pDone+pFailed, pTotal))
 		}
@@ -454,7 +457,7 @@ func (m Model) workflowSummaryLines(width, rows int) []string {
 		if activity := m.latestAgentActivity(a.Instance); activity != "" {
 			detail = activity
 		}
-		prefix := "  " + iconStyle.Render(icon+" ") + lipgloss.NewStyle().Foreground(colorText).Render(name)
+		prefix := "  " + iconStyle.Render(icon+" ") + lipgloss.NewStyle().Foreground(theme.Current().Text).Render(name)
 		lines = append(lines, prefix+" "+styleMuted.Render(
 			truncateLabel(strings.ReplaceAll(detail, "\n", " "), max(6, budget-lipgloss.Width(prefix)-1))))
 	}
@@ -478,7 +481,7 @@ func (m Model) renderWorkflowBlock(width, rows int) string {
 	return lipgloss.NewStyle().
 		Width(width-2).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
+		BorderForeground(theme.Current().Border).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 }

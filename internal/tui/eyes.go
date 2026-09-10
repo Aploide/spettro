@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 // Eye art from eyes.txt – two states: acting (coding) and planning.
@@ -61,6 +63,10 @@ func renderEyes(mode string, frame int, thinking bool, termWidth int) string {
 		if scanPos >= n {
 			scanPos = (n*2 - 2) - scanPos
 		}
+		// The falloff runs toward the terminal's own ground, so on a light
+		// theme "further from the scan line" means lighter, not darker; the
+		// anchors come from the palette rather than a fade toward black.
+		scan := theme.Current().EyesScan
 		lines = make([]string, n)
 		for i, raw := range art {
 			dist := i - scanPos
@@ -72,25 +78,26 @@ func renderEyes(mode string, frame int, thinking bool, termWidth int) string {
 			case 0:
 				s = lipgloss.NewStyle().Foreground(modeColor(mode)).Bold(true)
 			case 1:
-				s = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+				s = lipgloss.NewStyle().Foreground(scan[0])
 			case 2:
-				s = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+				s = lipgloss.NewStyle().Foreground(scan[1])
 			default:
-				s = lipgloss.NewStyle().Foreground(lipgloss.Color("#2A2A2A"))
+				s = lipgloss.NewStyle().Foreground(scan[2])
 			}
 			lines[i] = s.Render(raw)
 		}
 	} else {
 		// Normal mode: blink cycle every ~8 seconds (at 20fps = 160 frames)
 		cycle := frame % 160
+		blink := theme.Current().EyesBlink
 		var eyeStyle lipgloss.Style
 		switch {
 		case cycle >= 156: // closing
-			eyeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#1A1A2E"))
+			eyeStyle = lipgloss.NewStyle().Foreground(blink[2])
 		case cycle >= 152: // half-closed
-			eyeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3D3D5C"))
+			eyeStyle = lipgloss.NewStyle().Foreground(blink[1])
 		case cycle >= 148: // squinting
-			eyeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B6B8A"))
+			eyeStyle = lipgloss.NewStyle().Foreground(blink[0])
 		default:
 			eyeStyle = lipgloss.NewStyle().Foreground(modeColor(mode))
 		}

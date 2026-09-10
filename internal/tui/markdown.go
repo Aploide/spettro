@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"spettro/internal/theme"
 )
 
 var (
@@ -77,7 +79,7 @@ func renderMarkdown(content string, width int) string {
 		}
 
 		if level, title, ok := parseHeading(trim); ok {
-			titleStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
+			titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
 			if level == 1 {
 				titleStyle = titleStyle.Underline(true)
 			}
@@ -91,7 +93,7 @@ func renderMarkdown(content string, width int) string {
 		}
 
 		if quote, ok := parseQuote(line); ok {
-			q := lipgloss.NewStyle().Foreground(colorMuted).Italic(true).Render(renderInlineMarkdown(quote))
+			q := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Italic(true).Render(renderInlineMarkdown(quote))
 			out = append(out, styleMuted.Render("│ ")+q)
 			continue
 		}
@@ -101,7 +103,7 @@ func renderMarkdown(content string, width int) string {
 			if ruleW < 8 {
 				ruleW = 24
 			}
-			out = append(out, styleDim.Render(strings.Repeat("─", ruleW-2)))
+			out = append(out, styleRule.Render(strings.Repeat("─", ruleW-2)))
 			continue
 		}
 
@@ -135,8 +137,8 @@ func renderInlineMarkdown(s string) string {
 			return tok
 		}
 		codePieces[tok] = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D1D5DB")).
-			Background(lipgloss.Color("#1F2937")).
+			Foreground(theme.Current().CodeInlineFg).
+			Background(theme.Current().BgCodeInline).
 			Render(" " + parts[1] + " ")
 		return tok
 	})
@@ -185,8 +187,8 @@ func renderCodeBlock(code string, width int) string {
 		return ""
 	}
 	style := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#E5E7EB")).
-		Background(lipgloss.Color("#111827")).
+		Foreground(theme.Current().CodeFg).
+		Background(theme.Current().BgCode).
 		Padding(0, 1)
 	if width > 12 {
 		style = style.MaxWidth(width)
@@ -336,7 +338,7 @@ func renderTable(tableLines []string, width int) string {
 	}
 
 	border := styleMuted
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
 
 	sepLine := func(l, m, r, f string) string {
 		var b strings.Builder

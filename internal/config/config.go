@@ -36,6 +36,11 @@ type UserConfig struct {
 	LastAgentID             string            `json:"last_agent_id,omitempty"`
 	ShowSidePanel           bool              `json:"show_side_panel,omitempty"`
 	ShowPermissionDebug     bool              `json:"show_permission_debug,omitempty"`
+	// Theme selects the colour palette: "dark", "light" or "auto" (empty is
+	// treated as "auto"). Auto asks the terminal for its background colour and
+	// degrades to dark when it cannot be determined. The SPETTRO_THEME
+	// environment variable overrides this for a single process.
+	Theme string `json:"theme,omitempty"`
 	// ThinkingLevel selects extended-thinking compute when the active model
 	// supports it. Allowed values are "off", "low", "medium", "high", "x-high"
 	// (or empty, which is treated as "off"). Toggleable at runtime via the
@@ -149,6 +154,13 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 		// valid
 	default:
 		cfg.ThinkingLevel = ""
+		changed = true
+	}
+	switch cfg.Theme {
+	case "", "auto", "dark", "light":
+		// valid ("" means auto)
+	default:
+		cfg.Theme = ""
 		changed = true
 	}
 	if cfg.NotifyQuietSec <= 0 {

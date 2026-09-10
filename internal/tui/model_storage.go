@@ -10,6 +10,7 @@ import (
 	"spettro/internal/checkpoint"
 	"spettro/internal/jobs"
 	"spettro/internal/storage"
+	"spettro/internal/theme"
 )
 
 // handleStorageCommand implements /storage (report) and /storage clean
@@ -153,7 +154,7 @@ func (m Model) viewStorageClean() string {
 	for i, it := range m.storageItems {
 		if it.ClassName != lastClass {
 			lastClass = it.ClassName
-			rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render(it.ClassName))
+			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render(it.ClassName))
 		}
 		box := "○"
 		if m.storageChecked[i] {
@@ -163,9 +164,9 @@ func (m Model) viewStorageClean() string {
 		if i == m.storageCursor {
 			selectedRow = len(rows)
 			rows = append(rows, lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")+
-				lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(line))
+				lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true).Render(line))
 		} else {
-			rows = append(rows, "  "+lipgloss.NewStyle().Foreground(colorMuted).Render(line))
+			rows = append(rows, "  "+lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render(line))
 		}
 	}
 	maxRows := max(m.height-12, 4)
@@ -178,7 +179,7 @@ func (m Model) viewStorageClean() string {
 	}
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("▣ storage clean")
-	summary := lipgloss.NewStyle().Foreground(colorMuted).
+	summary := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).
 		Render(fmt.Sprintf("%d selected — %s", selCount, storage.FormatBytes(selSize)))
 	hint := styleMuted.Render("↑↓ move  space toggle  a all  n none  enter delete  esc cancel")
 
@@ -198,6 +199,6 @@ func (m Model) viewStorageClean() string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(colorDim)),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
 }

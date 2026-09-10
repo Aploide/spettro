@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
+	"spettro/internal/theme"
 )
 
 // questionMinContentH is the smallest conversation pane the question block is
@@ -366,7 +367,7 @@ func (m Model) renderQuestionRow(row questionRow, numWidth, indent, width int, f
 	}
 	label = truncateLabel(label, max(width-indent-lipgloss.Width(suffix), 8))
 
-	labelStyle := lipgloss.NewStyle().Foreground(colorText)
+	labelStyle := lipgloss.NewStyle().Foreground(theme.Current().Text)
 	if focused {
 		labelStyle = accent.Bold(true)
 	}
@@ -513,7 +514,7 @@ func windowQuestionBlocks(blocks [][]string, cursor, budget int) (start, end, hi
 // styleQuestionHead styles the wrapped question/context block: the question
 // reads as the thing being asked, the form's context stays muted under it.
 func (m Model) styleQuestionHead(head []string, questionLines int) []string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(colorText)
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
 	out := make([]string, 0, len(head))
 	for i, line := range head {
 		if i < questionLines {
@@ -551,7 +552,7 @@ func (m Model) questionHint() string {
 func (m Model) renderQuestionSubmitPage(width, budget int) [][]string {
 	q := m.pendingQuestion
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(colorText)
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
 	rows := questionReviewRows()
 	actions := make([]string, 0, len(rows))
 	for i, row := range rows {
@@ -682,7 +683,7 @@ func (m Model) renderQuestionStrip(width int) string {
 	for i := start; i < end; i++ {
 		style := styleMuted
 		if i == q.tab {
-			style = lipgloss.NewStyle().Background(colorSelBg).Foreground(m.currentColor()).Bold(true)
+			style = lipgloss.NewStyle().Background(theme.Current().BgSelection).Foreground(m.currentColor()).Bold(true)
 		}
 		rendered = append(rendered, style.Render(" "+chips[i]+" "))
 	}

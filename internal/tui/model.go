@@ -24,6 +24,7 @@ import (
 	"spettro/internal/spettro"
 	"spettro/internal/storage"
 	"spettro/internal/telegram"
+	"spettro/internal/theme"
 	"spettro/internal/update"
 	"spettro/internal/version"
 )
@@ -508,6 +509,26 @@ type Model struct {
 	// the Telegram relay) before the first tea event is processed.
 	startupCmds []tea.Cmd
 
+	// themeAuto is set when the palette was seeded by detection rather than
+	// chosen, and a late answer to the terminal's background query is still
+	// allowed to revise it. An explicit dark/light selection leaves it false
+	// so nothing can flip the UI out from under the user mid-session.
+	themeAuto bool
+
+	// themeDetected records that the palette in force came from the
+	// terminal's own answer to the background query, rather than from
+	// COLORFGBG or the dark fallback. Only /theme reads it, to report how the
+	// current palette was arrived at instead of guessing after the fact.
+	themeDetected bool
+
+	// showThemePicker owns the /theme overlay: a list of the themes with a
+	// panel previewing the one under the cursor. Nothing global changes until
+	// the choice is confirmed, so cancelling is just closing.
+	showThemePicker bool
+
+	// themeCursor indexes themePickerOrder.
+	themeCursor int
+
 	// Attachments (ctrl+f to attach, ctrl+r to remove; ctrl+v to paste image)
 	attachments      []attachmentItem
 	showAttachPrompt bool
@@ -561,16 +582,22 @@ type Model struct {
 }
 
 func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState) Model {
+	// Resolve the palette before anything else: the textarea chrome and the
+	// spinner style below are captured at construction, so a theme installed
+	// after them would leave the input box in the wrong palette for the rest
+	// of the session. For "auto" theme.Seed reads COLORFGBG when there is a
+	// terminal that could be asked and falls back to dark when there is not —
+	// a pure env read either way, no I/O — so the first paint is usually
+	// already right; Init then asks the terminal for the real answer.
+	wanted := theme.Preferred(cfg.Theme)
+	pal := theme.Set(theme.Seed(wanted))
+
 	ta := textarea.New()
 	ta.Placeholder = "enter message…"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
-	taStyles := textarea.DefaultDarkStyles()
-	taStyles.Focused.CursorLine = lipgloss.NewStyle()
-	taStyles.Focused.Prompt = lipgloss.NewStyle()
-	taStyles.Blurred.Prompt = lipgloss.NewStyle()
-	ta.SetStyles(taStyles)
+	ta.SetStyles(textareaStyles(pal))
 	ta.Focus()
 
 	sp := spinner.New()
@@ -629,6 +656,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		searcher:     agent.NewRepoSearcher(cwd),
 		sandboxState: sb,
 		historyIndex: -1,
+		themeAuto:    wanted == theme.AutoKind,
 		livePerm:     &livePermission{},
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
@@ -692,8 +720,59 @@ func (m Model) currentColor() color.Color {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, tick(), m.spin.Tick}
+	// Only "auto" asks the terminal what colour it is. An explicit selection
+	// must never put an OSC 11 query on the wire, and neither must a
+	// redirected stdout — Bubble Tea writes the sequence whether or not the
+	// far end can answer it, so an unguarded query would land as literal
+	// escape bytes in a captured transcript.
+	if m.themeAuto && theme.CanQueryTerminal() {
+		cmds = append(cmds, tea.RequestBackgroundColor)
+	}
 	cmds = append(cmds, m.startupCmds...)
 	return tea.Batch(cmds...)
+}
+
+// textareaStyles adapts bubbles' input chrome — placeholder, cursor line,
+// line numbers, end-of-buffer markers — to the palette. Only the polarity is
+// taken from the theme; the prompt and cursor-line overrides are the same
+// blanking the input box has always done.
+func textareaStyles(p theme.Palette) textarea.Styles {
+	var s textarea.Styles
+	if p.IsDark() {
+		s = textarea.DefaultDarkStyles()
+	} else {
+		s = textarea.DefaultLightStyles()
+		// bubbles' DefaultStyles hardcodes Cursor.Color to ANSI 7 for both
+		// polarities, and the virtual cursor renders as that colour reversed —
+		// so the caret becomes a silver block whose glyph is painted in the
+		// terminal's own background. On a light terminal that is white on
+		// white: the caret and the character under it both vanish. Painting it
+		// with body text ink instead gives a dark block with the page showing
+		// through the glyph. The dark branch is left alone so its bytes stay
+		// exactly what shipped before themes existed.
+		s.Cursor.Color = p.Text
+	}
+	s.Focused.CursorLine = lipgloss.NewStyle()
+	s.Focused.Prompt = lipgloss.NewStyle()
+	s.Blurred.Prompt = lipgloss.NewStyle()
+	return s
+}
+
+// applyTheme installs a resolved palette and repaints everything that captured
+// colours earlier. Both of the TUI's memoised render caches key on layout, not
+// on the palette, so they have to be dropped by hand or already-rendered
+// strings keep the old theme while new ones arrive in the new one: the message
+// blocks in renderCache, and the question form's preview, whose "… N more
+// lines" footer is styled at cache-fill time.
+func (m Model) applyTheme(k theme.Kind) Model {
+	pal := theme.Set(k)
+	m.ta.SetStyles(textareaStyles(pal))
+	m.renderCache = nil
+	if m.pendingQuestion != nil {
+		m.pendingQuestion.previewKey, m.pendingQuestion.previewLines = "", nil
+	}
+	m.refreshViewport()
+	return m
 }
 
 func tick() tea.Cmd {
