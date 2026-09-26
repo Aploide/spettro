@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Typographic characters, spelled by code point so the source stays ASCII.
@@ -611,5 +612,57 @@ func TestRunFileEditLineHintTrustedOnlyWhileFresh(t *testing.T) {
 	}})
 	if _, err := rt.runMultiEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "locations") {
 		t.Fatalf("stale hint on ambiguous match err=%v", err)
+	}
+}
+
+// goHandlers returns Go-like code with n handlers, each full of the common
+// block-anchor lines "if err != nil {" and "}".
+func goHandlers(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "func handler%d(w http.ResponseWriter, r *http.Request) error {\n", i)
+		for j := range 5 {
+			fmt.Fprintf(&b, "\tv%d, err := s.store.Load%d(ctx, r.URL.Query().Get(\"id%d\"))\n", j, i, j)
+			fmt.Fprintf(&b, "\tif err != nil {\n\t\treturn fmt.Errorf(\"load %d: %%w\", err)\n\t}\n", j)
+			fmt.Fprintf(&b, "\tlog.Printf(\"loaded %%v\", v%d)\n\tif err != nil {\n\t\treturn err\n\t}\n", j)
+		}
+		b.WriteString("\treturn nil\n}\n\n")
+	}
+	return b.String()
+}
+
+func TestBlockAnchorScalesOnCommonAnchors(t *testing.T) {
+	var q, blk strings.Builder
+	q.WriteString("\tif err != nil {\n")
+	blk.WriteString("\tif err != nil {\n")
+	for i := range 40 {
+		fmt.Fprintf(&q, "\t\tsomethingCompletelyDifferent%d := compute(alpha, beta, %d)\n", i, i)
+		fmt.Fprintf(&blk, "\t\tsomethingCompletelyDifferent%d := compute(alpha, gamma, %d)\n", i, i)
+	}
+	q.WriteString("\t}")
+	blk.WriteString("\t}\n")
+	big := goHandlers(600) // ~22k lines, ~6k "if err != nil {" anchors
+
+	start := time.Now()
+	if _, err := applyEdit(big, editRequest{Old: q.String(), New: "x"}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("miss: %v", err)
+	}
+	// The near-copy at the very end is still found, once, despite every
+	// earlier anchor and a wider window that swallows it.
+	content := big + "func tail() {\n" + blk.String() + "}\n"
+	res, err := applyEdit(content, editRequest{Old: q.String(), New: "\tif err != nil {\n\t\treturn err\n\t}"})
+	if err != nil || res.Tier != editTierBlockAnchor || !strings.HasSuffix(res.Content, "func tail() {\n\tif err != nil {\n\t\treturn err\n\t}\n}\n") {
+		t.Fatalf("near-copy: tier=%d err=%v", res.Tier, err)
+	}
+	// Seconds per call before the bound and cache; generous for -race.
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("block anchor took %v", d)
+	}
+
+	// Past its budget the tier gives up instead of stalling.
+	defer func(b int) { blockAnchorBudget = b }(blockAnchorBudget)
+	blockAnchorBudget = 1000
+	if spans := findBlockAnchor(newEditMatcher(content, 0), newEditQuery(q.String(), "x")); spans != nil {
+		t.Fatalf("over budget still matched: %+v", spans)
 	}
 }

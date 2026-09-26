@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -626,6 +627,12 @@ func anchorsUsable(q editQuery) (first, last string, ok bool) {
 // letting its size differ from old_string's by up to a quarter, and scores
 // the lines between by similarity. Every block above the threshold counts,
 // so two plausible blocks are reported as ambiguous.
+//
+// Common anchors ("if err != nil {" ... "}") can occur thousands of times,
+// so each candidate is first scored with a cheap upper bound and only the
+// ones that could pass are aligned for real, one alignment covering every
+// candidate size. The work is capped by blockAnchorBudget; a file too big
+// to finish within it skips this tier rather than stall the edit.
 func findBlockAnchor(m *editMatcher, q editQuery) []editSpan {
 	first, last, ok := anchorsUsable(q)
 	if !ok {
@@ -633,23 +640,52 @@ func findBlockAnchor(m *editMatcher, q editQuery) []editSpan {
 	}
 	k := len(q.lines)
 	tol := max(1, k/4)
+	sc := newLineScorer(m, q.lines[1:k-1], blockAnchorBudget)
 	var spans []editSpan
+	var sims []float64
 	for i := 0; i < len(m.lines); i++ {
 		if strings.TrimSpace(m.lines[i]) != first {
 			continue
 		}
-		bestSize, bestSim := 0, -1.0
-		for size := max(3, k-tol); size <= k+tol; size++ {
-			j := i + size - 1
-			if j >= len(m.lines) {
-				break
+		if sc.budget < 0 {
+			return nil
+		}
+		var sizes []int
+		for size := max(3, k-tol); size <= k+tol && i+size-1 < len(m.lines); size++ {
+			if strings.TrimSpace(m.lines[i+size-1]) == last {
+				sizes = append(sizes, size)
 			}
-			if strings.TrimSpace(m.lines[j]) != last {
-				continue
+		}
+		if len(sizes) == 0 {
+			continue
+		}
+		nb := sizes[len(sizes)-1] - 2
+		// Score of old_string's middle against the first b lines after the
+		// anchor, for every b; a size's middle is its first size-2 lines.
+		best := func(scores []float64) (size int, sim float64) {
+			sim = -1
+			for _, s := range sizes {
+				n := max(len(sc.want), s-2)
+				v := 1.0
+				if n > 0 {
+					v = scores[s-2] / float64(n)
+				}
+				if v > sim {
+					size, sim = s, v
+				}
 			}
-			if sim := blockSimilarity(q.lines[1:k-1], m.lines[i+1:j]); sim > bestSim {
-				bestSize, bestSim = size, sim
-			}
+			return size, sim
+		}
+		if _, ub := best(alignPrefixes(len(sc.want), nb, tol+1, func(a, b int) float64 {
+			return sc.bound(a, i+1+b)
+		})); ub < blockAnchorMinSimilarity {
+			continue
+		}
+		bestSize, bestSim := best(alignPrefixes(len(sc.want), nb, tol+1, func(a, b int) float64 {
+			return sc.similarity(a, i+1+b)
+		}))
+		if sc.budget < 0 {
+			return nil
 		}
 		if bestSim < blockAnchorMinSimilarity {
 			continue
@@ -658,9 +694,189 @@ func findBlockAnchor(m *editMatcher, q editQuery) []editSpan {
 		repl := reindentForFile(q.new, []string{q.lines[0], q.lines[k-1]}, []string{m.lines[i], m.lines[j]}, m.fileUnit())
 		span := m.lineSpan(q, i, bestSize, repl)
 		span.detail = fmt.Sprintf("lines %d-%d, %d%% similar", m.lineNo(i), m.lineNo(j), int(bestSim*100))
+		// Overlapping candidates are one block with different boundaries
+		// (an earlier anchor whose window swallows it); keep the closer fit.
+		if n := len(spans); n > 0 && span.start < spans[n-1].end {
+			if bestSim > sims[n-1] {
+				spans[n-1], sims[n-1] = span, bestSim
+			}
+			continue
+		}
 		spans = append(spans, span)
+		sims = append(sims, bestSim)
 	}
 	return spans
+}
+
+// blockAnchorBudget bounds findBlockAnchor's work, counted in Levenshtein
+// cells plus rune-bag comparisons; roughly 150ms. A var so tests can lower it.
+var blockAnchorBudget = 100_000_000
+
+// scoredLine is a line prepared for similarity scoring: trimmed and clipped
+// like lineSimilarity, with a sorted bag of its runes for the cheap bound.
+type scoredLine struct {
+	runes []rune
+	bag   []runeCount
+}
+
+type runeCount struct {
+	r rune
+	n int
+}
+
+func newScoredLine(l string) scoredLine {
+	rs := []rune(strings.TrimSpace(l))
+	rs = rs[:min(len(rs), 200)]
+	sorted := slices.Clone(rs)
+	slices.Sort(sorted)
+	var bag []runeCount
+	for _, r := range sorted {
+		if n := len(bag); n > 0 && bag[n-1].r == r {
+			bag[n-1].n++
+		} else {
+			bag = append(bag, runeCount{r, 1})
+		}
+	}
+	return scoredLine{runes: rs, bag: bag}
+}
+
+// lineScorer scores old_string's lines (want) against the file's lines. The
+// windows of nearby anchors overlap, so every score is cached by (want line,
+// file line); the work is charged to a shared budget.
+type lineScorer struct {
+	m      *editMatcher
+	want   []scoredLine
+	budget int
+	lines  []*scoredLine
+	// bounds and sims are indexed by file line, then want line; NaN means
+	// not computed yet.
+	bounds, sims [][]float32
+	prev, cur    []int
+}
+
+func newLineScorer(m *editMatcher, want []string, budget int) *lineScorer {
+	s := &lineScorer{m: m, budget: budget, want: make([]scoredLine, len(want)),
+		lines: make([]*scoredLine, len(m.lines)), bounds: make([][]float32, len(m.lines)), sims: make([][]float32, len(m.lines))}
+	for i, l := range want {
+		s.want[i] = newScoredLine(l)
+	}
+	return s
+}
+
+func (s *lineScorer) line(i int) scoredLine {
+	if s.lines[i] == nil {
+		sl := newScoredLine(s.m.lines[i])
+		s.lines[i] = &sl
+	}
+	return *s.lines[i]
+}
+
+// cached returns table's score for (want line a, file line i), computing it
+// with f on a miss.
+func (s *lineScorer) cached(table [][]float32, a, i int, f func(x, y scoredLine) float64) float64 {
+	row := table[i]
+	if row == nil {
+		row = make([]float32, len(s.want))
+		for j := range row {
+			row[j] = float32(math.NaN())
+		}
+		table[i] = row
+	}
+	if v := row[a]; !math.IsNaN(float64(v)) {
+		return float64(v)
+	}
+	v := f(s.want[a], s.line(i))
+	row[a] = float32(v)
+	return v
+}
+
+// bound is an upper bound on similarity(a, i): an edit script needs at least
+// as many edits as runes one line has that the other lacks.
+func (s *lineScorer) bound(a, i int) float64 {
+	return s.cached(s.bounds, a, i, func(x, y scoredLine) float64 {
+		n := max(len(x.runes), len(y.runes))
+		if n == 0 {
+			return 1
+		}
+		s.budget -= len(x.bag) + len(y.bag)
+		onlyX, onlyY := 0, 0
+		p, q := 0, 0
+		for p < len(x.bag) || q < len(y.bag) {
+			switch {
+			case q == len(y.bag) || (p < len(x.bag) && x.bag[p].r < y.bag[q].r):
+				onlyX += x.bag[p].n
+				p++
+			case p == len(x.bag) || y.bag[q].r < x.bag[p].r:
+				onlyY += y.bag[q].n
+				q++
+			default:
+				if d := x.bag[p].n - y.bag[q].n; d > 0 {
+					onlyX += d
+				} else {
+					onlyY -= d
+				}
+				p++
+				q++
+			}
+		}
+		return 1 - float64(max(onlyX, onlyY))/float64(n)
+	})
+}
+
+// similarity is lineSimilarity of want line a and file line i. Once the
+// budget runs out it returns 0, so callers must check the budget before
+// trusting a result.
+func (s *lineScorer) similarity(a, i int) float64 {
+	return s.cached(s.sims, a, i, func(x, y scoredLine) float64 {
+		ra, rb := x.runes, y.runes
+		if slices.Equal(ra, rb) {
+			return 1
+		}
+		if s.budget -= len(ra) * len(rb); s.budget < 0 {
+			return 0
+		}
+		n := max(len(ra), len(rb))
+		if cap(s.prev) < len(rb)+1 {
+			s.prev, s.cur = make([]int, len(rb)+1), make([]int, len(rb)+1)
+		}
+		prev, cur := s.prev[:len(rb)+1], s.cur[:len(rb)+1]
+		for j := range prev {
+			prev[j] = j
+		}
+		for p := 1; p <= len(ra); p++ {
+			cur[0] = p
+			for q := 1; q <= len(rb); q++ {
+				cost := 1
+				if ra[p-1] == rb[q-1] {
+					cost = 0
+				}
+				cur[q] = min(prev[q]+1, cur[q-1]+1, prev[q-1]+cost)
+			}
+			prev, cur = cur, prev
+		}
+		return 1 - float64(prev[len(rb)])/float64(n)
+	})
+}
+
+// alignPrefixes aligns na lines against nb lines (monotonic, each line used
+// at most once, pairs scored by score) and returns, for every b in 0..nb, the
+// best total for all na lines against the first b. Only pairs within band of
+// the diagonal are scored; the others count as unrelated.
+func alignPrefixes(na, nb, band int, score func(a, b int) float64) []float64 {
+	prev := make([]float64, nb+1)
+	cur := make([]float64, nb+1)
+	for a := 1; a <= na; a++ {
+		cur[0] = 0
+		for b := 1; b <= nb; b++ {
+			v := max(prev[b], cur[b-1])
+			if d := a - b; d <= band && d >= -band {
+				v = max(v, prev[b-1]+score(a-1, b-1))
+			}
+			cur[b] = v
+		}
+		prev, cur = cur, prev
+	}
+	return prev
 }
 
 // findContextAware matches a same-sized block whose first and last lines
