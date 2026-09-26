@@ -603,7 +603,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Unlock()
 	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements) + editNotesSuffix(notes)
+	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 
@@ -681,7 +681,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	r.mu.Unlock()
 	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements) + editNotesSuffix(notes)
+	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 

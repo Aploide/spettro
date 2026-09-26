@@ -4,7 +4,10 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
+
+	"spettro/internal/diff"
 )
 
 // File stamps back the stale-read guard. A stamp is the SHA-256 of a file's
@@ -70,4 +73,39 @@ func (r *toolRuntime) lockFile(abs string) func() {
 	r.mu.Unlock()
 	l.Lock()
 	return l.Unlock
+}
+
+// Bounds for the diff echoed back after an edit.
+const (
+	editDiffMaxLines = 40
+	editDiffMaxCols  = 200
+)
+
+// editDiffSummary is the compact diff returned to the model after an edit so
+// it can confirm what changed without re-reading the file: hunks with three
+// lines of context and a +added/-removed count, capped in size.
+func editDiffSummary(rel, before, after string) string {
+	d := diff.Unified(rel, strings.ReplaceAll(before, "\r\n", "\n"), strings.ReplaceAll(after, "\r\n", "\n"))
+	if d == "" {
+		return "no changes (new_string produced identical content)"
+	}
+	lines := strings.Split(strings.TrimRight(d, "\n"), "\n")
+	var body []string
+	adds, dels := 0, 0
+	for _, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "--- ") || strings.HasPrefix(l, "+++ "):
+			continue
+		case strings.HasPrefix(l, "+"):
+			adds++
+		case strings.HasPrefix(l, "-"):
+			dels++
+		}
+		body = append(body, clipRunes(l, editDiffMaxCols))
+	}
+	if len(body) > editDiffMaxLines {
+		more := len(body) - editDiffMaxLines
+		body = append(body[:editDiffMaxLines], fmt.Sprintf("... (%d more diff lines)", more))
+	}
+	return fmt.Sprintf("diff (+%d -%d lines):\n%s", adds, dels, strings.Join(body, "\n"))
 }

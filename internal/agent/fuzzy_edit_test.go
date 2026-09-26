@@ -234,6 +234,27 @@ func TestLineSimilarity(t *testing.T) {
 	}
 }
 
+func TestEditDiffSummary(t *testing.T) {
+	got := editDiffSummary("f.go", "a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\nd\r\n")
+	for _, want := range []string{"diff (+2 -1 lines):", "@@", "-b", "+B", "+d", " a"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "\r") || strings.Contains(got, "+++") {
+		t.Fatalf("summary has CR or file headers:\n%s", got)
+	}
+	var before, after strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&before, "line %d\n", i)
+		fmt.Fprintf(&after, "LINE %d\n", i)
+	}
+	big := editDiffSummary("f.go", before.String(), after.String())
+	if !strings.Contains(big, "more diff lines)") || strings.Count(big, "\n") > editDiffMaxLines+2 {
+		t.Fatalf("large diff not capped:\n%s", big)
+	}
+}
+
 func newEditTestRuntime(t *testing.T) (*toolRuntime, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -282,6 +303,23 @@ func TestRunFileEditFuzzyTierReported(t *testing.T) {
 	}
 	if got := readTestFile(t, path); got != "func f() {\n\treturn 2\n}\n" {
 		t.Fatalf("file: %q", got)
+	}
+}
+
+func TestRunFileEditReturnsDiffSummary(t *testing.T) {
+	rt, dir := newEditTestRuntime(t)
+	writeTestFile(t, dir, "f.go", "package f\n\nfunc f() int {\n\treturn 1\n}\n")
+	out, err := rt.runFileEdit(context.Background(), editArgs("f.go", "\treturn 1", "\tx := 2\n\treturn x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"edited f.go (1 replacements)", "diff (+2 -1 lines):", "-\treturn 1", "+\tx := 2", "+\treturn x"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not byte-exact") {
+		t.Fatalf("exact edit nagged about quoting:\n%s", out)
 	}
 }
 
@@ -467,7 +505,7 @@ func TestRunMultiEditFuzzySucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "edit 1 matched") {
+	if !strings.Contains(out, "edit 1 matched") || !strings.Contains(out, "diff (+2 -2 lines)") {
 		t.Fatalf("out=%q", out)
 	}
 	if got := readTestFile(t, path); got != "a\n    B\nC\n" {
