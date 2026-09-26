@@ -4,7 +4,7 @@ This folder contains prompt files referenced by `spettro.agents.toml`.
 
 The pack is split along the orchestrator vs worker contract:
 
-- **Orchestrators** (`planning.md`, `coding.md`, `chat.md`) prefer delegation — they decompose work, spawn workers via the `agent` tool (preferring parallel batches), and synthesize the results.
+- **Orchestrators** (`planning.md`, `chat.md`) prefer delegation — they decompose work, spawn workers via the `agent` tool (preferring parallel batches), and synthesize the results. `coding.md` is the primary coding agent: it works inline (understand, minimal edit, verify) and delegates only genuinely independent subtasks.
 - **Workers** (`code.md`, `explore.md`, `git.md`, `tester.md`, `reviewer.md`, `docs-writer.md`, `general-purpose.md`) execute a single focused slice end-to-end and return a tight summary.
 
 ## Included prompt files

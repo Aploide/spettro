@@ -87,3 +87,48 @@ func TestEveryManifestPromptFileIsEmbedded(t *testing.T) {
 		}
 	}
 }
+
+// TestCodingPromptContracts pins the practices the built-in coding prompt must
+// teach, and keeps the old per-answer ceremony from creeping back.
+func TestCodingPromptContracts(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	for _, needle := range []string{
+		"Understand before editing",
+		"file-edit",
+		"Verify",
+		"Read the full error output",
+		"non-interactively",
+		"state the assumption",
+		"Don't create files the task doesn't need",
+		"shared test namespaces",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("coding prompt missing %q", needle)
+		}
+	}
+	for _, banned := range []string{"Restate the request", "## Plan", "## Remaining Risks", "Keep parallel batches to 2"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("coding prompt still carries rigid ceremony %q", banned)
+		}
+	}
+}
+
+// TestPromptsDoNotMandateCommentNarration guards against prompts that make the
+// model spend steps on the comment tool.
+func TestPromptsDoNotMandateCommentNarration(t *testing.T) {
+	for _, name := range []string{"coding", "code", "explore", "general-purpose", "tester", "reviewer", "git", "docs-writer", "chat"} {
+		raw, ok := agentprompts.Prompt("agents/" + name + ".md")
+		if !ok {
+			t.Fatalf("agents/%s.md is not embedded", name)
+		}
+		for _, banned := range []string{"before each write/exec op", "before each test command", "before each major git operation"} {
+			if strings.Contains(raw, banned) {
+				t.Errorf("agents/%s.md mandates comment narration (%q)", name, banned)
+			}
+		}
+	}
+}
