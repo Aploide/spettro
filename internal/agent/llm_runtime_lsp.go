@@ -2,14 +2,18 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"spettro/internal/diff"
 	"spettro/internal/lsp"
+	"spettro/internal/provider"
 )
 
 // lspDiagnosticsWait bounds how long a file-write/file-edit result waits for
@@ -41,7 +45,7 @@ func (r *toolRuntime) withLSPDiagnostics(ctx context.Context, absPath, result st
 
 // lspTools are the tools that use a language server: the edits get post-edit
 // diagnostics, the rest query it.
-var lspTools = []string{"file-write", "file-edit", "multi-edit", "rename-symbol", "diagnostics", "references", "hover"}
+var lspTools = []string{"file-write", "file-edit", "multi-edit", "rename-symbol", "lsp"}
 
 // usesLanguageServer reports whether an agent with these tools would ever use
 // a language server. A read-only agent would not, and a server started for it
@@ -68,25 +72,138 @@ func (r *toolRuntime) warmLSP(absPath string) {
 	}
 }
 
-func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (string, error) {
+// noLSPServer is the error an lsp call gets when no language server is
+// configured or installed for the workspace.
+const noLSPServer = "no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)"
+
+// lspOps lists the lsp tool's operations, in the order errors name them.
+const lspOps = "diagnostics, references, definition, hover or restart"
+
+// lspCallOp returns the op an lsp call asks for, normalized; "" when the
+// arguments do not name one.
+func lspCallOp(raw []byte) string {
 	var args struct {
-		Path string `json:"path"`
+		Op string `json:"op"`
 	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("diagnostics args: %w", err)
+	if json.Unmarshal(raw, &args) != nil {
+		return ""
 	}
+	return strings.ToLower(strings.TrimSpace(args.Op))
+}
+
+// lspPosArgs are the arguments of the ops that look at one position
+// (references, definition, hover).
+type lspPosArgs struct {
+	Path      string `json:"path"`
+	Symbol    string `json:"symbol"`
+	Line      int    `json:"line"`
+	Character int    `json:"character"`
+	// Kind is the references tool's lookup mode, still honoured by op
+	// references: "definition" makes it op definition.
+	Kind string `json:"kind"`
+}
+
+// runLSP is the lsp tool: the read-only language-server operations. Writing
+// (rename-symbol) is a tool of its own, with its own approval.
+//
+// Each op decodes only its own arguments and ignores the rest, as the tool
+// it replaced did, so a stray argument of another op never fails the call.
+// calledAs is the retired tool the model called (the lsp call's CalledAs, or
+// the tool's own name when it was left unfolded); errors are then worded as
+// that tool's were.
+func (r *toolRuntime) runLSP(ctx context.Context, rawArgs []byte, calledAs string) (string, error) {
+	var head struct {
+		Op string `json:"op"`
+	}
+	if err := decodeJSONStrict(rawArgs, &head); err != nil {
+		return "", fmt.Errorf("%s args: %w", lspLabel(calledAs, ""), err)
+	}
+	op := strings.ToLower(strings.TrimSpace(head.Op))
+	label := lspLabel(calledAs, op)
+	decode := func(target any) error {
+		if err := decodeJSONStrict(rawArgs, target); err != nil {
+			return fmt.Errorf("%s args: %w", lspLabel(calledAs, ""), err)
+		}
+		return nil
+	}
+	switch op {
+	case "diagnostics":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := decode(&args); err != nil {
+			return "", err
+		}
+		return r.lspDiagnostics(ctx, args.Path)
+	case "references", "definition", "hover":
+		var args lspPosArgs
+		if err := decode(&args); err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(args.Path) == "" {
+			return "", fmt.Errorf("%s: path is required", label)
+		}
+		if strings.TrimSpace(args.Symbol) == "" && args.Line <= 0 {
+			return "", fmt.Errorf("%s: symbol or line is required", label)
+		}
+		if op == "hover" {
+			return r.lspHover(ctx, args)
+		}
+		if op == "references" {
+			switch args.Kind {
+			case "", "references":
+			case "definition":
+				op = "definition"
+			default:
+				if calledAs != "" {
+					return "", fmt.Errorf("%s: kind must be \"references\" or \"definition\"", label)
+				}
+				return "", fmt.Errorf("%s: kind must be \"references\" or \"definition\" (or use op \"definition\")", label)
+			}
+		}
+		return r.lspLookup(ctx, op, args)
+	case "restart":
+		var args struct {
+			Server string `json:"server"`
+		}
+		if err := decode(&args); err != nil {
+			return "", err
+		}
+		return r.lspRestart(args.Server)
+	case "":
+		return "", fmt.Errorf("lsp: op is required (%s)", lspOps)
+	default:
+		return "", fmt.Errorf("lsp: unknown op %q (want %s)", head.Op, lspOps)
+	}
+}
+
+// lspLabel names an lsp call in its errors: the retired tool the model
+// called, else "lsp <op>" (or "lsp" alone).
+func lspLabel(calledAs, op string) string {
+	switch {
+	case calledAs != "":
+		return calledAs
+	case op == "":
+		return "lsp"
+	}
+	return "lsp " + op
+}
+
+// lspDiagnostics is op diagnostics (the former diagnostics tool): one file's
+// diagnostics, or with no path everything published so far this session.
+func (r *toolRuntime) lspDiagnostics(ctx context.Context, path string) (string, error) {
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
+		return "", errors.New(noLSPServer)
 	}
-	if strings.TrimSpace(args.Path) == "" {
+	if strings.TrimSpace(path) == "" {
 		out := m.WorkspaceDiagnostics()
 		if strings.TrimSpace(out) == "" {
 			return "no diagnostics (across files opened so far this session)", nil
 		}
-		return truncate(out, r.historyLimit("diagnostics")), nil
+		return truncate(out, r.historyLimit("lsp")), nil
 	}
-	abs, rel, err := r.resolvePath(args.Path)
+	abs, rel, err := r.resolvePath(path)
 	if err != nil {
 		return "", err
 	}
@@ -97,62 +214,29 @@ func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (st
 	if strings.TrimSpace(out) == "" {
 		return fmt.Sprintf("no diagnostics for %s", rel), nil
 	}
-	return truncate(out, r.historyLimit("diagnostics")), nil
+	return truncate(out, r.historyLimit("lsp")), nil
 }
 
-func (r *toolRuntime) runLSPReferences(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path      string `json:"path"`
-		Symbol    string `json:"symbol"`
-		Kind      string `json:"kind"`
-		Line      int    `json:"line"`
-		Character int    `json:"character"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("references args: %w", err)
-	}
-	if strings.TrimSpace(args.Path) == "" {
-		return "", fmt.Errorf("references: path is required")
-	}
-	if strings.TrimSpace(args.Symbol) == "" && args.Line <= 0 {
-		return "", fmt.Errorf("references: symbol or line is required")
-	}
-	switch args.Kind {
-	case "", "references", "definition":
-	default:
-		return "", fmt.Errorf("references: kind must be \"references\" or \"definition\"")
-	}
+// lspLookup is ops references and definition (the former references tool,
+// kind "references" or "definition").
+func (r *toolRuntime) lspLookup(ctx context.Context, op string, args lspPosArgs) (string, error) {
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
+		return "", errors.New(noLSPServer)
 	}
 	abs, _, err := r.resolvePath(args.Path)
 	if err != nil {
 		return "", err
 	}
-	out, err := m.Lookup(ctx, abs, strings.TrimSpace(args.Symbol), args.Kind, args.Line, args.Character)
+	out, err := m.Lookup(ctx, abs, strings.TrimSpace(args.Symbol), op, args.Line, args.Character)
 	if err != nil {
 		return "", err
 	}
-	return truncate(out, r.historyLimit("references")), nil
+	return truncate(out, r.historyLimit("lsp")), nil
 }
 
-func (r *toolRuntime) runLSPHover(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path      string `json:"path"`
-		Symbol    string `json:"symbol"`
-		Line      int    `json:"line"`
-		Character int    `json:"character"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("hover args: %w", err)
-	}
-	if strings.TrimSpace(args.Path) == "" {
-		return "", fmt.Errorf("hover: path is required")
-	}
-	if strings.TrimSpace(args.Symbol) == "" && args.Line <= 0 {
-		return "", fmt.Errorf("hover: symbol or line is required")
-	}
+// lspHover is op hover (the former hover tool): type signature and docs.
+func (r *toolRuntime) lspHover(ctx context.Context, args lspPosArgs) (string, error) {
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
 		return "", fmt.Errorf("no language server for this file type (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
@@ -168,7 +252,67 @@ func (r *toolRuntime) runLSPHover(ctx context.Context, rawArgs []byte) (string, 
 	if out == "" {
 		return fmt.Sprintf("no hover info for that position in %s", rel), nil
 	}
-	return truncate(out, r.historyLimit("hover")), nil
+	return truncate(out, r.historyLimit("lsp")), nil
+}
+
+// lspRestart is op restart (the former lsp-restart tool): restart one server,
+// or all of them, and reload .spettro/lsp.json.
+func (r *toolRuntime) lspRestart(server string) (string, error) {
+	m := lsp.ForWorkspace(r.cwd)
+	if m == nil {
+		return "", errors.New(noLSPServer)
+	}
+	return m.Restart(strings.TrimSpace(server)), nil
+}
+
+// runUnfoldedLSPTool runs a retired language-server built-in under its own
+// name, which happens only while the operator's own tool holds the name lsp
+// (see toolRuntime.unfoldedLSPTool): the built-in the agent holds, not the
+// operator's lsp, does the work.
+func (r *toolRuntime) runUnfoldedLSPTool(ctx context.Context, call toolCall) (string, error) {
+	if !r.unfoldedLSPTool(call.Tool) || r.userToolNamed(call.Tool) {
+		return "", fmt.Errorf("unsupported tool %q", call.Tool)
+	}
+	args, err := legacyTools[call.Tool].args(call.Args)
+	if err != nil {
+		return "", fmt.Errorf("%s args: %w", call.Tool, err)
+	}
+	return r.runLSP(ctx, args, call.Tool)
+}
+
+// unfoldedLSPToolDescs and unfoldedLSPToolSchemas advertise the retired
+// language-server built-ins while they stand unfolded (the operator owns the
+// name lsp), as the tools were advertised before v13.
+var unfoldedLSPToolDescs = map[string]string{
+	"diagnostics": "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
+	"references":  "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+	"hover":       "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
+	"lsp-restart": "Restart a wedged language server (all servers when none named).",
+}
+
+var unfoldedLSPToolSchemas = map[string]json.RawMessage{
+	"diagnostics": json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	"references":  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"hover":       json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"lsp-restart": json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
+}
+
+// unfoldedLSPToolSpecs returns the native tool specs of the unfolded
+// language-server built-ins this agent holds.
+func (r *toolRuntime) unfoldedLSPToolSpecs(allowedTools []string) []provider.ToolSpec {
+	var out []provider.ToolSpec
+	for _, name := range allowedTools {
+		name = strings.TrimSpace(name)
+		spec, ok := r.toolPolicies[name]
+		if !ok || spec.ID != name || !isBuiltinTool(spec) || !r.unfoldedLSPTool(name) {
+			continue
+		}
+		if slices.ContainsFunc(out, func(t provider.ToolSpec) bool { return t.Name == name }) {
+			continue
+		}
+		out = append(out, provider.ToolSpec{Name: name, Description: unfoldedLSPToolDescs[name], Schema: unfoldedLSPToolSchemas[name]})
+	}
+	return out
 }
 
 func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string, error) {
@@ -238,18 +382,4 @@ func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string,
 	}
 	msg := fmt.Sprintf("renamed to %q in %d file(s):\n- %s", newName, len(applied), strings.Join(applied, "\n- "))
 	return r.withLSPDiagnostics(ctx, abs, msg, written...), nil
-}
-
-func (r *toolRuntime) runLSPRestart(rawArgs []byte) (string, error) {
-	var args struct {
-		Server string `json:"server"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("lsp-restart args: %w", err)
-	}
-	m := lsp.ForWorkspace(r.cwd)
-	if m == nil {
-		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
-	}
-	return m.Restart(strings.TrimSpace(args.Server)), nil
 }

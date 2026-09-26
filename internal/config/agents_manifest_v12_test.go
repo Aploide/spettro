@@ -10,17 +10,21 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// decodeV12 migrates a manifest and fails the test unless the result
-// validates: TUI and headless runs ignore a manifest load error and fall back
-// to an empty manifest, so a migration that breaks Validate fails silently.
+// latestManifestVersion is the version every migration ends at.
+const latestManifestVersion = 13
+
+// decodeV12 migrates a manifest (through v12 and every later migration) and
+// fails the test unless the result validates: TUI and headless runs ignore a
+// manifest load error and fall back to an empty manifest, so a migration that
+// breaks Validate fails silently.
 func decodeV12(t *testing.T, src string) AgentManifest {
 	t.Helper()
 	m, _, _, err := DecodeAgentManifestWithMigrationInfo(strings.NewReader(src))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if m.Version != 12 {
-		t.Fatalf("version = %d, want 12", m.Version)
+	if m.Version != latestManifestVersion {
+		t.Fatalf("version = %d, want %d", m.Version, latestManifestVersion)
 	}
 	if err := m.Validate(); err != nil {
 		t.Fatalf("migrated manifest must validate: %v", err)
@@ -327,7 +331,7 @@ func TestV12MigrationIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if changed {
-		t.Fatal("a v12 manifest must load unchanged")
+		t.Fatal("a migrated manifest must load unchanged")
 	}
 	raw2, _ := toml.Marshal(again)
 	if string(raw) != string(raw2) {
@@ -335,8 +339,8 @@ func TestV12MigrationIsIdempotent(t *testing.T) {
 	}
 }
 
-// Loading a v11 project manifest rewrites it at v12 and keeps the original
-// as a .bak.
+// Loading a v11 project manifest rewrites it at the latest version (v12's
+// folds included) and keeps the original as a .bak.
 func TestV12MigrationWritesBackup(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, AgentManifestFilename)
@@ -354,8 +358,8 @@ func TestV12MigrationWritesBackup(t *testing.T) {
 		t.Fatal("backup must hold the original manifest")
 	}
 	rewritten, _ := os.ReadFile(path)
-	if !strings.Contains(string(rewritten), "version = 12") || strings.Contains(string(rewritten), "id = 'shell-exec'") {
-		t.Fatalf("manifest not rewritten at v12:\n%s", rewritten)
+	if !strings.Contains(string(rewritten), "version = 13") || strings.Contains(string(rewritten), "id = 'shell-exec'") {
+		t.Fatalf("manifest not rewritten at the latest version:\n%s", rewritten)
 	}
 }
 

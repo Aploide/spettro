@@ -32,7 +32,7 @@ server, so it is usually up by the time the file is edited; read-only agents
 (Ask, Explore, Review, ...) never start one. A sub-agent working in its own
 git worktree has its own servers, and they are stopped when its workspace is
 merged back or dropped. A server that fails to start is not retried on every
-edit; the `lsp-restart` tool clears the failure mark.
+edit; an `lsp` restart (`op: "restart"`) clears the failure mark.
 
 ## What the agent gets
 
@@ -47,11 +47,11 @@ edit; the `lsp-restart` tool clears the failure mark.
 
   Diagnostics (errors) in internal/api/handler.go:
   internal/api/handler.go:42:9: undefined: reqID (compiler)
-  Also 2 errors in 1 other file: internal/api/routes.go (2) — use the diagnostics tool to list them.
+  Also 2 errors in 1 other file: internal/api/routes.go (2) — use the lsp tool (op: diagnostics) to list them.
   ```
 
-  Only errors are listed (warnings and hints are left to the `diagnostics`
-  tool), at most 20 for the edited file, and other files get a one-line count
+  Only errors are listed (warnings and hints are left to the `lsp` tool's
+  `diagnostics` op), at most 20 for the edited file, and other files get a one-line count
   — which is how a signature change that breaks callers shows up. A clean
   edit adds nothing. The wait is bounded to ~3s, server start included: the
   server's first publish after the change is awaited, then a short quiet
@@ -66,18 +66,27 @@ edit; the `lsp-restart` tool clears the failure mark.
   `diagnosticsDelay` set to `0s`, so it checks the packages that depend on
   the edited one in the same pass instead of a second pass a second later —
   a caller broken in another package is counted on the edit that broke it.
-- **`diagnostics` tool** — diagnostics for one file, or everything published
-  so far across the workspace when called without a path.
-- **`references` tool** — references or definition for a symbol
-  (by name or by line/character position).
-- **`hover` tool** — type signature and documentation for a symbol
-  (by name or by line/character position).
+- **`lsp` tool** — the read-only queries, one tool with an `op` argument:
+
+  | `op` | Arguments | Returns |
+  |---|---|---|
+  | `diagnostics` | `path` (optional) | Diagnostics for one file, or everything published so far across the workspace when called without a path. |
+  | `references` | `path`, plus `symbol` or `line` (and optional `character`) | Every reference to the symbol, declaration included, as `path:line:col`. |
+  | `definition` | same as `references` | Where the symbol is defined, as `path:line:col`. |
+  | `hover` | same as `references` | The symbol's type signature and documentation. |
+  | `restart` | `server` (optional) | Restarts that server, or all of them, and reloads the config. A server still starting is cancelled rather than waited for. |
+
+  A position is a symbol name (its first occurrence in the file) or a
+  1-based `line`/`character`. The former `diagnostics`, `references`,
+  `hover` and `lsp-restart` tools are hidden aliases of these ops
+  (`references` with `kind: "definition"` is `op: "definition"`); see
+  [Built-in tools](tools.md#retired-names). To keep an agent from some ops,
+  give it `lsp-op` rules with the op as the pattern, e.g.
+  `{ permission = "lsp-op", pattern = "restart", action = "deny" }`.
 - **`rename-symbol` tool** — rename a symbol across the workspace. The
   combined multi-file diff goes through the same approval flow as
   `file-write`, a checkpoint is taken first (so `/rewind` covers it), and the
   result lists every file changed.
-- **`lsp-restart` tool** — restart one or all servers and reload the config.
-  A server still starting is cancelled rather than waited for.
 
 ## Optional overrides: `.spettro/lsp.json`
 
@@ -105,4 +114,4 @@ Per entry:
 - `filetypes` — extensions the server claims (defaults to the built-in list
   for known keys; required for custom keys like `zig` above).
 
-Edits to `lsp.json` apply after an `lsp-restart` (or a new session).
+Edits to `lsp.json` apply after an `lsp` restart (or a new session).

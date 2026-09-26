@@ -82,7 +82,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"file-read", "file-write", "bash", "job-output", "job-kill", "tool-output", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
+		AllowedTools:    []string{"file-read", "file-write", "bash", "job-output", "job-kill", "tool-output", "glob", "grep", "lsp", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -588,6 +588,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// TOOL_CALL text-protocol fallback caused tool-capable local models to
 	// emit unparsed TOOL_CALL strings instead of real tool calls.
 	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
+	nativeToolSpecs = append(nativeToolSpecs, runtime.unfoldedLSPToolSpecs(cfg.AllowedTools)...)
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
@@ -1125,7 +1126,8 @@ func formatTokens(n int) string {
 // always fanned out together (see agentBudget in parallelExec). Everything
 // else — file writes and edits, shell and pty commands, worktree and swarm
 // tools, and any tool not listed here (MCP included) — runs alone, in the
-// model's order.
+// model's order. The lsp tool's lookups are concurrent too, but not its
+// restart (see concurrentCall).
 var concurrentTools = map[string]bool{
 	"file-read":          true,
 	"grep":               true,
@@ -1133,9 +1135,6 @@ var concurrentTools = map[string]bool{
 	"web-fetch":          true,
 	"web-search":         true,
 	"view-image":         true,
-	"diagnostics":        true,
-	"references":         true,
-	"hover":              true,
 	"skill-read":         true,
 	"skill-list":         true,
 	"tool-search":        true,
@@ -1156,7 +1155,7 @@ func planToolBatches(calls []toolCall, indices []int) [][]int {
 	var batches [][]int
 	var group []int
 	for _, idx := range indices {
-		if concurrentTools[calls[idx].Tool] {
+		if concurrentCall(calls[idx]) {
 			group = append(group, idx)
 			continue
 		}
@@ -1170,6 +1169,21 @@ func planToolBatches(calls []toolCall, indices []int) [][]int {
 		batches = append(batches, group)
 	}
 	return batches
+}
+
+// concurrentCall reports whether a call may run together with its
+// neighbours (see concurrentTools). An lsp restart stops the servers the
+// lookups next to it would be talking to, so it runs alone, as lsp-restart
+// always did.
+func concurrentCall(call toolCall) bool {
+	if call.Tool == "lsp" {
+		return lspCallOp(call.Args) != "restart"
+	}
+	if lt, ok := legacyTools[call.Tool]; ok && lt.canonical == "lsp" {
+		// A language-server built-in left unfolded (see unfoldedLSPTool).
+		return call.Tool != "lsp-restart"
+	}
+	return concurrentTools[call.Tool]
 }
 
 // parallelExec executes one step's tool calls and returns their results in
@@ -1354,7 +1368,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	if canon, err := r.canonicalCall(call); err == nil {
 		call = canon
 	}
-	ctx = withCalledAs(ctx, call.CalledAs)
+	ctx = withCalledAs(ctx, r.hookAlias(call))
 	if blocksOnUserInput(call.Tool) {
 		// The tool is waiting on a person, who may take as long as they take.
 		// A deadline here would cancel the question out from under them and
@@ -1430,7 +1444,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	if err != nil {
 		return "", err
 	}
-	ctx = withCalledAs(ctx, call.CalledAs)
+	ctx = withCalledAs(ctx, r.hookAlias(call))
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
 	}
@@ -1442,6 +1456,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			if evaluatePermissionRule(fam, spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
 				return "", fmt.Errorf("tool %q denied by policy for permission %q", call.Tool, fam)
 			}
+		}
+		if err := r.lspOpDenied(call, spec); err != nil {
+			return "", err
 		}
 	}
 	updatedArgs, denyReason, err := r.runPreToolHooks(ctx, call.Tool, call.Args)
@@ -1603,16 +1620,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runSkillList(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
-	case "diagnostics":
-		return r.runLSPDiagnostics(ctx, call.Args)
-	case "references":
-		return r.runLSPReferences(ctx, call.Args)
-	case "hover":
-		return r.runLSPHover(ctx, call.Args)
+	case "lsp":
+		return r.runLSP(ctx, call.Args, call.CalledAs)
+	case "diagnostics", "references", "hover", "lsp-restart":
+		return r.runUnfoldedLSPTool(ctx, call)
 	case "rename-symbol":
 		return r.runLSPRename(ctx, call.Args)
-	case "lsp-restart":
-		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
 		return r.runMCPListResources(ctx, call.Args)
 	case "mcp-read-resource":

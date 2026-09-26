@@ -5,6 +5,13 @@ import (
 	"strings"
 )
 
+// toolFold is one canonical tool and the built-ins a migration folds into
+// it.
+type toolFold struct {
+	canonical string
+	retired   []string
+}
+
 // consolidatedTools lists the built-in tools the v12 migration folds into one
 // canonical tool each. The agent runtime keeps every retired name callable
 // as a hidden alias of its canonical tool (internal/agent/tool_aliases.go),
@@ -13,15 +20,74 @@ import (
 // Retired names are ordered so that bash's long-standing bash-output alias
 // stays first, and so that the task tools that write come before the ones
 // that only read (see consolidateBuiltinTools).
-var consolidatedTools = []struct {
-	canonical string
-	retired   []string
-}{
+var consolidatedTools = []toolFold{
 	{"bash", []string{"bash-output", "shell-exec"}},
 	{"file-edit", []string{"multi-edit"}},
 	{"grep", []string{"repo-search"}},
 	{"glob", []string{"ls"}},
 	{"todo-write", []string{"task-create", "task-update", "task-delete", "task-get", "task-list"}},
+}
+
+// lspConsolidatedTools is the v13 fold: the read-only language-server tools
+// become the ops of one lsp tool (diagnostics; references and definition;
+// hover; restart). rename-symbol writes, needs approval and stays a tool of
+// its own. diagnostics comes first so a manifest without lsp gets it made
+// from diagnostics, the tool the others' settings then merge into.
+var lspConsolidatedTools = []toolFold{
+	{"lsp", []string{"diagnostics", "references", "hover", "lsp-restart"}},
+}
+
+// opFolds are the canonical tools whose retired tools became operations of
+// it rather than duplicates. An agent granted one through only some of them
+// gets a rule denying each op of the others (see denyUnheldOps), so an agent
+// that held diagnostics but not lsp-restart still cannot restart a server.
+var opFolds = map[string]bool{"lsp": true}
+
+// LSPOpPermission is the permission an lsp op is checked against, with the
+// op as the pattern: { permission = "lsp-op", pattern = "restart", action =
+// "deny" } stops an agent restarting language servers while it keeps the
+// lookups. Only rules naming this permission exactly apply (see
+// LSPOpDenied), so a catch-all rule that the lsp tool itself is an exception
+// to cannot take its ops away.
+const LSPOpPermission = "lsp-op"
+
+// lspOpsByRetiredTool maps each language-server tool v13 folds into lsp to
+// the ops that do its job.
+var lspOpsByRetiredTool = map[string][]string{
+	"diagnostics": {"diagnostics"},
+	"references":  {"references", "definition"},
+	"hover":       {"hover"},
+	"lsp-restart": {"restart"},
+}
+
+// LSPOpsOf returns the lsp ops that replaced a retired language-server tool;
+// nil for any other name.
+func LSPOpsOf(retired string) []string {
+	return slices.Clone(lspOpsByRetiredTool[retired])
+}
+
+// LSPOpDenied reports whether the rules, across the layers in order (runtime,
+// agent, tool), deny the lsp op: the last rule whose permission is exactly
+// LSPOpPermission and whose pattern matches op decides. Rules for any other
+// permission, a "*" permission included, never do: those decide whether the
+// lsp tool can be called at all.
+func LSPOpDenied(op string, layers ...[]PermissionRule) bool {
+	op = strings.ToLower(strings.TrimSpace(op))
+	denied := false
+	for _, rules := range layers {
+		for _, r := range rules {
+			if !strings.EqualFold(strings.TrimSpace(r.Permission), LSPOpPermission) || !WildcardMatch(r.Pattern, op) {
+				continue
+			}
+			denied = r.Action == RuleDeny
+		}
+	}
+	return denied
+}
+
+// toolFolds is every fold, in migration order.
+func toolFolds() []toolFold {
+	return append(slices.Clone(consolidatedTools), lspConsolidatedTools...)
 }
 
 // v11ToolDescriptions are the descriptions the canonical tools shipped with
@@ -43,10 +109,10 @@ var removedTools = []string{"grok-image", "grok-video"}
 // the migration drops them instead of handing it todo-write.
 var readOnlyRetiredTools = map[string]bool{"task-get": true, "task-list": true}
 
-// retiredToolNames returns the names v12 folded into canonical, in table
-// order; nil when it replaced none.
+// retiredToolNames returns the names a migration (v12 or v13) folded into
+// canonical, in table order; nil when it replaced none.
 func retiredToolNames(canonical string) []string {
-	for _, g := range consolidatedTools {
+	for _, g := range toolFolds() {
 		if g.canonical == canonical {
 			return slices.Clone(g.retired)
 		}
@@ -54,9 +120,10 @@ func retiredToolNames(canonical string) []string {
 	return nil
 }
 
-// canonicalOf returns the tool a retired built-in was folded into.
+// canonicalOf returns the tool a retired built-in was folded into, by any
+// migration.
 func canonicalOf(id string) (string, bool) {
-	for _, g := range consolidatedTools {
+	for _, g := range toolFolds() {
 		if slices.Contains(g.retired, id) {
 			return g.canonical, true
 		}
@@ -64,11 +131,13 @@ func canonicalOf(id string) (string, bool) {
 	return "", false
 }
 
-// consolidateBuiltinTools is the v12 migration: it folds the duplicate
-// built-ins into their canonical tools and removes the grok media tools,
-// without giving any agent access it did not have.
+// consolidateBuiltinTools folds each group's retired built-ins into its
+// canonical tool and deletes the removed ones, without giving any agent
+// access it did not have. v12 runs it for the duplicate built-ins (and
+// removes the grok media tools), v13 for the language-server tools.
 //
-//   - Access is settled first, against the v11 manifest as it stands: for
+//   - Access is settled first, against the manifest as it stands (v11 for
+//     the v12 fold, v12 for the v13 one): for
 //     each agent, which retired tools it could actually call (enabled, an
 //     action it may take, no permission rule denying it). Only those carry
 //     over.
@@ -97,12 +166,19 @@ func canonicalOf(id string) (string, bool) {
 //   - Rules are left as written. One naming a retired ID only ever decided
 //     whether that tool could be called, which the allow-lists now carry;
 //     rewriting it to the canonical ID would deny or allow a tool it never
-//     covered.
-func (m *AgentManifest) consolidateBuiltinTools() {
-	usable := m.retiredToolsUsable()
+//     covered. For a tool whose retired tools became its operations
+//     (opFolds: lsp), an agent granted the tool through some of them gets
+//     an lsp-op rule denying each op it could not call before.
+//   - An agent granted a canonical tool through a retired one it could call
+//     keeps being able to call it: where its rules would deny the canonical
+//     tool (an allow-list written as a "*" deny plus an allow per tool), it
+//     gets an agent rule allowing the canonical tool, the one tool that now
+//     does what the allowed ones did.
+func (m *AgentManifest) consolidateBuiltinTools(groups []toolFold, removedIDs []string) {
+	usable := m.retiredToolsUsable(groups)
 	folded := map[string]string{} // retired ID -> canonical ID, for folded definitions
 	created := map[string]bool{}  // canonical IDs that had no definition before
-	for _, g := range consolidatedTools {
+	for _, g := range groups {
 		ci := m.toolIndex(g.canonical)
 		if ci >= 0 && m.Tools[ci].Kind != "builtin" {
 			// The canonical name belongs to a tool of the operator's own;
@@ -146,7 +222,7 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 		}
 	}
 	removed := map[string]bool{}
-	for _, id := range removedTools {
+	for _, id := range removedIDs {
 		if i := m.toolIndex(id); i >= 0 && m.Tools[i].Kind == "builtin" {
 			m.Tools = slices.Delete(m.Tools, i, i+1)
 			removed[id] = true
@@ -181,6 +257,8 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 				tools = append(tools, id)
 			}
 		}
+		m.denyUnheldOps(i, groups, tools, usable[i], created)
+		m.keepCanonicalUsable(i, groups, tools, usable[i], created)
 		if len(tools) == 0 && len(a.AllowedTools) > 0 {
 			tools = []string{"comment"}
 			a.Enabled = false
@@ -192,17 +270,85 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 	}
 }
 
-// retiredToolsUsable reports, per agent (by index), which retired built-ins
-// on its allow-list it could call under the manifest as it stands.
-func (m *AgentManifest) retiredToolsUsable() []map[string]bool {
+// denyUnheldOps gives agent i, whose allow-list becomes tools, an lsp-op
+// rule denying each operation of an op-fold tool (opFolds) that it could not
+// call before the fold: it listed that retired tool but could not use it, or
+// did not list it (a tool of the operator's own that shares the name, such
+// as a "hover" script, is not the built-in's op). An agent that already held
+// the canonical tool keeps all of it.
+func (m *AgentManifest) denyUnheldOps(i int, groups []toolFold, tools []string, usable map[string]bool, created map[string]bool) {
+	a := &m.Agents[i]
+	for _, g := range groups {
+		if !opFolds[g.canonical] || !slices.Contains(tools, g.canonical) {
+			continue
+		}
+		if slices.Contains(a.AllowedTools, g.canonical) && !created[g.canonical] {
+			continue
+		}
+		for _, id := range g.retired {
+			if usable[id] {
+				continue
+			}
+			for _, op := range lspOpsByRetiredTool[id] {
+				rule := PermissionRule{Permission: LSPOpPermission, Pattern: op, Action: RuleDeny}
+				if !slices.Contains(a.PermissionRules, rule) {
+					a.PermissionRules = append(a.PermissionRules, rule)
+				}
+			}
+		}
+	}
+}
+
+// keepCanonicalUsable makes sure agent i can call each canonical tool it was
+// granted through a retired tool it could call. Rules naming the retired
+// tools are left as written, so an agent whose rules allowed only named
+// tools ("*" denied, diagnostics allowed) would otherwise hold lsp and be
+// denied it. It gets an agent rule allowing the canonical tool for each
+// permission (tool, or a permission family) that denied it; the canonical
+// tool's own rules still come after those and are not overridden.
+func (m *AgentManifest) keepCanonicalUsable(i int, groups []toolFold, tools []string, usable map[string]bool, created map[string]bool) {
+	a := &m.Agents[i]
+	for _, g := range groups {
+		if !slices.Contains(tools, g.canonical) {
+			continue
+		}
+		if slices.Contains(a.AllowedTools, g.canonical) && !created[g.canonical] {
+			continue // held before the fold: its rules are its own business
+		}
+		if !slices.ContainsFunc(g.retired, func(id string) bool { return usable[id] }) {
+			continue
+		}
+		ci := m.toolIndex(g.canonical)
+		if ci < 0 {
+			continue
+		}
+		t := m.Tools[ci]
+		layers := [][]PermissionRule{m.Runtime.PermissionRules, a.PermissionRules, t.PermissionRules}
+		for _, perm := range append([]string{"tool"}, ToolPermissionFamilies(t)...) {
+			if EvaluatePermissionRule(perm, t.ID, layers...) != RuleDeny {
+				continue
+			}
+			rule := PermissionRule{Permission: perm, Pattern: t.ID, Action: RuleAllow}
+			a.PermissionRules = append(a.PermissionRules, rule)
+			layers[1] = a.PermissionRules
+		}
+	}
+}
+
+// retiredToolsUsable reports, per agent (by index), which built-ins the
+// groups retire on its allow-list it could call under the manifest as it
+// stands.
+func (m *AgentManifest) retiredToolsUsable(groups []toolFold) []map[string]bool {
 	out := make([]map[string]bool, len(m.Agents))
 	for i, a := range m.Agents {
 		out[i] = map[string]bool{}
 		for _, id := range a.AllowedTools {
-			if _, retired := canonicalOf(id); !retired {
+			if !slices.ContainsFunc(groups, func(g toolFold) bool { return slices.Contains(g.retired, id) }) {
 				continue
 			}
-			if t, ok := m.toolNamed(id); ok && m.ToolUsableBy(a, t) {
+			// A tool of the operator's own that shares the name is not the
+			// built-in, and calling it never did the built-in's job.
+			if t, ok := m.toolNamed(id); ok && t.Kind == "builtin" && m.ToolUsableBy(a, t) {
 				out[i][id] = true
 			}
 		}

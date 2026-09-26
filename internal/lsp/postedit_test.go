@@ -108,7 +108,7 @@ func TestPostEditCountsOtherFiles(t *testing.T) {
 	// gone.fk does not exist: a deleted file's stale errors are not counted
 	writeFile(t, a, "BREAK b.fk\nBREAK gone.fk\n")
 	out, _ := postEdit(t, m, a, 10*time.Second)
-	want := "No errors in a.fk; 2 errors in 1 other file: b.fk (2) — use the diagnostics tool to list them."
+	want := "No errors in a.fk; 2 errors in 1 other file: b.fk (2) — use the lsp tool (op: diagnostics) to list them."
 	if out != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
 	}
@@ -116,7 +116,7 @@ func TestPostEditCountsOtherFiles(t *testing.T) {
 	writeFile(t, a, "ERR here\nBREAK b.fk\n")
 	out, _ = postEdit(t, m, a, 10*time.Second)
 	if !strings.HasPrefix(out, "Diagnostics (errors) in a.fk:\na.fk:1:1: bad thing: ERR here (fake)\n") ||
-		!strings.HasSuffix(out, "Also 2 errors in 1 other file: b.fk (2) — use the diagnostics tool to list them.") {
+		!strings.HasSuffix(out, "Also 2 errors in 1 other file: b.fk (2) — use the lsp tool (op: diagnostics) to list them.") {
 		t.Fatalf("unexpected report:\n%s", out)
 	}
 }
@@ -417,7 +417,7 @@ func TestPostEditSyncsAlsoChangedFiles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out := m.PostEditDiagnostics(ctx, a, a, b)
-	if out != "No errors in a.fk; 1 error in 1 other file: b.fk (1) — use the diagnostics tool to list them." {
+	if out != "No errors in a.fk; 1 error in 1 other file: b.fk (1) — use the lsp tool (op: diagnostics) to list them." {
 		t.Fatalf("got: %q", out)
 	}
 }
@@ -476,7 +476,7 @@ func TestPostEditReportFormat(t *testing.T) {
 		{postEditReport{rel: "a.go", server: "gopls", starting: true}, "(gopls is still starting, so a.go was not checked for errors yet; later edits will be.)"},
 		{postEditReport{rel: "a.go", server: "gopls", noAnswer: true}, "(gopls reported no diagnostics for a.go in time; it was not checked for errors.)"},
 		{postEditReport{rel: "a.go", others: []fileErrors{{"b.go", 1}, {"c.go", 1}, {"d.go", 1}, {"e.go", 1}, {"f.go", 1}, {"g.go", 3}}},
-			"No errors in a.go; 8 errors in 6 other files: b.go (1), c.go (1), d.go (1), e.go (1), f.go (1), 1 more — use the diagnostics tool to list them."},
+			"No errors in a.go; 8 errors in 6 other files: b.go (1), c.go (1), d.go (1), e.go (1), f.go (1), 1 more — use the lsp tool (op: diagnostics) to list them."},
 	}
 	for _, tc := range cases {
 		if got := tc.rep.format(); got != tc.want {

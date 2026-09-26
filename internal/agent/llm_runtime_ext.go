@@ -180,7 +180,7 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		if hasSpec && spec.ID != "" && spec.ID != id {
 			continue
 		}
-		if _, retired := legacyTools[id]; retired && (!hasSpec || spec.Kind == "" || spec.Kind == "builtin") {
+		if _, retired := legacyTools[id]; retired && (!hasSpec || isBuiltinTool(spec)) && !r.unfoldedLSPTool(id) {
 			continue
 		}
 		label := id

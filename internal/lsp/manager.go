@@ -227,7 +227,7 @@ type Manager struct {
 
 	mu       sync.Mutex
 	clients  map[string]*Client      // server key → running client
-	broken   map[string]string       // server key → start failure (until lsp-restart)
+	broken   map[string]string       // server key → start failure (until an lsp restart)
 	starting map[string]*serverStart // server key → the start in flight
 	// shutDown is set by Shutdown. The manager is out of the registry by
 	// then, so a server it started afterwards would never be closed.
@@ -310,7 +310,7 @@ func (m *Manager) serverKeyFor(path string) (string, bool) {
 // server is paid for once per session; each caller waits for it only as
 // long as its own ctx allows (ErrServerStarting otherwise). A failed start
 // is remembered so a missing binary is not retried on every edit;
-// lsp-restart clears the mark.
+// an lsp restart (Restart) clears the mark.
 func (m *Manager) clientFor(ctx context.Context, path string) (*Client, string, error) {
 	key, ok := m.serverKeyFor(path)
 	if !ok {
@@ -352,7 +352,7 @@ func (m *Manager) ensureStarted(key string) (*Client, <-chan struct{}, error) {
 		return c, nil, nil
 	}
 	if reason, bad := m.broken[key]; bad {
-		return nil, nil, fmt.Errorf("lsp server %q unavailable: %s (use lsp-restart to retry)", key, reason)
+		return nil, nil, fmt.Errorf("lsp server %q unavailable: %s (use the lsp tool, op restart, to retry)", key, reason)
 	}
 	if st, ok := m.starting[key]; ok {
 		return nil, st.done, nil
