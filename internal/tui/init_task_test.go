@@ -20,3 +20,14 @@ func TestInitTaskIsProjectAgnostic(t *testing.T) {
 		}
 	}
 }
+
+// TestInitTaskUpdatesExistingInstructionFile: every AGENTS.md, CLAUDE.md and
+// SPETTRO.md is loaded into each session, so /init must update an existing one
+// instead of writing a SPETTRO.md that restates it.
+func TestInitTaskUpdatesExistingInstructionFile(t *testing.T) {
+	for _, want := range []string{"update that file in place", "do not create a second file", "Only when none exists, create SPETTRO.md"} {
+		if !strings.Contains(initTask, want) {
+			t.Errorf("/init task missing %q", want)
+		}
+	}
+}

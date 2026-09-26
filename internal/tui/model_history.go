@@ -410,14 +410,18 @@ func (m Model) runInit() (tea.Model, tea.Cmd) {
 	return m.runAgent(spec, initTask, nil, nil)
 }
 
-// initTask is the /init prompt. The SPETTRO.md it produces is loaded into
-// every future session's system prompt (capped at 16 KiB), so it asks for
+// initTask is the /init prompt. The instruction file it produces is loaded
+// into every future session's system prompt (capped at 16 KiB), so it asks for
 // the facts an agent can't cheaply rediscover, kept short, for any project.
-const initTask = `Analyze this codebase and write a SPETTRO.md file to the repository root. Future agent sessions load it into their context, so write what a new engineer (or agent) needs to work here effectively, and keep it concise (well under 200 lines).
+// Every AGENTS.md, CLAUDE.md and SPETTRO.md is loaded, so when the repo already
+// has one it is updated in place rather than restated in a second file.
+const initTask = `Analyze this codebase and write the project instruction file future agent sessions load into their context: write what a new engineer (or agent) needs to work here effectively, and keep it concise (well under 200 lines).
 
-Use glob, grep, file-read, and ls to explore first: the README, build files (Makefile, package.json, go.mod, pyproject.toml, Cargo.toml, ...), CI config, and the main source directories. If SPETTRO.md, AGENTS.md or CLAUDE.md already exist, read them and improve on them rather than starting over.
+Which file: if the repository root already has AGENTS.md, CLAUDE.md or SPETTRO.md, read it and update that file in place, improving on it rather than starting over; do not create a second file that restates it, since every one of these files is loaded into every session. If several exist, update SPETTRO.md if present, otherwise AGENTS.md (when CLAUDE.md is a symlink to or copy of AGENTS.md, edit only AGENTS.md). Only when none exists, create SPETTRO.md.
 
-SPETTRO.md should contain:
+Use glob, grep, file-read, and ls to explore first: the README, build files (Makefile, package.json, go.mod, pyproject.toml, Cargo.toml, ...), CI config, and the main source directories.
+
+The file should contain:
 - **Project overview**: what the project does, in 2–3 sentences
 - **Build, test & lint**: the exact commands, including how to run a single test
 - **Architecture**: key directories/packages/modules and their roles, one line each, and how the main pieces fit together
@@ -425,9 +429,9 @@ SPETTRO.md should contain:
 - **Configuration**: where config comes from and the settings that matter
 - **Conventions**: code style, naming, error handling, testing patterns, and anything non-obvious a contributor must follow
 
-Only include facts you verified in the code; skip sections that don't apply, and don't pad with generic advice.
+Only include facts you verified in the code; skip sections that don't apply, and don't pad with generic advice. When updating an existing file, keep its structure and any rules the maintainers wrote.
 
-CRITICAL: You MUST write the file to disk using file-write at path "SPETTRO.md" in the repository root. Do not just output the content — the file must exist after you finish.`
+CRITICAL: You MUST write the result to disk: edit the existing instruction file, or, when there is none, use file-write at path "SPETTRO.md" in the repository root. Do not just output the content — the file must exist after you finish.`
 
 func (m Model) runExplore(task string) (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(task) == "" {
