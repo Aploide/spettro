@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"spettro/internal/config"
 	"spettro/internal/fsperm"
@@ -35,6 +37,9 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	var args struct {
 		Command         string `json:"command"`
 		RunInBackground bool   `json:"run_in_background"`
+		// Timeout is an optional per-call limit in seconds for a foreground
+		// command; see shellCallTimeoutSec.
+		Timeout int `json:"timeout"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("%s args: %w", prefix, err)
@@ -67,15 +72,62 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// level. The policy is set once at startup (CLI flags / manifest) and is
 	// not visible to the model: blocked operations surface as ordinary command
 	// failures, with no hint that a sandbox exists.
+	runCtx := ctx
+	if args.Timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, time.Duration(r.clampShellTimeoutSec(toolID, args.Timeout))*time.Second)
+		defer cancel()
+	}
 	shellName, shellArgs := shell.CommandLine(cmdText)
-	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
+	cmd := sandbox.Command(runCtx, r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
 	cmd.Dir = r.cwd
 	out, err := cmd.CombinedOutput()
 	text := r.spoolResult(toolID, string(out))
 	if err != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return text, fmt.Errorf("command timed out (pass a larger timeout, in seconds, for slow commands): %w", err)
+		}
 		return text, fmt.Errorf("command failed: %w", err)
 	}
 	return text, nil
+}
+
+// maxShellCallTimeoutSec caps the timeout argument of a shell call, unless the
+// manifest or goal mode already grants the tool more.
+const maxShellCallTimeoutSec = 600
+
+// clampShellTimeoutSec bounds a requested per-call shell timeout to
+// [1, max(maxShellCallTimeoutSec, the tool's configured limit)].
+func (r *toolRuntime) clampShellTimeoutSec(tool string, sec int) int {
+	ceiling := maxShellCallTimeoutSec
+	if spec, ok := r.toolPolicies[tool]; ok && spec.TimeoutSec > ceiling {
+		ceiling = spec.TimeoutSec
+	}
+	if r.goalMode && r.shellTimeoutSec > ceiling {
+		ceiling = r.shellTimeoutSec
+	}
+	return min(max(sec, 1), ceiling)
+}
+
+// shellCallTimeoutSec returns the timeout argument of a foreground shell call,
+// clamped, or 0 when the call is not a shell command or doesn't set one.
+// executeWithTimeout uses it so the per-tool deadline never cuts a command
+// short of the limit the model asked for.
+func (r *toolRuntime) shellCallTimeoutSec(call toolCall) int {
+	switch call.Tool {
+	case "shell-exec", "bash", "bash-output":
+	default:
+		return 0
+	}
+	var probe struct {
+		JobID           string `json:"job_id"`
+		RunInBackground bool   `json:"run_in_background"`
+		Timeout         int    `json:"timeout"`
+	}
+	if json.Unmarshal(call.Args, &probe) != nil || strings.TrimSpace(probe.JobID) != "" || probe.RunInBackground || probe.Timeout <= 0 {
+		return 0
+	}
+	return r.clampShellTimeoutSec(call.Tool, probe.Timeout)
 }
 
 type allowedCommandsFile struct {

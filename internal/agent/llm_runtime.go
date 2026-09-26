@@ -1043,6 +1043,11 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 			}
 		}
 	}
+	if sec := r.shellCallTimeoutSec(call); sec > 0 {
+		// runShellTool enforces the call's own timeout and reports it; this
+		// deadline is only a backstop, so it fires a little later.
+		timeoutSec = sec + 5
+	}
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	out, err := r.execute(tctx, call, allowed)
@@ -1675,6 +1680,7 @@ func typeExtensions(t string) []string {
 
 type grepArgs struct {
 	Pattern         string `json:"pattern"`
+	Path            string `json:"path"` // optional file or directory to search instead of the whole workspace
 	Glob            string `json:"glob"`
 	Type            string `json:"type"`
 	CaseInsensitive bool   `json:"case_insensitive"`
@@ -1706,6 +1712,18 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 
 	exts := typeExtensions(args.Type)
 
+	root := r.cwd
+	if strings.TrimSpace(args.Path) != "" {
+		abs, _, err := r.resolvePath(args.Path)
+		if err != nil {
+			return "", fmt.Errorf("grep: %w", err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Errorf("grep: path %q: %w", args.Path, err)
+		}
+		root = abs
+	}
+
 	type fileResult struct {
 		path   string
 		count  int
@@ -1716,12 +1734,14 @@ func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) 
 	totalMatches := 0
 	truncated := false
 
-	walkErr := filepath.WalkDir(r.cwd, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			// An explicitly requested directory is searched even if its name
+			// is one the recursive walk normally skips (e.g. path=vendor).
+			if skipDirs[d.Name()] && path != root {
 				return filepath.SkipDir
 			}
 			return nil
