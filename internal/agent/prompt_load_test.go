@@ -138,6 +138,73 @@ func TestCodingPromptContracts(t *testing.T) {
 	}
 }
 
+// TestCodingPromptEvidenceContracts pins the habits a benchmark showed the
+// coding agent lacking: long thinking before running anything, one test for
+// several symptoms, assertions weakened until they passed, and a reference
+// library trusted as the spec (then fuzzed well outside the task).
+func TestCodingPromptEvidenceContracts(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	for _, needle := range []string{
+		"Get evidence early",
+		"run the failing test",
+		"instead of simulating it at length in your head",
+		"short steps between tool calls",
+		"each reported symptom and each stated requirement its own check",
+		"at the strength the task states",
+		"Never weaken or delete an assertion",
+		"an aid, not the spec",
+		"boundary cases",
+		"Stay in scope",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("coding prompt missing %q", needle)
+		}
+	}
+}
+
+// TestCodingPromptFinalAnswerIsShort keeps the report guidance brief: a few
+// lines covering change, verification and caveats.
+func TestCodingPromptFinalAnswerIsShort(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	_, section, found := strings.Cut(stripFrontmatter(raw), "# Final answer")
+	if !found {
+		t.Fatal("coding prompt has no Final answer section")
+	}
+	for _, needle := range []string{"A few lines", "what you changed", "how you verified", "caveats"} {
+		if !strings.Contains(section, needle) {
+			t.Errorf("Final answer section missing %q", needle)
+		}
+	}
+}
+
+// TestCodingPromptLSPIsOptional: the lsp tool is absent (or has no server)
+// in many projects, so the coding prompt may only mention it conditionally;
+// an unconditional nudge wastes calls on "no lsp server configured" errors.
+func TestCodingPromptLSPIsOptional(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	for _, line := range strings.Split(stripFrontmatter(raw), "\n") {
+		for _, sentence := range strings.Split(line, ". ") {
+			lower := strings.ToLower(sentence)
+			if !strings.Contains(lower, "`lsp`") && !strings.Contains(lower, "language-server") && !strings.Contains(lower, "language server") {
+				continue
+			}
+			if !strings.Contains(lower, "if ") {
+				t.Errorf("coding prompt mentions the language server unconditionally: %q", sentence)
+			}
+		}
+	}
+}
+
 // TestPromptsDoNotMandateCommentNarration guards against prompts that make the
 // model spend steps on the comment tool.
 func TestPromptsDoNotMandateCommentNarration(t *testing.T) {
