@@ -71,7 +71,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
 		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
 		if infos, err := spettro.ListModels(context.Background(), cfg.APIKeys[spettro.ProviderID]); err == nil {
-			pm.SetSpettro(spettro.InferenceBaseURL(), spettroInfosToModels(infos))
+			pm.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
 		}
 	}
 	models.RefreshBackground(pm.SetCatalog)
@@ -249,12 +249,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 
 // configuredThinking returns the user's thinking_level for the active model,
 // or "" (no thinking parameter) when the model does not support reasoning —
-// the same gate the ACP bridge applies.
+// the same rule the TUI and the ACP bridge apply.
 func configuredThinking(pm *provider.Manager, cfg config.UserConfig) provider.ThinkingLevel {
-	if !pm.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		return ""
-	}
-	return provider.ThinkingLevel(cfg.ThinkingLevel)
+	return pm.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 }
 
 // resolveContextWindow looks up the context window size for the active model.

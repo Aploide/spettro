@@ -17,7 +17,7 @@ func TestHandleSpettroLoaded_FromLogin(t *testing.T) {
 	m.showOnboarding = true
 	m.login = loginState{step: "loading", fromOnboarding: true}
 
-	models := spettroModelsToProvider([]spettro.ModelInfo{
+	models := spettro.ProviderModels([]spettro.ModelInfo{
 		{ID: "deepseek-v4-flash", OwnedBy: "deepseek"},
 		{ID: "qwen3.7-plus", OwnedBy: "alibaba"},
 	})

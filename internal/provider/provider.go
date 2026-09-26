@@ -104,12 +104,16 @@ func NextLowerThinking(level ThinkingLevel) ThinkingLevel {
 }
 
 type Model struct {
-	Provider      string
-	ProviderName  string
-	Name          string
-	DisplayName   string
-	Vision        bool
-	Reasoning     bool
+	Provider     string
+	ProviderName string
+	Name         string
+	DisplayName  string
+	Vision       bool
+	Reasoning    bool
+	// NoReasoning marks a model its source explicitly lists as
+	// non-reasoning where Reasoning alone would not decide it (the Spettro
+	// plan's reasoning:false; see Manager.SupportsReasoning).
+	NoReasoning   bool
 	ToolCall      bool
 	PromptCaching bool
 	Context       int

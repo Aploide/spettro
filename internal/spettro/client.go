@@ -120,7 +120,9 @@ type ModelInfo struct {
 	OwnedBy       string `json:"owned_by"`
 	ContextWindow int    `json:"context_window"`
 	Vision        bool   `json:"vision"`
-	Reasoning     bool   `json:"reasoning"`
+	// Reasoning is the plan's reasoning flag: nil when the list leaves it
+	// out, which does not mean the model cannot reason (see ProviderModels).
+	Reasoning *bool `json:"reasoning,omitempty"`
 }
 
 // ListModels returns the models available on the authenticated user's plan.

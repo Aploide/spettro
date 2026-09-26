@@ -504,10 +504,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return s.permission
 	}
 
-	thinking := provider.ThinkingLevel("")
-	if b.opts.Providers.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		thinking = provider.ThinkingLevel(cfg.ThinkingLevel)
-	}
+	thinking := b.opts.Providers.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 
 	contextWindow := b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel)
 	// Turn-level usage accumulation for the final PromptResponse. The

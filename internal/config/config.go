@@ -41,11 +41,14 @@ type UserConfig struct {
 	// degrades to dark when it cannot be determined. The SPETTRO_THEME
 	// environment variable overrides this for a single process.
 	Theme string `json:"theme,omitempty"`
-	// ThinkingLevel selects extended-thinking compute when the active model
-	// supports it. Allowed values are "off", "low", "medium", "high", "x-high"
-	// (or empty, which is treated as "off"). Toggleable at runtime via the
-	// /thinking command and honoured by the Anthropic adapter; other
-	// providers ignore it.
+	// ThinkingLevel selects reasoning compute when the active model supports
+	// it. Allowed values are "off", "low", "medium", "high", "x-high", "max",
+	// or empty (never set: no thinking parameter is sent and the provider's
+	// default applies). Toggleable at runtime via the /thinking command and
+	// honoured by the TUI, headless and ACP runs alike: Anthropic gets a
+	// thinking token budget; OpenAI and OpenAI-compatible backends (the Spettro
+	// Subscription included) get reasoning_effort (low/medium/high, x-high and
+	// max as "xhigh", an explicit "off" as "none").
 	ThinkingLevel string `json:"thinking_level,omitempty"`
 	// MaxOutputTokens caps each model reply (max_tokens on the wire). 0 =
 	// auto: the model's known output limit, or 32000 for Anthropic-protocol
