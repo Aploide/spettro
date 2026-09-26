@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,5 +65,32 @@ func TestParallelExecAskUserWithoutUserSucceeds(t *testing.T) {
 	res := rt.parallelExec(context.Background(), []toolCall{{Tool: "ask-user", Args: []byte(askUserTestArgs)}}, map[string]struct{}{"ask-user": {}}, nil)
 	if res[0].status != "success" || res[0].output != noUserAvailableResult {
 		t.Fatalf("result = %+v", res[0])
+	}
+}
+
+// When the user picks "reply in chat", the turn ends: calls the model queued
+// after ask-user in the same step must not run on a guess.
+func TestParallelExecStopsAfterAskUserChatExit(t *testing.T) {
+	rt := newShellTestRuntime(t)
+	rt.askUser = func(context.Context, AskUserForm) ([]AskUserAnswer, error) {
+		return nil, ErrAskUserReplyInChat
+	}
+	calls := []toolCall{
+		{Tool: "ask-user", Args: []byte(askUserTestArgs)},
+		{Tool: "bash", Args: []byte(`{"command":"touch ran.txt"}`)},
+	}
+	allowed := map[string]struct{}{"ask-user": {}, "bash": {}}
+	res := rt.parallelExec(context.Background(), calls, allowed, nil)
+	if !rt.shouldStop() {
+		t.Fatal("chat exit must request a stop")
+	}
+	if res[0].status != "success" {
+		t.Fatalf("ask-user result = %+v", res[0])
+	}
+	if res[1].status != "error" || !strings.Contains(res[1].output, "not executed") {
+		t.Fatalf("bash after the chat exit must not run, got %+v", res[1])
+	}
+	if _, err := os.Stat(filepath.Join(rt.cwd, "ran.txt")); err == nil {
+		t.Fatal("bash ran after the user chose to reply in chat")
 	}
 }

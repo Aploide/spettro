@@ -1204,6 +1204,21 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 		}
 	}
 	for _, batch := range planToolBatches(calls, runnable) {
+		if r.shouldStop() {
+			// An earlier batch ended the turn (ask-user's reply-in-chat exit,
+			// task-stop): later calls were planned on the assumption the turn
+			// goes on, so they get a result each but must not start.
+			for _, idx := range batch {
+				results[idx] = parallelResult{
+					agentID: r.traceID(),
+					name:    calls[idx].Tool,
+					args:    singleLine(string(calls[idx].Args)),
+					output:  "error: not executed: the turn was ended by an earlier call in this step",
+					status:  "error",
+				}
+			}
+			continue
+		}
 		if len(batch) == 1 {
 			run(batch[0], calls[batch[0]])
 			continue
