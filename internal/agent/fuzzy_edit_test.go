@@ -89,6 +89,16 @@ func TestApplyEdit(t *testing.T) {
 		{name: "double escaped quotes", content: `fmt.Println("hi")`, old: `fmt.Println(\"hi\")`, new: `fmt.Println(\"bye\")`,
 			want: `fmt.Println("bye")`, wantTier: editTierEscape, wantCount: 1},
 		{name: "trimmed boundary", content: "x := foo(1) + 2", old: "  foo(1)  ", new: "  bar(1)  ", want: "x := bar(1) + 2", wantTier: editTierTrimmedBoundary, wantCount: 1},
+		{name: "trimmed boundary refuses mid-word", content: "x := myfoo(1) + 2", old: "  foo(1)  ", new: "  bar(1)  ", wantErr: "not found"},
+		{name: "inline whitespace match refuses mid-word", content: "\tmax := 1\n", old: "    x := 1", new: "    x := 2", wantErr: "not found"},
+		{name: "escaped old keeps real escapes in new", content: "a := 1\nb := 2\n", old: `a := 1\nb := 2`,
+			new: "a := 1\nb := 2\nfmt.Printf(\"%d\\n\", a)", want: "a := 1\nb := 2\nfmt.Printf(\"%d\\n\", a)\n",
+			wantTier: editTierEscape, wantCount: 1, wantNote: "new_string kept as written"},
+		{name: "escaped new unescapes only old's escapes", content: "say(\"hi\")\n", old: `say(\"hi\")`, new: `say(\"a\\nb\")`,
+			want: "say(\"a\\nb\")\n", wantTier: editTierEscape, wantCount: 1, wantNote: "unescaped the same way"},
+		{name: "intended typographic chars in new kept", content: "msg := \"don't stop\"\n", old: "msg := \"don" + rsquo + "t stop\"",
+			new: "msg := \"don" + rsquo + "t stop " + string(rune(0x2014)) + " ever\"", want: "msg := \"don't stop " + string(rune(0x2014)) + " ever\"\n",
+			wantTier: editTierUnicode, wantCount: 1},
 
 		// Line-number prefixes copied from reads.
 		{name: "file-read prefixes stripped", content: "a\nb\nc\n", old: "2. b\n3. c", new: "2. B\n3. c", want: "a\nB\nc\n",
@@ -240,6 +250,13 @@ func TestUnescapeEditString(t *testing.T) {
 			t.Errorf("unescape(%q) = %q want %q", in, got, want)
 		}
 	}
+	if got := editEscapesUsed(`a\"b\"\n\d`); got != `"n` {
+		t.Errorf("editEscapesUsed = %q", got)
+	}
+	// Escapes outside kinds are copied as whole pairs.
+	if got := unescapeEditStringKinds(`\"x\" \\n \t`, `"`); got != `"x" \\n \t` {
+		t.Errorf("unescapeEditStringKinds = %q", got)
+	}
 }
 
 func TestLineSimilarity(t *testing.T) {
@@ -386,6 +403,15 @@ func TestRunFileEditCRLFRoundTrip(t *testing.T) {
 	}
 	if got := readTestFile(t, path); got != "one\r\n2\r\n3\r\n4\r\n" {
 		t.Fatalf("file: %q", got)
+	}
+	// A one-line range has no line break of its own; the file's style wins.
+	path = writeTestFile(t, dir, "r.txt", "one\r\ntwo\r\nthree\r\n")
+	args, _ := json.Marshal(map[string]any{"path": "r.txt", "old_string": "two", "new_string": "2\n2b", "start_line": 2, "end_line": 2})
+	if _, err := rt.runFileEdit(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestFile(t, path); got != "one\r\n2\r\n2b\r\nthree\r\n" {
+		t.Fatalf("ranged file: %q", got)
 	}
 }
 

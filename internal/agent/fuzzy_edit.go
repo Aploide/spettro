@@ -492,9 +492,26 @@ func findWhitespaceNormalized(m *editMatcher, q editQuery) []editSpan {
 	repl := trimBoundaryLike(q.old, q.new)
 	var spans []editSpan
 	for _, loc := range re.FindAllStringIndex(m.content, -1) {
-		spans = append(spans, editSpan{start: loc[0], end: loc[1], repl: repl})
+		if m.atWordBoundaries(loc[0], loc[1]) {
+			spans = append(spans, editSpan{start: loc[0], end: loc[1], repl: repl})
+		}
 	}
 	return spans
+}
+
+// atWordBoundaries reports whether content[start:end] neither starts nor ends
+// in the middle of a word, so an inline match of "x := 1" can't land inside
+// "max := 1". Bytes of multi-byte runes count as word characters.
+func (m *editMatcher) atWordBoundaries(start, end int) bool {
+	c := m.content
+	if start > 0 && start < len(c) && isWordByte(c[start-1]) && isWordByte(c[start]) {
+		return false
+	}
+	return !(end > 0 && end < len(c) && isWordByte(c[end-1]) && isWordByte(c[end]))
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || b >= 0x80 || ('0' <= b && b <= '9') || ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z')
 }
 
 // findUnicodeNormalized matches after mapping typographic quotes, dashes and
@@ -520,27 +537,54 @@ func findUnicodeNormalized(m *editMatcher, q editQuery) []editSpan {
 	if len(spans) == 0 {
 		spans = m.normalizedBlockSpans(q, func(l string) string { return collapseWS(normalizeTypographic(l)) })
 	}
-	// If the file has plain ASCII where old_string had smart quotes, the model's
-	// new_string almost certainly carries the same wrong characters.
+	// Where old_string had a smart quote the file spells in ASCII, new_string
+	// almost certainly carries the same wrong character; other typographic
+	// characters in new_string (an intended em-dash) are kept.
 	for i, s := range spans {
-		if !hasTypographic(m.content[s.start:s.end]) {
-			spans[i].repl = normalizeTypographic(s.repl)
-		}
+		spans[i].repl = asciiLikeFile(s.repl, q.old, m.content[s.start:s.end])
 	}
 	return spans
 }
 
+// asciiLikeFile maps to ASCII each typographic character of repl that old
+// used but the matched region of the file does not contain.
+func asciiLikeFile(repl, old, region string) string {
+	var b strings.Builder
+	for _, r := range repl {
+		if a, ok := typographicASCII[r]; ok && strings.ContainsRune(old, r) && !strings.ContainsRune(region, r) {
+			b.WriteString(a)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // findEscapeNormalized handles a double-escaped old_string (literal `\n`
 // where the file has a line break, `\"` for `"`): it unescapes old_string and
-// new_string alike and retries the precise tiers.
+// retries the precise tiers. new_string is unescaped only when it looks
+// escaped the same way, and then only for the escapes old_string used, so a
+// real "\n" inside a string literal the model is adding survives.
 func findEscapeNormalized(m *editMatcher, q editQuery) []editSpan {
 	u := unescapeEditString(q.old)
 	if u == q.old || u == "" {
 		return nil
 	}
-	uq := newEditQuery(u, unescapeEditString(q.new))
+	newStr, detail := q.new, "new_string kept as written"
+	// An old_string whose line breaks were all escaped came from a writer
+	// that escapes; a new_string with real line breaks did not.
+	if strings.Contains(q.old, "\n") || !strings.Contains(q.new, "\n") {
+		// A writer that escapes anything escapes backslashes too.
+		if un := unescapeEditStringKinds(q.new, editEscapesUsed(q.old)+`\`); un != q.new {
+			newStr, detail = un, "new_string unescaped the same way"
+		}
+	}
+	uq := newEditQuery(u, newStr)
 	for _, f := range []func(*editMatcher, editQuery) []editSpan{findExact, findLineExact, findIndentFlexible, findLineTrimmed} {
 		if spans := f(m, uq); len(spans) > 0 {
+			for i := range spans {
+				spans[i].detail = detail
+			}
 			return spans
 		}
 	}
@@ -549,12 +593,14 @@ func findEscapeNormalized(m *editMatcher, q editQuery) []editSpan {
 
 // findTrimmedBoundary retries with old_string's leading and trailing
 // whitespace (blank lines included) removed, e.g. a fragment in mid-line.
+// The fragment must not start or end inside a word.
 func findTrimmedBoundary(m *editMatcher, q editQuery) []editSpan {
 	t := strings.TrimSpace(q.old)
 	if t == q.old || t == "" {
 		return nil
 	}
-	return m.literalSpans(t, trimBoundaryLike(q.old, q.new))
+	spans := m.literalSpans(t, trimBoundaryLike(q.old, q.new))
+	return slices.DeleteFunc(spans, func(s editSpan) bool { return !m.atWordBoundaries(s.start, s.end) })
 }
 
 // blockAnchorMinSimilarity is how similar the lines between the anchors must
@@ -1023,10 +1069,35 @@ func normalizeTypographicMap(s string) (string, []int) {
 	return b.String(), offs
 }
 
+// editEscapeKinds are the characters after a backslash that
+// unescapeEditString undoes.
+const editEscapeKinds = "ntr'\"`\\$"
+
 // unescapeEditString undoes one level of backslash escaping: \n, \t, \r,
 // \', \", \`, \\ and \$. Other backslashes are kept as written.
 func unescapeEditString(s string) string {
-	if !strings.Contains(s, `\`) {
+	return unescapeEditStringKinds(s, editEscapeKinds)
+}
+
+// editEscapesUsed returns the escape kinds (see editEscapeKinds) present in s.
+func editEscapesUsed(s string) string {
+	var kinds []byte
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '\\' {
+			continue
+		}
+		if n := s[i+1]; strings.IndexByte(editEscapeKinds, n) >= 0 && !slices.Contains(kinds, n) {
+			kinds = append(kinds, n)
+		}
+		i++
+	}
+	return string(kinds)
+}
+
+// unescapeEditStringKinds is unescapeEditString limited to the escapes in
+// kinds; any other backslash pair is copied through untouched.
+func unescapeEditStringKinds(s, kinds string) string {
+	if !strings.Contains(s, `\`) || kinds == "" {
 		return s
 	}
 	var b strings.Builder
@@ -1034,6 +1105,16 @@ func unescapeEditString(s string) string {
 		c := s[i]
 		if c != '\\' || i+1 == len(s) {
 			b.WriteByte(c)
+			continue
+		}
+		if strings.IndexByte(kinds, s[i+1]) < 0 {
+			b.WriteByte(c)
+			if strings.IndexByte(editEscapeKinds, s[i+1]) >= 0 {
+				// An escape old_string never used: keep the pair whole, so
+				// "\\n" doesn't turn into a backslash plus a line break.
+				b.WriteByte(s[i+1])
+				i++
+			}
 			continue
 		}
 		switch n := s[i+1]; n {

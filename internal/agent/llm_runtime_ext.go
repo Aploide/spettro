@@ -527,8 +527,15 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	prefix := ""
 	suffix := ""
 	lineOffset := 0
+	// The line-ending style is the whole file's: a one-line scope of a CRLF
+	// file has no "\r\n" of its own, and applyEdit would write bare LFs.
+	crlf := false
 	if args.StartLine > 0 || args.EndLine > 0 {
-		lines := strings.Split(content, "\n")
+		work := content
+		if crlf = isCRLF(work); crlf {
+			work = strings.ReplaceAll(work, "\r\n", "\n")
+		}
+		lines := strings.Split(work, "\n")
 		start := args.StartLine
 		if start <= 0 {
 			start = 1
@@ -594,6 +601,9 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
 	}
 	updated = prefix + updated + suffix
+	if crlf {
+		updated = strings.ReplaceAll(updated, "\n", "\r\n")
+	}
 	// Approval comes after the edit is fully computed so the user can be shown
 	// the exact diff that would be applied.
 	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
