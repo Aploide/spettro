@@ -108,9 +108,10 @@ func newLoopDetector(p config.LoopDetectionPolicy) *loopDetector {
 // volatileOutput matches result fragments that change between otherwise
 // identical runs (durations, timestamps, pointer addresses, and the spool /
 // background-job ids a fresh run is always given — every oversized output's
-// truncation footer carries a new "spool:N"), so a failing test that prints
+// truncation footer carries a new "spool:N" and the file backing it,
+// ".../spettro-spool-XXXX/N.txt"), so a failing test that prints
 // "FAIL pkg 0.012s" then "FAIL pkg 0.015s" still hashes the same.
-var volatileOutput = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|µs|us|ms|s|m|h)\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|0x[0-9a-fA-F]+|\bspool:\d+|\bjob-\d+`)
+var volatileOutput = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|µs|us|ms|s|m|h)\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|0x[0-9a-fA-F]+|\bspool:\d+|spettro-spool-[^\s/\\]*[/\\]\d+\.txt|\bjob-\d+`)
 
 // callSignature normalizes one executed tool call to
 // "name\x00hash(args)\x00hash(status+output)". JSON args are compacted first

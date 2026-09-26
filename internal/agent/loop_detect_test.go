@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 )
 
 func call(tool, args string) []toolCall {
@@ -190,6 +191,32 @@ func TestLoopDetectorSpooledOutputStillMatches(t *testing.T) {
 	var got []loopAction
 	for i := range 20 {
 		out := spoolTruncate(big, 4000, true, fmt.Sprintf("spool:%d", 100+i))
+		a := d.observe(call("shell-exec", `{"command":"go test ./..."}`), res(out), "")
+		got = append(got, a)
+		if a == loopAbort {
+			break
+		}
+	}
+	if got[2] != loopNudge || got[len(got)-1] != loopAbort {
+		t.Fatalf("identical spooled results must nudge then abort, got %v", got)
+	}
+}
+
+// The truncation footer also names the spool file backing the id
+// (".../spettro-spool-XXXX/N.txt"); its number changes on every run too.
+func TestLoopDetectorSpoolFilePathStillMatches(t *testing.T) {
+	d := newLoopDetector(config.LoopDetectionPolicy{})
+	big := strings.Repeat("--- FAIL: TestX\n    x_test.go:12: boom\n", 3000)
+	var got []loopAction
+	for range 20 {
+		id, err := jobs.Spool().Add(big)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := spoolTruncate(big, 4000, true, id)
+		if !strings.Contains(out, jobs.Spool().Path(id)) {
+			t.Fatalf("footer should name the spool file: %q", out[len(out)-600:])
+		}
 		a := d.observe(call("shell-exec", `{"command":"go test ./..."}`), res(out), "")
 		got = append(got, a)
 		if a == loopAbort {
