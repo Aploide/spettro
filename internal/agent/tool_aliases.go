@@ -23,11 +23,16 @@ type legacyTool struct {
 	// args converts the retired tool's arguments to the canonical tool's;
 	// nil when the canonical tool accepts them unchanged.
 	args func(json.RawMessage) (json.RawMessage, error)
+	// sameTool marks a retired name that was the very same tool as its
+	// canonical one, not a narrower operation now folded into it: hooks
+	// written for it keep firing on every call of the canonical tool (see
+	// toolRuntime.toolHookRules).
+	sameTool bool
 }
 
 var legacyTools = map[string]legacyTool{
-	"shell-exec":     {canonical: "bash"},
-	"bash-output":    {canonical: "bash"},
+	"shell-exec":     {canonical: "bash", sameTool: true},
+	"bash-output":    {canonical: "bash", sameTool: true},
 	"multi-edit":     {canonical: "file-edit"},
 	"repo-search":    {canonical: "grep", args: repoSearchArgs},
 	"ls":             {canonical: "glob"},
@@ -36,8 +41,8 @@ var legacyTools = map[string]legacyTool{
 	"task-get":       {canonical: "todo-write", args: taskReadArgs},
 	"task-list":      {canonical: "todo-write", args: taskReadArgs},
 	"task-delete":    {canonical: "todo-write", args: taskDeleteArgs},
-	"activate-skill": {canonical: "skill-read"},
-	"skill-activate": {canonical: "skill-read"},
+	"activate-skill": {canonical: "skill-read", sameTool: true},
+	"skill-activate": {canonical: "skill-read", sameTool: true},
 }
 
 // LegacyToolNames returns the retired names that now route to canonical,
@@ -70,7 +75,7 @@ func canonicalToolCall(call toolCall) (toolCall, error) {
 	if !ok {
 		return call, nil
 	}
-	out := toolCall{Tool: lt.canonical, Args: call.Args}
+	out := toolCall{Tool: lt.canonical, Args: call.Args, CalledAs: call.Tool}
 	if lt.args != nil {
 		args, err := lt.args(call.Args)
 		if err != nil {
@@ -105,18 +110,29 @@ func repoSearchArgs(raw json.RawMessage) (json.RawMessage, error) {
 
 // taskUpsertArgs maps task-create / task-update (one task object) onto a
 // merging todo-write of that task. task-update names an existing task, so it
-// must carry an ID.
-func taskUpsertArgs(needID bool) func(json.RawMessage) (json.RawMessage, error) {
+// must carry an ID, an unknown ID stays an error instead of becoming a new
+// task, and an empty dependencies list keeps the stored one, as task-update
+// always treated it (todo-write's merge reads [] as "clear").
+func taskUpsertArgs(update bool) func(json.RawMessage) (json.RawMessage, error) {
 	return func(raw json.RawMessage) (json.RawMessage, error) {
 		var item map[string]json.RawMessage
 		if err := decodeJSONStrict(raw, &item); err != nil {
 			return nil, err
 		}
-		if needID {
+		if update {
 			var id string
 			if json.Unmarshal(item["id"], &id) != nil || strings.TrimSpace(id) == "" {
 				return nil, fmt.Errorf("id is required")
 			}
+			if deps, ok := item["dependencies"]; ok {
+				var list []string
+				if json.Unmarshal(deps, &list) == nil && len(list) == 0 {
+					delete(item, "dependencies")
+				}
+			}
+			item["update_only"] = json.RawMessage("true")
+		} else {
+			delete(item, "update_only")
 		}
 		return json.Marshal(map[string]any{"merge": true, "todos": []any{item}})
 	}

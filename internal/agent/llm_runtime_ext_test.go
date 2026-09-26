@@ -201,6 +201,7 @@ type todoListOut struct {
 		ID           string   `json:"id"`
 		Content      string   `json:"content"`
 		Status       string   `json:"status"`
+		Priority     string   `json:"priority"`
 		Dependencies []string `json:"dependencies"`
 		BlockedBy    []string `json:"blocked_by"`
 		Ready        bool     `json:"ready"`

@@ -37,11 +37,17 @@ advertised to the model or listed by `tool-search`.
 | `skill-read` | `activate-skill`, `skill-activate` | Same arguments. |
 
 The canonical tool must be allowed: an old name never grants access the agent
-does not already have. Everything downstream (permission rules, hooks, the
-tool trace, the TUI and ACP clients) sees the canonical name. Hook matchers
-written for an old name still match (see [hooks](hooks.md#matcher-syntax)).
+does not already have. Permission rules, the tool trace and the TUI and ACP
+clients see the canonical name. Hooks match the canonical name and the name
+the model called; a hook for `shell-exec` or `bash-output`, which were the
+very same tool as `bash`, also keeps firing on `bash` (see
+[hooks](hooks.md#matcher-syntax)).
+
+`task-update` keeps its old contract: an unknown `id` is an error rather
+than a new task, and an empty `dependencies` list leaves the stored ones as
+they are.
 
 Manifests are migrated to schema v12 on load, which replaces the old names in
-every `allowed_tools` list and in tool-level permission rules, and removes the
-former `grok-image`/`grok-video` generators; see the v12 notes in
-[AGENTS.md](../AGENTS.md#root-fields).
+`allowed_tools` (only where the agent could actually call the old tool) and
+removes the former `grok-image`/`grok-video` generators; permission rules are
+left as written. See the v12 notes in [AGENTS.md](../AGENTS.md#root-fields).

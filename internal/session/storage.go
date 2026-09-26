@@ -249,6 +249,9 @@ type TodoPatch struct {
 	Source       string
 	Priority     string
 	Dependencies *[]string
+	// MustExist makes a merge refuse an ID that is not in the list instead of
+	// adding it (task-update's contract).
+	MustExist bool
 }
 
 // TodoChange is one atomic edit of the session task list: Todos are applied
@@ -258,7 +261,12 @@ type TodoChange struct {
 	Todos []TodoPatch
 	// Replace makes Todos the whole new list; otherwise each one is inserted
 	// or updated by ID.
-	Replace        bool
+	Replace bool
+	// MatchContent, in a merge, gives a task written without an ID the ID of
+	// a stored task with exactly the same content, so writing the same list
+	// again updates it instead of adding copies. A sub-agent's full replace
+	// becomes such a merge.
+	MatchContent   bool
 	Delete         []string
 	ClearCompleted bool
 }
@@ -297,9 +305,26 @@ func ApplyTodos(globalDir, sessionID string, change TodoChange) ([]Todo, []strin
 	}
 	var notes []string
 	touched := map[string]struct{}{}
-	var unnamed []int // positions of new tasks still waiting for an ID
+	var unnamed []int            // positions of new tasks still waiting for an ID
+	claimed := map[string]bool{} // stored tasks an entry of this change already names
+	for _, p := range change.Todos {
+		if id := strings.TrimSpace(p.ID); id != "" {
+			claimed[id] = true
+		}
+	}
 	for n, p := range change.Todos {
 		id := strings.TrimSpace(p.ID)
+		if id == "" && change.MatchContent && !change.Replace {
+			if c := strings.TrimSpace(p.Content); c != "" {
+				for _, t := range stored {
+					if t.Content == c && !claimed[t.ID] {
+						id = t.ID
+						claimed[id] = true
+						break
+					}
+				}
+			}
+		}
 		status := ""
 		if strings.TrimSpace(p.Status) != "" || change.Replace {
 			if status, err = NormalizeTaskStatus(p.Status); err != nil {
@@ -338,8 +363,14 @@ func ApplyTodos(globalDir, sessionID string, change TodoChange) ([]Todo, []strin
 			touched[id] = struct{}{}
 			continue
 		}
+		if p.MustExist && !change.Replace {
+			return nil, nil, fmt.Errorf("task %s not found", todoLabel(id, n))
+		}
 		content := strings.TrimSpace(p.Content)
 		if content == "" {
+			if id != "" && !change.Replace {
+				return nil, nil, fmt.Errorf("task %q not found (content is required to add it as a new task)", id)
+			}
 			return nil, nil, fmt.Errorf("task %s: content is required for a new task", todoLabel(id, n))
 		}
 		if status == "" {

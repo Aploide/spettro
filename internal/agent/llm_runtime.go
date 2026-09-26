@@ -219,6 +219,9 @@ func (r *toolRuntime) traceID() string {
 type toolCall struct {
 	Tool string          `json:"tool"`
 	Args json.RawMessage `json:"args"`
+	// CalledAs is the retired name the model used when canonicalToolCall
+	// rewrote the call to its canonical tool; hooks match it as well.
+	CalledAs string `json:"-"`
 }
 
 type toolRuntime struct {
@@ -1320,6 +1323,11 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 }
 
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	// The PostToolUse hooks in finishToolCall need the canonical call too.
+	if canon, err := r.canonicalCall(call); err == nil {
+		call = canon
+	}
+	ctx = withCalledAs(ctx, call.CalledAs)
 	if blocksOnUserInput(call.Tool) {
 		// The tool is waiting on a person, who may take as long as they take.
 		// A deadline here would cancel the question out from under them and
@@ -1388,6 +1396,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	if err != nil {
 		return "", err
 	}
+	ctx = withCalledAs(ctx, call.CalledAs)
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
 	}

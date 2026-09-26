@@ -53,7 +53,9 @@ aliases of it):
   all dependencies met).
 - Sub-agents share their parent's session folder, so below the top level a
   full replace is merged instead: a worker can add and update tasks but
-  never wipe the orchestrator's list.
+  never wipe the orchestrator's list. In that merge a task written without
+  an `id` updates the stored task with exactly the same `content`, so a
+  worker that rewrites its whole list does not add copies.
 
 - Each task has an `id`, `content`, `status` (`pending`, `in_progress`,
   `completed`, `blocked`, `cancelled`) and optional `dependencies` (IDs of

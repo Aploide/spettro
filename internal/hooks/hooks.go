@@ -132,7 +132,7 @@ func LoadEffective(cwd string) (EffectiveConfig, error) {
 }
 
 // MatchAny reports whether the rule's matcher matches any of the tool IDs
-// (a tool's canonical name and the retired names that route to it).
+// (a tool's canonical name and the retired name it was called by).
 func MatchAny(rule EffectiveRule, toolIDs ...string) bool {
 	for _, id := range toolIDs {
 		if Match(rule, id) {

@@ -73,9 +73,13 @@ Equivalent array form:
 | `re:(bash\|pty-start)` | Regex: a shell command or an interactive terminal. |
 
 A matcher is tested against the tool's canonical ID and against the retired
-names that now route to it (see [Built-in tools](tools.md)), so a rule written
-for `shell-exec` still fires on `bash`, and one for `multi-edit` on
-`file-edit`. The `tool_id` the hook receives is always the canonical ID
+name the model called it by, if any (see [Built-in tools](tools.md)). A rule
+for `shell-exec` or `bash-output`, which were the very same tool as `bash`,
+also fires on every `bash` call; a rule copied under both `shell-exec` and
+`bash` (same `command`) runs once per call. A rule for a retired name that
+was a narrower operation (`multi-edit`, `repo-search`, `ls`, `task-*`) fires
+only when the model calls that name, not on every `file-edit`, `grep`, `glob`
+or `todo-write`. The `tool_id` the hook receives is always the canonical ID
 (`bash`, never `shell-exec`): a script that checks `tool_id` itself must
 test the canonical name.
 

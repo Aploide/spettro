@@ -167,6 +167,104 @@ func TestTaskAliasesMapOntoTodoWrite(t *testing.T) {
 	}
 }
 
+// task-update keeps its old contract: an empty dependencies list leaves the
+// stored ones alone, and an unknown ID is an error, not a new task.
+func TestTaskUpdateAliasKeepsItsContract(t *testing.T) {
+	r, _ := newAliasTestRuntime(t)
+	allowed := map[string]struct{}{"todo-write": {}}
+	exec := func(tool string, args any) (todoListOut, error) {
+		t.Helper()
+		out, err := r.execute(context.Background(), aliasCall(t, tool, args), allowed)
+		if err != nil {
+			return todoListOut{}, err
+		}
+		return decodeTodoList(t, out), nil
+	}
+	if _, err := exec("task-create", map[string]any{"id": "a", "content": "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec("task-create", map[string]any{"id": "b", "content": "second", "dependencies": []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := exec("task-update", map[string]any{"id": "b", "priority": "high", "dependencies": []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range list.Tasks {
+		if task.ID == "b" && (strings.Join(task.Dependencies, ",") != "a" || task.Ready || task.Priority != "high") {
+			t.Fatalf("task-update with dependencies [] changed b: %+v", task)
+		}
+	}
+	for _, args := range []map[string]any{
+		{"id": "ghost", "content": "boo"},
+		{"id": "ghost", "status": "completed"},
+	} {
+		if _, err := exec("task-update", args); err == nil || !strings.Contains(err.Error(), `task "ghost" not found`) {
+			t.Fatalf("task-update %v on an unknown id: %v", args, err)
+		}
+	}
+	if list, _ := exec("task-list", map[string]any{}); len(list.Tasks) != 2 {
+		t.Fatalf("an unknown id must not add a task: %+v", list)
+	}
+	// todo-write's own merge still reads [] as "clear".
+	list, err = exec("todo-write", map[string]any{"merge": true, "todos": []any{map[string]any{"id": "b", "dependencies": []string{}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range list.Tasks {
+		if task.ID == "b" && len(task.Dependencies) != 0 {
+			t.Fatalf("todo-write merge with [] should clear: %+v", task)
+		}
+	}
+}
+
+// A sub-agent's full todo-write becomes a merge (it must not wipe the
+// parent's list); writing the same ID-less list again with new statuses
+// updates those tasks instead of adding copies.
+func TestSubAgentTodoWriteRewriteDoesNotDuplicate(t *testing.T) {
+	r, _ := newAliasTestRuntime(t)
+	allowed := map[string]struct{}{"todo-write": {}}
+	write := func(args any) todoListOut {
+		t.Helper()
+		out, err := r.execute(context.Background(), aliasCall(t, "todo-write", args), allowed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decodeTodoList(t, out)
+	}
+	write(map[string]any{"todos": []any{map[string]any{"id": "orch", "content": "orchestrator task"}}})
+	r.delegationDepth = 1
+	write(map[string]any{"todos": []any{
+		map[string]any{"content": "write parser", "status": "in_progress"},
+		map[string]any{"content": "add tests"},
+	}})
+	list := write(map[string]any{"todos": []any{
+		map[string]any{"content": "write parser", "status": "completed"},
+		map[string]any{"content": "add tests", "status": "in_progress"},
+		map[string]any{"content": "add tests", "status": "pending"},
+	}})
+	// The third entry repeats a content already matched in this call, so it
+	// is a new task.
+	if len(list.Tasks) != 4 {
+		t.Fatalf("want orch, the 2 updated tasks and 1 new one, got %+v", list.Tasks)
+	}
+	status := map[string]string{}
+	for _, task := range list.Tasks {
+		status[task.ID] = task.Content + "|" + task.Status
+	}
+	want := map[string]string{
+		"orch":   "orchestrator task|pending",
+		"task-1": "write parser|completed",
+		"task-2": "add tests|in_progress",
+		"task-3": "add tests|pending",
+	}
+	for id, w := range want {
+		if status[id] != w {
+			t.Fatalf("task %s = %q, want %q (list %v)", id, status[id], w, status)
+		}
+	}
+}
+
 // An alias is never a way around the allow-list: the canonical tool must be
 // allowed, and an argument-conversion failure is an error result, not a run.
 func TestLegacyToolNeedsCanonicalAllowed(t *testing.T) {
@@ -215,8 +313,9 @@ func TestToolSearchHidesAliases(t *testing.T) {
 	}
 }
 
-// A hook written for a retired name still fires on the canonical tool.
-func TestHooksMatchRetiredToolNames(t *testing.T) {
+// A hook written for shell-exec, which was the very same tool as bash, keeps
+// guarding the shell now that the model only sees bash.
+func TestHooksForSameToolNameFireOnCanonical(t *testing.T) {
 	r, _ := newAliasTestRuntime(t)
 	r.hooksConfig = hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("no-shell", hooks.EventPreToolUse, "shell-exec", `echo '{"decision":"deny","reason":"no shell here"}'`),
@@ -224,6 +323,86 @@ func TestHooksMatchRetiredToolNames(t *testing.T) {
 	res := r.parallelExec(context.Background(), []toolCall{{Tool: "bash", Args: json.RawMessage(`{"command":"echo hi"}`)}}, map[string]struct{}{"bash": {}}, nil)
 	if res[0].status != "error" || !strings.Contains(res[0].output, "no shell here") {
 		t.Fatalf("shell-exec hook did not fire on bash: %s %q", res[0].status, res[0].output)
+	}
+}
+
+// A hook on the canonical tool fires however the model named it, so an alias
+// is no way around it.
+func TestHooksForCanonicalFireOnAliasCalls(t *testing.T) {
+	r, _ := newAliasTestRuntime(t)
+	r.hooksConfig = hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
+		hookRule("no-glob", hooks.EventPreToolUse, "glob", `echo '{"decision":"deny","reason":"no glob"}'`),
+	}}
+	res := r.parallelExec(context.Background(), []toolCall{{Tool: "ls", Args: json.RawMessage(`{}`)}}, map[string]struct{}{"glob": {}}, nil)
+	if res[0].status != "error" || !strings.Contains(res[0].output, "no glob") {
+		t.Fatalf("glob hook did not fire on ls: %s %q", res[0].status, res[0].output)
+	}
+}
+
+// A hook written for a retired name that was a narrower operation fires when
+// the model calls that name, and on nothing else the canonical tool does: a
+// deny on task-delete must not block creating or reading tasks, and one on ls
+// must not block a glob pattern search.
+func TestHooksForNarrowerRetiredNamesStayNarrow(t *testing.T) {
+	r, _ := newAliasTestRuntime(t)
+	r.hooksConfig = hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
+		hookRule("no-deletes", hooks.EventPreToolUse, "task-delete", `echo '{"decision":"deny","reason":"no deletes"}'`),
+		hookRule("no-ls", hooks.EventPreToolUse, "ls", `echo '{"decision":"deny","reason":"no ls"}'`),
+		hookRule("no-multi", hooks.EventPreToolUse, "multi-edit", `echo '{"decision":"deny","reason":"no multi"}'`),
+		hookRule("no-repo-search", hooks.EventPreToolUse, "repo-search", `echo '{"decision":"deny","reason":"no repo-search"}'`),
+	}}
+	allowed := map[string]struct{}{"todo-write": {}, "glob": {}, "grep": {}}
+	for _, c := range []toolCall{
+		aliasCall(t, "task-create", map[string]any{"content": "write parser"}),
+		aliasCall(t, "todo-write", map[string]any{}),
+		aliasCall(t, "task-list", map[string]any{}),
+		aliasCall(t, "glob", map[string]any{"pattern": "*.go"}),
+		aliasCall(t, "grep", map[string]any{"pattern": "HelloWorld"}),
+	} {
+		res := r.parallelExec(context.Background(), []toolCall{c}, allowed, nil)
+		if res[0].status == "error" {
+			t.Errorf("%s %s blocked: %q", c.Tool, c.Args, res[0].output)
+		}
+	}
+	for _, c := range []struct {
+		call toolCall
+		want string
+	}{
+		{aliasCall(t, "task-delete", map[string]any{"id": "task-1"}), "no deletes"},
+		{aliasCall(t, "ls", map[string]any{}), "no ls"},
+		{aliasCall(t, "repo-search", map[string]any{"query": "HelloWorld"}), "no repo-search"},
+	} {
+		res := r.parallelExec(context.Background(), []toolCall{c.call}, allowed, nil)
+		if res[0].status != "error" || !strings.Contains(res[0].output, c.want) {
+			t.Errorf("%s not blocked by its own hook: %s %q", c.call.Tool, res[0].status, res[0].output)
+		}
+	}
+}
+
+// A hook copied under both shell-exec and bash runs once per bash call; two
+// different hooks both run.
+func TestHooksCopiedUnderBothShellNamesRunOnce(t *testing.T) {
+	r, _ := newAliasTestRuntime(t)
+	log := filepath.Join(t.TempDir(), "hook.log")
+	logCmd := func(tag string) string { return "echo " + tag + " >> " + log + "; echo '{\"decision\":\"allow\"}'" }
+	r.hooksConfig = hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
+		hookRule("copy-old", hooks.EventPostToolUse, "shell-exec", logCmd("same")),
+		hookRule("copy-new", hooks.EventPostToolUse, "bash", logCmd("same")),
+		hookRule("other", hooks.EventPostToolUse, "shell-exec", logCmd("other")),
+	}}
+	allowed := map[string]struct{}{"bash": {}}
+	for _, name := range []string{"bash", "shell-exec"} {
+		if err := os.WriteFile(log, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res := r.parallelExec(context.Background(), []toolCall{{Tool: name, Args: json.RawMessage(`{"command":"echo hi"}`)}}, allowed, nil)
+		if res[0].status == "error" {
+			t.Fatalf("%s: %q", name, res[0].output)
+		}
+		raw, _ := os.ReadFile(log)
+		if got := strings.Fields(string(raw)); strings.Join(got, ",") != "same,other" {
+			t.Errorf("%s call ran hooks %v, want [same other]", name, got)
+		}
 	}
 }
 

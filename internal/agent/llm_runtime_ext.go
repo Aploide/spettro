@@ -35,6 +35,9 @@ type todoWriteItem struct {
 	Source       string    `json:"source"`
 	Priority     string    `json:"priority"`
 	Dependencies *[]string `json:"dependencies"`
+	// UpdateOnly is not in the schema: the task-update alias sets it so an
+	// unknown ID is an error, as it always was, rather than a new task.
+	UpdateOnly bool `json:"update_only"`
 }
 
 // todoRow is one task as todo-write reports it: the stored fields without
@@ -89,8 +92,12 @@ func (r *toolRuntime) runTodoWrite(rawArgs []byte) (string, error) {
 		if args.Todos != nil {
 			change.Replace = !bool(args.Merge)
 			if change.Replace && r.delegationDepth > 0 {
+				// Tasks written without IDs match stored tasks by content, so
+				// a worker that rewrites its whole list updates it instead of
+				// adding copies next to the stale originals.
 				change.Replace = false
-				notes = append(notes, "merged instead of replacing: sub-agents share the parent's task list")
+				change.MatchContent = true
+				notes = append(notes, "merged instead of replacing: sub-agents share the parent's task list (tasks without an id were matched to existing tasks by content)")
 			}
 			for _, it := range *args.Todos {
 				change.Todos = append(change.Todos, session.TodoPatch{
@@ -101,6 +108,7 @@ func (r *toolRuntime) runTodoWrite(rawArgs []byte) (string, error) {
 					Source:       it.Source,
 					Priority:     it.Priority,
 					Dependencies: it.Dependencies,
+					MustExist:    it.UpdateOnly,
 				})
 			}
 		}
