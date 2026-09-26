@@ -13,6 +13,15 @@ import (
 type localModelsResp struct {
 	Data []struct {
 		ID string `json:"id"`
+		// Context window, when the server reports it. Field names vary:
+		// vLLM sends max_model_len; OpenRouter-style gateways and some
+		// local servers send context_length / max_context_length /
+		// context_window. Training-time values (llama.cpp n_ctx_train) are
+		// deliberately ignored: the runtime window can be much smaller.
+		MaxModelLen      int `json:"max_model_len"`
+		ContextLength    int `json:"context_length"`
+		MaxContextLength int `json:"max_context_length"`
+		ContextWindow    int `json:"context_window"`
 	} `json:"data"`
 }
 
@@ -68,11 +77,18 @@ func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, err
 		if m.ID == "" {
 			continue
 		}
+		ctxWindow := m.MaxModelLen
+		for _, v := range []int{m.ContextLength, m.MaxContextLength, m.ContextWindow} {
+			if ctxWindow <= 0 {
+				ctxWindow = v
+			}
+		}
 		out = append(out, Model{
 			Provider:     baseURL,
 			ProviderName: provName,
 			Name:         m.ID,
 			DisplayName:  m.ID,
+			Context:      max(ctxWindow, 0),
 			Local:        true,
 		})
 	}

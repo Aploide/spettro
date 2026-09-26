@@ -14,10 +14,11 @@ import (
 // nudge and keeps going; when the repetition continues, the run ends with a
 // clear user-facing message instead of burning tokens forever.
 func TestLoopDetection_NudgeThenAbort(t *testing.T) {
-	// Six identical responses: the default threshold (3 identical consecutive
-	// calls) trips the nudge on step 3, counters reset, and the second trip on
-	// step 6 aborts the run. No further requests should be made.
-	responses := make([]string, 6)
+	// The same call with the same result every time: the default threshold
+	// (3 identical consecutive outcomes) nudges on steps 3 and 6, and the 8th
+	// identical outcome in a row aborts the run. A ninth scripted response
+	// proves no further request is made after the abort.
+	responses := make([]string, 9)
 	for i := range responses {
 		responses[i] = `TOOL_CALL {"tool":"comment","args":{"message":"same"}}`
 	}
@@ -48,9 +49,10 @@ func TestLoopDetection_NudgeThenAbort(t *testing.T) {
 	if !strings.Contains(result.Content, "repeating the same actions") {
 		t.Errorf("expected loop-stop message, got: %q", result.Content)
 	}
-	// The abort fires before the sixth call executes: 5 tool traces, not 6.
-	if len(result.Tools) > 5 {
-		t.Errorf("expected the repeated call to be skipped on abort, got %d traces", len(result.Tools))
+	// Detection runs on executed outcomes, so the aborting 8th call ran (its
+	// result is recorded to keep the history valid) and nothing after it.
+	if len(result.Tools) != 8 {
+		t.Errorf("expected 8 tool traces (abort after the 8th identical outcome), got %d", len(result.Tools))
 	}
 }
 

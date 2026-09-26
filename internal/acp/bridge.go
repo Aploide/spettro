@@ -522,6 +522,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		ModelName:       func() string { return cfg.ActiveModel },
 		CWD:             s.cwd,
 		MaxTokens:       cfg.TokenBudget,
+		MaxOutputTokens: cfg.MaxOutputTokens,
 		Thinking:        thinking,
 		Ultra:           cfg.UltraActive(),
 		RequiredReads:   mentioned,

@@ -37,6 +37,7 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	}
 
 	pm := provider.NewManager()
+	pm.SetStreamAll(true)
 	pm.SetAPIKeys(cfg.APIKeys)
 
 	if cat, err := models.Load(); err == nil {

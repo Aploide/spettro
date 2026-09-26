@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	"spettro/internal/config"
@@ -16,22 +17,43 @@ type loopAction int
 const (
 	// loopOK: no repetition detected, keep going.
 	loopOK loopAction = iota
-	// loopNudge: repetition detected for the first time; inject a system
-	// nudge telling the agent to change approach.
+	// loopNudge: repetition detected; inject a system nudge telling the
+	// agent to change approach and keep going.
 	loopNudge
-	// loopAbort: repetition detected again after a nudge; stop the turn.
+	// loopAbort: the repetition is sustained (it kept tripping after
+	// maxLoopNudges nudges, or the same call produced the same result
+	// hardLoopRepeats times in a row); stop the turn.
 	loopAbort
+)
+
+const (
+	// maxLoopNudges is how many nudges a run gets before the next trip
+	// aborts it.
+	maxLoopNudges = 3
+	// hardLoopRepeats aborts regardless of the remaining nudge budget once
+	// the very same (call, result) pair repeats this many times back to back
+	// (after at least one nudge).
+	hardLoopRepeats = 8
+	// loopClearAfter forgives earlier nudges once this many consecutive tool
+	// calls went by without a trip: the agent recovered, and a much later,
+	// unrelated repetition should start from a nudge again, not an abort.
+	loopClearAfter = 10
 )
 
 // loopStopMessage is the user-facing message when a run is stopped because
 // the agent kept repeating itself after being nudged.
 const loopStopMessage = "Stopped: the agent was repeating the same actions without making progress. Rephrase the task or narrow its scope and try again."
 
-// loopNudgeMessage is injected into the conversation on first detection.
-const loopNudgeMessage = "system: you appear to be repeating the same action or output. Do not repeat it again — change your approach: re-read the relevant context, try a different tool or different arguments, or explain why you are stuck."
+// loopNudgeMessage is injected into the conversation on detection.
+const loopNudgeMessage = "system: you appear to be repeating the same action and getting the same result. Do not repeat it again — change your approach: re-read the relevant context, try a different tool or different arguments, or explain why you are stuck."
 
-// loopDetector tracks a rolling window of recent tool calls (name + normalized
-// args hash) and consecutive assistant text outputs to spot a stuck agent.
+// loopDetector tracks a rolling window of recent tool-call outcomes and
+// consecutive assistant text outputs to spot a stuck agent.
+//
+// A tool call's signature covers the call (name + normalized args) AND its
+// result (status + normalized output hash). Re-running the same test command
+// while its output changes is progress (the edit→test cycle), not a loop;
+// only the same call producing the same result again counts as repetition.
 // It is used from a single goroutine (the run loop); no locking needed.
 type loopDetector struct {
 	enabled               bool
@@ -45,7 +67,14 @@ type loopDetector struct {
 	consecutive int
 	lastText    string
 	textRepeats int
-	nudged      bool
+
+	// identicalRun counts back-to-back identical signatures and, unlike
+	// consecutive, survives a nudge (see hardLoopRepeats).
+	identicalRun int
+	// nudges given since the last clear; cleanCalls counts calls since the
+	// last trip (see loopClearAfter).
+	nudges     int
+	cleanCalls int
 }
 
 // newLoopDetector builds a detector from the manifest policy, applying
@@ -76,38 +105,65 @@ func newLoopDetector(p config.LoopDetectionPolicy) *loopDetector {
 	return d
 }
 
-// callSignature normalizes a tool call to "name\x00hash(args)". JSON args are
-// compacted first so whitespace differences don't defeat detection.
-func callSignature(name string, args json.RawMessage) string {
+// volatileOutput matches result fragments that change between otherwise
+// identical runs (durations, timestamps, pointer addresses, and the spool /
+// background-job ids a fresh run is always given — every oversized output's
+// truncation footer carries a new "spool:N"), so a failing test that prints
+// "FAIL pkg 0.012s" then "FAIL pkg 0.015s" still hashes the same.
+var volatileOutput = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|µs|us|ms|s|m|h)\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|0x[0-9a-fA-F]+|\bspool:\d+|\bjob-\d+`)
+
+// callSignature normalizes one executed tool call to
+// "name\x00hash(args)\x00hash(status+output)". JSON args are compacted first
+// so whitespace differences don't defeat detection.
+func callSignature(name string, args json.RawMessage, status, output string) string {
 	norm := bytes.TrimSpace(args)
 	var buf bytes.Buffer
 	if json.Compact(&buf, norm) == nil {
 		norm = buf.Bytes()
 	}
-	h := sha256.Sum256(norm)
-	return name + "\x00" + hex.EncodeToString(h[:])
+	ah := sha256.Sum256(norm)
+	rh := sha256.Sum256([]byte(status + "\x00" + volatileOutput.ReplaceAllString(output, "#")))
+	return name + "\x00" + hex.EncodeToString(ah[:8]) + "\x00" + hex.EncodeToString(rh[:8])
 }
 
-// observe records one LLM step (its tool calls and assistant text) and
-// returns the action to take. The first trip returns loopNudge and resets the
-// counters so the agent gets a fresh chance; a second trip returns loopAbort.
-func (d *loopDetector) observe(calls []toolCall, text string) loopAction {
+// observe records one executed LLM step — its tool calls with their results
+// (results[i] belongs to calls[i]; missing results hash as empty) and the
+// assistant text — and returns the action to take. Trips nudge (resetting
+// the repetition counters so the agent is judged on fresh behavior) until
+// maxLoopNudges nudges were spent, or hardLoopRepeats identical outcomes ran
+// back to back after a nudge; then it aborts.
+func (d *loopDetector) observe(calls []toolCall, results []parallelResult, text string) loopAction {
 	if d == nil || !d.enabled {
 		return loopOK
 	}
 	tripped := d.recordText(text)
-	for _, c := range calls {
-		if d.recordCall(callSignature(c.Tool, c.Args)) {
+	hard := false
+	for i, c := range calls {
+		var status, output string
+		if i < len(results) {
+			status, output = results[i].status, results[i].output
+		}
+		if d.recordCall(callSignature(c.Tool, c.Args, status, output)) {
 			tripped = true
 		}
+		if d.identicalRun >= hardLoopRepeats {
+			hard = true
+		}
 	}
-	if !tripped {
+	if !tripped && !hard {
+		d.cleanCalls += len(calls)
+		if d.cleanCalls >= loopClearAfter {
+			d.nudges = 0
+		}
 		return loopOK
 	}
-	if d.nudged {
+	d.cleanCalls = 0
+	// The hard limit ends the run only once the agent was warned: a single
+	// response with 8+ identical parallel calls gets its nudge first.
+	if (hard && d.nudges > 0) || d.nudges >= maxLoopNudges {
 		return loopAbort
 	}
-	d.nudged = true
+	d.nudges++
 	d.reset()
 	return loopNudge
 }
@@ -115,9 +171,11 @@ func (d *loopDetector) observe(calls []toolCall, text string) loopAction {
 func (d *loopDetector) recordCall(sig string) bool {
 	if sig == d.lastSig {
 		d.consecutive++
+		d.identicalRun++
 	} else {
 		d.lastSig = sig
 		d.consecutive = 1
+		d.identicalRun = 1
 	}
 	d.window = append(d.window, sig)
 	if len(d.window) > d.windowSize {
@@ -149,11 +207,12 @@ func (d *loopDetector) recordText(text string) bool {
 	return d.textRepeats >= d.textRepeatThreshold
 }
 
-// reset clears the repetition counters (kept thresholds and nudged flag) so a
-// nudged agent is judged on fresh behavior.
+// reset clears the repetition counters (kept: thresholds, nudge count and
+// the identical-run streak) so a nudged agent is judged on fresh behavior.
+// lastSig is kept too, so the identical-run streak can keep growing across
+// the nudge.
 func (d *loopDetector) reset() {
 	d.window = d.window[:0]
-	d.lastSig = ""
 	d.consecutive = 0
 	d.lastText = ""
 	d.textRepeats = 0

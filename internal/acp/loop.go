@@ -145,6 +145,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
 			MaxTokens:       cfg.TokenBudget,
+			MaxOutputTokens: cfg.MaxOutputTokens,
 			Thinking:        thinking,
 			Ultra:           cfg.UltraActive(),
 			Messages:        history,

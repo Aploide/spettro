@@ -158,7 +158,13 @@ type toolLoopConfig struct {
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
-	MaxTokens       int                    // max tokens per request; 0 = unlimited
+	// MaxTokens is the per-request INPUT token budget (config token_budget):
+	// a prompt estimated at or above it is force-compacted once, then the run
+	// fails. 0 = unlimited. It is never sent as the output cap.
+	MaxTokens int
+	// MaxOutputTokens caps each reply (max_tokens on the wire); 0 = auto, the
+	// provider manager's per-model default (see provider.Manager.MaxOutputTokens).
+	MaxOutputTokens int
 	Thinking        provider.ThinkingLevel // forwarded to provider.Request.Thinking
 	RequiredReads   []string
 	Images          []string        // attached to this turn's user message (re-sent every step)
@@ -568,9 +574,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 
 	// finish appends the final assistant turn so the returned conversation is
-	// complete and reusable as the next turn's prefix.
+	// complete and reusable as the next turn's prefix. When the loop already
+	// stored that turn itself (with its reasoning, or as continued pieces) it
+	// sets answerRecorded first.
+	answerRecorded := false
 	finish := func(content string, goalDone bool, goalSummary string) (toolLoopResult, error) {
-		if strings.TrimSpace(content) != "" {
+		if strings.TrimSpace(content) != "" && !answerRecorded {
 			last := len(convMsgs) - 1
 			if last < 0 || convMsgs[last].Role != provider.RoleAssistant || convMsgs[last].Content != content {
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: content})
@@ -606,12 +615,56 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// steps or the provider-side prompt cache misses on every call.
 	system := buildSystemString(cfg)
 
-	// Resilience state: transient provider failures are retried in-loop and an
-	// over-budget context gets one forced compaction attempt, so a single bad
-	// step (huge tool output, provider hiccup) doesn't kill the whole run.
-	const maxSendRetries = 2
-	sendRetries := 0
+	// Resilience state. Provider failures are classified
+	// (provider.ClassifyRetry): transient ones (rate limit, overload, 5xx,
+	// network, stalled stream) are retried with exponential backoff that
+	// honors Retry-After; deterministic ones (auth, bad request) fail fast; a
+	// context overflow forces one compaction and a resend. An over-budget
+	// context also gets one forced compaction attempt, so a single bad step
+	// (huge tool output, provider hiccup) doesn't kill the whole run.
+	retryPolicy := provider.DefaultRetryPolicy
+	sendFailures := 0
 	budgetCompacted := false
+	overflowCompacted := false
+	// learnedWindow is the context window a provider stated in an overflow
+	// error. It overrides a missing (URL/local endpoints) or larger window.
+	learnedWindow := 0
+	// emptyReplies counts consecutive replies with neither text nor tool
+	// calls; each one appends a nudge, which a run that gives up drops from
+	// the history again (see dropEmptyNudges).
+	emptyReplies := 0
+	// truncatedText collects the pieces of a text answer that hit the output
+	// limit and was continued; they are joined into the final answer.
+	var truncatedText []string
+	// thinking starts at the configured level and follows the level the
+	// manager actually succeeded with, so a level the model rejected is not
+	// re-sent (and re-rejected) on every later step.
+	thinking := cfg.Thinking
+	// measure is the calibrated prompt size of a would-be request: history +
+	// system + tool schemas, scaled by what the provider reported for the
+	// previous step (see usageCalibration).
+	var calibration usageCalibration
+	measure := func(system string, msgs []provider.Message) int {
+		return calibration.apply(provider.EstimateRequestTokens(provider.Request{System: system, Messages: msgs, Tools: nativeToolSpecs}))
+	}
+	contextWindow := func() int {
+		w := cfg.ContextWindow
+		if w <= 0 {
+			// Hosts that don't wire the window (sub-agents, URL endpoints):
+			// ask the catalog / local probe.
+			m := runtime.effectiveModel()
+			w = cfg.ProviderManager.ModelContext(m.Provider, m.Model)
+		}
+		if learnedWindow > 0 && (w <= 0 || learnedWindow < w) {
+			w = learnedWindow
+		}
+		return w
+	}
+	notify := func(msg string) {
+		if cfg.ToolCallback != nil {
+			cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: msg})
+		}
+	}
 	// steps counts successful LLM calls; when cfg.MaxSteps is set (goal-mode
 	// iterations) the loop yields back to the host once the cap is reached.
 	steps := 0
@@ -636,35 +689,26 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// honoring the user's auto-compact settings via runtime.compactCfg.
 		// On error, keep convMsgs as-is — never abort a run for compaction;
 		// the trigger fires again at the next step until MaxFailures pauses it.
-		beforeTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
-		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err != nil {
-			if cfg.ToolCallback != nil {
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("auto-compaction failed (%s) — continuing; will retry at the next threshold crossing", truncate(err.Error(), 200))})
-			}
+		beforeTokens := measure(system, convMsgs)
+		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, contextWindow(), false, measure); err != nil {
+			notify(fmt.Sprintf("auto-compaction failed (%s) — continuing; will retry at the next threshold crossing", truncate(err.Error(), 200)))
 		} else {
 			convMsgs = compacted
-			if did && cfg.ToolCallback != nil {
-				afterTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(afterTokens))})
+			if did {
+				notify(fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(measure(system, convMsgs))))
 			}
 		}
-		// Budget validation: sum system + all messages.
-		allContent := make([]string, 0, 1+len(convMsgs))
-		allContent = append(allContent, system)
-		for _, m := range convMsgs {
-			allContent = append(allContent, m.Content)
-		}
-		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
+		// Input budget (config token_budget): the whole prompt — tool results
+		// and tool schemas included — must stay under it.
+		if err := budget.CheckTokens(cfg.MaxTokens, measure(system, convMsgs)); err != nil {
 			// Over budget (e.g. an oversized tool result blew up the history):
 			// force-compact once instead of failing the run. Only if forced
 			// compaction doesn't help either does the run error out.
 			if !budgetCompacted {
 				budgetCompacted = true
-				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, true); cerr == nil && did {
+				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, contextWindow(), true, measure); cerr == nil && did {
 					convMsgs = compacted
-					if cfg.ToolCallback != nil {
-						cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
-					}
+					notify("context exceeded the token budget — force-compacted history and continuing")
 					continue
 				}
 			}
@@ -672,17 +716,18 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		budgetCompacted = false
 		req := provider.Request{
-			System:    system,
-			Messages:  convMsgs,
-			MaxTokens: cfg.MaxTokens,
-			Thinking:  cfg.Thinking,
+			System:        system,
+			Messages:      convMsgs,
+			MaxTokens:     cfg.MaxOutputTokens,
+			Thinking:      thinking,
+			ContextWindow: contextWindow(),
 		}
 		if len(nativeToolSpecs) > 0 {
 			req.Tools = nativeToolSpecs
 		}
 		if cfg.ToolCallback != nil {
 			req.OnRateLimit = func(d time.Duration) {
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
+				notify(fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds())))
 			}
 		}
 		var demux *streamDemux
@@ -700,6 +745,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 		}
 		model := runtime.effectiveModel()
+		sentEstimate := provider.EstimateRequestTokens(req)
 		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()
@@ -709,16 +755,33 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if ctx.Err() != nil {
 				return fail(fmt.Errorf("agent call failed: %w", err))
 			}
-			// Transient failure (5xx/timeout/network): retry the same request a
-			// bounded number of times before considering a fallback model, so a
-			// single provider hiccup doesn't kill the whole run.
-			if sendRetries < maxSendRetries {
-				sendRetries++
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
+			class := provider.ClassifyRetry(err)
+			// Context overflow: resending the same prompt is pointless. Learn
+			// the real window when the provider states it, force-compact once
+			// and resend; fail clearly if compaction cannot shrink it.
+			if class == provider.RetryContextOverflow {
+				if n := provider.ContextLimitFromError(err); n > 0 && (learnedWindow == 0 || n < learnedWindow) {
+					learnedWindow = n
 				}
+				if !overflowCompacted {
+					overflowCompacted = true
+					if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, contextWindow(), true, measure); cerr == nil && did {
+						convMsgs = compacted
+						notify("the request exceeded the model's context window — force-compacted history and retrying")
+						continue
+					}
+				}
+				return fail(fmt.Errorf("agent call failed: the conversation exceeds the model's context window and compaction could not shrink it enough: %w", err))
+			}
+			// Transient (rate limit / overload / 5xx / network / stalled
+			// stream) or unclassified: bounded exponential backoff with
+			// jitter, honoring the provider's Retry-After. Deterministic
+			// failures (auth, invalid request) are never resent.
+			sendFailures++
+			if delay, ok := retryPolicy.NextDelay(err, sendFailures); ok {
+				notify(fmt.Sprintf("provider call failed (%s) — retrying in %s (attempt %d)...", truncate(err.Error(), 180), delay.Round(100*time.Millisecond), sendFailures+1))
 				select {
-				case <-time.After(time.Duration(sendRetries) * 2 * time.Second):
+				case <-time.After(delay):
 				case <-ctx.Done():
 					return fail(ctx.Err())
 				}
@@ -729,15 +792,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// user consent on interactive runs and pins the rest of the run.
 			if next, ok := runtime.offerFallback(ctx, model, err); ok {
 				runtime.modelOverride = &next
-				sendRetries = 0
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
-				}
+				sendFailures = 0
+				notify(fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next))
 				continue
 			}
 			return fail(fmt.Errorf("agent call failed: %w", err))
 		}
-		sendRetries = 0
+		sendFailures = 0
+		overflowCompacted = false
+		thinking = resp.Thinking
+		calibration.observe(resp.Usage.TotalInput(), sentEstimate)
 		steps++
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
@@ -759,32 +823,59 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		main, _ := stripThinkTags(content)
 		main = strings.TrimSpace(main)
 		if main == "" && len(resp.ToolCalls) == 0 {
+			if resp.FinishReason == provider.FinishContentFilter {
+				return fail(fmt.Errorf("agent call failed: the provider's content filter stopped the response"))
+			}
+			if len(truncatedText) > 0 {
+				// A continuation came back empty: the answer is complete. Drop
+				// the trailing continue request so the carried history ends on
+				// the answer.
+				if last := len(convMsgs) - 1; last >= 0 && convMsgs[last].Role == provider.RoleUser && convMsgs[last].Content == continueTruncatedNudge {
+					convMsgs = convMsgs[:last]
+				}
+				answerRecorded = true
+				return finish(strings.TrimSpace(strings.Join(truncatedText, "")), false, "")
+			}
 			if cfg.MaxSteps > 0 && steps >= cfg.MaxSteps {
 				return finish("", false, "")
 			}
+			// Never resend the identical request: nudge the model, and give
+			// up with a clear error once the empty streak persists.
+			emptyReplies++
+			if emptyReplies >= maxEmptyReplies {
+				convMsgs = dropEmptyNudges(convMsgs, emptyReplies-1)
+				return fail(fmt.Errorf("agent call failed: the model returned %d empty responses in a row", emptyReplies))
+			}
+			nudge := emptyReplyNudge
+			if resp.Truncated() {
+				nudge = emptyTruncatedNudge
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: nudge})
+			notify(fmt.Sprintf("the model returned an empty response — nudging it to continue (%d/%d)", emptyReplies, maxEmptyReplies))
 			continue
 		}
+		emptyReplies = 0
 
 		// Native tool-calling path: model returned structured tool calls.
 		if len(resp.ToolCalls) > 0 {
+			truncatedText = nil
 			emitNarration(cfg, main)
 			internalCalls := make([]toolCall, len(resp.ToolCalls))
 			for i, tc := range resp.ToolCalls {
 				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
 			}
-			// Loop check before execution: an abort skips the repeated calls
-			// entirely (the assistant turn is not yet in the history, so the
-			// carried prefix stays valid); a nudge lets the step run and is
-			// injected alongside the tool results below.
-			loopAct := runtime.loopDetect.observe(internalCalls, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
-			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
+			// Loop check after execution: the signature includes each result,
+			// so re-running a command whose output changes (edit → test) is
+			// progress; only the same call with the same result repeats. On
+			// abort the results are still recorded below, keeping the
+			// history a valid prefix.
+			loopAct := runtime.loopDetect.observe(internalCalls, results, main)
 			convMsgs = append(convMsgs, provider.Message{
 				Role:      provider.RoleAssistant,
 				Content:   main,
 				ToolCalls: resp.ToolCalls,
+				Reasoning: resp.Reasoning,
 			})
 			toolResults := make([]provider.ToolResult, len(results))
 			for i, res := range results {
@@ -804,11 +895,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults}
 			if loopAct == loopNudge {
 				resultsMsg.Content = loopNudgeMessage
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
-				}
+				notify("repetition detected — nudged the agent to change approach")
 			}
 			convMsgs = append(convMsgs, resultsMsg)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			if runtime.shouldStop() {
 				return finish(runtime.stopMessage(), false, "")
 			}
@@ -828,14 +920,37 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			continue
 		}
 
+		// Text cut at the output token limit: a half answer is not a final
+		// answer. Record the piece and ask the model to continue (bounded).
+		if resp.Truncated() && len(truncatedText) < maxContinuations && !(cfg.MaxSteps > 0 && steps >= cfg.MaxSteps) {
+			piece, _ := stripThinkTags(resp.Content)
+			if len(truncatedText) == 0 {
+				piece = strings.TrimLeft(piece, " \t\r\n")
+			}
+			truncatedText = append(truncatedText, piece)
+			convMsgs = append(convMsgs,
+				provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning},
+				provider.Message{Role: provider.RoleUser, Content: continueTruncatedNudge})
+			notify(fmt.Sprintf("the response hit the output token limit — asking the model to continue (%d/%d)", len(truncatedText), maxContinuations))
+			continue
+		}
+
 		// Final answer: model returned text with no tool calls.
 		if next, ok := runtime.nextRequiredRead(); ok {
 			emitNarration(cfg, main)
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
 			continue
 		}
-		return finish(strings.TrimSpace(main), false, "")
+		// Store the answer with its reasoning (finish only records plain
+		// text), then return it — joined with any earlier continued pieces.
+		convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
+		answerRecorded = true
+		if len(truncatedText) > 0 {
+			piece, _ := stripThinkTags(resp.Content)
+			return finish(strings.TrimSpace(strings.Join(append(truncatedText, piece), "")), false, "")
+		}
+		return finish(main, false, "")
 	}
 }
 
@@ -858,14 +973,42 @@ func emitNarration(cfg toolLoopConfig, text string) {
 	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
 }
 
+// dropEmptyNudges removes the last n empty-reply nudges from msgs, matched
+// by content rather than position: compaction may have rewritten the history
+// since the streak began (shifting or summarizing the nudges away), and
+// steering turns the user sent between nudges must survive. Empty replies
+// are never recorded, so the streak's nudges all follow the last assistant
+// message; earlier ones (from a streak the model recovered from) are kept.
+// The result never aliases msgs.
+func dropEmptyNudges(msgs []provider.Message, n int) []provider.Message {
+	drop := make(map[int]bool, n)
+	for i := len(msgs) - 1; i >= 0 && len(drop) < n; i-- {
+		m := msgs[i]
+		if m.Role == provider.RoleAssistant {
+			break
+		}
+		if m.Role == provider.RoleUser && len(m.ToolResults) == 0 && (m.Content == emptyReplyNudge || m.Content == emptyTruncatedNudge) {
+			drop[i] = true
+		}
+	}
+	out := make([]provider.Message, 0, len(msgs)-len(drop))
+	for i, m := range msgs {
+		if !drop[i] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // compactConv summarizes the older portion of convMsgs into a single
-// synthetic message when the estimated request size approaches the context
+// synthetic message when the measured request size approaches the context
 // window (or unconditionally when force is set — used to recover from an
-// over-budget context instead of failing the run). The cut/summarize core
+// over-budget or overflowing context instead of failing the run). measure
+// sizes the would-be request (nil → plain history estimate). The cut/summarize core
 // lives in compactpkg.CompactHistory (shared with the ACP bridge's
 // between-turn compaction); this wrapper supplies the runtime's summarizer
 // routing.
-func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []provider.Message, window int, force bool) ([]provider.Message, bool, error) {
+func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []provider.Message, window int, force bool, measure compactpkg.MeasureFunc) ([]provider.Message, bool, error) {
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
 	}
@@ -888,7 +1031,7 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			},
 			primary, chain, req, nil)
 	}
-	out, did, err := compactpkg.CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures)
+	out, did, err := compactpkg.CompactHistoryMeasured(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures, measure)
 	// Consecutive-failure bookkeeping: a failing summarizer pauses the auto
 	// trigger after MaxFailures (see compact.Evaluate); any success resets it.
 	if err != nil {

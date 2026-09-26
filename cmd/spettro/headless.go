@@ -54,6 +54,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 	}
 
 	pm := provider.NewManager()
+	pm.SetStreamAll(true)
 	pm.SetAPIKeys(cfg.APIKeys)
 
 	if cat, err := models.Load(); err == nil {
@@ -231,10 +232,14 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					ProviderName:    func() string { return cfg.ActiveProvider },
 					ModelName:       func() string { return cfg.ActiveModel },
 					CWD:             cwd,
+					MaxTokens:       cfg.TokenBudget,
+					MaxOutputTokens: cfg.MaxOutputTokens,
+					Thinking:        configuredThinking(pm, cfg),
 					Ultra:           cfg.UltraActive(),
 					Manifest:        &manifest,
 					SandboxState:    sb,
 					SessionDir:      sessionDir,
+					ContextWindow:   pm.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
 					Compact:         cfg.CompactConfig(),
 					ToolCallback: func(tr agent.ToolTrace) {
 						data := map[string]any{

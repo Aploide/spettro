@@ -57,6 +57,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	}
 
 	pm := provider.NewManager()
+	pm.SetStreamAll(true)
 	pm.SetAPIKeys(cfg.APIKeys)
 
 	if cat, err := models.Load(); err == nil {
@@ -163,6 +164,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
+			MaxTokens:       cfg.TokenBudget,
+			MaxOutputTokens: cfg.MaxOutputTokens,
+			Thinking:        configuredThinking(pm, cfg),
 			Ultra:           cfg.UltraActive(),
 			Messages:        history,
 			Manifest:        &manifest,
@@ -241,6 +245,16 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			fmt.Printf("Continuing (no-progress: %d/%d)...\n", state.NoProgress, state.NoProgressLimit)
 		}
 	}
+}
+
+// configuredThinking returns the user's thinking_level for the active model,
+// or "" (no thinking parameter) when the model does not support reasoning —
+// the same gate the ACP bridge applies.
+func configuredThinking(pm *provider.Manager, cfg config.UserConfig) provider.ThinkingLevel {
+	if !pm.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
+		return ""
+	}
+	return provider.ThinkingLevel(cfg.ThinkingLevel)
 }
 
 // resolveContextWindow looks up the context window size for the active model.
