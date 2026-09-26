@@ -24,7 +24,7 @@ var globalInstructionFiles = []string{"AGENTS.md", "SPETTRO.md"}
 
 const (
 	// instructionFileMaxBytes caps one instruction file; the rest is dropped
-	// with a note pointing the model at file-read.
+	// with a note telling the model how to read it.
 	instructionFileMaxBytes = 16 * 1024
 	// instructionTotalMaxBytes caps all instruction files together; files past
 	// the cap are listed by path only.
@@ -38,25 +38,50 @@ var (
 	sessionContextCache = map[string]string{}
 )
 
-// sessionContext returns the environment and project-instructions sections
-// appended to the system prompt, built once per process per working directory
-// and then frozen. Freezing is what keeps the system prompt byte-stable across
-// every step and turn of a session (the provider prompt cache keys on it), so
-// the date, branch and listing are a session-start snapshot and edits to
-// instruction files take effect in the next session.
-func sessionContext(cwd string) string {
+// sessionContextFor returns the environment and project-instructions sections
+// appended to cfg's system prompt. They are a snapshot taken when a
+// conversation starts and reused for the rest of it: the system prompt must
+// stay byte-stable across every step and turn (the provider prompt cache keys
+// on it), so the date, branch, listing and instruction files are not
+// refreshed mid-conversation.
+//
+//   - A top-level run with no carried messages starts a conversation (a new
+//     session, /clear, an ACP session/new): it takes a fresh snapshot, so
+//     instruction files written since (e.g. by /init), a branch switch or a
+//     new day show up without restarting a long-lived process.
+//   - A top-level run continuing a conversation reuses the snapshot its first
+//     turn took.
+//   - Sub-agents reuse their parent's snapshot for the same directory (keeping
+//     sibling prompts identical) and never store one of their own, so
+//     per-worktree sub-agents don't grow the cache.
+func sessionContextFor(cfg toolLoopConfig) string {
+	switch {
+	case cfg.DelegationDepth > 0:
+		return sessionContext(cfg.CWD, false, false)
+	case len(cfg.Messages) == 0:
+		return sessionContext(cfg.CWD, true, true)
+	default:
+		return sessionContext(cfg.CWD, false, true)
+	}
+}
+
+// sessionContext returns the snapshot for cwd: rebuilt when refresh is set or
+// none is cached, and cached for later runs when store is set.
+func sessionContext(cwd string, refresh, store bool) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return ""
 	}
 	sessionContextMu.Lock()
 	defer sessionContextMu.Unlock()
-	if v, ok := sessionContextCache[cwd]; ok {
+	if v, ok := sessionContextCache[cwd]; ok && !refresh {
 		return v
 	}
 	home, _ := homedir.Dir()
 	v := buildSessionContext(cwd, home, time.Now())
-	sessionContextCache[cwd] = v
+	if store {
+		sessionContextCache[cwd] = v
+	}
 	return v
 }
 
@@ -67,7 +92,7 @@ func buildSessionContext(cwd, home string, now time.Time) string {
 
 func environmentSection(cwd, gitRoot, branch string, isGit bool, now time.Time) string {
 	var sb strings.Builder
-	sb.WriteString("\n\n# Environment\nSnapshot taken when the session started; it is not refreshed as you work.\n")
+	sb.WriteString("\n\n# Environment\nSnapshot taken when this conversation started; it is not refreshed as you work.\n")
 	sb.WriteString("- Working directory: " + cwd + "\n")
 	sb.WriteString(environmentBrief() + "\n")
 	sb.WriteString("- Today's date: " + now.Format("2006-01-02") + "\n")
@@ -115,7 +140,8 @@ func topLevelListing(cwd string, max int) string {
 // gitInfo finds the repository containing dir by walking up to the nearest
 // .git entry, and reads the current branch straight from HEAD (no git
 // subprocess). A .git file (linked worktree or submodule) is followed to its
-// gitdir. branch is "detached at <sha>" for a detached HEAD, "" if unreadable.
+// gitdir. branch is "detached at <sha>" for a detached HEAD, "" if unreadable
+// (or kept in a reftable, which this doesn't parse).
 func gitInfo(dir string) (root, branch string, ok bool) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -164,7 +190,14 @@ func readGitHead(gitDir string) string {
 	}
 	head := strings.TrimSpace(string(data))
 	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
-		return strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+		branch := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+		if branch == ".invalid" {
+			// Reftable repositories keep this placeholder in HEAD and the
+			// real ref in the binary table; report the branch as unknown
+			// rather than name a branch that doesn't exist.
+			return ""
+		}
+		return branch
 	}
 	if len(head) >= 12 {
 		return "detached at " + head[:12]
@@ -200,7 +233,11 @@ func instructionDirs(cwd, gitRoot string) []string {
 
 type instructionFile struct {
 	path    string // as shown to the model
+	abs     string
 	content string
+	// inWorkspace is false for files file-read cannot open (global files and
+	// those in directories above cwd); notes about them point at the shell.
+	inWorkspace bool
 }
 
 // collectInstructionFiles reads the global and project instruction files in
@@ -252,7 +289,9 @@ func collectInstructionFiles(cwd, gitRoot, home string) []instructionFile {
 			continue
 		}
 		seenContent[text] = true
-		out = append(out, instructionFile{path: c.shown, content: text})
+		rel, relErr := filepath.Rel(cwd, c.abs)
+		inWorkspace := relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+		out = append(out, instructionFile{path: c.shown, abs: c.abs, content: text, inWorkspace: inWorkspace})
 	}
 	return out
 }
@@ -262,32 +301,60 @@ func instructionsSection(cwd, gitRoot, home string) string {
 	if len(files) == 0 {
 		return ""
 	}
+	// The budget goes to the most specific files first (cwd, then up to the
+	// root, then global), so a large global or root file can't crowd out the
+	// package-level instructions that should win. A file that doesn't fit
+	// whole gets whatever budget is left, unless that is too little to be
+	// useful; the files are still rendered in precedence order.
+	bodies := make([]string, len(files))
+	loaded := make([]bool, len(files))
+	used := 0
+	for i := len(files) - 1; i >= 0; i-- {
+		f := files[i]
+		remaining := instructionTotalMaxBytes - used
+		limit := min(instructionFileMaxBytes, remaining)
+		if len(f.content) > limit && remaining < 1024 {
+			continue
+		}
+		bodies[i] = capInstructionText(f.content, limit, readHint(f))
+		loaded[i] = true
+		used += len(bodies[i])
+	}
 	var sb strings.Builder
 	sb.WriteString("\n\n# Project instructions\n")
 	sb.WriteString("Instructions from the user and the project's maintainers, loaded from the files below (global first, then from the repository root down to the working directory; later files are more specific). Follow them: they override the default guidance above, but not explicit requests the user makes in this conversation.\n")
-	used := 0
-	var skipped []string
-	for _, f := range files {
-		// A file that doesn't fit whole gets whatever budget is left, unless
-		// that is too little to be useful.
-		remaining := instructionTotalMaxBytes - used
-		if remaining < 1024 {
-			skipped = append(skipped, f.path)
+	var skippedIn, skippedOut []string
+	for i, f := range files {
+		if !loaded[i] {
+			if f.inWorkspace {
+				skippedIn = append(skippedIn, f.path)
+			} else {
+				skippedOut = append(skippedOut, f.abs)
+			}
 			continue
 		}
-		body := capInstructionText(f.content, min(instructionFileMaxBytes, remaining))
-		used += len(body)
-		fmt.Fprintf(&sb, "\n<instructions file=%q>\n%s\n</instructions>\n", f.path, body)
+		fmt.Fprintf(&sb, "\n<instructions file=%q>\n%s\n</instructions>\n", f.path, bodies[i])
 	}
-	if len(skipped) > 0 {
-		fmt.Fprintf(&sb, "\nNot loaded (over the size cap; read them with file-read if relevant): %s\n", strings.Join(skipped, ", "))
+	if len(skippedIn) > 0 {
+		fmt.Fprintf(&sb, "\nNot loaded (over the size cap; read them with file-read if relevant): %s\n", strings.Join(skippedIn, ", "))
+	}
+	if len(skippedOut) > 0 {
+		fmt.Fprintf(&sb, "\nNot loaded (over the size cap; outside the working directory, so file-read cannot open them: read them with a read-only shell command such as sed -n if relevant): %s\n", strings.Join(skippedOut, ", "))
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// readHint tells the model how to read the rest of a truncated file.
+func readHint(f instructionFile) string {
+	if f.inWorkspace {
+		return "read the rest with file-read"
+	}
+	return "the file is outside the working directory, so file-read cannot open it: read the rest of " + f.abs + " with a read-only shell command such as sed -n"
+}
+
 // capInstructionText truncates text to at most max bytes at a line boundary,
-// appending a note so the model knows to read the rest itself.
-func capInstructionText(text string, max int) string {
+// appending a note (ending in hint) so the model knows to read the rest.
+func capInstructionText(text string, max int, hint string) string {
 	if len(text) <= max {
 		return text
 	}
@@ -299,7 +366,7 @@ func capInstructionText(text string, max int) string {
 	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
 		cut = cut[:i]
 	}
-	return cut + fmt.Sprintf("\n[... truncated: %d more bytes; read the file for the rest]", len(text)-len(cut))
+	return cut + fmt.Sprintf("\n[... truncated: %d more bytes; %s]", len(text)-len(cut), hint)
 }
 
 // resetSessionContextForTesting clears the per-process snapshot.

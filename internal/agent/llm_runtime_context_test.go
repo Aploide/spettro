@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"spettro/internal/provider"
 )
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -159,7 +161,9 @@ func TestInstructionsSizeCaps(t *testing.T) {
 	if strings.Count(got, "[... truncated:") != 2 {
 		t.Errorf("both loaded files are oversized and must be truncated with a note")
 	}
-	if !strings.Contains(got, "Not loaded (over the size cap; read them with file-read if relevant): SPETTRO.md") {
+	// The budget goes to the most specific files first; among files in one
+	// directory, the last in load order (SPETTRO.md) is served first.
+	if !strings.Contains(got, "Not loaded (over the size cap; read them with file-read if relevant): AGENTS.md") {
 		t.Errorf("file past the total cap must be listed by path:\n%s", got[len(got)-300:])
 	}
 	if len(got) > instructionTotalMaxBytes+2048 {
@@ -167,9 +171,66 @@ func TestInstructionsSizeCaps(t *testing.T) {
 	}
 }
 
+// TestInstructionsBudgetFavorsSpecificFiles pins that large global and root
+// files can't starve the cwd's own instructions, and that notes about files
+// outside the working directory point at something that can read them.
+func TestInstructionsBudgetFavorsSpecificFiles(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
+	big := strings.Repeat("line of project guidance\n", 17*1024/25)
+	writeTestFile(t, filepath.Join(home, ".spettro", "AGENTS.md"), "GLOBAL\n"+big)
+	writeTestFile(t, filepath.Join(root, "AGENTS.md"), "ROOT\n"+big+"root tail")
+	writeTestFile(t, filepath.Join(root, "CLAUDE.md"), "ROOT CLAUDE\n"+big)
+	sub := filepath.Join(root, "svc")
+	writeTestFile(t, filepath.Join(sub, "SPETTRO.md"), "SVC: use pnpm test:svc")
+
+	got := instructionsSection(sub, root, home)
+	if !strings.Contains(got, `<instructions file="SPETTRO.md">`+"\nSVC: use pnpm test:svc\n</instructions>") {
+		t.Fatalf("the cwd's instruction file must load whole:\n%s", got[len(got)-min(len(got), 600):])
+	}
+	if !strings.Contains(got, `<instructions file="../AGENTS.md">`) || !strings.Contains(got, `<instructions file="../CLAUDE.md">`) {
+		t.Errorf("the root files are next in line for the budget")
+	}
+	rootAbs := filepath.Join(root, "AGENTS.md")
+	if !strings.Contains(got, "file-read cannot open it: read the rest of "+rootAbs+" with a read-only shell command") {
+		t.Errorf("truncation note for a file above cwd must name its absolute path and the shell, not file-read")
+	}
+	globalAbs := filepath.Join(home, ".spettro", "AGENTS.md")
+	if strings.Contains(got, `file="~/.spettro/AGENTS.md"`) || !strings.Contains(got, "file-read cannot open them: read them with a read-only shell command such as sed -n if relevant): "+globalAbs) {
+		t.Errorf("the global file is the least specific: it is the one left out, listed by absolute path:\n%s", got[len(got)-min(len(got), 600):])
+	}
+	if len(got) > instructionTotalMaxBytes+2048 {
+		t.Errorf("instructions section is %d bytes, cap is %d", len(got), instructionTotalMaxBytes)
+	}
+}
+
+func TestInstructionsSmallFileFitsInLeftoverBudget(t *testing.T) {
+	cwd := t.TempDir()
+	// Fill the budget to under 1 KiB left with two cwd files, then check a
+	// tiny global file (least specific, served last) still loads whole.
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, ".spettro", "SPETTRO.md"), "TINY GLOBAL")
+	writeTestFile(t, filepath.Join(cwd, "AGENTS.md"), strings.Repeat("a", instructionFileMaxBytes))
+	writeTestFile(t, filepath.Join(cwd, "CLAUDE.md"), strings.Repeat("b", instructionFileMaxBytes-600))
+	got := instructionsSection(cwd, "", home)
+	if !strings.Contains(got, "TINY GLOBAL") || strings.Contains(got, "Not loaded") {
+		t.Fatalf("a file that fits whole in the leftover budget must load:\n%s", got[len(got)-min(len(got), 400):])
+	}
+}
+
+func TestGitInfoReftableHeadPlaceholder(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/.invalid\n")
+	gotRoot, branch, ok := gitInfo(root)
+	if !ok || gotRoot != root || branch != "" {
+		t.Fatalf("reftable HEAD placeholder must read as an unknown branch, got (%q, %q, %v)", gotRoot, branch, ok)
+	}
+}
+
 func TestCapInstructionTextKeepsValidUTF8(t *testing.T) {
 	text := strings.Repeat("é", 100) // no newlines, 2-byte runes
-	got := capInstructionText(text, 51)
+	got := capInstructionText(text, 51, "hint")
 	body, _, _ := strings.Cut(got, "\n[... truncated")
 	if !strings.HasPrefix(text, body) || len(body)%2 != 0 {
 		t.Fatalf("cut split a rune: %q", body)
@@ -192,8 +253,15 @@ func TestSystemStringCarriesFrozenSessionContext(t *testing.T) {
 		t.Fatalf("system prompt missing session context:\n%s", first)
 	}
 	writeTestFile(t, filepath.Join(cwd, "AGENTS.md"), "CHANGED")
-	if again := buildSystemString(cfg); again != first {
-		t.Fatalf("system prompt must stay byte-stable within a session")
+	cont := cfg
+	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn"}}
+	if again := buildSystemString(cont); again != first {
+		t.Fatalf("system prompt must stay byte-stable within a conversation")
+	}
+	sub := cfg
+	sub.DelegationDepth = 1
+	if got := buildSystemString(sub); got != first {
+		t.Fatalf("a sub-agent in the same directory must reuse its parent's snapshot")
 	}
 
 	user := buildInitialUserMessage(cfg)
@@ -206,5 +274,54 @@ func TestBuildSystemStringNoCommentNudge(t *testing.T) {
 	cfg := toolLoopConfig{SystemPrompt: "base", AllowedTools: []string{"comment", "bash"}}
 	if got := buildSystemString(cfg); strings.Contains(got, "comment tool") {
 		t.Fatalf("the system prompt must not push the comment tool on every step:\n%s", got)
+	}
+}
+
+// TestSessionContextRefreshesOnNewConversation covers long-lived hosts (ACP,
+// the TUI after /clear or /init): a new conversation must see instruction
+// files written since the process started, while a continuing one keeps its
+// snapshot.
+func TestSessionContextRefreshesOnNewConversation(t *testing.T) {
+	resetSessionContextForTesting()
+	t.Cleanup(resetSessionContextForTesting)
+	t.Setenv("HOME", t.TempDir())
+	cwd := t.TempDir()
+	cfg := toolLoopConfig{SystemPrompt: "base", CWD: cwd}
+	first := buildSystemString(cfg)
+	if strings.Contains(first, "# Project instructions") {
+		t.Fatalf("no instruction files yet:\n%s", first)
+	}
+
+	writeTestFile(t, filepath.Join(cwd, "SPETTRO.md"), "Written by /init.")
+	cont := cfg
+	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn"}}
+	if got := buildSystemString(cont); got != first {
+		t.Fatalf("a continuing conversation must keep its snapshot")
+	}
+	sub := cfg
+	sub.DelegationDepth = 1
+	if got := buildSystemString(sub); got != first {
+		t.Fatalf("a sub-agent must reuse the stored snapshot")
+	}
+
+	fresh := buildSystemString(cfg)
+	if !strings.Contains(fresh, "Written by /init.") {
+		t.Fatalf("a new conversation must take a fresh snapshot:\n%s", fresh)
+	}
+	if got := buildSystemString(cont); got != fresh {
+		t.Fatalf("later turns must reuse the newest conversation's snapshot")
+	}
+}
+
+func TestSubAgentSnapshotIsNotCached(t *testing.T) {
+	resetSessionContextForTesting()
+	t.Cleanup(resetSessionContextForTesting)
+	worktree := t.TempDir()
+	buildSystemString(toolLoopConfig{SystemPrompt: "base", CWD: worktree, DelegationDepth: 1})
+	sessionContextMu.Lock()
+	n := len(sessionContextCache)
+	sessionContextMu.Unlock()
+	if n != 0 {
+		t.Fatalf("sub-agent runs must not grow the snapshot cache, have %d entries", n)
 	}
 }

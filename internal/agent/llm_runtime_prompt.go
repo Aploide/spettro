@@ -113,8 +113,8 @@ func summarizeLoopToolArgs(name, args string) string {
 // turn of a session): the system prompt is the first segment of the provider
 // cache prefix, so any variation invalidates prompt caching for the entire
 // request. Never embed step counters, timestamps, or other per-call state here;
-// the environment and project-instruction sections come from sessionContext,
-// which is frozen per process for exactly this reason.
+// the environment and project-instruction sections come from sessionContextFor,
+// which freezes them per conversation for exactly this reason.
 func buildSystemString(cfg toolLoopConfig) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
@@ -123,12 +123,12 @@ func buildSystemString(cfg toolLoopConfig) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	return base + sessionContext(cfg.CWD)
+	return base + sessionContextFor(cfg)
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation
 // history, the task and required reads. The working directory and environment
-// live in the system prompt (see sessionContext).
+// live in the system prompt (see sessionContextFor).
 func buildInitialUserMessage(cfg toolLoopConfig) string {
 	var sb strings.Builder
 	if h := strings.TrimSpace(cfg.History); h != "" {
