@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,15 +11,28 @@ import (
 	"spettro/internal/remote"
 )
 
-// fakeAskServer stands in for the remote server: subs connected clients, and
-// an optional canned reply (nil: the client never answers).
+// fakeAskServer stands in for the remote server: subs connected clients that
+// may answer, when the last one left, and an optional canned reply (nil: the
+// client never answers).
 type fakeAskServer struct {
-	subs  int
-	reply *remote.AskUserReply
-	asked bool
+	mu       sync.Mutex
+	subs     int
+	lastLeft time.Time
+	reply    *remote.AskUserReply
+	asked    bool
 }
 
-func (f *fakeAskServer) SubscriberCount() int { return f.subs }
+func (f *fakeAskServer) Answerers() (int, time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subs, f.lastLeft
+}
+
+func (f *fakeAskServer) setSubs(n int) {
+	f.mu.Lock()
+	f.subs = n
+	f.mu.Unlock()
+}
 
 func (f *fakeAskServer) RequestAskUser(ctx context.Context, _ string, _ map[string]any) (remote.AskUserReply, error) {
 	f.asked = true
@@ -88,5 +102,60 @@ func TestHeadlessAskUserWaitFromEnv(t *testing.T) {
 		if got := headlessAskUserWait(); got != want {
 			t.Errorf("%s=%q: got %s, want %s", askUserWaitEnv, raw, got, want)
 		}
+	}
+}
+
+// A client that dropped off moments ago (a phone backgrounding the app) is
+// waited for: once it is back the question goes out instead of being given up.
+func TestHeadlessAskUserWaitsForReconnectingClient(t *testing.T) {
+	orig := askUserPresencePoll
+	askUserPresencePoll = 10 * time.Millisecond
+	t.Cleanup(func() { askUserPresencePoll = orig })
+	srv := &fakeAskServer{lastLeft: time.Now(), reply: &remote.AskUserReply{Answer: "SQLite"}}
+	time.AfterFunc(100*time.Millisecond, func() { srv.setSubs(1) })
+	answers, err := headlessAskUser(context.Background(), srv, "q-1", testForm, time.Hour)
+	if err != nil {
+		t.Fatalf("reconnecting client not waited for: %v", err)
+	}
+	if !srv.asked || len(answers) != 1 {
+		t.Fatalf("asked=%v answers=%+v", srv.asked, answers)
+	}
+}
+
+// The reconnect wait is bounded by the grace since the client left, and a
+// client that left long ago is not waited for at all.
+func TestHeadlessAskUserReconnectGraceIsBounded(t *testing.T) {
+	orig := askUserPresencePoll
+	askUserPresencePoll = 10 * time.Millisecond
+	t.Cleanup(func() { askUserPresencePoll = orig })
+	for name, left := range map[string]time.Time{
+		"grace running out": time.Now().Add(-askUserReconnectGrace + 100*time.Millisecond),
+		"left long ago":     time.Now().Add(-time.Hour),
+	} {
+		srv := &fakeAskServer{lastLeft: left}
+		start := time.Now()
+		_, err := headlessAskUser(context.Background(), srv, "q-1", testForm, time.Hour)
+		if !errors.Is(err, agent.ErrNoUserAvailable) {
+			t.Fatalf("%s: err = %v, want ErrNoUserAvailable", name, err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("%s: waited %s", name, elapsed)
+		}
+		if srv.asked {
+			t.Fatalf("%s: question published with nobody connected", name)
+		}
+	}
+}
+
+// Each question gets its own id, so a late answer to an expired question
+// cannot be delivered to the next one.
+func TestNextQuestionIDIsUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for range 100 {
+		id := nextQuestionID()
+		if seen[id] {
+			t.Fatalf("question id %s reused", id)
+		}
+		seen[id] = true
 	}
 }

@@ -94,11 +94,14 @@ type Server struct {
 	bindHost   string
 
 	mu      sync.RWMutex
-	subs    map[chan Event]struct{}
+	subs    map[chan Event]subscriber
 	recent  []Event
 	seq     uint64
 	closed  bool
 	running bool
+	// lastAnswererLeft is when the most recent subscriber that may answer
+	// questions (not an observer) disconnected; zero until one does.
+	lastAnswererLeft time.Time
 
 	statusMu sync.RWMutex
 	status   Status
@@ -145,8 +148,15 @@ func NewServer(opts Options) (*Server, error) {
 		bindHost:    host,
 		submitCh:    make(chan SubmitRequest, buf),
 		interruptCh: make(chan struct{}, 8),
-		subs:        map[chan Event]struct{}{},
+		subs:        map[chan Event]subscriber{},
 	}, nil
+}
+
+// subscriber describes one /events connection.
+type subscriber struct {
+	// observer is set by ?observe=1: a client that follows the stream (a
+	// log tailer, CI) but never answers ask_user or approval requests.
+	observer bool
 }
 
 // Host returns the interface address the server is bound to (e.g. "127.0.0.1" or "0.0.0.0").
@@ -294,6 +304,22 @@ func (s *Server) SubscriberCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.subs)
+}
+
+// Answerers reports how many connected /events clients might answer a
+// question — every subscriber except observers (?observe=1) — and when the
+// last such client disconnected (zero if none has). The second value lets a
+// headless run wait briefly for a client that is reconnecting instead of
+// deciding nobody is there.
+func (s *Server) Answerers() (connected int, lastLeft time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sub := range s.subs {
+		if !sub.observer {
+			connected++
+		}
+	}
+	return connected, s.lastAnswererLeft
 }
 
 // Publish records an event in the replay buffer and fans it out to every
@@ -519,13 +545,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	ch := make(chan Event, 32)
+	sub := subscriber{observer: queryFlag(r.URL.Query().Get("observe"))}
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
-	s.subs[ch] = struct{}{}
+	s.subs[ch] = sub
 	backlog := append([]Event(nil), s.recent...)
 	s.mu.Unlock()
 
@@ -539,6 +566,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		// returning, so the channel will be garbage-collected once the
 		// publisher's snapshot is released.
 		delete(s.subs, ch)
+		if !sub.observer {
+			s.lastAnswererLeft = time.Now()
+		}
 		s.mu.Unlock()
 	}()
 
@@ -734,4 +764,13 @@ func generateToken(byteLen int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+// queryFlag reads a boolean query parameter: 1, true, yes (any case) are true.
+func queryFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }

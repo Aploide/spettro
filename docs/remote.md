@@ -98,6 +98,11 @@ Authorization: Bearer <token>
 Accept: text/event-stream
 ```
 
+A client that only follows the stream and never answers questions (a log
+tailer, a CI job) should connect with `GET /events?observe=1`, so a headless
+run does not wait on it for an `ask_user` answer (see
+[Ask-user forms](#ask-user-forms)).
+
 Each event is delivered with the SSE structure:
 
 ```
@@ -257,12 +262,16 @@ question whose run was cancelled or interrupted gets `404` because the pending
 answer was already resolved.
 
 **When nobody answers.** A headless run never waits on a question nobody can
-see: with no client connected to `/events` the tool returns at once, telling
-the agent that no user is available and to proceed on its best judgment. With
-a client connected it waits up to 5 minutes (override with
-`SPETTRO_ASK_USER_TIMEOUT_SEC`, in seconds; `0` waits indefinitely), then the
-agent is told the same thing and the question expires (`404`). Sub-agents and
-goal-mode runs never ask at all.
+answer: with no client connected to `/events` — observers connected with
+`?observe=1` do not count — the tool returns at once, telling the agent that
+no user is available and to proceed on its best judgment. The exception is a
+client that dropped off within the last 30 seconds: the question waits for it
+to reconnect (a phone backgrounding the app, a proxy recycling the stream)
+before giving up. With a client connected it waits up to 5 minutes (override
+with `SPETTRO_ASK_USER_TIMEOUT_SEC`, in seconds; `0` waits indefinitely), then
+the agent is told the same thing and the question expires: every question gets
+a fresh `question_id`, so a late answer gets `404` rather than answering a
+later question. Sub-agents and goal-mode runs never ask at all.
 
 ## Quick examples
 
