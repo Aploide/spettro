@@ -59,6 +59,10 @@ func (r *toolRuntime) spoolResult(toolName, out string) string {
 	switch toolName {
 	case "shell-exec", "bash", "bash-output", "pty-start", "pty-write":
 		return spoolIfLarge(out, r.historyLimit(toolName), true)
+	case "file-read":
+		// The file itself is the backing store: point at a ranged file-read,
+		// not at a job-output spool.
+		return fileReadTruncate(out, r.historyLimit(toolName))
 	}
 	return spoolIfLarge(out, r.historyLimit(toolName), false)
 }

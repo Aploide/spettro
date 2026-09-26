@@ -215,7 +215,7 @@ func buildTurnUserMessage(cfg toolLoopConfig) string {
 var builtinNativeToolDescs = map[string]string{
 	"comment":            "Emit a progress message visible to the user.",
 	"ls":                 "List directory entries.",
-	"file-read":          "Read a file, optionally bounded to a line range.",
+	"file-read":          "Read a text file. Every line is prefixed with its line number and a tab (\"     7\\tcode\"); the prefix is not part of the file, so leave it out of file-edit old_string. Returns up to 2000 lines per call; the footer gives the offset to continue from. Use offset/limit (or start_line/end_line) to read a range. Binary files are refused.",
 	"file-write":         "Create or overwrite a file, optionally appending.",
 	"file-edit":          "Apply targeted string replacements or line-range edits to a file.",
 	"multi-edit":         "Apply an ordered list of find/replace edits to one file atomically: each edit sees the result of the previous one, and if any edit fails to match uniquely the whole call fails and the file is untouched.",
@@ -275,7 +275,7 @@ var builtinNativeToolDescs = map[string]string{
 var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"comment":            json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`),
 	"ls":                 json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
-	"file-read":          json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}},"required":["path"]}`),
+	"file-read":          json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based line to start reading from"},"limit":{"type":"integer","description":"number of lines to read (default 2000)"},"start_line":{"type":"integer"},"end_line":{"type":"integer","description":"inclusive last line"}},"required":["path"]}`),
 	"file-write":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"append":{"type":"boolean"}},"required":["path","content"]}`),
 	"file-edit":          json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"expected_replacements":{"type":"integer"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old_string","new_string"]}}},"required":["path"]}`),
 	"multi-edit":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old_string","new_string"]}}},"required":["path","edits"]}`),

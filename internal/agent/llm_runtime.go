@@ -1201,34 +1201,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.markReadFromSearch(out)
 		return r.spoolResult("repo-search", out), nil
 	case "file-read":
-		var args struct {
-			Path      string `json:"path"`
-			StartLine int    `json:"start_line"`
-			EndLine   int    `json:"end_line"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("file-read args: %w", err)
-		}
-		abs, rel, err := r.resolvePath(args.Path)
-		if err != nil {
-			return "", err
-		}
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			return "", err
-		}
-		r.mu.Lock()
-		r.readSet[rel] = struct{}{}
-		delete(r.requiredReads, rel)
-		r.mu.Unlock()
-		content := string(data)
-		if args.StartLine > 0 {
-			// Bounded reads are already scoped by the model; plain truncation
-			// keeps the response aligned with the requested line window.
-			content = sliceLines(content, args.StartLine, args.EndLine)
-			return truncate(content, r.historyLimit("file-read")), nil
-		}
-		return r.spoolResult("file-read", content), nil
+		return r.runFileRead(call.Args)
 	case "file-write":
 		defer r.lockFileForMutation(call.Args)()
 		var args struct {
