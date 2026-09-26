@@ -173,6 +173,89 @@ func TestRunToolLoopEmptyRepliesEndTurnWithError(t *testing.T) {
 	}
 }
 
+// Compaction during an empty-reply streak rewrites the history; giving up
+// must still drop the nudges by content, not by a stale index (which used to
+// panic with a slice-bounds error).
+func TestRunToolLoopEmptyStreakSurvivesCompaction(t *testing.T) {
+	fastRetries(t)
+	pm, url, _ := newLoopServer(t,
+		loopReply{}, // empty → nudge 1
+		loopReply{status: http.StatusBadRequest, errMsg: "This model's maximum context length is 100000 tokens"},
+		loopReply{content: "SUMMARY OF EARLIER WORK"}, // the compaction summarizer
+		loopReply{}, // empty → nudge 2
+		loopReply{}, // empty → give up
+	)
+	cfg := loopCfg(t, pm, url)
+	for i := range 40 {
+		role := provider.RoleUser
+		if i%2 == 1 {
+			role = provider.RoleAssistant
+		}
+		cfg.Messages = append(cfg.Messages, provider.Message{Role: role, Content: fmt.Sprintf("earlier turn %d", i)})
+	}
+	res, err := runToolLoop(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "3 empty responses") {
+		t.Fatalf("err = %v, want the empty-response error", err)
+	}
+	if !strings.Contains(fmt.Sprint(res.messages), "[earlier progress summarized]") {
+		t.Fatal("the carried history must be the compacted one")
+	}
+	for _, m := range res.messages {
+		if m.Content == emptyReplyNudge {
+			t.Fatal("the nudges must not stay in the carried history of a failed turn")
+		}
+	}
+}
+
+// Steering the user sent during an empty-reply streak stays in the carried
+// history when the run gives up; only the nudges are removed.
+func TestRunToolLoopEmptyStreakKeepsSteering(t *testing.T) {
+	pm, url, _ := newLoopServer(t, loopReply{}, loopReply{}, loopReply{})
+	cfg := loopCfg(t, pm, url)
+	cfg.Steering = NewSteeringQueue()
+	pushed := false
+	cfg.ToolCallback = func(tr ToolTrace) {
+		if !pushed && strings.Contains(tr.Output, "empty response") {
+			pushed = true
+			cfg.Steering.Push("focus on the tests")
+		}
+	}
+	res, err := runToolLoop(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected the empty-response error")
+	}
+	var steering, nudges int
+	for _, m := range res.messages {
+		switch {
+		case m.Content == emptyReplyNudge:
+			nudges++
+		case strings.HasPrefix(m.Content, steeringMessagePrefix):
+			steering++
+		}
+	}
+	if steering != 1 || nudges != 0 {
+		t.Fatalf("steering turns = %d (want 1), nudges = %d (want 0)", steering, nudges)
+	}
+}
+
+func TestDropEmptyNudges(t *testing.T) {
+	u := func(c string) provider.Message { return provider.Message{Role: provider.RoleUser, Content: c} }
+	a := provider.Message{Role: provider.RoleAssistant, Content: "ok"}
+	msgs := []provider.Message{u("task"), u(emptyReplyNudge), a, u("results"), u(emptyReplyNudge), u("steer"), u(emptyTruncatedNudge)}
+	got := dropEmptyNudges(msgs, 2)
+	var contents []string
+	for _, m := range got {
+		contents = append(contents, m.Content)
+	}
+	want := []string{"task", emptyReplyNudge, "ok", "results", "steer"}
+	if strings.Join(contents, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q, want %q (an earlier, recovered streak's nudge is kept)", contents, want)
+	}
+	if len(msgs) != 7 || msgs[6].Content != emptyTruncatedNudge {
+		t.Fatal("the input slice must not be modified")
+	}
+}
+
 func TestRunToolLoopTruncatedTextIsContinued(t *testing.T) {
 	pm, url, ls := newLoopServer(t,
 		loopReply{content: "The answer is forty", finish: "length"},

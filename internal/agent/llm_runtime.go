@@ -626,9 +626,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// error. It overrides a missing (URL/local endpoints) or larger window.
 	learnedWindow := 0
 	// emptyReplies counts consecutive replies with neither text nor tool
-	// calls; emptyNudgeAt is where the first nudge for the current streak was
-	// appended, so a run that gives up can drop the nudges from the history.
-	emptyReplies, emptyNudgeAt := 0, -1
+	// calls; each one appends a nudge, which a run that gives up drops from
+	// the history again (see dropEmptyNudges).
+	emptyReplies := 0
 	// truncatedText collects the pieces of a text answer that hit the output
 	// limit and was continued; they are joined into the final answer.
 	var truncatedText []string
@@ -712,10 +712,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		budgetCompacted = false
 		req := provider.Request{
-			System:    system,
-			Messages:  convMsgs,
-			MaxTokens: cfg.MaxOutputTokens,
-			Thinking:  thinking,
+			System:        system,
+			Messages:      convMsgs,
+			MaxTokens:     cfg.MaxOutputTokens,
+			Thinking:      thinking,
+			ContextWindow: contextWindow(),
 		}
 		if len(nativeToolSpecs) > 0 {
 			req.Tools = nativeToolSpecs
@@ -838,13 +839,8 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// up with a clear error once the empty streak persists.
 			emptyReplies++
 			if emptyReplies >= maxEmptyReplies {
-				if emptyNudgeAt >= 0 {
-					convMsgs = convMsgs[:emptyNudgeAt]
-				}
+				convMsgs = dropEmptyNudges(convMsgs, emptyReplies-1)
 				return fail(fmt.Errorf("agent call failed: the model returned %d empty responses in a row", emptyReplies))
-			}
-			if emptyNudgeAt < 0 {
-				emptyNudgeAt = len(convMsgs)
 			}
 			nudge := emptyReplyNudge
 			if resp.Truncated() {
@@ -854,7 +850,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			notify(fmt.Sprintf("the model returned an empty response — nudging it to continue (%d/%d)", emptyReplies, maxEmptyReplies))
 			continue
 		}
-		emptyReplies, emptyNudgeAt = 0, -1
+		emptyReplies = 0
 
 		// Native tool-calling path: model returned structured tool calls.
 		if len(resp.ToolCalls) > 0 {
@@ -971,6 +967,33 @@ func emitNarration(cfg toolLoopConfig, text string) {
 		id = cfg.AgentID
 	}
 	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
+}
+
+// dropEmptyNudges removes the last n empty-reply nudges from msgs, matched
+// by content rather than position: compaction may have rewritten the history
+// since the streak began (shifting or summarizing the nudges away), and
+// steering turns the user sent between nudges must survive. Empty replies
+// are never recorded, so the streak's nudges all follow the last assistant
+// message; earlier ones (from a streak the model recovered from) are kept.
+// The result never aliases msgs.
+func dropEmptyNudges(msgs []provider.Message, n int) []provider.Message {
+	drop := make(map[int]bool, n)
+	for i := len(msgs) - 1; i >= 0 && len(drop) < n; i-- {
+		m := msgs[i]
+		if m.Role == provider.RoleAssistant {
+			break
+		}
+		if m.Role == provider.RoleUser && len(m.ToolResults) == 0 && (m.Content == emptyReplyNudge || m.Content == emptyTruncatedNudge) {
+			drop[i] = true
+		}
+	}
+	out := make([]provider.Message, 0, len(msgs)-len(drop))
+	for i, m := range msgs {
+		if !drop[i] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // compactConv summarizes the older portion of convMsgs into a single
