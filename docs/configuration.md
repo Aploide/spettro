@@ -117,7 +117,7 @@ Session policy for `/storage clean` and `spettro clean`; see
 
 ### Shell command approvals
 
-- Shell tools run via `bash -lc` (`shell-exec`/`bash`).
+- The `bash` tool runs commands via `bash -lc` (PowerShell on Windows; see [Windows](windows.md)).
 - Some safe read-only commands are always allowed.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
@@ -131,7 +131,7 @@ Session policy for `/storage clean` and `spettro clean`; see
 
 ### Commit co-authoring (mandatory)
 
-- Every commit Spettro produces — directly via the built-in committer or indirectly when an agent runs `git commit` through `shell-exec`/`bash` — carries the trailer `Co-Authored-By: Spettro <spettro@eyed.to>`.
+- Every commit Spettro produces — directly via the built-in committer or indirectly when an agent runs `git commit` through the `bash` tool — carries the trailer `Co-Authored-By: Spettro <spettro@eyed.to>`.
 - The trailer is auto-injected by the runtime when missing. It is idempotent: if you (or the agent) already supplied the trailer, no second copy is added.
 - Only the porcelain `git commit` is rewritten; plumbing such as `git commit-tree` is left untouched.
 

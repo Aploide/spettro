@@ -28,7 +28,7 @@ workspace. A server that fails to start is not retried on every edit; the
 
 ## What the agent gets
 
-- **Post-edit diagnostics** — after `file-write` / `file-edit` / `multi-edit`,
+- **Post-edit diagnostics** — after `file-write` / `file-edit`,
   fresh diagnostics for the changed file are appended to the tool result
   (bounded to ~3s so edits never feel slow), so the agent sees its own type
   errors immediately instead of at build time.

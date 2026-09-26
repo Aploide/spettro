@@ -42,6 +42,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Parallel native tool-call spawning of sub-agents
 - Permission policies: `ask-first`, `restricted`, `yolo`
 - Live tool traces in planning/coding runs
+- [Built-in tools](docs/tools.md) — one tool per job (`bash`, `file-edit`, `grep`, `glob`, `todo-write`, ...); retired duplicate names keep working as hidden aliases
 - [Dark, light and auto themes](docs/theme.md) — `/theme`, terminal-background detection, `SPETTRO_THEME`
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints

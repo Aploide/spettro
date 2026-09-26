@@ -97,7 +97,7 @@ the chat stays useful rather than noisy:
 | Shell-approval request | `🔐` + the command (handle inside the TUI) |
 | Successful commits | `🟢 commit` |
 
-Tool traces (e.g. every `file-write` and `shell-exec`) are **not**
+Tool traces (e.g. every `file-write` and `bash`) are **not**
 forwarded by default to keep the chat readable. State changes
 (run start, run done) are silent unless the `verbose` flag is set in
 `telegram.json`.

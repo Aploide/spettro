@@ -40,24 +40,33 @@ project-specific hash combined with a timestamp:
 ### Task graph
 
 Session tasks form a persistent dependency graph, not just a flat list. The
-agent manages it with the `task-create`, `task-update`, `task-get`,
-`task-list` and `task-delete` tools (the flat `todo-write` tool remains as an
-alias writing to the same store):
+agent manages it with the `todo-write` tool (the retired `task-create`,
+`task-update`, `task-get`, `task-list` and `task-delete` names still work as
+aliases of it):
+
+- `todos` replaces the whole list; with `merge: true` it inserts or updates
+  only the given tasks by `id`, and fields left out keep their stored value.
+  `delete` removes tasks by id and `clear_completed` prunes completed and
+  cancelled ones. A call with none of these only reads the list.
+- Every call returns the full list in dependency order, each task with a
+  derived `blocked_by` (its incomplete dependencies) and `ready` (pending,
+  all dependencies met).
+- Sub-agents share their parent's session folder, so below the top level a
+  full replace is merged instead: a worker can add and update tasks but
+  never wipe the orchestrator's list.
 
 - Each task has an `id`, `content`, `status` (`pending`, `in_progress`,
   `completed`, `blocked`, `cancelled`) and optional `dependencies` (IDs of
   tasks that must be completed first).
-- Dependencies are validated on every change: unknown IDs, self-references and
-  cycles are rejected, and a task cannot be moved to `in_progress` or
-  `completed` while any dependency is incomplete.
-- `task-list` returns tasks in dependency order with a derived `blocked_by`
-  field, and supports the pseudo-filters `ready` (pending, all dependencies
-  met) and `blocked`.
+- Dependencies are validated on every change: self-references and cycles are
+  rejected, dependencies on unknown IDs are dropped with a note in the
+  result, and a merged task cannot be moved to `in_progress` or `completed`
+  while any dependency is incomplete. Tasks written without an `id` get the
+  next free `task-N`.
 - The TUI side panel and `/tasks list` render the graph live during runs;
   pending tasks gated by incomplete dependencies show as blocked.
-- `task-delete` removes a task by id (or prunes all completed/cancelled
-  tasks with `clear_completed`); references to deleted tasks are stripped
-  from other tasks' dependencies so the graph stays valid.
+- References to deleted tasks are stripped from other tasks' dependencies so
+  the graph stays valid.
 - The graph is persisted per session, so a `/resume` restores the plan
   exactly where it was left.
 
@@ -144,7 +153,7 @@ is the summarizer.
   the ok/error status, and the first/last line:
 
   ```text
-  [offloaded: re-read with tool-output {"id":"spool:7"}] shell-exec args={"command":"go test ./..."} — 48210 chars, 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
+  [offloaded: re-read with tool-output {"id":"spool:7"}] bash args={"command":"go test ./..."} — 48210 chars, 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
   ```
 
   The full output stays on disk and the model can re-read it at any time with
@@ -339,7 +348,7 @@ Terminates every running job at once.
 
 ### Lifecycle
 
-- Jobs are created when the agent calls `bash` or `shell-exec` with
+- Jobs are created when the agent calls `bash` with
   `run_in_background: true`.
 - Output is captured in a per-job ring buffer (up to 1 MiB of combined
   stdout/stderr, oldest bytes dropped when exceeded).
@@ -350,13 +359,12 @@ Terminates every running job at once.
 
 ### Tool output spooling
 
-Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
-`bash`, `web-fetch`) are automatically spooled to disk instead of being
+Oversized tool results (from `file-read`, `grep`, `glob`, `bash`, `web-fetch`)
+are automatically spooled to disk instead of being
 hard-truncated. The model receives a truncated head with a footer containing a
 `spool:N` ID and an offset, and can page through the full result with the
 `tool-output` tool (`{"id":"spool:N","offset":Z,"limit":M}`), which every agent
-holding `file-read` has; `job-output {"job_id":"spool:N","offset":Z}` works too
-for agents that hold it.
+holding `file-read` has.
 
 In addition, *every* tool result over ~500 tokens — even ones small enough to
 stay in context untruncated — is written to the spool at execution time. This
@@ -378,5 +386,6 @@ run end, and are deleted on `/clear` and when the process exits (TUI exit,
 # the next chunk of content...
 ```
 
-The `bash-output` tool also accepts `job_id` and `offset` fields (in addition
-to `command`), so it can double as a spool reader.
+`bash` (and its retired `bash-output` alias) also accepts `job_id` and
+`offset` in place of `command`, and then reads a background job's output like
+`job-output`.

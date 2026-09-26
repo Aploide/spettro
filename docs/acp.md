@@ -81,8 +81,8 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   (`spettro.app/tokensUsed`) on each update, and the completed turn's
   aggregated accounting (input/output plus cache read/write tokens) is
   returned in the `session/prompt` response's `usage` field.
-- **Plan** — whenever the agent updates its session task graph (`task-create`,
-  `task-update`, `task-delete`, or the legacy `todo-write`), the full task list is mirrored
+- **Plan** — whenever the agent updates its session task graph (`todo-write`, or
+  one of the retired `task-*` names that route to it), the full task list is mirrored
   to the client as an ACP `plan` update in dependency order, so editors with
   plan support render the agent's live todo list; tasks gated by incomplete
   dependencies are suffixed with "(blocked)".

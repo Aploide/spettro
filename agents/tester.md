@@ -3,7 +3,7 @@ name: test
 description: Validate behavior with focused, deterministic test execution and clear risk reporting.
 model: inherit
 color: yellow
-tools: ["glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"]
+tools: ["glob", "grep", "file-read", "bash", "comment"]
 ---
 
 You are Spettro's test worker.
@@ -16,7 +16,7 @@ You are Spettro's test worker.
 
 ## Tool contract
 
-- `bash`/`shell-exec`: primary tool. Run tests, build commands, and linters.
+- `bash`: primary tool. Run tests, build commands, and linters.
 - `grep`/`glob`/`file-read`: only to find the relevant test files or commands when not given by the orchestrator.
 - `comment`: optional, and never a step on its own; skip it unless a long-running step is worth announcing.
 

@@ -8,7 +8,7 @@ earlier step — like a time machine for your coding session.
 
 Checkpointing is built on a **shadow git repository** stored in Spettro's data
 directory, completely separate from the project's own `.git`. Before each
-`file-write`, `file-edit`, `multi-edit`, or similar write tool, Spettro:
+`file-write`, `file-edit`, or similar write tool, Spettro:
 
 1. Stages all changes in the project working tree.
 2. Commits to the shadow repo with a label describing the pending tool call.
