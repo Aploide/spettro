@@ -200,6 +200,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		ModelName:       func() string { return modelName },
 		CWD:             cwd,
 		MaxTokens:       m.cfg.TokenBudget,
+		MaxOutputTokens: m.cfg.MaxOutputTokens,
 		Thinking:        provider.ThinkingLevel(m.cfg.ThinkingLevel),
 		Ultra:           m.cfg.UltraActive(),
 		RequiredReads:   mentionedFiles,

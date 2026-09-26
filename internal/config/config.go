@@ -26,7 +26,7 @@ type UserConfig struct {
 	ActiveProvider          string            `json:"active_provider"`
 	ActiveModel             string            `json:"active_model"`
 	Permission              PermissionLevel   `json:"permission"`
-	TokenBudget             int               `json:"token_budget,omitempty"` // max tokens per request; 0 = unlimited
+	TokenBudget             int               `json:"token_budget,omitempty"` // max INPUT (prompt) tokens per request; 0 = unlimited
 	AutoCompactEnabled      bool              `json:"auto_compact_enabled"`
 	AutoCompactThresholdPct int               `json:"auto_compact_threshold_pct,omitempty"`
 	AutoCompactMaxFailures  int               `json:"auto_compact_max_failures,omitempty"`
@@ -47,6 +47,11 @@ type UserConfig struct {
 	// /thinking command and honoured by the Anthropic adapter; other
 	// providers ignore it.
 	ThinkingLevel string `json:"thinking_level,omitempty"`
+	// MaxOutputTokens caps each model reply (max_tokens on the wire). 0 =
+	// auto: the model's known output limit, or 32000 for Anthropic-protocol
+	// models whose limit is unknown (their implicit default is only 4096).
+	// Distinct from TokenBudget, which limits the prompt.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 	// Ultra, when true, injects the ultra fan-out tool and swarm guidance into
 	// the top-level agent so it decomposes hard tasks across many parallel
 	// sub-agents. Works with any model (sub-agents inherit the active model).

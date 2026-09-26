@@ -142,6 +142,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
 			MaxTokens:       cfg.TokenBudget,
+			MaxOutputTokens: cfg.MaxOutputTokens,
 			Thinking:        thinking,
 			Messages:        history,
 			Manifest:        &manifest,
