@@ -1553,10 +1553,6 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runDownload(ctx, call.Args)
 	case "web-search":
 		return r.runWebSearch(ctx, call.Args)
-	case "grok-image":
-		return r.runGrokImage(ctx, call.Args)
-	case "grok-video":
-		return r.runGrokVideo(ctx, call.Args)
 	case "view-image":
 		return r.runViewImage(ctx, call.Args)
 	case "ask-user":

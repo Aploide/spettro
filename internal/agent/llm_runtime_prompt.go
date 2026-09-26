@@ -88,23 +88,6 @@ func summarizeLoopToolArgs(name, args string) string {
 		if json.Unmarshal([]byte(args), &payload) == nil && payload.Path != "" {
 			return "path=" + truncate(payload.Path, 120)
 		}
-	case "grok-image", "grok-video":
-		var payload struct {
-			Prompt string `json:"prompt"`
-			Path   string `json:"path"`
-		}
-		if json.Unmarshal([]byte(args), &payload) == nil {
-			parts := []string{}
-			if payload.Prompt != "" {
-				parts = append(parts, "prompt="+truncate(payload.Prompt, 80))
-			}
-			if payload.Path != "" {
-				parts = append(parts, "path="+payload.Path)
-			}
-			if len(parts) > 0 {
-				return strings.Join(parts, " ")
-			}
-		}
 	}
 	return truncate(strings.TrimSpace(args), 120)
 }
@@ -302,8 +285,6 @@ var builtinNativeToolDescs = map[string]string{
 	"mcp-list-resources": "List resources exposed by an MCP server.",
 	"mcp-read-resource":  "Read an MCP resource.",
 	"mcp-auth":           "Authenticate with an MCP server.",
-	"grok-image":         "Generate an image.",
-	"grok-video":         "Generate a video.",
 	"view-image":         "Attach an image file from the workspace so you can SEE it (vision models). Combine with the shell tools to inspect anything visually: capture a page yourself (e.g. `chromium --headless --screenshot=shot.png <url>` or `npx playwright screenshot <url> shot.png`), then view the file — no need to ask the user for screenshots.",
 }
 
@@ -362,8 +343,6 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"mcp-list-resources": json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"}},"required":["server_id"]}`),
 	"mcp-read-resource":  json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"},"resource_id":{"type":"string"}},"required":["server_id","resource_id"]}`),
 	"mcp-auth":           json.RawMessage(`{"type":"object","properties":{"server_id":{"type":"string"},"token":{"type":"string"},"scope":{"type":"string"},"expires_at":{"type":"string"},"description":{"type":"string"}},"required":["server_id"]}`),
-	"grok-image":         json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"},"path":{"type":"string"},"model":{"type":"string"},"n":{"type":"integer"},"aspect_ratio":{"type":"string"},"resolution":{"type":"string","enum":["1k","2k"]},"response_format":{"type":"string","enum":["url","b64_json"]}},"required":["prompt"]}`),
-	"grok-video":         json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"},"path":{"type":"string"},"model":{"type":"string"},"duration":{"type":"integer"},"aspect_ratio":{"type":"string"},"resolution":{"type":"string"},"image_url":{"type":"string"},"reference_image_urls":{"type":"array","items":{"type":"string"}}},"required":["prompt"]}`),
 	"view-image":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"image file inside the workspace (png, jpg, webp, gif)"}},"required":["path"]}`),
 }
 

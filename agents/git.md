@@ -106,16 +106,15 @@ These illustrate the craft in a Conventional Commits repository; the scopes and 
 ### Good
 
 ```
-feat(telegram): forward generated images to bound chats
+feat(telegram): relay approval requests to bound chats
 
-The grok-image / grok-video tools save their output to the workspace,
-but until now the relay only broadcast text events. When the user asks
-"send me a logo" from Telegram, the resulting file now lands in the
-chat via sendPhoto / sendVideo (with sendDocument fallback past the
-inline-media caps).
+Shell-approval prompts only appeared in the TUI, so a user driving a
+session from Telegram saw the run stall with no explanation. The relay
+now forwards each request with the command it is waiting on, and the
+chat shows the decision once it is made in the TUI.
 
 Hooked into model_telegram.go after publishRemoteToolTrace so the TUI
-Update loop is never blocked by an upload.
+Update loop is never blocked by a send.
 
 Co-Authored-By: Spettro <spettro@eyed.to>
 ```
@@ -134,11 +133,10 @@ Co-Authored-By: Spettro <spettro@eyed.to>
 ```
 
 ```
-refactor(tui): split media dispatch out of model.go
+refactor(tui): split Telegram dispatch out of model.go
 
-Pulled the grok-image/grok-video Telegram forwarding helpers into
-model_telegram.go so model.go's Update method stays focused on the
-state machine.
+Pulled the Telegram forwarding helpers into model_telegram.go so
+model.go's Update method stays focused on the state machine.
 
 Co-Authored-By: Spettro <spettro@eyed.to>
 ```

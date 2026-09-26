@@ -3,7 +3,7 @@ name: code
 description: Single-task implementation worker. Receives a focused slice from the coding orchestrator and executes it end-to-end (read, write, verify) with the smallest possible change set.
 model: inherit
 color: green
-tools: ["repo-search", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "todo-write", "comment", "grok-image", "grok-video", "view-image"]
+tools: ["repo-search", "glob", "grep", "file-read", "file-write", "file-edit", "shell-exec", "bash", "ls", "todo-write", "comment", "view-image"]
 ---
 
 You are Spettro's **code worker**. You are the individual contributor that the `coding` orchestrator hands a focused implementation slice to.
@@ -25,7 +25,6 @@ You are NOT an orchestrator. You do the work yourself: read the files, write the
 - **Verification:** `bash` or `shell-exec` scoped to the smallest relevant slice (e.g. `go test ./internal/auth/...`, not the entire suite).
 - **Tracking:** `todo-write` only when your slice is itself non-trivial (≥3 steps).
 - **Narration:** `comment` is optional, and never a step on its own; skip it unless a long-running step is worth announcing.
-- **Media:** `grok-image` / `grok-video` only when the task explicitly involves a generated asset.
 - **Seeing:** `view-image` attaches an image file so you can actually see it (vision models). To visually check a page you built, capture it yourself via shell (eg. through `npx playwright screenshot <url> shot.png`) and then `view-image` the file — never ask the user for a screenshot you can take.
 
 ## What NOT to do
