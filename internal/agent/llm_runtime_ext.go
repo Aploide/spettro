@@ -566,10 +566,17 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		old        string
 		new        string
 		replaceAll bool
+		// expected is the op's own expected_replacements (0: not given).
+		expected int
 	}
 	ops := make([]fileEditOp, 0, len(args.Edits)+1)
 	if hasSingle {
-		ops = append(ops, fileEditOp{old: args.Single.OldString, new: args.Single.NewString, replaceAll: args.Single.ReplaceAll})
+		op := fileEditOp{old: args.Single.OldString, new: args.Single.NewString, replaceAll: args.Single.ReplaceAll}
+		if len(args.Edits) == 0 {
+			// The call's expected_replacements is this one edit's.
+			op.expected = args.Expected
+		}
+		ops = append(ops, op)
 	}
 	for i, e := range args.Edits {
 		if e.OldString == "" {
@@ -577,7 +584,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 			// silently skipped while the rest are written.
 			return "", fmt.Errorf("file-edit: edit %d: old_string is required (file untouched)", i+1)
 		}
-		ops = append(ops, fileEditOp{old: e.OldString, new: e.NewString, replaceAll: e.ReplaceAll})
+		ops = append(ops, fileEditOp{old: e.OldString, new: e.NewString, replaceAll: e.ReplaceAll, expected: e.Expected})
 	}
 	updated := scope
 	totalReplacements := 0
@@ -590,12 +597,19 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		if op.old == op.new {
 			return "", fmt.Errorf("file-edit: %sold_string and new_string are identical", label)
 		}
+		// Expecting several replacements asks for every occurrence (as
+		// other harnesses' expected_replacements does); the count below
+		// then checks there were exactly that many.
+		replaceAll := op.replaceAll || op.expected > 1
 		// Line numbers the model copied only describe the file as it was
 		// read; after the first op they may have moved.
-		res, err := applyEdit(updated, editRequest{Old: op.old, New: op.new, ReplaceAll: op.replaceAll, LineOffset: lineOffset,
+		res, err := applyEdit(updated, editRequest{Old: op.old, New: op.new, ReplaceAll: replaceAll, LineOffset: lineOffset,
 			TrustLineNumbers: i == 0 && trustLines})
 		if err != nil {
 			return "", fmt.Errorf("file-edit: %s%w", label, err)
+		}
+		if op.expected > 0 && res.Count != op.expected {
+			return "", fmt.Errorf("file-edit: %sexpected %d replacements, got %d (file untouched)", label, op.expected, res.Count)
 		}
 		updated = res.Content
 		totalReplacements += res.Count
