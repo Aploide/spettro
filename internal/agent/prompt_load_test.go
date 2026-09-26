@@ -30,8 +30,8 @@ func TestLoadPromptUsesEmbeddedDefaultOutsideRepo(t *testing.T) {
 
 func TestLoadPromptProjectManifestFileWins(t *testing.T) {
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, config.AgentManifestFilename), "# project manifest\n")
-	writeTestFile(t, filepath.Join(cwd, "agents", "coding.md"), "---\nname: coding\n---\n\nProject-specific coding prompt.")
+	writeFileAt(t, filepath.Join(cwd, config.AgentManifestFilename), "# project manifest\n")
+	writeFileAt(t, filepath.Join(cwd, "agents", "coding.md"), "---\nname: coding\n---\n\nProject-specific coding prompt.")
 	if got := loadPromptOrFallback(cwd, "agents/coding.md", "fallback"); got != "Project-specific coding prompt." {
 		t.Fatalf("with a project manifest, its prompt file must win, got %q", truncate(got, 80))
 	}
@@ -42,7 +42,7 @@ func TestLoadPromptProjectManifestFileWins(t *testing.T) {
 // built-in prompts unless the project ships a Spettro manifest.
 func TestLoadPromptIgnoresUnrelatedAgentsDir(t *testing.T) {
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, "agents", "reviewer.md"), "You review customer support tickets.")
+	writeFileAt(t, filepath.Join(cwd, "agents", "reviewer.md"), "You review customer support tickets.")
 	got := loadPromptOrFallback(cwd, "agents/reviewer.md", "fallback")
 	raw, _ := agentprompts.Prompt("agents/reviewer.md")
 	if got != stripFrontmatter(raw) {
@@ -52,9 +52,9 @@ func TestLoadPromptIgnoresUnrelatedAgentsDir(t *testing.T) {
 
 func TestLoadPromptDotSpettroOverride(t *testing.T) {
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, ".spettro", "agents", "coding.md"), "Override from .spettro.")
-	writeTestFile(t, filepath.Join(cwd, config.AgentManifestFilename), "# project manifest\n")
-	writeTestFile(t, filepath.Join(cwd, "agents", "coding.md"), "Manifest-relative prompt.")
+	writeFileAt(t, filepath.Join(cwd, ".spettro", "agents", "coding.md"), "Override from .spettro.")
+	writeFileAt(t, filepath.Join(cwd, config.AgentManifestFilename), "# project manifest\n")
+	writeFileAt(t, filepath.Join(cwd, "agents", "coding.md"), "Manifest-relative prompt.")
 	if got := loadPromptOrFallback(cwd, "agents/coding.md", "fallback"); got != "Override from .spettro." {
 		t.Fatalf(".spettro/agents override must win, got %q", truncate(got, 80))
 	}
@@ -62,7 +62,7 @@ func TestLoadPromptDotSpettroOverride(t *testing.T) {
 
 func TestLoadPromptCustomPromptFileWithoutManifest(t *testing.T) {
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, "prompts", "triage.md"), "Custom triage prompt.")
+	writeFileAt(t, filepath.Join(cwd, "prompts", "triage.md"), "Custom triage prompt.")
 	if got := loadPromptOrFallback(cwd, "prompts/triage.md", "fallback"); got != "Custom triage prompt." {
 		t.Fatalf("a non-built-in prompt_file is read from the project, got %q", truncate(got, 80))
 	}
@@ -70,7 +70,7 @@ func TestLoadPromptCustomPromptFileWithoutManifest(t *testing.T) {
 
 func TestLoadPromptBlankOverrideFallsThroughToEmbedded(t *testing.T) {
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, ".spettro", "agents", "explore.md"), "  \n")
+	writeFileAt(t, filepath.Join(cwd, ".spettro", "agents", "explore.md"), "  \n")
 	got := loadPromptOrFallback(cwd, "agents/explore.md", "fallback")
 	if got == "fallback" || !strings.Contains(got, "explore") {
 		t.Fatalf("blank override should fall through to the embedded prompt, got %q", got)

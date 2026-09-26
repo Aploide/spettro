@@ -513,16 +513,29 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
 	}
+	defer r.lockFile(abs)()
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return "", err
 	}
+	if err := r.checkFileStamp("file-edit", rel, raw); err != nil {
+		return "", err
+	}
+	trustLines := r.unchangedSinceRead(rel, raw)
 	content := string(raw)
 	scope := content
 	prefix := ""
 	suffix := ""
+	lineOffset := 0
+	// The line-ending style is the whole file's: a one-line scope of a CRLF
+	// file has no "\r\n" of its own, and applyEdit would write bare LFs.
+	crlf := false
 	if args.StartLine > 0 || args.EndLine > 0 {
-		lines := strings.Split(content, "\n")
+		work := content
+		if crlf = isCRLF(work); crlf {
+			work = strings.ReplaceAll(work, "\r\n", "\n")
+		}
+		lines := strings.Split(work, "\n")
 		start := args.StartLine
 		if start <= 0 {
 			start = 1
@@ -534,6 +547,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		if start > end || start > len(lines) {
 			return "", fmt.Errorf("file-edit: invalid line range")
 		}
+		lineOffset = start - 1
 		prefix = strings.Join(lines[:start-1], "\n")
 		scope = strings.Join(lines[start-1:end], "\n")
 		suffix = strings.Join(lines[end:], "\n")
@@ -561,22 +575,35 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	}
 	updated := scope
 	totalReplacements := 0
-	var tierNotes []string
-	for _, op := range ops {
-		next, n, tier, err := replaceWithFallback(updated, op.old, op.new, op.replaceAll, false)
-		if err != nil {
-			return "", fmt.Errorf("file-edit: %w", err)
+	var notes []string
+	for i, op := range ops {
+		label := ""
+		if len(ops) > 1 {
+			label = fmt.Sprintf("edit %d: ", i+1)
 		}
-		updated = next
-		totalReplacements += n
-		if note := editTierNote(tier); note != "" {
-			tierNotes = append(tierNotes, note)
+		if op.old == op.new {
+			return "", fmt.Errorf("file-edit: %sold_string and new_string are identical", label)
+		}
+		// Line numbers the model copied only describe the file as it was
+		// read; after the first op they may have moved.
+		res, err := applyEdit(updated, editRequest{Old: op.old, New: op.new, ReplaceAll: op.replaceAll, LineOffset: lineOffset,
+			TrustLineNumbers: i == 0 && trustLines})
+		if err != nil {
+			return "", fmt.Errorf("file-edit: %s%w", label, err)
+		}
+		updated = res.Content
+		totalReplacements += res.Count
+		for _, n := range res.Notes {
+			notes = append(notes, label+n)
 		}
 	}
 	if args.Expected > 0 && totalReplacements != args.Expected {
 		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
 	}
 	updated = prefix + updated + suffix
+	if crlf {
+		updated = strings.ReplaceAll(updated, "\n", "\r\n")
+	}
 	// Approval comes after the edit is fully computed so the user can be shown
 	// the exact diff that would be applied.
 	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
@@ -588,12 +615,19 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)
-	if len(tierNotes) > 0 {
-		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
-	}
+	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
+}
+
+// editNotesSuffix renders the match notes of an edit, nudging the model to
+// quote verbatim when a fuzzy tier was needed.
+func editNotesSuffix(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	return " — " + strings.Join(notes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
 }
 
 // runMultiEdit applies an ordered list of find/replace edits to one file
@@ -619,14 +653,19 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	if len(args.Edits) == 0 {
 		return "", fmt.Errorf("multi-edit: edits is required")
 	}
+	defer r.lockFile(abs)()
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return "", err
 	}
+	if err := r.checkFileStamp("multi-edit", rel, raw); err != nil {
+		return "", err
+	}
+	trustLines := r.unchangedSinceRead(rel, raw)
 	content := string(raw)
 	updated := content
 	totalReplacements := 0
-	var tierNotes []string
+	var notes []string
 	for i, e := range args.Edits {
 		if e.OldString == "" {
 			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
@@ -634,14 +673,15 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 		if e.OldString == e.NewString {
 			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
 		}
-		next, n, tier, err := replaceWithFallback(updated, e.OldString, e.NewString, e.ReplaceAll, true)
+		res, err := applyEdit(updated, editRequest{Old: e.OldString, New: e.NewString, ReplaceAll: e.ReplaceAll,
+			TrustLineNumbers: i == 0 && trustLines})
 		if err != nil {
 			return "", fmt.Errorf("multi-edit: edit %d: %w (file untouched)", i+1, err)
 		}
-		updated = next
-		totalReplacements += n
-		if note := editTierNote(tier); note != "" {
-			tierNotes = append(tierNotes, fmt.Sprintf("edit %d %s", i+1, note))
+		updated = res.Content
+		totalReplacements += res.Count
+		for _, n := range res.Notes {
+			notes = append(notes, fmt.Sprintf("edit %d %s", i+1, n))
 		}
 	}
 	// Approval comes after all edits are computed so the user is shown the
@@ -655,11 +695,9 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)
-	if len(tierNotes) > 0 {
-		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
-	}
+	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 

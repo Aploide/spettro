@@ -524,6 +524,7 @@ func (r *toolRuntime) writeMediaFile(ctx context.Context, absPath string, item g
 			r.mu.Lock()
 			r.readSet[filepath.ToSlash(rel)] = struct{}{}
 			r.mu.Unlock()
+			r.stampFromDisk(filepath.ToSlash(rel), absPath)
 			return filepath.ToSlash(rel), nil
 		}
 	}

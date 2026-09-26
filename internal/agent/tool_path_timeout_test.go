@@ -22,7 +22,7 @@ func TestGrepPathScopesTheSearch(t *testing.T) {
 		"b/two.go":        "needle in b\n",
 		"vendor/three.go": "needle in vendor\n",
 	} {
-		writeTestFile(t, filepath.Join(cwd, rel), body)
+		writeFileAt(t, filepath.Join(cwd, rel), body)
 	}
 	r := &toolRuntime{cwd: cwd, permission: config.PermissionYOLO, readSet: map[string]struct{}{}}
 	grep := func(args string) (string, error) {

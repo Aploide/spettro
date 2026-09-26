@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -78,6 +79,63 @@ func (r *toolRuntime) runPostToolHooks(ctx context.Context, toolID string, args 
 		}
 	}
 	return nil
+}
+
+// hasPostToolHooks reports whether any enabled PostToolUse hook matches toolID.
+func (r *toolRuntime) hasPostToolHooks(toolID string) bool {
+	for _, rule := range r.hooksConfig.Rules {
+		if rule.Enabled && rule.Event == hooks.EventPostToolUse && hooks.Match(rule, toolID) {
+			return true
+		}
+	}
+	return false
+}
+
+// finishToolCall runs the PostToolUse hooks for a finished call and returns
+// the output to hand the model. After a successful file-edit, multi-edit or
+// file-write, a hook that rewrites the file (gofmt -w, prettier --write) is
+// part of the agent's own write: the file is re-stamped so the stale-read
+// guard doesn't refuse the next edit, and the model is told the file changed.
+func (r *toolRuntime) finishToolCall(ctx context.Context, call toolCall, out string, err error) string {
+	abs, rel, ok := "", "", false
+	if err == nil && r.hasPostToolHooks(call.Tool) {
+		abs, rel, ok = r.writtenFile(call)
+	}
+	if !ok {
+		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
+		return out
+	}
+	// Held across the hooks, so a concurrent edit of the file waits for the
+	// formatter instead of racing it.
+	defer r.lockFile(abs)()
+	before, _ := os.ReadFile(abs)
+	_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
+	after, readErr := os.ReadFile(abs)
+	// Re-stamp only a change the hooks made on top of the agent's own
+	// content; if the file already differed before they ran, something else
+	// changed it and the guard must still fire.
+	if readErr != nil || bytes.Equal(before, after) || !r.stampMatches(rel, before) {
+		return out
+	}
+	r.recordFileStamp(rel, after)
+	return out + fmt.Sprintf("\nnote: a PostToolUse hook rewrote %s after this change (a formatter?), so it no longer matches what you wrote above; file-read it before quoting it in old_string", rel)
+}
+
+// writtenFile returns the file a successful write tool call changed.
+func (r *toolRuntime) writtenFile(call toolCall) (abs, rel string, ok bool) {
+	switch call.Tool {
+	case "file-edit", "multi-edit", "file-write":
+	default:
+		return "", "", false
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(call.Args, &args) != nil || strings.TrimSpace(args.Path) == "" {
+		return "", "", false
+	}
+	abs, rel, err := r.resolvePath(args.Path)
+	return abs, rel, err == nil
 }
 
 func (r *toolRuntime) runPermissionRequestHooks(ctx context.Context, toolID, command string) (string, string, error) {

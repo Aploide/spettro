@@ -226,6 +226,12 @@ type toolRuntime struct {
 	worktreeMu    sync.Mutex
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
+	// fileStamps and fileLocks back the stale-read guard and per-file write
+	// serialization (file_stamps.go); readStamps holds the content hash of
+	// each path's last file-read. All are created lazily.
+	fileStamps    map[string][32]byte
+	readStamps    map[string][32]byte
+	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
 	permissionFn  func() config.PermissionLevel
@@ -1020,8 +1026,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		// block until the user actually answers (or declines). The manifest's
 		// timeout_sec bounds tool execution, not human attention.
 		out, err := r.execute(ctx, call, allowed)
-		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
-		return out, err
+		return r.finishToolCall(ctx, call, out, err), err
 	}
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
@@ -1051,8 +1056,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	out, err := r.execute(tctx, call, allowed)
-	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
-	return out, err
+	return r.finishToolCall(tctx, call, out, err), err
 }
 
 // blocksOnUserInput reports whether a tool's execution is a wait on the human,
@@ -1121,14 +1125,20 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err != nil {
 			return "", err
 		}
+		// The lock keeps a concurrent edit in the same batch from landing
+		// between the read and the stamp, which would stamp stale content.
+		unlock := r.lockFile(abs)
 		data, err := os.ReadFile(abs)
 		if err != nil {
+			unlock()
 			return "", err
 		}
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		delete(r.requiredReads, rel)
 		r.mu.Unlock()
+		r.recordReadStamp(rel, data)
+		unlock()
 		content := string(data)
 		if args.StartLine > 0 {
 			// Bounded reads are already scoped by the model; plain truncation
@@ -1153,17 +1163,26 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if strings.TrimSpace(args.Path) == "" {
 			return "", fmt.Errorf("file-write path is required")
 		}
+		defer r.lockFile(abs)()
 		_, statErr := os.Stat(abs)
 		exists := statErr == nil
 		oldContent := ""
 		if exists {
-			r.mu.Lock()
-			_, alreadyRead := r.readSet[rel]
-			r.mu.Unlock()
-			if !alreadyRead {
+			// Overwriting needs a full read (a stamp); a grep or repo-search
+			// hit only showed the model a line or two of the file.
+			if !r.hasFileStamp(rel) {
+				r.mu.Lock()
+				_, searched := r.readSet[rel]
+				r.mu.Unlock()
+				if searched {
+					return "", fmt.Errorf("refusing write: file-read %q first (a search hit is not a full read)", rel)
+				}
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
 			if raw, err := os.ReadFile(abs); err == nil {
+				if err := r.checkFileStamp("file-write", rel, raw); err != nil {
+					return "", err
+				}
 				oldContent = string(raw)
 			}
 		}
@@ -1194,6 +1213,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
+		r.recordFileStamp(rel, []byte(newContent))
 		r.invalidateSymbolIndex(rel)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil

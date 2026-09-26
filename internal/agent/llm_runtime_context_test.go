@@ -11,7 +11,7 @@ import (
 	"spettro/internal/provider"
 )
 
-func writeTestFile(t *testing.T, path, content string) {
+func writeFileAt(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -23,7 +23,7 @@ func writeTestFile(t *testing.T, path, content string) {
 
 func TestGitInfoBranchFromSubdirectory(t *testing.T) {
 	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/feature/x\n")
+	writeFileAt(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/feature/x\n")
 	sub := filepath.Join(root, "pkg", "inner")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -37,9 +37,9 @@ func TestGitInfoBranchFromSubdirectory(t *testing.T) {
 func TestGitInfoWorktreeFileAndDetachedHead(t *testing.T) {
 	base := t.TempDir()
 	gitDir := filepath.Join(base, "main", ".git", "worktrees", "wt")
-	writeTestFile(t, filepath.Join(gitDir, "HEAD"), "0123456789abcdef0123456789abcdef01234567\n")
+	writeFileAt(t, filepath.Join(gitDir, "HEAD"), "0123456789abcdef0123456789abcdef01234567\n")
 	wt := filepath.Join(base, "wt")
-	writeTestFile(t, filepath.Join(wt, ".git"), "gitdir: ../main/.git/worktrees/wt\n")
+	writeFileAt(t, filepath.Join(wt, ".git"), "gitdir: ../main/.git/worktrees/wt\n")
 	root, branch, ok := gitInfo(wt)
 	if !ok || root != wt || branch != "detached at 0123456789ab" {
 		t.Fatalf("gitInfo(worktree) = (%q, %q, %v)", root, branch, ok)
@@ -54,8 +54,8 @@ func TestGitInfoNotARepo(t *testing.T) {
 
 func TestEnvironmentSectionContents(t *testing.T) {
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n")
-	writeTestFile(t, filepath.Join(cwd, "go.mod"), "module x\n")
+	writeFileAt(t, filepath.Join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n")
+	writeFileAt(t, filepath.Join(cwd, "go.mod"), "module x\n")
 	if err := os.MkdirAll(filepath.Join(cwd, "internal"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestEnvironmentSectionContents(t *testing.T) {
 func TestTopLevelListingCapped(t *testing.T) {
 	cwd := t.TempDir()
 	for i := range 12 {
-		writeTestFile(t, filepath.Join(cwd, fmt.Sprintf("f%02d.txt", i)), "x")
+		writeFileAt(t, filepath.Join(cwd, fmt.Sprintf("f%02d.txt", i)), "x")
 	}
 	got := topLevelListing(cwd, 5)
 	if !strings.Contains(got, "(first 5 of 12)") || strings.Contains(got, "f05.txt") || !strings.HasSuffix(got, "…") {
@@ -94,16 +94,16 @@ func TestTopLevelListingCapped(t *testing.T) {
 
 func TestInstructionsLoadedRootToCwdWithGlobalFirst(t *testing.T) {
 	home := t.TempDir()
-	writeTestFile(t, filepath.Join(home, ".spettro", "AGENTS.md"), "GLOBAL RULE")
+	writeFileAt(t, filepath.Join(home, ".spettro", "AGENTS.md"), "GLOBAL RULE")
 	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
-	writeTestFile(t, filepath.Join(root, "AGENTS.md"), "ROOT RULE")
+	writeFileAt(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
+	writeFileAt(t, filepath.Join(root, "AGENTS.md"), "ROOT RULE")
 	// CLAUDE.md duplicating AGENTS.md (a common setup) must load once.
-	writeTestFile(t, filepath.Join(root, "CLAUDE.md"), "ROOT RULE\n")
-	writeTestFile(t, filepath.Join(root, "SPETTRO.md"), "SPETTRO OVERVIEW")
+	writeFileAt(t, filepath.Join(root, "CLAUDE.md"), "ROOT RULE\n")
+	writeFileAt(t, filepath.Join(root, "SPETTRO.md"), "SPETTRO OVERVIEW")
 	sub := filepath.Join(root, "svc")
-	writeTestFile(t, filepath.Join(sub, "AGENTS.md"), "SUB RULE")
-	writeTestFile(t, filepath.Join(sub, "CLAUDE.md"), "   ") // blank: skipped
+	writeFileAt(t, filepath.Join(sub, "AGENTS.md"), "SUB RULE")
+	writeFileAt(t, filepath.Join(sub, "CLAUDE.md"), "   ") // blank: skipped
 
 	got := buildSessionContext(sub, home, time.Now())
 	if !strings.Contains(got, "# Project instructions") {
@@ -139,9 +139,9 @@ func TestInstructionsOutsideGitUseCwdOnly(t *testing.T) {
 	if _, _, ok := gitInfo(parent); ok {
 		t.Skip("temp dir is inside a git repository on this machine")
 	}
-	writeTestFile(t, filepath.Join(parent, "AGENTS.md"), "PARENT RULE")
+	writeFileAt(t, filepath.Join(parent, "AGENTS.md"), "PARENT RULE")
 	cwd := filepath.Join(parent, "proj")
-	writeTestFile(t, filepath.Join(cwd, "CLAUDE.md"), "PROJECT RULE")
+	writeFileAt(t, filepath.Join(cwd, "CLAUDE.md"), "PROJECT RULE")
 	got := buildSessionContext(cwd, "", time.Now())
 	if !strings.Contains(got, "PROJECT RULE") || strings.Contains(got, "PARENT RULE") {
 		t.Fatalf("outside a repo only cwd instruction files load:\n%s", got)
@@ -154,9 +154,9 @@ func TestInstructionsOutsideGitUseCwdOnly(t *testing.T) {
 func TestInstructionsSizeCaps(t *testing.T) {
 	cwd := t.TempDir()
 	big := strings.Repeat("line of project guidance\n", 2*instructionFileMaxBytes/25)
-	writeTestFile(t, filepath.Join(cwd, "AGENTS.md"), big)
-	writeTestFile(t, filepath.Join(cwd, "CLAUDE.md"), big+"variant A")
-	writeTestFile(t, filepath.Join(cwd, "SPETTRO.md"), big+"variant B")
+	writeFileAt(t, filepath.Join(cwd, "AGENTS.md"), big)
+	writeFileAt(t, filepath.Join(cwd, "CLAUDE.md"), big+"variant A")
+	writeFileAt(t, filepath.Join(cwd, "SPETTRO.md"), big+"variant B")
 	got := instructionsSection(cwd, "", "")
 	if strings.Count(got, "[... truncated:") != 2 {
 		t.Errorf("both loaded files are oversized and must be truncated with a note")
@@ -177,13 +177,13 @@ func TestInstructionsSizeCaps(t *testing.T) {
 func TestInstructionsBudgetFavorsSpecificFiles(t *testing.T) {
 	home := t.TempDir()
 	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
+	writeFileAt(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
 	big := strings.Repeat("line of project guidance\n", 17*1024/25)
-	writeTestFile(t, filepath.Join(home, ".spettro", "AGENTS.md"), "GLOBAL\n"+big)
-	writeTestFile(t, filepath.Join(root, "AGENTS.md"), "ROOT\n"+big+"root tail")
-	writeTestFile(t, filepath.Join(root, "CLAUDE.md"), "ROOT CLAUDE\n"+big)
+	writeFileAt(t, filepath.Join(home, ".spettro", "AGENTS.md"), "GLOBAL\n"+big)
+	writeFileAt(t, filepath.Join(root, "AGENTS.md"), "ROOT\n"+big+"root tail")
+	writeFileAt(t, filepath.Join(root, "CLAUDE.md"), "ROOT CLAUDE\n"+big)
 	sub := filepath.Join(root, "svc")
-	writeTestFile(t, filepath.Join(sub, "SPETTRO.md"), "SVC: use pnpm test:svc")
+	writeFileAt(t, filepath.Join(sub, "SPETTRO.md"), "SVC: use pnpm test:svc")
 
 	got := instructionsSection(sub, root, home)
 	if !strings.Contains(got, `<instructions file="SPETTRO.md">`+"\nSVC: use pnpm test:svc\n</instructions>") {
@@ -210,9 +210,9 @@ func TestInstructionsSmallFileFitsInLeftoverBudget(t *testing.T) {
 	// Fill the budget to under 1 KiB left with two cwd files, then check a
 	// tiny global file (least specific, served last) still loads whole.
 	home := t.TempDir()
-	writeTestFile(t, filepath.Join(home, ".spettro", "SPETTRO.md"), "TINY GLOBAL")
-	writeTestFile(t, filepath.Join(cwd, "AGENTS.md"), strings.Repeat("a", instructionFileMaxBytes))
-	writeTestFile(t, filepath.Join(cwd, "CLAUDE.md"), strings.Repeat("b", instructionFileMaxBytes-600))
+	writeFileAt(t, filepath.Join(home, ".spettro", "SPETTRO.md"), "TINY GLOBAL")
+	writeFileAt(t, filepath.Join(cwd, "AGENTS.md"), strings.Repeat("a", instructionFileMaxBytes))
+	writeFileAt(t, filepath.Join(cwd, "CLAUDE.md"), strings.Repeat("b", instructionFileMaxBytes-600))
 	got := instructionsSection(cwd, "", home)
 	if !strings.Contains(got, "TINY GLOBAL") || strings.Contains(got, "Not loaded") {
 		t.Fatalf("a file that fits whole in the leftover budget must load:\n%s", got[len(got)-min(len(got), 400):])
@@ -221,7 +221,7 @@ func TestInstructionsSmallFileFitsInLeftoverBudget(t *testing.T) {
 
 func TestGitInfoReftableHeadPlaceholder(t *testing.T) {
 	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/.invalid\n")
+	writeFileAt(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/.invalid\n")
 	gotRoot, branch, ok := gitInfo(root)
 	if !ok || gotRoot != root || branch != "" {
 		t.Fatalf("reftable HEAD placeholder must read as an unknown branch, got (%q, %q, %v)", gotRoot, branch, ok)
@@ -245,14 +245,14 @@ func TestSystemStringCarriesFrozenSessionContext(t *testing.T) {
 	t.Cleanup(resetSessionContextForTesting)
 	t.Setenv("HOME", t.TempDir())
 	cwd := t.TempDir()
-	writeTestFile(t, filepath.Join(cwd, "AGENTS.md"), "Run make check before finishing.")
+	writeFileAt(t, filepath.Join(cwd, "AGENTS.md"), "Run make check before finishing.")
 	cfg := toolLoopConfig{SystemPrompt: "You are a coder.", UserTask: "fix it", CWD: cwd}
 
 	first := buildSystemString(cfg)
 	if !strings.HasPrefix(first, "You are a coder.") || !strings.Contains(first, "Run make check before finishing.") || !strings.Contains(first, "- Working directory: "+cwd) {
 		t.Fatalf("system prompt missing session context:\n%s", first)
 	}
-	writeTestFile(t, filepath.Join(cwd, "AGENTS.md"), "CHANGED")
+	writeFileAt(t, filepath.Join(cwd, "AGENTS.md"), "CHANGED")
 	cont := cfg
 	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn"}}
 	if again := buildSystemString(cont); again != first {
@@ -292,7 +292,7 @@ func TestSessionContextRefreshesOnNewConversation(t *testing.T) {
 		t.Fatalf("no instruction files yet:\n%s", first)
 	}
 
-	writeTestFile(t, filepath.Join(cwd, "SPETTRO.md"), "Written by /init.")
+	writeFileAt(t, filepath.Join(cwd, "SPETTRO.md"), "Written by /init.")
 	cont := cfg
 	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn"}}
 	if got := buildSystemString(cont); got != first {
