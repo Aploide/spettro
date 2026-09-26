@@ -50,6 +50,15 @@ func (s *SpoolStore) Add(content string) (string, error) {
 	return id, nil
 }
 
+// Path returns the file backing a spool ID, or "" for an unknown ID. Tool
+// output footers name it so the model can also search the full output with
+// ordinary shell tools (grep, tail) instead of paging through it.
+func (s *SpoolStore) Path(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.files[strings.TrimSpace(id)]
+}
+
 // Dir returns the spool directory of this store, or "" when nothing has been
 // spooled yet. Storage cleanup uses it to exempt the live session's spool.
 func (s *SpoolStore) Dir() string {

@@ -125,6 +125,25 @@ const (
 	askUserChatStopReason = "Waiting for your reply in the chat below."
 )
 
+// ErrNoUserAvailable is returned by an AskUserCallback that has nobody to put
+// the question to: a headless server with no connected client, or one whose
+// client let the question go unanswered past the host's limit. The tool turns
+// it into noUserAvailableResult instead of failing, so the run carries on.
+var ErrNoUserAvailable = errors.New("no user is available to answer")
+
+// noUserAvailableResult is what the model reads when ask-user cannot reach a
+// person. It is a successful result, not an error: asking was reasonable, and
+// the model's next move — decide and say so — is the same either way.
+const noUserAvailableResult = "No user is available to answer. Proceed using your best judgment and state your assumptions."
+
+// askUserReachable reports whether a question from this runtime can reach a
+// person at all. Goal mode is autonomous by contract, and a sub-agent (swarm
+// member, workflow worker, delegated agent) must not stall its parent — or
+// dozens of siblings — on a prompt the user never asked for.
+func (r *toolRuntime) askUserReachable() bool {
+	return r.askUser != nil && !r.goalMode && r.delegationDepth == 0
+}
+
 // askUserMultiSelectHint tells the user that a single-choice picker is standing
 // in for a multi-select question, and how to answer anyway.
 const askUserMultiSelectHint = "(more than one answer is allowed — pick one, or type several separated by commas)"
@@ -610,10 +629,13 @@ func (r *toolRuntime) runAskUser(ctx context.Context, rawArgs []byte) (string, e
 	if err != nil {
 		return "", fmt.Errorf("ask-user: %w", err)
 	}
-	if r.askUser == nil {
-		return "", fmt.Errorf("ask-user: interactive callback not configured")
+	if !r.askUserReachable() {
+		return noUserAvailableResult, nil
 	}
 	answers, err := r.askUser(ctx, form)
+	if errors.Is(err, ErrNoUserAvailable) {
+		return noUserAvailableResult, nil
+	}
 	if errors.Is(err, ErrAskUserReplyInChat) {
 		// Settled 2026-07-25: the chat exit ends the turn rather than steering
 		// the live run. Stopping here is what makes the user's next message an

@@ -9,7 +9,7 @@ import (
 	"spettro/internal/jobs"
 )
 
-var spoolFooterRe = regexp.MustCompile(`\[truncated: ([\d,]+) of ([\d,]+) lines omitted; use job-output \{"job_id":"(spool:\d+)","offset":(\d+)\} to read more\]`)
+var spoolFooterRe = regexp.MustCompile(`\[truncated: ([\d,]+) of ([\d,]+) lines omitted; (?:full output saved to [^;]+; )?use job-output \{"job_id":"(spool:\d+)","offset":(\d+)\} to read more\]`)
 
 func TestSpoolIfLargeSmallPassThrough(t *testing.T) {
 	out := "just a few lines\nof output\n"

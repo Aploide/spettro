@@ -42,16 +42,29 @@ func ensureSpooled(out string) string {
 
 // spoolFooterReserve is the budget slice held back for the truncation footer
 // so the assembled result never exceeds the tool's history budget (downstream
-// history truncation would otherwise cut the footer off).
-const spoolFooterReserve = 200
+// history truncation would otherwise cut the footer off). It covers the spool
+// file path the footer names.
+const spoolFooterReserve = 400
+
+// shellOutputHistoryLimit is the in-history character budget for foreground
+// shell output. Test and build logs are what the model iterates on, so the
+// budget is generous; beyond it the head and the tail are kept.
+const shellOutputHistoryLimit = 30000
 
 // spoolResult enforces the per-tool history budget on a tool's output. Small
 // outputs pass through untouched; oversized outputs are written in full to the
 // session spool and replaced by their head (plus, for shell output, the tail)
 // with a footer telling the model how to page the rest via job-output.
 func (r *toolRuntime) spoolResult(toolName, out string) string {
-	keepTail := toolName == "shell-exec" || toolName == "bash" || toolName == "pty-start" || toolName == "pty-write"
-	return spoolIfLarge(out, r.historyLimit(toolName), keepTail)
+	switch toolName {
+	case "shell-exec", "bash", "bash-output", "pty-start", "pty-write":
+		return spoolIfLarge(out, r.historyLimit(toolName), true)
+	case "file-read":
+		// The file itself is the backing store: point at a ranged file-read,
+		// not at a job-output spool.
+		return fileReadTruncate(out, r.historyLimit(toolName))
+	}
+	return spoolIfLarge(out, r.historyLimit(toolName), false)
 }
 
 func spoolIfLarge(out string, budget int, keepTail bool) string {
@@ -70,11 +83,14 @@ func spoolIfLarge(out string, budget int, keepTail bool) string {
 // within budget and inserts a footer pointing at the spool. The cut points are
 // a pure function of (out, budget, keepTail), so truncation is deterministic
 // for a given output and prompt-cache prefixes stay stable.
+//
+// With keepTail the tail gets the larger share: in command output the verdict
+// — failing tests, the compiler's errors, the exit summary — comes last.
 func spoolTruncate(out string, budget int, keepTail bool, id string) string {
 	headBudget := budget - spoolFooterReserve
 	tailBudget := 0
 	if keepTail {
-		tailBudget = headBudget / 4
+		tailBudget = headBudget * 3 / 5
 		headBudget -= tailBudget
 	}
 	if headBudget < 0 {
@@ -101,9 +117,13 @@ func spoolTruncate(out string, budget int, keepTail bool, id string) string {
 		omittedLines++
 	}
 
+	saved := ""
+	if path := jobs.Spool().Path(id); path != "" {
+		saved = "full output saved to " + path + "; "
+	}
 	footer := fmt.Sprintf(
-		"[truncated: %s of %s lines omitted; use job-output {\"job_id\":%q,\"offset\":%d} to read more]",
-		groupDigits(omittedLines), groupDigits(totalLines), id, len(head))
+		"[truncated: %s of %s lines omitted; %suse job-output {\"job_id\":%q,\"offset\":%d} to read more]",
+		groupDigits(omittedLines), groupDigits(totalLines), saved, id, len(head))
 
 	if tail == "" {
 		return head + footer

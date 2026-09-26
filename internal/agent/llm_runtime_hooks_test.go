@@ -141,3 +141,18 @@ func TestRunPostToolHooksError(t *testing.T) {
 		t.Fatal("expected error from failing post hook")
 	}
 }
+
+// TestWrittenFileAcceptsPathAlias checks that the PostToolUse re-stamp finds
+// the file of a write sent with the file_path alias the write tools accept.
+func TestWrittenFileAcceptsPathAlias(t *testing.T) {
+	r := &toolRuntime{cwd: t.TempDir()}
+	for _, args := range []string{`{"path":"a.txt","content":"x"}`, `{"file_path":"a.txt","content":"x"}`} {
+		_, rel, ok := r.writtenFile(toolCall{Tool: "file-write", Args: json.RawMessage(args)})
+		if !ok || rel != "a.txt" {
+			t.Errorf("writtenFile(%s) = %q, %v; want a.txt", args, rel, ok)
+		}
+	}
+	if _, _, ok := r.writtenFile(toolCall{Tool: "file-read", Args: json.RawMessage(`{"path":"a.txt"}`)}); ok {
+		t.Error("file-read is not a write")
+	}
+}

@@ -258,9 +258,10 @@ func TestAskUser_WorkersCannotAsk(t *testing.T) {
 	}
 }
 
-// Without a callback the tool reports the gap instead of inventing an answer
-// (headless mode relies on this, see docs/goal.md).
-func TestAskUser_NoCallbackIsAnError(t *testing.T) {
+// Without a callback the tool reports the gap instead of inventing an answer:
+// it returns at once, telling the model nobody can answer and to proceed on
+// its own judgment (headless and goal runs rely on this, see docs/goal.md).
+func TestAskUser_NoCallbackTellsModelNoUserIsAvailable(t *testing.T) {
 	pm, providerName, modelName := scriptedManager(t, []string{
 		`TOOL_CALL {"name":"ask-user","arguments":{"question":"Ship it?","default_option":"yes"}}`,
 		"FINAL\ndone",
@@ -285,8 +286,8 @@ func TestAskUser_NoCallbackIsAnError(t *testing.T) {
 	if len(result.Tools) == 0 {
 		t.Fatal("expected an ask-user tool trace")
 	}
-	if result.Tools[0].Status != "error" {
-		t.Fatalf("expected an error trace, got %+v", result.Tools[0])
+	if result.Tools[0].Status != "success" || !strings.Contains(result.Tools[0].Output, "No user is available to answer") {
+		t.Fatalf("expected a no-user result, got %+v", result.Tools[0])
 	}
 	if strings.Contains(result.Tools[0].Output, "yes") {
 		t.Fatalf("the default option must never stand in for an answer: %q", result.Tools[0].Output)

@@ -56,8 +56,10 @@ func TestRunSaveMemoryRejectsBadArgs(t *testing.T) {
 	if _, err := rt.runSaveMemory([]byte(`{"fact":""}`)); err == nil {
 		t.Fatal("empty fact accepted")
 	}
-	if _, err := rt.runSaveMemory([]byte(`{"fact":"x","bogus":true}`)); err == nil {
-		t.Fatal("unknown field accepted")
+	// Unknown fields are ignored rather than rejected (see decodeJSONStrict):
+	// an extra key must not cost the model a round trip.
+	if _, err := rt.runSaveMemory([]byte(`{"fact":"x","bogus":true}`)); err != nil {
+		t.Fatalf("unknown field rejected: %v", err)
 	}
 }
 

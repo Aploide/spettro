@@ -488,28 +488,15 @@ func (r *toolRuntime) runMCPAuth(ctx context.Context, rawArgs []byte) (string, e
 }
 
 func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path       string `json:"path"`
-		OldString  string `json:"old_string"`
-		NewString  string `json:"new_string"`
-		ReplaceAll bool   `json:"replace_all"`
-		StartLine  int    `json:"start_line"`
-		EndLine    int    `json:"end_line"`
-		Expected   int    `json:"expected_replacements"`
-		Edits      []struct {
-			OldString  string `json:"old_string"`
-			NewString  string `json:"new_string"`
-			ReplaceAll bool   `json:"replace_all"`
-		} `json:"edits"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("file-edit args: %w", err)
+	args, err := decodeFileEditArgs(rawArgs)
+	if err != nil {
+		return "", err
 	}
 	abs, rel, err := r.resolvePath(args.Path)
 	if err != nil {
 		return "", err
 	}
-	hasSingle := strings.TrimSpace(args.OldString) != ""
+	hasSingle := strings.TrimSpace(args.Single.OldString) != ""
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
 	}
@@ -565,7 +552,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	}
 	ops := make([]fileEditOp, 0, len(args.Edits)+1)
 	if hasSingle {
-		ops = append(ops, fileEditOp{old: args.OldString, new: args.NewString, replaceAll: args.ReplaceAll})
+		ops = append(ops, fileEditOp{old: args.Single.OldString, new: args.Single.NewString, replaceAll: args.Single.ReplaceAll})
 	}
 	for _, e := range args.Edits {
 		if strings.TrimSpace(e.OldString) == "" {
@@ -635,22 +622,15 @@ func editNotesSuffix(notes []string) string {
 // one, and if any edit fails to match (or matches ambiguously without
 // replace_all) the whole call errors and the file is left untouched.
 func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path  string `json:"path"`
-		Edits []struct {
-			OldString  string `json:"old_string"`
-			NewString  string `json:"new_string"`
-			ReplaceAll bool   `json:"replace_all"`
-		} `json:"edits"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("multi-edit args: %w", err)
-	}
-	abs, rel, err := r.resolvePath(args.Path)
+	path, edits, err := decodeMultiEditArgs(rawArgs)
 	if err != nil {
 		return "", err
 	}
-	if len(args.Edits) == 0 {
+	abs, rel, err := r.resolvePath(path)
+	if err != nil {
+		return "", err
+	}
+	if len(edits) == 0 {
 		return "", fmt.Errorf("multi-edit: edits is required")
 	}
 	defer r.lockFile(abs)()
@@ -666,7 +646,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	updated := content
 	totalReplacements := 0
 	var notes []string
-	for i, e := range args.Edits {
+	for i, e := range edits {
 		if e.OldString == "" {
 			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
 		}
@@ -697,7 +677,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	r.mu.Unlock()
 	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
+	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(edits), totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 

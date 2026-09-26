@@ -79,24 +79,34 @@ func TestShellTimeoutArgumentIsHonored(t *testing.T) {
 	}
 }
 
-func TestShellCallTimeoutSec(t *testing.T) {
+// TestShellCallTimeoutArgument checks which calls own their deadline (a
+// foreground shell command) and how a requested timeout is clamped, including
+// a manifest that grants a tool more than the default cap.
+func TestShellCallTimeoutArgument(t *testing.T) {
 	r := &toolRuntime{toolPolicies: map[string]config.ToolSpec{"bash": {TimeoutSec: 1200}}}
-	cases := []struct {
+	foreground := []struct {
 		tool, args string
-		want       int
+		want       bool
 	}{
-		{"shell-exec", `{"command":"go test ./...","timeout":300}`, 300},
-		{"shell-exec", `{"command":"x","timeout":5000}`, maxShellCallTimeoutSec},
-		{"bash", `{"command":"x","timeout":900}`, 900}, // manifest grants bash more than the default cap
-		{"shell-exec", `{"command":"x"}`, 0},
-		{"shell-exec", `{"command":"x","timeout":60,"run_in_background":true}`, 0},
-		{"bash-output", `{"job_id":"job-1","timeout":60}`, 0},
-		{"file-read", `{"path":"x","timeout":60}`, 0},
+		{"shell-exec", `{"command":"go test ./...","timeout":300}`, true},
+		{"shell-exec", `{"command":"x"}`, true},
+		{"shell-exec", `{"command":"x","timeout":60,"run_in_background":true}`, false},
+		{"bash-output", `{"job_id":"job-1","timeout":60}`, false},
+		{"file-read", `{"path":"x","timeout":60}`, false},
 	}
-	for _, c := range cases {
-		if got := r.shellCallTimeoutSec(toolCall{Tool: c.tool, Args: json.RawMessage(c.args)}); got != c.want {
-			t.Errorf("%s %s: got %d, want %d", c.tool, c.args, got, c.want)
+	for _, c := range foreground {
+		if got := r.isForegroundShellCall(toolCall{Tool: c.tool, Args: json.RawMessage(c.args)}); got != c.want {
+			t.Errorf("isForegroundShellCall(%s %s) = %v, want %v", c.tool, c.args, got, c.want)
 		}
+	}
+	if got := r.shellTimeout("shell-exec", 300); got != 300*time.Second {
+		t.Errorf("timeout 300 = %s, want 300s", got)
+	}
+	if got := r.shellTimeout("shell-exec", 1000); got != maxShellTimeoutSec*time.Second {
+		t.Errorf("timeout 1000 = %s, want the %ds cap", got, maxShellTimeoutSec)
+	}
+	if got := r.shellTimeout("bash", 900); got != 900*time.Second {
+		t.Errorf("manifest grants bash 1200s, so timeout 900 = %s, want 900s", got)
 	}
 }
 

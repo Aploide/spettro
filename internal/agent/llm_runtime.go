@@ -1,11 +1,9 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -910,7 +908,67 @@ func formatTokens(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// parallelExec fires one goroutine per call and collects results in original order.
+// concurrentTools may run at the same time as each other within one step:
+// tools that only read (files, the index, the web, job/spool output) plus
+// `agent`, whose sub-agent spawns are Spettro's parallelism feature and were
+// always fanned out together (see agentBudget in parallelExec). Everything
+// else — file writes and edits, shell and pty commands, worktree and swarm
+// tools, and any tool not listed here (MCP included) — runs alone, in the
+// model's order.
+var concurrentTools = map[string]bool{
+	"file-read":          true,
+	"grep":               true,
+	"glob":               true,
+	"ls":                 true,
+	"repo-search":        true,
+	"web-fetch":          true,
+	"web-search":         true,
+	"view-image":         true,
+	"diagnostics":        true,
+	"references":         true,
+	"hover":              true,
+	"skill-read":         true,
+	"skill-list":         true,
+	"tool-search":        true,
+	"task-get":           true,
+	"task-list":          true,
+	"job-output":         true,
+	"tool-output":        true,
+	"mcp-list-resources": true,
+	"mcp-read-resource":  true,
+	"comment":            true,
+	"agent":              true,
+}
+
+// planToolBatches splits a step's calls (by index) into the batches parallelExec
+// runs one after another: each maximal run of consecutive concurrent tools is
+// one batch whose calls run together, and every other call is a batch of its
+// own. A mutating call therefore always sees the effects of every call the
+// model placed before it, and never races one placed after it.
+func planToolBatches(calls []toolCall, indices []int) [][]int {
+	var batches [][]int
+	var group []int
+	for _, idx := range indices {
+		if concurrentTools[calls[idx].Tool] {
+			group = append(group, idx)
+			continue
+		}
+		if len(group) > 0 {
+			batches = append(batches, group)
+			group = nil
+		}
+		batches = append(batches, []int{idx})
+	}
+	if len(group) > 0 {
+		batches = append(batches, group)
+	}
+	return batches
+}
+
+// parallelExec executes one step's tool calls and returns their results in
+// call order. Consecutive read-only calls (and sub-agent spawns) run
+// concurrently; mutating calls run serially in the order the model emitted
+// them — see planToolBatches.
 //
 // It enforces two limits:
 //   - r.maxToolCallsPerStep caps the total batch size; calls beyond the limit
@@ -928,7 +986,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	}
 	toolCap := r.maxToolCallsPerStep
 	agentCalls := 0
-	var wg sync.WaitGroup
+	runnable := make([]int, 0, len(calls))
 	for i, call := range calls {
 		if toolCap > 0 && i >= toolCap {
 			results[i] = parallelResult{
@@ -953,45 +1011,70 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				continue
 			}
 		}
-		wg.Add(1)
-		go func(idx int, c toolCall) {
-			defer wg.Done()
-			callArgs := singleLine(string(c.Args))
-			if callback != nil && isMajorOperationTool(c.Tool) {
-				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
-				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
-			}
-			if callback != nil {
-				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
-			}
-			cctx, sink := withImageSink(ctx)
-			output, err := r.executeWithTimeout(cctx, c, allowed)
-			status := "success"
-			if err != nil {
-				status = "error"
-				output = "error: " + err.Error()
-			}
+		runnable = append(runnable, i)
+	}
+	run := func(idx int, c toolCall) {
+		callArgs := singleLine(string(c.Args))
+		if err := ctx.Err(); err != nil {
+			// The run was interrupted by an earlier call in this step; the
+			// rest still need a result each, but must not start.
 			results[idx] = parallelResult{
 				agentID: r.traceID(),
 				name:    c.Tool,
 				args:    callArgs,
-				output:  output,
-				status:  status,
-				images:  sink.list(),
+				output:  "error: not executed: " + err.Error(),
+				status:  "error",
 			}
-			if callback != nil {
-				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
-				if isMajorOperationTool(c.Tool) {
-					msg := fmt.Sprintf("Completed %s.", c.Tool)
-					if err != nil {
-						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
-					}
-					callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+			return
+		}
+		if callback != nil && isMajorOperationTool(c.Tool) {
+			msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
+			callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+		}
+		if callback != nil {
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
+		}
+		cctx, sink := withImageSink(ctx)
+		output, err := r.executeWithTimeout(cctx, c, allowed)
+		status := "success"
+		if err != nil {
+			status = "error"
+			output = toolErrorOutput(output, err)
+		}
+		results[idx] = parallelResult{
+			agentID: r.traceID(),
+			name:    c.Tool,
+			args:    callArgs,
+			output:  output,
+			status:  status,
+			images:  sink.list(),
+		}
+		if callback != nil {
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
+			if isMajorOperationTool(c.Tool) {
+				msg := fmt.Sprintf("Completed %s.", c.Tool)
+				if err != nil {
+					msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
 				}
+				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 			}
-		}(i, call)
+		}
 	}
-	wg.Wait()
+	for _, batch := range planToolBatches(calls, runnable) {
+		if len(batch) == 1 {
+			run(batch[0], calls[batch[0]])
+			continue
+		}
+		var wg sync.WaitGroup
+		for _, idx := range batch {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				run(idx, calls[idx])
+			}(idx)
+		}
+		wg.Wait()
+	}
 	return results
 }
 
@@ -1028,18 +1111,40 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		out, err := r.execute(ctx, call, allowed)
 		return r.finishToolCall(ctx, call, out, err), err
 	}
+	if r.isForegroundShellCall(call) {
+		// runShellTool owns both deadlines of a foreground command: the
+		// approval prompt gets the tool's default window, and the command's
+		// own timeout (honouring a per-call timeout argument) starts only once
+		// it is approved. An outer deadline here would start before approval,
+		// so a slow approval — or a short per-call timeout — would eat into
+		// the other. The command's wait is itself bounded (process-group kill
+		// plus WaitDelay), and hooks carry their own timeouts.
+		out, err := r.execute(ctx, call, allowed)
+		return r.finishToolCall(ctx, call, out, err), err
+	}
+	timeout := time.Duration(r.defaultToolTimeoutSec(call.Tool)) * time.Second
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := r.execute(tctx, call, allowed)
+	return r.finishToolCall(tctx, call, out, err), err
+}
+
+// defaultToolTimeoutSec is a tool's execution limit in seconds when the call
+// does not ask for its own: the manifest's timeout_sec, else 45s, with longer
+// floors for swarms/workflows and for shell tools in goal mode.
+func (r *toolRuntime) defaultToolTimeoutSec(tool string) int {
 	timeoutSec := 45
-	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
+	if spec, ok := r.toolPolicies[tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
 	}
-	if call.Tool == "ultra" || call.Tool == "workflow" {
+	if tool == "ultra" || tool == "workflow" {
 		// A swarm — or a workflow script, which may run several rounds of them
 		// — is many full sub-agent turns; the per-tool default (and any
 		// manifest value tuned for single tools) would kill it mid-flight.
 		timeoutSec = 7200
 	}
 	if r.goalMode {
-		switch call.Tool {
+		switch tool {
 		case "shell-exec", "bash", "bash-output":
 			if r.shellTimeoutSec > 0 {
 				timeoutSec = r.shellTimeoutSec
@@ -1048,15 +1153,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 			}
 		}
 	}
-	if sec := r.shellCallTimeoutSec(call); sec > 0 {
-		// runShellTool enforces the call's own timeout and reports it; this
-		// deadline is only a backstop, so it fires a little later.
-		timeoutSec = sec + 5
-	}
-	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-	out, err := r.execute(tctx, call, allowed)
-	return r.finishToolCall(tctx, call, out, err), err
+	return timeoutSec
 }
 
 // blocksOnUserInput reports whether a tool's execution is a wait on the human,
@@ -1113,48 +1210,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.markReadFromSearch(out)
 		return r.spoolResult("repo-search", out), nil
 	case "file-read":
-		var args struct {
-			Path      string `json:"path"`
-			StartLine int    `json:"start_line"`
-			EndLine   int    `json:"end_line"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("file-read args: %w", err)
-		}
-		abs, rel, err := r.resolvePath(args.Path)
-		if err != nil {
-			return "", err
-		}
-		// The lock keeps a concurrent edit in the same batch from landing
-		// between the read and the stamp, which would stamp stale content.
-		unlock := r.lockFile(abs)
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			unlock()
-			return "", err
-		}
-		r.mu.Lock()
-		r.readSet[rel] = struct{}{}
-		delete(r.requiredReads, rel)
-		r.mu.Unlock()
-		r.recordReadStamp(rel, data)
-		unlock()
-		content := string(data)
-		if args.StartLine > 0 {
-			// Bounded reads are already scoped by the model; plain truncation
-			// keeps the response aligned with the requested line window.
-			content = sliceLines(content, args.StartLine, args.EndLine)
-			return truncate(content, r.historyLimit("file-read")), nil
-		}
-		return r.spoolResult("file-read", content), nil
+		return r.runFileRead(call.Args)
 	case "file-write":
-		var args struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-			Append  bool   `json:"append"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("file-write args: %w", err)
+		defer r.lockFileForMutation(call.Args)()
+		args, err := decodeFileWriteArgs(call.Args)
+		if err != nil {
+			return "", err
 		}
 		abs, rel, err := r.resolvePath(args.Path)
 		if err != nil {
@@ -1229,7 +1290,11 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("glob args: %w", err)
 		}
-		return r.runGlob(args.Pattern, args.Path)
+		out, err := r.runGlob(ctx, args.Pattern, args.Path)
+		if err != nil {
+			return "", err
+		}
+		return r.spoolResult("glob", out), nil
 	case "grep":
 		var gargs grepArgs
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
@@ -1239,10 +1304,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err != nil {
 			return "", err
 		}
-		if gargs.OutputMode == "" || gargs.OutputMode == "content" {
-			return r.spoolResult("grep", out), nil
-		}
-		return out, nil
+		return r.spoolResult("grep", out), nil
 	case "ls":
 		var args struct {
 			Path string `json:"path"`
@@ -1387,8 +1449,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":
+		defer r.lockFileForMutation(call.Args)()
 		return r.runFileEdit(ctx, call.Args)
 	case "multi-edit":
+		defer r.lockFileForMutation(call.Args)()
 		return r.runMultiEdit(ctx, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
@@ -1575,326 +1639,37 @@ func isMutatingTool(tool string) bool {
 	return false
 }
 
-// skipDirs are directories to skip when walking the workspace.
-var skipDirs = map[string]bool{
-	".git":         true,
-	".spettro":     true,
-	"vendor":       true,
-	"node_modules": true,
-	"dist":         true,
-	"build":        true,
-}
+// fileMutationLocks holds one mutex per file (keyed by resolved absolute path)
+// serializing the in-process read-modify-write tools on it. It is process-wide
+// rather than per runtime so sibling sub-agents editing the same checkout are
+// covered too. parallelExec already runs mutating calls of one step serially;
+// this is the backstop for everything that step ordering cannot see.
+var fileMutationLocks sync.Map // string -> *sync.Mutex
 
-// runGlob implements the glob tool using filepath.WalkDir with ** support.
-func (r *toolRuntime) runGlob(pattern, subPath string) (string, error) {
-	if strings.TrimSpace(pattern) == "" {
-		return "", fmt.Errorf("glob: pattern is required")
+// lockFileForMutation locks the file named by a tool call's path argument (or
+// its file_path alias) and returns the unlock function. Arguments without a
+// resolvable path lock nothing: the tool reports that error itself.
+func (r *toolRuntime) lockFileForMutation(rawArgs []byte) (unlock func()) {
+	var probe struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
 	}
-	root := r.cwd
-	if strings.TrimSpace(subPath) != "" {
-		abs, _, err := r.resolvePath(subPath)
-		if err != nil {
-			return "", fmt.Errorf("glob path: %w", err)
-		}
-		root = abs
+	_ = json.Unmarshal(rawArgs, &probe)
+	p := firstNonEmpty(probe.Path, probe.FilePath)
+	if p == "" {
+		return func() {}
 	}
-
-	var matches []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip inaccessible entries
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(r.cwd, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if matchGlobPattern(pattern, rel) {
-			matches = append(matches, rel)
-		}
-		return nil
-	})
+	abs, _, err := r.resolvePath(p)
 	if err != nil {
-		return "", fmt.Errorf("glob walk: %w", err)
+		return func() {}
 	}
-	sort.Strings(matches)
-	if len(matches) == 0 {
-		return fmt.Sprintf("no files match %q", pattern), nil
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
 	}
-	return fmt.Sprintf("%d files:\n%s", len(matches), strings.Join(matches, "\n")), nil
-}
-
-// matchGlobPattern matches a slash-separated path against a glob pattern with ** support.
-func matchGlobPattern(pattern, rel string) bool {
-	patParts := strings.Split(pattern, "/")
-	pathParts := strings.Split(rel, "/")
-	return globMatch(patParts, pathParts)
-}
-
-func globMatch(patParts, pathParts []string) bool {
-	if len(patParts) == 0 && len(pathParts) == 0 {
-		return true
-	}
-	if len(patParts) == 0 {
-		return false
-	}
-	if patParts[0] == "**" {
-		// ** can match zero or more path components
-		// Try matching rest of pattern against every suffix of path
-		restPat := patParts[1:]
-		// Zero-component match: skip ** entirely
-		if globMatch(restPat, pathParts) {
-			return true
-		}
-		// One or more components match
-		for i := 1; i <= len(pathParts); i++ {
-			if globMatch(restPat, pathParts[i:]) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(pathParts) == 0 {
-		return false
-	}
-	matched, err := filepath.Match(patParts[0], pathParts[0])
-	if err != nil || !matched {
-		return false
-	}
-	return globMatch(patParts[1:], pathParts[1:])
-}
-
-// typeExtensions maps type names to file extensions.
-func typeExtensions(t string) []string {
-	switch strings.ToLower(t) {
-	case "go":
-		return []string{".go"}
-	case "ts":
-		return []string{".ts", ".tsx"}
-	case "js":
-		return []string{".js", ".jsx", ".mjs"}
-	case "py":
-		return []string{".py"}
-	case "rs":
-		return []string{".rs"}
-	case "md":
-		return []string{".md"}
-	case "toml":
-		return []string{".toml"}
-	case "json":
-		return []string{".json"}
-	case "yaml", "yml":
-		return []string{".yaml", ".yml"}
-	case "sh":
-		return []string{".sh", ".bash"}
-	default:
-		return nil
-	}
-}
-
-type grepArgs struct {
-	Pattern         string `json:"pattern"`
-	Path            string `json:"path"` // optional file or directory to search instead of the whole workspace
-	Glob            string `json:"glob"`
-	Type            string `json:"type"`
-	CaseInsensitive bool   `json:"case_insensitive"`
-	Context         int    `json:"context"`
-	OutputMode      string `json:"output_mode"`
-	MaxResults      int    `json:"max_results"`
-}
-
-// runGrep implements the grep tool.
-func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) {
-	if strings.TrimSpace(args.Pattern) == "" {
-		return "", fmt.Errorf("grep: pattern is required")
-	}
-	regexPattern := args.Pattern
-	if args.CaseInsensitive {
-		regexPattern = "(?i)" + regexPattern
-	}
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return "", fmt.Errorf("grep: invalid pattern: %w", err)
-	}
-	if args.MaxResults <= 0 {
-		args.MaxResults = 200
-	}
-	outputMode := args.OutputMode
-	if outputMode == "" {
-		outputMode = "content"
-	}
-
-	exts := typeExtensions(args.Type)
-
-	root := r.cwd
-	if strings.TrimSpace(args.Path) != "" {
-		abs, _, err := r.resolvePath(args.Path)
-		if err != nil {
-			return "", fmt.Errorf("grep: %w", err)
-		}
-		if _, err := os.Stat(abs); err != nil {
-			return "", fmt.Errorf("grep: path %q: %w", args.Path, err)
-		}
-		root = abs
-	}
-
-	type fileResult struct {
-		path   string
-		count  int
-		blocks []string // for content mode
-	}
-
-	var results []fileResult
-	totalMatches := 0
-	truncated := false
-
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			// An explicitly requested directory is searched even if its name
-			// is one the recursive walk normally skips (e.g. path=vendor).
-			if skipDirs[d.Name()] && path != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if truncated {
-			return nil
-		}
-
-		// Filter by type
-		if len(exts) > 0 {
-			ext := strings.ToLower(filepath.Ext(d.Name()))
-			found := slices.Contains(exts, ext)
-			if !found {
-				return nil
-			}
-		}
-		// Filter by glob
-		if args.Glob != "" {
-			matched, mErr := filepath.Match(args.Glob, d.Name())
-			if mErr != nil || !matched {
-				return nil
-			}
-		}
-
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		rel, relErr := filepath.Rel(r.cwd, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-
-		lines := strings.Split(string(data), "\n")
-		matchLines := make([]int, 0)
-		for i, line := range lines {
-			if re.MatchString(line) {
-				matchLines = append(matchLines, i)
-			}
-		}
-		if len(matchLines) == 0 {
-			return nil
-		}
-
-		// Mark as read from search
-		r.mu.Lock()
-		r.readSet[rel] = struct{}{}
-		r.mu.Unlock()
-
-		fr := fileResult{path: rel, count: len(matchLines)}
-
-		if outputMode == "content" {
-			// Build context blocks
-			included := make([]bool, len(lines))
-			for _, mi := range matchLines {
-				start := max(mi-args.Context, 0)
-				end := mi + args.Context
-				if end >= len(lines) {
-					end = len(lines) - 1
-				}
-				for j := start; j <= end; j++ {
-					included[j] = true
-				}
-			}
-
-			var blockBuf bytes.Buffer
-			prevIncluded := false
-			for i, line := range lines {
-				if included[i] {
-					if !prevIncluded && blockBuf.Len() > 0 {
-						blockBuf.WriteString("--\n")
-					}
-					fmt.Fprintf(&blockBuf, "%s:%d: %s\n", rel, i+1, line)
-					prevIncluded = true
-				} else {
-					prevIncluded = false
-				}
-			}
-			fr.blocks = []string{blockBuf.String()}
-		}
-
-		results = append(results, fr)
-		totalMatches += len(matchLines)
-		if totalMatches >= args.MaxResults {
-			truncated = true
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return "", fmt.Errorf("grep walk: %w", walkErr)
-	}
-
-	if len(results) == 0 {
-		return fmt.Sprintf("no matches for %q", args.Pattern), nil
-	}
-
-	var sb strings.Builder
-	switch outputMode {
-	case "files_with_matches":
-		for _, fr := range results {
-			sb.WriteString(fr.path)
-			sb.WriteString("\n")
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	case "count":
-		for _, fr := range results {
-			fmt.Fprintf(&sb, "%s: %d\n", fr.path, fr.count)
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	default: // "content"
-		for _, fr := range results {
-			for _, block := range fr.blocks {
-				sb.WriteString(block)
-			}
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	}
+	v, _ := fileMutationLocks.LoadOrStore(abs, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (r *toolRuntime) nextRequiredRead() (string, bool) {

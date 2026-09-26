@@ -129,12 +129,17 @@ func (r *toolRuntime) writtenFile(call toolCall) (abs, rel string, ok bool) {
 		return "", "", false
 	}
 	var args struct {
-		Path string `json:"path"`
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"` // alias the write tools accept
 	}
-	if json.Unmarshal(call.Args, &args) != nil || strings.TrimSpace(args.Path) == "" {
+	if json.Unmarshal(call.Args, &args) != nil {
 		return "", "", false
 	}
-	abs, rel, err := r.resolvePath(args.Path)
+	p := firstNonEmpty(args.Path, args.FilePath)
+	if strings.TrimSpace(p) == "" {
+		return "", "", false
+	}
+	abs, rel, err := r.resolvePath(p)
 	return abs, rel, err == nil
 }
 

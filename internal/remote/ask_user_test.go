@@ -3,6 +3,8 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -138,6 +140,41 @@ func TestRequestAskUser_CancelResolvesOnce(t *testing.T) {
 	}
 }
 
+// SubscriberCount tracks /events connections, which is how a headless run
+// knows whether an ask_user event could reach anyone at all.
+func TestSubscriberCountTracksEventStreams(t *testing.T) {
+	s := startTestServer(t)
+	if n := s.SubscriberCount(); n != 0 {
+		t.Fatalf("idle server has %d subscribers", n)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/events", s.Port()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	go func() {
+		if resp, err := testHTTPClient.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	waitFor := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for s.SubscriberCount() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("subscriber count = %d, want %d", s.SubscriberCount(), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitFor(1)
+	cancel()
+	waitFor(0)
+}
+
 // Answering twice is a conflict, not a second delivery to a call that already
 // returned.
 func TestRequestAskUser_SecondAnswerConflicts(t *testing.T) {
@@ -160,4 +197,53 @@ func TestRequestAskUser_SecondAnswerConflicts(t *testing.T) {
 	}
 	var payload map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&payload)
+}
+
+// An observer (/events?observe=1) is on the stream but does not count as a
+// client that could answer; an answering client leaving is recorded so a
+// question can wait for it to reconnect.
+func TestAnswerersExcludeObservers(t *testing.T) {
+	s := startTestServer(t)
+	connect := func(query string) context.CancelFunc {
+		ctx, cancel := context.WithCancel(context.Background())
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/events%s", s.Port(), query), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer test-token")
+		go func() {
+			if resp, err := testHTTPClient.Do(req); err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+		}()
+		return cancel
+	}
+	waitFor := func(subs, answerers int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			n, _ := s.Answerers()
+			if s.SubscriberCount() == subs && n == answerers {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("subscribers = %d, answerers = %d; want %d, %d", s.SubscriberCount(), n, subs, answerers)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	stopObserver := connect("?observe=1")
+	defer stopObserver()
+	waitFor(1, 0)
+	if _, left := s.Answerers(); !left.IsZero() {
+		t.Fatalf("lastLeft set before any answerer left: %s", left)
+	}
+	stopClient := connect("")
+	waitFor(2, 1)
+	stopClient()
+	waitFor(1, 0)
+	if _, left := s.Answerers(); time.Since(left) > 5*time.Second {
+		t.Fatalf("answerer departure not recorded: %s", left)
+	}
 }

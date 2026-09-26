@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,8 +97,10 @@ func fileExists(p string) bool {
 	return err == nil && !fi.IsDir()
 }
 
+// sliceLines returns lines start..end (1-based, inclusive; end < 1 means to the
+// end) of content in file-read's numbered format.
 func sliceLines(content string, start, end int) string {
-	lines := strings.Split(content, "\n")
+	lines := splitFileLines(content)
 	if start < 1 {
 		start = 1
 	}
@@ -111,7 +112,7 @@ func sliceLines(content string, start, end int) string {
 	}
 	var b strings.Builder
 	for i := start - 1; i < end; i++ {
-		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, lines[i]))
+		b.WriteString(formatNumberedLine(i+1, lines[i]))
 	}
 	return b.String()
 }
