@@ -1,7 +1,11 @@
 package agent
 
 import (
+	"bufio"
+	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -37,7 +41,12 @@ type fileReadArgs struct {
 // start_line/end_line refer to. Output is capped at fileReadDefaultLines lines
 // (unless the call asked for a range) and at the history budget, with a footer
 // naming the offset to continue from. Binary files are refused.
-func (r *toolRuntime) runFileRead(rawArgs []byte) (string, error) {
+//
+// The file is streamed: only the page being returned is held in memory, so a
+// ranged read of a multi-GB log costs a pass over it, not several copies, and
+// ctx (the tool deadline) can stop the pass. Non-regular files (FIFOs,
+// devices) are refused rather than blocking the step.
+func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, error) {
 	var args fileReadArgs
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("file-read args: %w", err)
@@ -47,32 +56,15 @@ func (r *toolRuntime) runFileRead(rawArgs []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info, err := os.Stat(abs); err == nil && info.IsDir() {
-		return "", fmt.Errorf("file-read: %s is a directory; use ls or glob to list it", rel)
-	}
-	// The lock keeps a concurrent edit in the same batch from landing
-	// between the read and the stamp, which would stamp stale content.
-	unlock := r.lockFile(abs)
-	data, err := os.ReadFile(abs)
+	info, err := os.Stat(abs)
 	if err != nil {
-		unlock()
 		return "", err
 	}
-	if looksBinaryText(data) {
-		unlock()
-		return "", fmt.Errorf("file-read: %s looks like a binary file (%d bytes); file-read returns text only — use view-image for images, or a shell command (file, xxd, strings) to inspect it", rel, len(data))
+	if info.IsDir() {
+		return "", fmt.Errorf("file-read: %s is a directory; use ls or glob to list it", rel)
 	}
-	r.mu.Lock()
-	r.readSet[rel] = struct{}{}
-	delete(r.requiredReads, rel)
-	r.mu.Unlock()
-	r.recordReadStamp(rel, data)
-	unlock()
-
-	lines := splitFileLines(string(data))
-	total := len(lines)
-	if total == 0 {
-		return "(empty file)", nil
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("file-read: %s is not a regular file (%s)", rel, info.Mode().Type())
 	}
 	start := 1
 	switch {
@@ -80,9 +72,6 @@ func (r *toolRuntime) runFileRead(rawArgs []byte) (string, error) {
 		start = int(args.StartLine)
 	case args.Offset > 0:
 		start = int(args.Offset)
-	}
-	if start > total {
-		return "", fmt.Errorf("file-read: %s has %d lines; start line %d is past the end", rel, total, start)
 	}
 	end := start + fileReadDefaultLines - 1
 	switch {
@@ -94,11 +83,43 @@ func (r *toolRuntime) runFileRead(rawArgs []byte) (string, error) {
 	if end < start {
 		return "", fmt.Errorf("file-read: end line %d is before start line %d", end, start)
 	}
-	end = min(end, total)
-
 	budget := r.historyLimit("file-read")
 	budget = max(budget-fileReadFooterReserve, budget/2)
-	body, last, clipped := renderNumberedLines(lines, start, end, budget)
+
+	// The lock keeps a concurrent edit in the same batch from landing
+	// between the read and the stamp, which would stamp stale content.
+	unlock := r.lockFile(abs)
+	f, err := os.Open(abs)
+	if err != nil {
+		unlock()
+		return "", err
+	}
+	pg, err := readFilePage(ctx, f, start, end, budget)
+	f.Close()
+	if err != nil {
+		unlock()
+		return "", fmt.Errorf("file-read: %w", err)
+	}
+	if looksBinaryText(pg.head) {
+		unlock()
+		return "", fmt.Errorf("file-read: %s looks like a binary file (%d bytes); file-read returns text only — use view-image for images, or a shell command (file, xxd, strings) to inspect it", rel, pg.size)
+	}
+	r.mu.Lock()
+	r.readSet[rel] = struct{}{}
+	delete(r.requiredReads, rel)
+	r.mu.Unlock()
+	r.recordReadStampSum(rel, pg.sum)
+	unlock()
+
+	total := pg.total
+	if total == 0 {
+		return "(empty file)", nil
+	}
+	if start > total {
+		return "", fmt.Errorf("file-read: %s has %d lines; start line %d is past the end", rel, total, start)
+	}
+	end = min(end, total)
+	body, last, clipped := renderNumberedLines(pg.lines, start, end, budget)
 	var notes []string
 	if clipped {
 		notes = append(notes, fmt.Sprintf("lines longer than %d chars were clipped", fileReadMaxLineChars))
@@ -111,6 +132,85 @@ func (r *toolRuntime) runFileRead(rawArgs []byte) (string, error) {
 		return body, nil
 	}
 	return body + "[" + strings.Join(notes, "; ") + "]", nil
+}
+
+// pageLine is one line kept for a file-read page: its text, cut a little
+// past fileReadMaxLineChars, and its full length in bytes.
+type pageLine struct {
+	text string
+	size int
+}
+
+// filePage is what one streaming pass over a file yields.
+type filePage struct {
+	lines []pageLine // lines start..; stops once past end or the budget
+	total int        // number of lines in the file
+	size  int64      // bytes in the file
+	sum   [32]byte   // SHA-256 of the whole content (the read stamp)
+	head  []byte     // the first binarySniffBytes, for the binary check
+}
+
+// readFilePage streams rd once, keeping only lines start..end (and no more
+// than about budget bytes of them) while counting every line and hashing the
+// whole content. Lines follow splitFileLines: a trailing newline ends the
+// last line rather than starting an empty one.
+func readFilePage(ctx context.Context, rd io.Reader, start, end, budget int) (filePage, error) {
+	var pg filePage
+	h := sha256.New()
+	br := bufio.NewReaderSize(io.TeeReader(rd, h), 64<<10)
+	if head, _ := br.Peek(binarySniffBytes); len(head) > 0 {
+		pg.head = append([]byte(nil), head...)
+	}
+	keepCap := fileReadMaxLineChars + utf8.UTFMax
+	kept := 0
+	var cur []byte
+	curSize, lineNum := 0, 1
+	collecting := func() bool { return lineNum >= start && lineNum <= end && kept <= budget }
+	for reads := 1; ; reads++ {
+		if reads%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return pg, err
+			}
+		}
+		chunk, err := br.ReadSlice('\n')
+		pg.size += int64(len(chunk))
+		if len(chunk) > 0 {
+			piece := chunk
+			if piece[len(piece)-1] == '\n' {
+				piece = piece[:len(piece)-1]
+			}
+			curSize += len(piece)
+			if collecting() && len(cur) < keepCap {
+				cur = append(cur, piece[:min(len(piece), keepCap-len(cur))]...)
+			}
+			if chunk[len(chunk)-1] == '\n' {
+				if collecting() {
+					pg.lines = append(pg.lines, pageLine{text: string(cur), size: curSize})
+					kept += len(cur) + 8
+				}
+				pg.total++
+				lineNum++
+				cur, curSize = cur[:0], 0
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil {
+			if err != io.EOF {
+				return pg, err
+			}
+			if curSize > 0 { // a last line without a trailing newline
+				if collecting() {
+					pg.lines = append(pg.lines, pageLine{text: string(cur), size: curSize})
+				}
+				pg.total++
+			}
+			break
+		}
+	}
+	copy(pg.sum[:], h.Sum(nil))
+	return pg, nil
 }
 
 // splitFileLines splits file content into lines; a trailing newline ends the
@@ -131,17 +231,18 @@ func formatNumberedLine(num int, text string) string {
 	return fmt.Sprintf("%6d\t%s\n", num, text)
 }
 
-// renderNumberedLines renders lines[start-1:end] numbered, stopping before the
-// output would exceed budget (at least one line is always rendered). It
-// returns the text, the number of the last line rendered, and whether any
-// line was clipped to fileReadMaxLineChars.
-func renderNumberedLines(lines []string, start, end, budget int) (text string, last int, clipped bool) {
+// renderNumberedLines renders lines start..end numbered — page holds the
+// lines from start on — stopping before the output would exceed budget (at
+// least one line is always rendered). It returns the text, the number of the
+// last line rendered, and whether any line was clipped to fileReadMaxLineChars.
+func renderNumberedLines(page []pageLine, start, end, budget int) (text string, last int, clipped bool) {
 	var b strings.Builder
 	last = start - 1
-	for i := start; i <= end; i++ {
-		line := lines[i-1]
-		if len(line) > fileReadMaxLineChars {
-			line = clipUTF8(line, fileReadMaxLineChars) + fmt.Sprintf(" …(line truncated, %d chars)", len(lines[i-1]))
+	for i := start; i <= end && i-start < len(page); i++ {
+		pl := page[i-start]
+		line := pl.text
+		if pl.size > fileReadMaxLineChars {
+			line = clipUTF8(line, fileReadMaxLineChars) + fmt.Sprintf(" …(line truncated, %d chars)", pl.size)
 			clipped = true
 		}
 		row := formatNumberedLine(i, line)

@@ -216,14 +216,14 @@ func decodeFileEditArgs(raw []byte) (fileEditArgs, error) {
 		EndLine:   int(in.EndLine),
 		Expected:  int(in.Expected),
 	}
-	if strings.TrimSpace(out.Single.OldString) != "" {
+	if out.Single.OldString != "" {
 		if err := out.Single.requireNew("file-edit"); err != nil {
 			return fileEditArgs{}, err
 		}
 	}
 	for i, e := range in.Edits {
 		pair := e.resolve()
-		if strings.TrimSpace(pair.OldString) != "" {
+		if pair.OldString != "" {
 			if err := pair.requireNew(fmt.Sprintf("file-edit: edit %d", i+1)); err != nil {
 				return fileEditArgs{}, err
 			}

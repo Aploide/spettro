@@ -235,6 +235,7 @@ type toolRuntime struct {
 	// each path's last file-read. All are created lazily.
 	fileStamps    map[string][32]byte
 	readStamps    map[string][32]byte
+	stampsChanged map[string]struct{} // stamp keys changed since takeStampDelta
 	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
@@ -482,6 +483,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		loopPolicy = cfg.Manifest.Runtime.LoopDetection
 	}
 	runtime.loopDetect = newLoopDetector(loopPolicy)
+	// The stale-read guard spans the conversation: earlier runs' stamps ride
+	// on the carried tool-results messages.
+	runtime.restoreStamps(cfg.Messages)
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
 	}
@@ -892,7 +896,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// Tool results are appended before any exit check: an assistant
 			// tool-call turn without its matching results is an invalid prefix
 			// for the next request (and would poison the carried history).
-			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults}
+			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults, FileStamps: runtime.takeStampDelta()}
 			if loopAct == loopNudge {
 				resultsMsg.Content = loopNudgeMessage
 				notify("repetition detected — nudged the agent to change approach")
@@ -1032,6 +1036,11 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			primary, chain, req, nil)
 	}
 	out, did, err := compactpkg.CompactHistoryMeasured(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures, measure)
+	if did && err == nil && len(out) > 0 {
+		// The summarized messages carried stamp deltas; the summary carries
+		// all of them instead, so a later turn still restores every stamp.
+		out[0].FileStamps = r.stampSnapshot()
+	}
 	// Consecutive-failure bookkeeping: a failing summarizer pauses the auto
 	// trigger after MaxFailures (see compact.Evaluate); any success resets it.
 	if err != nil {
@@ -1368,7 +1377,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.markReadFromSearch(out)
 		return r.spoolResult("repo-search", out), nil
 	case "file-read":
-		return r.runFileRead(call.Args)
+		return r.runFileRead(ctx, call.Args)
 	case "file-write":
 		defer r.lockFileForMutation(call.Args)()
 		args, err := decodeFileWriteArgs(call.Args)
@@ -1385,10 +1394,20 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		defer r.lockFile(abs)()
 		_, statErr := os.Stat(abs)
 		exists := statErr == nil
-		oldContent := ""
+		var oldRaw []byte
 		if exists {
-			// Overwriting needs a full read (a stamp); a grep or repo-search
-			// hit only showed the model a line or two of the file.
+			raw, err := os.ReadFile(abs)
+			if err != nil {
+				return "", err
+			}
+			oldRaw = raw
+		}
+		oldContent := string(oldRaw)
+		// Overwriting needs a full read (a stamp); a grep or repo-search hit
+		// only showed the model a line or two of the file. Appending replaces
+		// nothing, so it needs no read — and does not count as one.
+		stampedBefore := exists && r.stampMatches(rel, oldRaw)
+		if exists && !args.Append {
 			if !r.hasFileStamp(rel) {
 				r.mu.Lock()
 				_, searched := r.readSet[rel]
@@ -1398,11 +1417,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				}
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
-			if raw, err := os.ReadFile(abs); err == nil {
-				if err := r.checkFileStamp("file-write", rel, raw); err != nil {
-					return "", err
-				}
-				oldContent = string(raw)
+			if err := r.checkFileStamp("file-write", rel, oldRaw); err != nil {
+				return "", err
 			}
 		}
 		newContent := args.Content
@@ -1410,6 +1426,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			newContent = oldContent + args.Content
 		}
 		if err := r.authorizeWriteAccess(ctx, "file-write", rel, diff.Unified(rel, oldContent, newContent)); err != nil {
+			return "", err
+		}
+		if err := r.recheckBeforeWrite("file-write", rel, abs, exists, oldRaw); err != nil {
 			return "", err
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -1432,7 +1451,11 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
-		r.recordFileStamp(rel, []byte(newContent))
+		if !args.Append || !exists || stampedBefore {
+			// An append to a file the agent had not seen in full leaves it
+			// unstamped: the model still has not read what was there.
+			r.recordFileStamp(rel, []byte(newContent))
+		}
 		r.invalidateSymbolIndex(rel)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil

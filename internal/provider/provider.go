@@ -225,6 +225,20 @@ type Message struct {
 	// re-sent with every step of a tool loop and survive into carried history,
 	// so the model still sees them when composing its final answer.
 	Images []string
+	// FileStamps records, on a tool-results turn, the file content hashes the
+	// agent's file tools saw during that step (the stale-read guard's state),
+	// so a later run carrying this history keeps enforcing it. Never sent to
+	// a provider.
+	FileStamps []FileStamp `json:",omitempty"`
+}
+
+// FileStamp is one file's stale-read guard state: the SHA-256 (hex) of the
+// content the agent last saw in full (Seen) and last saw through file-read,
+// with line numbers (Read). Path is the file's real absolute path.
+type FileStamp struct {
+	Path string `json:"path"`
+	Seen string `json:"seen,omitempty"`
+	Read string `json:"read,omitempty"`
 }
 
 type Request struct {

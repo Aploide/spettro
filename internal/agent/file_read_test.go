@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -26,7 +27,7 @@ func numberedLines(from, to int, text func(int) string) string {
 
 func TestFileReadNumbersFullAndRangedReadsAlike(t *testing.T) {
 	r := newReadRuntime(t, map[string]string{"a.go": "package a\n\nfunc A() {}\n"})
-	full, err := r.runFileRead([]byte(`{"path":"a.go"}`))
+	full, err := r.runFileRead(context.Background(), []byte(`{"path":"a.go"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestFileReadNumbersFullAndRangedReadsAlike(t *testing.T) {
 		`{"file_path":"a.go","offset":"3","limit":"5"}`,
 		`{"path":"a.go","start_line":3}`,
 	} {
-		got, err := r.runFileRead([]byte(args))
+		got, err := r.runFileRead(context.Background(), []byte(args))
 		if err != nil {
 			t.Fatalf("%s: %v", args, err)
 		}
@@ -64,7 +65,7 @@ func TestFileReadCapsAtDefaultLinesWithContinuationFooter(t *testing.T) {
 		fmt.Fprintf(&b, "l%d\n", i)
 	}
 	r := newReadRuntime(t, map[string]string{"big.txt": b.String()})
-	out, err := r.runFileRead([]byte(`{"path":"big.txt"}`))
+	out, err := r.runFileRead(context.Background(), []byte(`{"path":"big.txt"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,7 @@ func TestFileReadCapsAtDefaultLinesWithContinuationFooter(t *testing.T) {
 	if !strings.HasPrefix(out, numberedLines(1, 2000, func(i int) string { return fmt.Sprintf("l%d", i) })) {
 		t.Fatal("first 2000 lines not returned in order")
 	}
-	rest, err := r.runFileRead([]byte(`{"path":"big.txt","offset":2001}`))
+	rest, err := r.runFileRead(context.Background(), []byte(`{"path":"big.txt","offset":2001}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestFileReadCapsAtDefaultLinesWithContinuationFooter(t *testing.T) {
 func TestFileReadCapsAtCharBudgetOnLineBoundary(t *testing.T) {
 	line := strings.Repeat("x", 99)
 	r := newReadRuntime(t, map[string]string{"wide.txt": strings.Repeat(line+"\n", 1000)})
-	out, err := r.runFileRead([]byte(`{"path":"wide.txt"}`))
+	out, err := r.runFileRead(context.Background(), []byte(`{"path":"wide.txt"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,23 +121,23 @@ func TestFileReadRefusesBinaryAndHandlesEdges(t *testing.T) {
 		"empty.txt": "",
 		"dir/x.txt": "x\n",
 	})
-	if _, err := r.runFileRead([]byte(`{"path":"img.png"}`)); err == nil || !strings.Contains(err.Error(), "binary") {
+	if _, err := r.runFileRead(context.Background(), []byte(`{"path":"img.png"}`)); err == nil || !strings.Contains(err.Error(), "binary") {
 		t.Fatalf("binary file not refused: %v", err)
 	}
 	if _, ok := r.readSet["img.png"]; ok {
 		t.Fatal("refused binary file marked as read")
 	}
 	// Invalid UTF-8 that is still text (Latin-1) is not binary.
-	if out, err := r.runFileRead([]byte(`{"path":"latin.txt"}`)); err != nil || !strings.HasPrefix(out, "     1\tcaf") {
+	if out, err := r.runFileRead(context.Background(), []byte(`{"path":"latin.txt"}`)); err != nil || !strings.HasPrefix(out, "     1\tcaf") {
 		t.Fatalf("latin-1 text refused: %v %q", err, out)
 	}
-	if out, err := r.runFileRead([]byte(`{"path":"empty.txt"}`)); err != nil || out != "(empty file)" {
+	if out, err := r.runFileRead(context.Background(), []byte(`{"path":"empty.txt"}`)); err != nil || out != "(empty file)" {
 		t.Fatalf("empty file: %v %q", err, out)
 	}
-	if _, err := r.runFileRead([]byte(`{"path":"dir"}`)); err == nil || !strings.Contains(err.Error(), "directory") {
+	if _, err := r.runFileRead(context.Background(), []byte(`{"path":"dir"}`)); err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("directory read: %v", err)
 	}
-	if _, err := r.runFileRead([]byte(`{"path":"dir/x.txt","offset":5}`)); err == nil || !strings.Contains(err.Error(), "past the end") {
+	if _, err := r.runFileRead(context.Background(), []byte(`{"path":"dir/x.txt","offset":5}`)); err == nil || !strings.Contains(err.Error(), "past the end") {
 		t.Fatalf("offset past end: %v", err)
 	}
 }
@@ -144,7 +145,7 @@ func TestFileReadRefusesBinaryAndHandlesEdges(t *testing.T) {
 func TestFileReadClipsLongLinesOnRuneBoundary(t *testing.T) {
 	long := strings.Repeat("é", fileReadMaxLineChars) // 2 bytes each
 	r := newReadRuntime(t, map[string]string{"min.js": long + "\nshort\n"})
-	out, err := r.runFileRead([]byte(`{"path":"min.js"}`))
+	out, err := r.runFileRead(context.Background(), []byte(`{"path":"min.js"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

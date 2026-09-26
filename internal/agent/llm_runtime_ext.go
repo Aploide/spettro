@@ -496,7 +496,9 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if err != nil {
 		return "", err
 	}
-	hasSingle := strings.TrimSpace(args.Single.OldString) != ""
+	// A whitespace-only old_string ("\n\n\n" to collapse blank lines) is a
+	// real edit; only an absent or empty one is missing.
+	hasSingle := args.Single.OldString != ""
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
 	}
@@ -554,9 +556,11 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if hasSingle {
 		ops = append(ops, fileEditOp{old: args.Single.OldString, new: args.Single.NewString, replaceAll: args.Single.ReplaceAll})
 	}
-	for _, e := range args.Edits {
-		if strings.TrimSpace(e.OldString) == "" {
-			continue
+	for i, e := range args.Edits {
+		if e.OldString == "" {
+			// edits[] is all or nothing: a blank item is an error, never
+			// silently skipped while the rest are written.
+			return "", fmt.Errorf("file-edit: edit %d: old_string is required (file untouched)", i+1)
 		}
 		ops = append(ops, fileEditOp{old: e.OldString, new: e.NewString, replaceAll: e.ReplaceAll})
 	}
@@ -594,6 +598,9 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	// Approval comes after the edit is fully computed so the user can be shown
 	// the exact diff that would be applied.
 	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+		return "", err
+	}
+	if err := r.recheckBeforeWrite("file-edit", rel, abs, true, raw); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
@@ -667,6 +674,9 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	// Approval comes after all edits are computed so the user is shown the
 	// combined diff exactly as it would be applied.
 	if err := r.authorizeWriteAccess(ctx, "multi-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+		return "", err
+	}
+	if err := r.recheckBeforeWrite("multi-edit", rel, abs, true, raw); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
