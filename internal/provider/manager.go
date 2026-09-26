@@ -329,6 +329,20 @@ func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
 	return true
 }
 
+// isLocalEndpoint reports whether the model is served by a local endpoint
+// (a probed local server, or a provider identified by its URL).
+func (m *Manager) isLocalEndpoint(providerName, modelName string) bool {
+	if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
+		return true
+	}
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return item.Local
+		}
+	}
+	return false
+}
+
 func (m *Manager) HasModel(providerName, modelName string) bool {
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
@@ -480,12 +494,18 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	// The input budget (config token_budget) caps the PROMPT: estimate the
 	// whole request, tool results and tool schemas included — they are most
 	// of a coding session's context. The output cap is a separate field.
+	promptTokens := EstimateRequestTokens(req)
 	if req.InputBudget > 0 {
-		if err := budget.CheckTokens(req.InputBudget, EstimateRequestTokens(req)); err != nil {
+		if err := budget.CheckTokens(req.InputBudget, promptTokens); err != nil {
 			return Response{}, err
 		}
 	}
-	req.MaxTokens = m.resolveMaxOutput(providerName, apiKind, modelName, req.MaxTokens)
+	window := req.ContextWindow
+	if window <= 0 {
+		window = m.ModelContext(providerName, modelName)
+	}
+	req.MaxTokens = m.resolveMaxOutput(providerName, apiKind, modelName, req.MaxTokens, window, promptTokens)
+	req.localEndpoint = m.isLocalEndpoint(providerName, modelName)
 
 	// The fantasy path handles images natively (FilePart on user messages), so
 	// vision requests take the same primary path as everything else — the

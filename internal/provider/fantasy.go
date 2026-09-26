@@ -5,9 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"charm.land/fantasy"
@@ -20,7 +25,7 @@ import (
 )
 
 func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL, nil)
 	if err != nil {
 		return Response{}, err
 	}
@@ -74,27 +79,142 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 // request is safe to resend.
 var ErrStreamIdle = errors.New("stream idle timeout: the provider sent no data")
 
-// DefaultStreamIdleTimeout is the longest silence tolerated between two
-// streamed chunks. streamFirstChunkTimeout applies before the first chunk
-// and, for high thinking levels, between chunks too: a reasoning model may
-// think for minutes without emitting anything on some APIs.
+// Stream silence limits. Activity is measured on the raw response body, so
+// SSE keep-alives (Anthropic "ping" events, ": comment" lines) count as
+// life even when the SDK yields no part: a healthy stream that is buffering
+// a large tool input or thinking with its display omitted is not cut off.
+// The limits are still generous, because some backends send nothing at all
+// while working: OpenAI Responses reasoning models without a summary, and
+// local servers processing a long prompt before the first token.
+//
+//   - DefaultStreamIdleTimeout: the longest silence between two chunks.
+//   - streamReasoningIdleTimeout: the same, when the model may reason
+//     silently (a thinking level is set, or OpenAI's Responses API).
+//   - streamFirstChunkTimeout: before the first body byte.
+//   - streamLocalFirstChunkTimeout: before the first body byte from a local
+//     endpoint (prompt processing on slow hardware; no proxy can stall it).
+//
+// SPETTRO_STREAM_IDLE_TIMEOUT (a Go duration or a number of seconds; 0
+// disables the watchdog) overrides all of them, as does
+// Request.StreamIdleTimeout.
 const (
-	DefaultStreamIdleTimeout = 120 * time.Second
-	streamFirstChunkTimeout  = 300 * time.Second
+	DefaultStreamIdleTimeout     = 300 * time.Second
+	streamReasoningIdleTimeout   = 600 * time.Second
+	streamFirstChunkTimeout      = 600 * time.Second
+	streamLocalFirstChunkTimeout = 30 * time.Minute
 )
 
+// streamIdleEnv names the environment override for the stream watchdog.
+const streamIdleEnv = "SPETTRO_STREAM_IDLE_TIMEOUT"
+
+// streamIdleOverride parses SPETTRO_STREAM_IDLE_TIMEOUT. ok is false when it
+// is unset or unparsable; a zero duration disables the watchdog.
+func streamIdleOverride() (time.Duration, bool) {
+	v := strings.TrimSpace(os.Getenv(streamIdleEnv))
+	if v == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return time.Duration(n) * time.Second, true
+	}
+	if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+		return d, true
+	}
+	return 0, false
+}
+
 // streamTimeouts returns the (first-chunk, between-chunk) silence limits for
-// req. An explicit Request.StreamIdleTimeout applies to both.
-func streamTimeouts(req Request) (first, idle time.Duration) {
+// req on providerName. An explicit Request.StreamIdleTimeout, then the
+// environment override, applies to both; 0 means no watchdog.
+func streamTimeouts(providerName string, req Request) (first, idle time.Duration) {
 	if req.StreamIdleTimeout > 0 {
 		return req.StreamIdleTimeout, req.StreamIdleTimeout
 	}
-	idle = DefaultStreamIdleTimeout
-	switch req.Thinking {
-	case ThinkingHigh, ThinkingXHigh, ThinkingMax:
-		idle = streamFirstChunkTimeout
+	if d, ok := streamIdleOverride(); ok {
+		return d, d
 	}
-	return streamFirstChunkTimeout, idle
+	idle = DefaultStreamIdleTimeout
+	if (req.Thinking != "" && req.Thinking != ThinkingOff) || providerName == "openai" {
+		idle = streamReasoningIdleTimeout
+	}
+	first = streamFirstChunkTimeout
+	if req.localEndpoint {
+		first = streamLocalFirstChunkTimeout
+	}
+	return first, idle
+}
+
+// streamWatchdog cancels a stream with ErrStreamIdle once no response bytes
+// arrived for too long: first before any byte, idle after. touch is safe
+// from any goroutine (the SDK reads the body on its own).
+type streamWatchdog struct {
+	last    atomic.Int64 // unix nanos of the last activity
+	started atomic.Bool  // a body byte arrived
+	done    chan struct{}
+	once    sync.Once
+}
+
+func startStreamWatchdog(first, idle time.Duration, cancel context.CancelCauseFunc) *streamWatchdog {
+	w := &streamWatchdog{done: make(chan struct{})}
+	w.last.Store(time.Now().UnixNano())
+	if first <= 0 || idle <= 0 {
+		return w
+	}
+	tick := min(first, idle) / 8
+	tick = max(min(tick, time.Second), time.Millisecond)
+	go func() {
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-w.done:
+				return
+			case <-t.C:
+				limit := first
+				if w.started.Load() {
+					limit = idle
+				}
+				if time.Since(time.Unix(0, w.last.Load())) > limit {
+					cancel(ErrStreamIdle)
+					return
+				}
+			}
+		}
+	}()
+	return w
+}
+
+// touch records activity: a response body read that returned data.
+func (w *streamWatchdog) touch() {
+	w.last.Store(time.Now().UnixNano())
+	w.started.Store(true)
+}
+
+func (w *streamWatchdog) stop() { w.once.Do(func() { close(w.done) }) }
+
+// activityHTTPClient is the SDK HTTP client for a watched stream: it reports
+// every chunk of response body to onRead, keep-alives included.
+type activityHTTPClient struct{ onRead func() }
+
+func (c activityHTTPClient) Do(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultClient.Do(r)
+	if resp != nil && resp.Body != nil {
+		resp.Body = activityBody{ReadCloser: resp.Body, onRead: c.onRead}
+	}
+	return resp, err
+}
+
+type activityBody struct {
+	io.ReadCloser
+	onRead func()
+}
+
+func (b activityBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.onRead()
+	}
+	return n, err
 }
 
 // sendWithFantasyStream is the streaming counterpart of sendWithFantasy. It
@@ -104,7 +224,13 @@ func streamTimeouts(req Request) (first, idle time.Duration) {
 // the stream with ErrStreamIdle when the provider goes silent (see
 // streamTimeouts).
 func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
+	firstTimeout, idleTimeout := streamTimeouts(providerName, req)
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	watchdog := startStreamWatchdog(firstTimeout, idleTimeout, cancel)
+	defer watchdog.stop()
+
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL, &activityHTTPClient{onRead: watchdog.touch})
 	if err != nil {
 		return Response{}, err
 	}
@@ -113,12 +239,6 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 	if err != nil {
 		return Response{}, err
 	}
-
-	firstTimeout, idleTimeout := streamTimeouts(req)
-	streamCtx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	watchdog := time.AfterFunc(firstTimeout, func() { cancel(ErrStreamIdle) })
-	defer watchdog.Stop()
 	idleErr := func(err error) error {
 		if ctx.Err() == nil && errors.Is(context.Cause(streamCtx), ErrStreamIdle) {
 			return ErrStreamIdle
@@ -169,7 +289,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		return r
 	}
 	for part := range stream {
-		watchdog.Reset(idleTimeout)
+		watchdog.touch()
 		switch part.Type {
 		case fantasy.StreamPartTypeTextDelta:
 			textSB.WriteString(part.Delta)
@@ -214,7 +334,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 			}
 		}
 	}
-	watchdog.Stop()
+	watchdog.stop()
 	if streamErr != nil {
 		return Response{}, idleErr(streamErr)
 	}
@@ -624,11 +744,17 @@ func fantasyImageParts(paths []string) []fantasy.FilePart {
 	return parts
 }
 
-func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.Provider, error) {
+// newFantasyProvider builds the fantasy provider for one request. A non-nil
+// client replaces the SDK's default HTTP client (the stream watchdog uses it
+// to observe body activity).
+func newFantasyProvider(providerName, apiKind, apiKey, baseURL string, client *activityHTTPClient) (fantasy.Provider, error) {
 	switch {
 	case providerName == "anthropic" || apiKind == models.APIAnthropic:
 		opts := []fantasyanthropic.Option{
 			fantasyanthropic.WithUserAgent(fantasyUserAgent()),
+		}
+		if client != nil {
+			opts = append(opts, fantasyanthropic.WithHTTPClient(*client))
 		}
 		if apiKey != "" {
 			opts = append(opts, fantasyanthropic.WithAPIKey(apiKey))
@@ -648,6 +774,9 @@ func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.
 			fantasyopenai.WithUserAgent(fantasyUserAgent()),
 			fantasyopenai.WithUseResponsesAPI(),
 		}
+		if client != nil {
+			opts = append(opts, fantasyopenai.WithHTTPClient(*client))
+		}
 		if apiKey != "" {
 			opts = append(opts, fantasyopenai.WithAPIKey(apiKey))
 		}
@@ -665,6 +794,9 @@ func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.
 			fantasyopenaicompat.WithName(providerName),
 			fantasyopenaicompat.WithAPIKey(apiKey),
 			fantasyopenaicompat.WithUserAgent(fantasyUserAgent()),
+		}
+		if client != nil {
+			opts = append(opts, fantasyopenaicompat.WithHTTPClient(*client))
 		}
 		if resolvedBaseURL != "" {
 			opts = append(opts, fantasyopenaicompat.WithBaseURL(resolvedBaseURL))

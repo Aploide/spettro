@@ -34,10 +34,16 @@ func knownOutputLimit(model string) int {
 		return 32000
 	case strings.Contains(id, "claude"):
 		return 64000
+	case strings.Contains(id, "gpt-4o-2024-05-13"):
+		return 4096
 	case strings.Contains(id, "gpt-4o"):
 		return 16384
 	case strings.Contains(id, "gpt-4.1"):
 		return 32768
+	case strings.Contains(id, "gpt-5") && strings.Contains(id, "chat"):
+		// The ChatGPT snapshots (gpt-5-chat-latest, gpt-5.x-chat) are
+		// capped far below the reasoning models.
+		return 16384
 	case strings.Contains(id, "gpt-5"):
 		return 128000
 	case strings.Contains(id, "deepseek-reasoner"):
@@ -49,12 +55,42 @@ func knownOutputLimit(model string) int {
 	if i := strings.LastIndex(base, "/"); i >= 0 {
 		base = base[i+1:]
 	}
+	switch {
+	case base == "o1-mini" || strings.HasPrefix(base, "o1-mini-"):
+		return 65536
+	case base == "o1-preview" || strings.HasPrefix(base, "o1-preview-"):
+		return 32768
+	}
 	for _, p := range []string{"o1", "o3", "o4-mini"} {
 		if base == p || strings.HasPrefix(base, p+"-") {
 			return 100000
 		}
 	}
 	return 0
+}
+
+// minOutputTokens is the smallest output cap the window clamp in
+// resolveMaxOutput goes down to (fantasy's former Anthropic default): below
+// it a prompt that nearly fills the window fails anyway and belongs to the
+// caller's compaction, not to a uselessly tiny reply.
+const minOutputTokens = 4096
+
+// outputRoom is how many output tokens fit next to a prompt of promptTokens
+// in a window of window tokens. Most APIs (Anthropic since 3.7, OpenAI,
+// OpenRouter, vLLM, DeepSeek) reject a request whose prompt + max_tokens
+// exceeds the window, so the output cap must leave the prompt its room. The
+// prompt estimate is a chars/4 heuristic that undercounts code, so it is
+// padded by a quarter plus a fixed margin. Returns -1 when the window is
+// unknown (no clamp).
+func outputRoom(window, promptTokens int) int {
+	if window <= 0 {
+		return -1
+	}
+	room := window - promptTokens - promptTokens/4 - 1024
+	if room < 0 {
+		return 0
+	}
+	return room
 }
 
 // MaxOutputTokens returns the model's maximum output tokens when known: the
@@ -69,28 +105,50 @@ func (m *Manager) MaxOutputTokens(providerName, modelName string) int {
 	return knownOutputLimit(modelName)
 }
 
-// resolveMaxOutput decides the output cap to send. An explicit request value
-// wins but is clamped to the model's known limit (a cap above it is a hard
-// 400). With no explicit value the known limit is sent; if the limit is
-// unknown, Anthropic-protocol models get DefaultMaxOutputTokens (their
-// implicit default is a crippling 4096), while OpenAI-style backends send
-// nothing and keep the server default, which is normally the model maximum —
-// guessing there risks a 400 on servers with smaller limits.
-func (m *Manager) resolveMaxOutput(providerName, apiKind, modelName string, requested int) int {
+// resolveMaxOutput decides the output cap to send for a prompt of
+// promptTokens on a model with a context window of window tokens (0 =
+// unknown).
+//
+// An explicit request value wins but is clamped to the model's known limit
+// (a cap above it is a hard 400). With no explicit value the known limit is
+// used; if the limit is unknown, Anthropic-protocol models get
+// DefaultMaxOutputTokens (their implicit default is a crippling 4096), while
+// OpenAI-style backends send nothing and keep the server default, which is
+// normally the model maximum — guessing there risks a 400 on servers with
+// smaller limits.
+//
+// Either way the cap is then fitted to the window (see outputRoom): a
+// 64k default next to a 150k prompt on a 200k model would otherwise turn a
+// prompt that fits into a context-overflow 400. Anthropic requires
+// max_tokens, so it is shrunk (never below minOutputTokens); an automatic
+// OpenAI-style cap that does not fit is dropped instead, leaving the server
+// to use whatever room remains.
+func (m *Manager) resolveMaxOutput(providerName, apiKind, modelName string, requested, window, promptTokens int) int {
 	limit := m.MaxOutputTokens(providerName, modelName)
-	if requested > 0 {
-		if limit > 0 && requested > limit {
-			return limit
+	anthropic := isAnthropicAPI(providerName, apiKind)
+	out := requested
+	if out > 0 {
+		if limit > 0 && out > limit {
+			out = limit
 		}
-		return requested
+	} else {
+		switch {
+		case limit > 0:
+			out = limit
+		case anthropic:
+			out = DefaultMaxOutputTokens
+		default:
+			return 0
+		}
 	}
-	if limit > 0 {
-		return limit
+	room := outputRoom(window, promptTokens)
+	if room < 0 || out <= room {
+		return out
 	}
-	if isAnthropicAPI(providerName, apiKind) {
-		return DefaultMaxOutputTokens
+	if requested <= 0 && !anthropic {
+		return 0
 	}
-	return 0
+	return max(room, min(out, minOutputTokens))
 }
 
 // EstimateRequestTokens approximates the prompt tokens a request occupies:

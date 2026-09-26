@@ -28,6 +28,12 @@ func TestKnownOutputLimit(t *testing.T) {
 		"claude-3-7-sonnet-latest":                 64000,
 		"claude-3-haiku-20240307":                  4096,
 		"gpt-4o-mini":                              16384,
+		"gpt-4o-2024-05-13":                        4096,
+		"gpt-5-chat-latest":                        16384,
+		"openai/gpt-5.2-chat":                      16384,
+		"o1-mini":                                  65536,
+		"openai/o1-preview-2024-09-12":             32768,
+		"o1":                                       100000,
 		"gpt-4.1":                                  32768,
 		"gpt-5-codex":                              128000,
 		"o3":                                       100000,
@@ -52,18 +58,26 @@ func TestResolveMaxOutput(t *testing.T) {
 		"groq": {API: models.APIOpenAI, BaseURL: "https://x", Models: map[string]models.CatalogModel{"llama-x": {}}},
 	}})
 	cases := []struct {
-		name, provider, apiKind, model string
-		requested, want                int
+		name, provider, apiKind, model  string
+		requested, window, prompt, want int
 	}{
-		{"catalog output wins", "anthropic", models.APIAnthropic, "claude-future", 0, 100000},
-		{"known family", "anthropic", models.APIAnthropic, "claude-sonnet-4-5", 0, 64000},
-		{"unknown anthropic-protocol model gets the default", "zai", models.APIAnthropic, "glm-9", 0, DefaultMaxOutputTokens},
-		{"unknown openai-style model keeps the server default", "groq", models.APIOpenAI, "llama-x", 0, 0},
-		{"explicit value is kept", "groq", models.APIOpenAI, "llama-x", 4000, 4000},
-		{"explicit value is clamped to the known limit", "anthropic", models.APIAnthropic, "claude-3-5-haiku-latest", 50000, 8192},
+		{"catalog output wins", "anthropic", models.APIAnthropic, "claude-future", 0, 0, 0, 100000},
+		{"known family", "anthropic", models.APIAnthropic, "claude-sonnet-4-5", 0, 0, 0, 64000},
+		{"unknown anthropic-protocol model gets the default", "zai", models.APIAnthropic, "glm-9", 0, 0, 0, DefaultMaxOutputTokens},
+		{"unknown openai-style model keeps the server default", "groq", models.APIOpenAI, "llama-x", 0, 0, 0, 0},
+		{"explicit value is kept", "groq", models.APIOpenAI, "llama-x", 4000, 0, 0, 4000},
+		{"explicit value is clamped to the known limit", "anthropic", models.APIAnthropic, "claude-3-5-haiku-latest", 50000, 0, 0, 8192},
+		// prompt + max_tokens must fit the window.
+		{"small prompt keeps the full default", "anthropic", models.APIAnthropic, "claude-sonnet-4-5", 0, 200000, 10000, 64000},
+		{"large prompt shrinks the anthropic default", "anthropic", models.APIAnthropic, "claude-sonnet-4-5", 0, 200000, 150000, 200000 - 150000 - 37500 - 1024},
+		{"anthropic cap never drops below the floor", "anthropic", models.APIAnthropic, "claude-sonnet-4-5", 0, 200000, 199000, minOutputTokens},
+		{"floor never exceeds the model limit", "anthropic", models.APIAnthropic, "claude-3-haiku-20240307", 0, 8000, 7000, 4096},
+		{"openai-style auto cap that does not fit is dropped", "openai", models.APIOpenAI, "gpt-5-codex", 0, 128000, 1000, 0},
+		{"openai-style auto cap that fits is sent", "openai", models.APIOpenAI, "gpt-4.1", 0, 1000000, 1000, 32768},
+		{"explicit cap is fitted to the window", "groq", models.APIOpenAI, "llama-x", 60000, 100000, 60000, 100000 - 60000 - 15000 - 1024},
 	}
 	for _, tc := range cases {
-		if got := m.resolveMaxOutput(tc.provider, tc.apiKind, tc.model, tc.requested); got != tc.want {
+		if got := m.resolveMaxOutput(tc.provider, tc.apiKind, tc.model, tc.requested, tc.window, tc.prompt); got != tc.want {
 			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
 		}
 	}

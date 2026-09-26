@@ -249,6 +249,11 @@ type Request struct {
 	// It is deliberately separate from MaxTokens: one number cannot be both
 	// an output cap and a prompt-size limit.
 	InputBudget int
+	// ContextWindow is the model's context window in tokens when the caller
+	// knows it better than the catalog (a configured window, or one learned
+	// from an overflow error). 0 → the catalog / local probe value. It only
+	// bounds the output cap: prompt + max_tokens must fit the window.
+	ContextWindow int
 	// Thinking selects extended-thinking compute. Empty == ThinkingOff.
 	Thinking ThinkingLevel
 	// Tools, when non-empty, enables native tool calling for capable backends.
@@ -263,12 +268,16 @@ type Request struct {
 	// honour a provider-issued rate limit (currently: the Spettro Subscription
 	// overflow tier's 429/Retry-After) instead of surfacing it as an error.
 	OnRateLimit func(time.Duration)
-	// StreamIdleTimeout bounds the silence between two streamed chunks; a
-	// stream that goes quiet longer fails with ErrStreamIdle (retryable) so a
-	// stalled connection cannot hang the run forever. 0 → default
-	// (DefaultStreamIdleTimeout, longer before the first chunk and for high
-	// thinking levels, where the model may legitimately think silently).
+	// StreamIdleTimeout bounds the silence on a streamed response (keep-alives
+	// count as activity); a stream that goes quiet longer fails with
+	// ErrStreamIdle (retryable) so a stalled connection cannot hang the run
+	// forever. 0 → defaults (see DefaultStreamIdleTimeout: longer before the
+	// first chunk, for reasoning, and for local servers).
 	StreamIdleTimeout time.Duration
+
+	// localEndpoint is set by the manager for local model servers, whose
+	// first token may take minutes of prompt processing (see streamTimeouts).
+	localEndpoint bool
 }
 
 // FinishReason is why the model stopped generating, normalized across
