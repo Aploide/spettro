@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -261,6 +263,13 @@ func editArgs(path, oldStr, newStr string) []byte {
 	return b
 }
 
+// runTool drives a tool through execute, the same path the agent loop uses.
+func runTool(t *testing.T, rt *toolRuntime, tool string, args map[string]any) (string, error) {
+	t.Helper()
+	raw, _ := json.Marshal(args)
+	return rt.execute(context.Background(), toolCall{Tool: tool, Args: raw}, map[string]struct{}{tool: {}})
+}
+
 func TestRunFileEditFuzzyTierReported(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	path := writeTestFile(t, dir, "f.go", "func f() {\n\treturn  1\n}\n")
@@ -315,6 +324,112 @@ func TestRunFileEditCRLFRoundTrip(t *testing.T) {
 	}
 	if got := readTestFile(t, path); got != "one\r\n2\r\n3\r\n4\r\n" {
 		t.Fatalf("file: %q", got)
+	}
+}
+
+func TestStaleReadGuard(t *testing.T) {
+	ctx := context.Background()
+	rt, dir := newEditTestRuntime(t)
+	path := writeTestFile(t, dir, "s.go", "a := 1\nb := 2\n")
+
+	// A file the agent never read can still be edited when old_string matches.
+	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "a := 1", "a := 10")); err != nil {
+		t.Fatalf("edit of unread file: %v", err)
+	}
+	// The agent's own edit refreshes the stamp, so a follow-up edit passes.
+	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "b := 2", "b := 20")); err != nil {
+		t.Fatalf("second edit: %v", err)
+	}
+
+	// Someone else changes the file: edits are refused until it is re-read.
+	writeTestFile(t, dir, "s.go", "a := 10\nb := 20\nc := 3\n")
+	_, err := rt.runFileEdit(ctx, editArgs("s.go", "c := 3", "c := 30"))
+	if err == nil || !strings.Contains(err.Error(), "modified on disk since you last read it") {
+		t.Fatalf("stale edit err=%v", err)
+	}
+	multi, _ := json.Marshal(map[string]any{"path": "s.go", "edits": []map[string]any{{"old_string": "c := 3", "new_string": "c := 30"}}})
+	if _, err := rt.runMultiEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "modified on disk") {
+		t.Fatalf("stale multi-edit err=%v", err)
+	}
+	if got := readTestFile(t, path); got != "a := 10\nb := 20\nc := 3\n" {
+		t.Fatalf("stale edit wrote the file: %q", got)
+	}
+
+	if _, err := runTool(t, rt, "file-read", map[string]any{"path": "s.go", "start_line": 3, "end_line": 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "c := 3", "c := 30")); err != nil {
+		t.Fatalf("edit after re-read: %v", err)
+	}
+	// A touch that leaves the content alone doesn't count as a change.
+	writeTestFile(t, dir, "s.go", readTestFile(t, path))
+	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "c := 30", "c := 31")); err != nil {
+		t.Fatalf("edit after same-content rewrite: %v", err)
+	}
+}
+
+func TestFileWriteNeedsFullReadAndFreshContent(t *testing.T) {
+	rt, dir := newEditTestRuntime(t)
+	path := writeTestFile(t, dir, "w.go", "package w\n\nvar target = 1\n")
+
+	// A grep hit marks the file as seen but is not a full read.
+	if _, err := runTool(t, rt, "grep", map[string]any{"pattern": "target"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runTool(t, rt, "file-write", map[string]any{"path": "w.go", "content": "clobbered\n"})
+	if err == nil || !strings.Contains(err.Error(), "search hit is not a full read") {
+		t.Fatalf("write after grep err=%v", err)
+	}
+
+	if _, err := runTool(t, rt, "file-read", map[string]any{"path": "w.go"}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, "w.go", "package w\n\nvar target = 2\n")
+	_, err = runTool(t, rt, "file-write", map[string]any{"path": "w.go", "content": "overwrite\n"})
+	if err == nil || !strings.Contains(err.Error(), "modified on disk") {
+		t.Fatalf("stale write err=%v", err)
+	}
+	if got := readTestFile(t, path); got != "package w\n\nvar target = 2\n" {
+		t.Fatalf("stale write clobbered the file: %q", got)
+	}
+
+	if _, err := runTool(t, rt, "file-read", map[string]any{"path": "w.go"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runTool(t, rt, "file-write", map[string]any{"path": "w.go", "content": "fresh\n"}); err != nil {
+		t.Fatalf("write after re-read: %v", err)
+	}
+	// Its own write keeps the stamp current, so an edit right after passes.
+	if _, err := rt.runFileEdit(context.Background(), editArgs("w.go", "fresh", "fresher")); err != nil {
+		t.Fatalf("edit after own write: %v", err)
+	}
+}
+
+func TestParallelEditsOnOneFileBothLand(t *testing.T) {
+	rt, dir := newEditTestRuntime(t)
+	var content strings.Builder
+	for i := range 20 {
+		fmt.Fprintf(&content, "v%d := %d\n", i, i)
+	}
+	path := writeTestFile(t, dir, "p.go", content.String())
+	var wg sync.WaitGroup
+	errs := make([]error, 20)
+	for i := range 20 {
+		wg.Go(func() {
+			_, errs[i] = rt.runFileEdit(context.Background(), editArgs("p.go", fmt.Sprintf("v%d := %d\n", i, i), fmt.Sprintf("v%d := %d\n", i, i*100+1)))
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("edit %d: %v", i, err)
+		}
+	}
+	got := readTestFile(t, path)
+	for i := range 20 {
+		if !strings.Contains(got, fmt.Sprintf("v%d := %d\n", i, i*100+1)) {
+			t.Fatalf("edit %d lost:\n%s", i, got)
+		}
 	}
 }
 

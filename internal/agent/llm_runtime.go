@@ -226,6 +226,10 @@ type toolRuntime struct {
 	worktreeMu    sync.Mutex
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
+	// fileStamps and fileLocks back the stale-read guard and per-file write
+	// serialization (file_stamps.go); both are created lazily.
+	fileStamps    map[string][32]byte
+	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
 	permissionFn  func() config.PermissionLevel
@@ -1124,6 +1128,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.readSet[rel] = struct{}{}
 		delete(r.requiredReads, rel)
 		r.mu.Unlock()
+		r.recordFileStamp(rel, data)
 		content := string(data)
 		if args.StartLine > 0 {
 			// Bounded reads are already scoped by the model; plain truncation
@@ -1148,17 +1153,26 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if strings.TrimSpace(args.Path) == "" {
 			return "", fmt.Errorf("file-write path is required")
 		}
+		defer r.lockFile(abs)()
 		_, statErr := os.Stat(abs)
 		exists := statErr == nil
 		oldContent := ""
 		if exists {
-			r.mu.Lock()
-			_, alreadyRead := r.readSet[rel]
-			r.mu.Unlock()
-			if !alreadyRead {
+			// Overwriting needs a full read (a stamp); a grep or repo-search
+			// hit only showed the model a line or two of the file.
+			if !r.hasFileStamp(rel) {
+				r.mu.Lock()
+				_, searched := r.readSet[rel]
+				r.mu.Unlock()
+				if searched {
+					return "", fmt.Errorf("refusing write: file-read %q first (a search hit is not a full read)", rel)
+				}
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
 			if raw, err := os.ReadFile(abs); err == nil {
+				if err := r.checkFileStamp("file-write", rel, raw); err != nil {
+					return "", err
+				}
 				oldContent = string(raw)
 			}
 		}
@@ -1189,6 +1203,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
+		r.recordFileStamp(rel, []byte(newContent))
 		r.invalidateSymbolIndex(rel)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil

@@ -183,6 +183,7 @@ func (r *toolRuntime) runDownload(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.stampFromDisk(rel, abs)
 	ctype := resp.Header.Get("Content-Type")
 	if ctype == "" {
 		ctype = "unknown"

@@ -513,8 +513,12 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
 	}
+	defer r.lockFile(abs)()
 	raw, err := os.ReadFile(abs)
 	if err != nil {
+		return "", err
+	}
+	if err := r.checkFileStamp("file-edit", rel, raw); err != nil {
 		return "", err
 	}
 	content := string(raw)
@@ -597,6 +601,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
 	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements) + editNotesSuffix(notes)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
@@ -634,8 +639,12 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	if len(args.Edits) == 0 {
 		return "", fmt.Errorf("multi-edit: edits is required")
 	}
+	defer r.lockFile(abs)()
 	raw, err := os.ReadFile(abs)
 	if err != nil {
+		return "", err
+	}
+	if err := r.checkFileStamp("multi-edit", rel, raw); err != nil {
 		return "", err
 	}
 	content := string(raw)
@@ -670,6 +679,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
 	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements) + editNotesSuffix(notes)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
