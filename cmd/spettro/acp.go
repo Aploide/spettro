@@ -52,7 +52,7 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
 		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
 		if infos, err := spettro.ListModels(ctx, cfg.APIKeys[spettro.ProviderID]); err == nil {
-			pm.SetSpettro(spettro.InferenceBaseURL(), spettroInfosToModels(infos))
+			pm.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
 		}
 	}
 	models.RefreshBackground(pm.SetCatalog)

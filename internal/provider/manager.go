@@ -39,6 +39,11 @@ type Manager struct {
 	// streamAll routes every request through the streaming path, even when
 	// the caller wants no live tokens (see SetStreamAll).
 	streamAll bool
+	// effortDowngrades remembers, per provider, model and thinking level, the
+	// lower level Send stepped down to after the backend rejected the
+	// reasoning_effort value, so later sends start there instead of walking
+	// the ladder again on every call (see rememberedThinking).
+	effortDowngrades map[string]ThinkingLevel
 }
 
 func NewManager() *Manager {
@@ -319,16 +324,17 @@ func (m *Manager) ModelContext(providerName, modelName string) int {
 // true: OpenAI-compatible servers that don't know reasoning_effort ignore
 // it, and ones that reject it trigger the downgrade ladder, so offering the
 // switcher is safe and refusing it would lock out genuinely reasoning-capable
-// local models. Spettro Subscription models are always offered it: the
-// inference proxy forwards reasoning_effort to its upstream, its model list
-// need not flag reasoning, and a rejection steps down the same ladder.
+// local models. Spettro Subscription models are offered it unless the plan's
+// model list marks them reasoning:false (NoReasoning): the inference proxy
+// forwards reasoning_effort to its upstream, the list need not flag
+// reasoning, and a rejection steps down the same ladder.
 func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
-	if providerName == spettroProviderID {
-		return true
-	}
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
-			return item.Reasoning || item.Local
+			if item.NoReasoning {
+				return false
+			}
+			return item.Reasoning || item.Local || providerName == spettroProviderID
 		}
 	}
 	return true
@@ -383,13 +389,21 @@ func (m *Manager) HasModel(providerName, modelName string) bool {
 // returned, wrapped in ErrRateLimitRetriesExhausted. Any other error
 // (including 429s from other providers) is returned immediately.
 func (m *Manager) Send(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
+	req.Thinking = m.rememberedThinking(providerName, modelName, req.Thinking)
 	// limited counts the sends rate limited so far; waited, the time spent
 	// waiting them out.
 	limited := 0
 	var waited time.Duration
+	// unflaggedFrom is the level a bare 400 made Send drop on a Spettro
+	// model the plan does not flag as reasoning (see
+	// unflaggedThinkingFallback); remembered only if the retry succeeds.
+	var unflaggedFrom ThinkingLevel
 	for {
 		resp, err := m.sendOnce(ctx, providerName, modelName, req)
 		if err == nil {
+			if unflaggedFrom != "" {
+				m.recordEffortDowngrade(providerName, modelName, unflaggedFrom, "")
+			}
 			m.usageRec.record(providerName, modelName, resp.Usage)
 			resp.Thinking = req.Thinking
 			return resp, nil
@@ -399,7 +413,15 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		// than aborting the run, step the level down and retry so the user
 		// keeps continuity; at "" no thinking parameter is sent at all.
 		if next, ok := m.downgradedThinking(providerName, req.Thinking, err); ok {
+			if !isAnthropicAPI(providerName, m.providerKind(providerName)) && isReasoningEffortError(err) {
+				m.recordEffortDowngrade(providerName, modelName, req.Thinking, next)
+			}
 			req.Thinking = next
+			continue
+		}
+		if unflaggedFrom == "" && m.unflaggedThinkingFallback(providerName, modelName, req.Thinking, err) {
+			unflaggedFrom = req.Thinking
+			req.Thinking = ""
 			continue
 		}
 		retryAfter, ok := rateLimitRetryAfter(providerName, err)
@@ -631,6 +653,81 @@ func (m *Manager) downgradedThinking(providerName string, level ThinkingLevel, e
 	return next, true
 }
 
+func effortDowngradeKey(providerName, modelName string, level ThinkingLevel) string {
+	return providerName + "\x00" + modelName + "\x00" + string(level)
+}
+
+// recordEffortDowngrade records that the model rejected level and Send
+// stepped down to next. Only reasoning_effort rejections are recorded: they
+// are about the values the model accepts, the same on every call. Anthropic
+// thinking errors can depend on the request (a budget against its
+// max_tokens, a history without thinking blocks), so those are retried fresh
+// each time.
+func (m *Manager) recordEffortDowngrade(providerName, modelName string, level, next ThinkingLevel) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.effortDowngrades == nil {
+		m.effortDowngrades = map[string]ThinkingLevel{}
+	}
+	m.effortDowngrades[effortDowngradeKey(providerName, modelName, level)] = next
+}
+
+func (m *Manager) providerKind(providerName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.providerKinds[providerName]
+}
+
+// unflaggedThinkingFallback reports whether a send to a Spettro Subscription
+// model that the plan does not flag as reasoning should be retried once
+// without the thinking parameter. Such a model gets reasoning_effort on
+// trust (see SupportsReasoning), and the proxy may pass an upstream's
+// rejection of it on as a bare 400 that no longer names the parameter, which
+// downgradedThinking cannot recognize. When the retry succeeds, Send
+// remembers that the model takes no reasoning_effort.
+func (m *Manager) unflaggedThinkingFallback(providerName, modelName string, level ThinkingLevel, err error) bool {
+	if providerName != spettroProviderID || level == "" || ClassifyRetry(err) != RetryNever {
+		return false
+	}
+	if status, _, ok := httpErrorDetails(err); !ok || status != http.StatusBadRequest {
+		return false
+	}
+	for _, item := range m.Models() {
+		if item.Provider == providerName && item.Name == modelName {
+			return !item.Reasoning
+		}
+	}
+	return true
+}
+
+// rememberedThinking returns the level a send at level starts from: level
+// itself, or the lower level an earlier send settled on after the model
+// rejected it (see rememberEffortDowngrade).
+func (m *Manager) rememberedThinking(providerName, modelName string, level ThinkingLevel) ThinkingLevel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	// Each remembered step goes strictly down the ladder, so this ends; the
+	// bound only guards against a corrupted map.
+	for range 8 {
+		if level == "" {
+			return level
+		}
+		next, ok := m.effortDowngrades[effortDowngradeKey(providerName, modelName, level)]
+		if !ok {
+			return level
+		}
+		level = next
+	}
+	return level
+}
+
+// isReasoningEffortError reports whether err is a backend rejecting the
+// reasoning_effort parameter or its value.
+func isReasoningEffortError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "reasoning_effort") || strings.Contains(msg, "reasoning.effort") || strings.Contains(msg, "reasoning effort")
+}
+
 // isThinkingLevelError reports whether err looks like a provider rejecting
 // the reasoning/thinking configuration (as opposed to auth, rate limit, or
 // any other failure).
@@ -638,10 +735,10 @@ func isThinkingLevelError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "reasoning_effort") || strings.Contains(msg, "reasoning.effort") || strings.Contains(msg, "reasoning effort") {
+	if isReasoningEffortError(err) {
 		return true
 	}
+	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "budget_tokens") || strings.Contains(msg, "thinking.enabled") || strings.Contains(msg, "extended thinking") {
 		return true
 	}

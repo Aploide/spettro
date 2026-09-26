@@ -29,14 +29,16 @@ func TestConfiguredThinking(t *testing.T) {
 	}
 
 	// Spettro Subscription models, registered the way headless and ACP
-	// startup do, get the level whether or not the plan's model list flags
-	// reasoning (it becomes reasoning_effort on the proxy).
-	pm.SetSpettro("https://inference.example/v1", spettroInfosToModels([]spettro.ModelInfo{
-		{ID: "flash"}, {ID: "thinker", Reasoning: true},
+	// startup do, get the level unless the plan's model list marks them
+	// reasoning:false; a list that does not flag reasoning either way still
+	// gets it (it becomes reasoning_effort on the proxy).
+	yes, no := true, false
+	pm.SetSpettro("https://inference.example/v1", spettro.ProviderModels([]spettro.ModelInfo{
+		{ID: "flash"}, {ID: "thinker", Reasoning: &yes}, {ID: "chat", Reasoning: &no},
 	}))
 	for _, m := range pm.Models() {
 		if m.Provider == spettro.ProviderID && m.Name == "thinker" && !m.Reasoning {
-			t.Error("spettroInfosToModels dropped the reasoning flag")
+			t.Error("spettro.ProviderModels dropped the reasoning flag")
 		}
 	}
 	for _, model := range []string{"flash", "thinker"} {
@@ -44,5 +46,9 @@ func TestConfiguredThinking(t *testing.T) {
 		if got := configuredThinking(pm, cfg); got != provider.ThinkingLow {
 			t.Errorf("spettro %s: got %q, want low", model, got)
 		}
+	}
+	cfg = config.UserConfig{ActiveProvider: spettro.ProviderID, ActiveModel: "chat", ThinkingLevel: "high"}
+	if got := configuredThinking(pm, cfg); got != "" {
+		t.Errorf("spettro model listed reasoning:false: got %q, want none", got)
 	}
 }

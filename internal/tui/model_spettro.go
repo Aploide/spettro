@@ -86,29 +86,12 @@ func loadSpettroCmd(apiKey string, activate, fromLogin bool) tea.Cmd {
 		acc, _ := spettro.GetAccount(ctx, apiKey)
 		return spettroLoadedMsg{
 			apiKey:    apiKey,
-			models:    spettroModelsToProvider(infos),
+			models:    spettro.ProviderModels(infos),
 			account:   acc,
 			activate:  activate,
 			fromLogin: fromLogin,
 		}
 	}
-}
-
-func spettroModelsToProvider(infos []spettro.ModelInfo) []provider.Model {
-	out := make([]provider.Model, 0, len(infos))
-	for _, mi := range infos {
-		out = append(out, provider.Model{
-			Provider:     spettro.ProviderID,
-			ProviderName: spettro.ProviderName,
-			Name:         mi.ID,
-			DisplayName:  mi.ID,
-			ToolCall:     true,
-			Vision:       mi.Vision,
-			Reasoning:    mi.Reasoning,
-			Context:      mi.ContextWindow,
-		})
-	}
-	return out
 }
 
 func openBrowser(url string) {

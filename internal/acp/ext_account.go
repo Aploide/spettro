@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"spettro/internal/config"
-	"spettro/internal/provider"
 	"spettro/internal/spettro"
 )
 
@@ -133,28 +132,9 @@ func (b *bridge) accountStatus(ctx context.Context) (AccountStatus, error) {
 		out.ModelCount = len(infos)
 		// Keep the live manager in sync so /models and the model selector
 		// show the plan's models without waiting for a restart.
-		b.opts.Providers.SetSpettro(spettro.InferenceBaseURL(), spettroModelsToProvider(infos))
+		b.opts.Providers.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
 	}
 	return out, nil
-}
-
-// spettroModelsToProvider mirrors the TUI's conversion (model_spettro.go) so
-// plan models register under the same provider ID and flags.
-func spettroModelsToProvider(infos []spettro.ModelInfo) []provider.Model {
-	out := make([]provider.Model, 0, len(infos))
-	for _, mi := range infos {
-		out = append(out, provider.Model{
-			Provider:     spettro.ProviderID,
-			ProviderName: spettro.ProviderName,
-			Name:         mi.ID,
-			DisplayName:  mi.ID,
-			ToolCall:     true,
-			Vision:       mi.Vision,
-			Reasoning:    mi.Reasoning,
-			Context:      mi.ContextWindow,
-		})
-	}
-	return out
 }
 
 // accountLoginStart begins a device-flow login and returns the URL the user
@@ -268,7 +248,7 @@ func (b *bridge) finishLogin(ctx context.Context, apiKey string) error {
 		b.opts.Providers.SetSpettro(spettro.InferenceBaseURL(), nil)
 		return err
 	}
-	models := spettroModelsToProvider(infos)
+	models := spettro.ProviderModels(infos)
 	b.opts.Providers.SetSpettro(spettro.InferenceBaseURL(), models)
 
 	acc, _ := spettro.GetAccount(fetchCtx, apiKey)

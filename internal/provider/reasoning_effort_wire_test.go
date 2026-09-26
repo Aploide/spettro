@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"spettro/internal/models"
@@ -80,5 +81,101 @@ func TestConfiguredThinkingSendsReasoningEffort(t *testing.T) {
 		case tc.want != nil && got != tc.want:
 			t.Errorf("%s/%s %q: reasoning_effort = %v, want %v", tc.provider, tc.model, tc.level, got, tc.want)
 		}
+	}
+}
+
+// newEffortRejectingServer answers any request carrying reasoning_effort
+// with a 400 whose message is msg, and counts the requests it gets.
+func newEffortRejectingServer(t *testing.T, msg string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		if _, has := body["reasoning_effort"]; has {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": msg, "type": "invalid_request_error"}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "c", "object": "chat.completion",
+			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &n
+}
+
+// A Spettro model the plan lists as reasoning:false gets no thinking
+// parameter, like a catalog model marked non-reasoning.
+func TestConfiguredThinkingSkipsSpettroNonReasoning(t *testing.T) {
+	pm := NewManager()
+	pm.SetSpettro("https://inference.example/v1", []Model{
+		{Provider: spettroProviderID, Name: "chat", NoReasoning: true},
+		{Provider: spettroProviderID, Name: "flash"},
+	})
+	if got := pm.ConfiguredThinking(spettroProviderID, "chat", "high"); got != "" {
+		t.Errorf("reasoning:false model: got %q, want none", got)
+	}
+	if got := pm.ConfiguredThinking(spettroProviderID, "flash", "high"); got != ThinkingHigh {
+		t.Errorf("unflagged model: got %q, want high", got)
+	}
+}
+
+// Once a model has rejected reasoning_effort, later sends start from the
+// level the ladder settled on instead of walking it again on every call.
+func TestSendRemembersRejectedReasoningEffort(t *testing.T) {
+	srv, n := newEffortRejectingServer(t, "Unsupported parameter: 'reasoning_effort' is not supported with this model.")
+	pm := NewManager()
+	pm.SetAPIKeys(map[string]string{spettroProviderID: "k"})
+	pm.SetSpettro(srv.URL, []Model{{Provider: spettroProviderID, Name: "flash", ToolCall: true}})
+
+	resp, err := pm.Send(context.Background(), spettroProviderID, "flash", Request{Prompt: "hi", Thinking: ThinkingHigh})
+	if err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if resp.Thinking != "" || n.Load() < 2 {
+		t.Fatalf("first send: thinking %q after %d requests; want the ladder walked down to none", resp.Thinking, n.Load())
+	}
+	for i := range 2 {
+		n.Store(0)
+		resp, err := pm.Send(context.Background(), spettroProviderID, "flash", Request{Prompt: "hi", Thinking: ThinkingHigh})
+		if err != nil {
+			t.Fatalf("send %d: %v", i+2, err)
+		}
+		if got := n.Load(); got != 1 || resp.Thinking != "" {
+			t.Errorf("send %d: %d requests, thinking %q; want 1 request without reasoning_effort", i+2, got, resp.Thinking)
+		}
+	}
+}
+
+// The proxy may rewrap an upstream's rejection as a bare 400 that no longer
+// names reasoning_effort. For a Spettro model the plan does not flag as
+// reasoning (it got the parameter on trust), Send retries once without it and
+// remembers that; a model the plan flags as reasoning gets the error.
+func TestSendDropsThinkingOnBare400ForUnflaggedSpettroModel(t *testing.T) {
+	srv, n := newEffortRejectingServer(t, "upstream provider returned 400 Bad Request")
+	pm := NewManager()
+	pm.SetAPIKeys(map[string]string{spettroProviderID: "k"})
+	pm.SetSpettro(srv.URL, []Model{
+		{Provider: spettroProviderID, Name: "flash", ToolCall: true},
+		{Provider: spettroProviderID, Name: "thinker", ToolCall: true, Reasoning: true},
+	})
+
+	if _, err := pm.Send(context.Background(), spettroProviderID, "flash", Request{Prompt: "hi", Thinking: ThinkingHigh}); err != nil {
+		t.Fatalf("unflagged model: %v", err)
+	}
+	n.Store(0)
+	if _, err := pm.Send(context.Background(), spettroProviderID, "flash", Request{Prompt: "hi", Thinking: ThinkingHigh}); err != nil {
+		t.Fatalf("unflagged model, second send: %v", err)
+	}
+	if got := n.Load(); got != 1 {
+		t.Errorf("unflagged model, second send: %d requests, want 1", got)
+	}
+	if _, err := pm.Send(context.Background(), spettroProviderID, "thinker", Request{Prompt: "hi", Thinking: ThinkingHigh}); err == nil {
+		t.Error("reasoning model: a bare 400 must surface, not silently drop thinking")
 	}
 }
