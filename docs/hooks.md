@@ -79,7 +79,10 @@ also fires on every `bash` call; a rule copied under both `shell-exec` and
 `bash` (same `command`) runs once per call. A rule for a retired name that
 was a narrower operation (`multi-edit`, `repo-search`, `ls`, `task-*`) fires
 only when the model calls that name, not on every `file-edit`, `grep`, `glob`
-or `todo-write`. The `tool_id` the hook receives is always the canonical ID
+or `todo-write`. The former language-server tools are the `lsp` tool's ops,
+so a rule for one fires on that op whatever name the model used: one for
+`lsp-restart` on `lsp` with `op: "restart"`, one for `references` on ops
+`references` and `definition`, and neither on `op: "hover"`. The `tool_id` the hook receives is always the canonical ID
 (`bash`, never `shell-exec`): a script that checks `tool_id` itself must
 test the canonical name.
 
