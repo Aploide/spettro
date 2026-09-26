@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -342,11 +343,19 @@ func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpe
 			return strings.TrimSpace(result.Content), nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || !provider.Classify(err).Transient() {
+		if ctx.Err() != nil || !rerunSubagentAfter(err) {
 			break
 		}
 	}
 	return "", lastErr
+}
+
+// rerunSubagentAfter reports whether a sub-agent run that failed with err is
+// worth starting over: a transient provider failure, except a rate limit the
+// provider manager already waited out for minutes (a re-run would restart
+// the work from scratch only to queue on the same bucket).
+func rerunSubagentAfter(err error) bool {
+	return provider.Classify(err).Transient() && !errors.Is(err, provider.ErrRateLimitRetriesExhausted)
 }
 
 // ultraSleep waits for d or until ctx is cancelled; false means cancelled.

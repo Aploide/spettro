@@ -77,9 +77,12 @@ response times when approaching or exceeding your credit limit.
 
 The waits back off exponentially (about 1s, 2s, 4s, ...) with jitter, each
 capped at the `Retry-After` the backend sent (20 seconds without one), so
-parallel sessions throttled together do not retry in lockstep. After 8
-rate-limited attempts, or about 3 minutes of waiting, the 429 is reported
-as an error (and the model fallback chain, if configured, is offered).
+parallel sessions throttled together do not retry in lockstep. Early
+retries can come before the `Retry-After`, since that is the worst-case
+refill time. Once a request has waited about 3 minutes in all, the 429 is
+reported as an error, and the model fallback chain, if configured, is
+offered. It is not retried again: an `ultra` or `workflow` sub-agent that
+hits it fails instead of being re-run from scratch.
 
 ## Configuration
 

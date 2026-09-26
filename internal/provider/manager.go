@@ -357,12 +357,11 @@ func (m *Manager) HasModel(providerName, modelName string) bool {
 // the Spettro Subscription overflow tier: pro/max accounts get throttled onto
 // a free-tier model once their credit budget is exhausted, and the backend
 // returns 429 with a bounded Retry-After for that specific case. The waits
-// back off exponentially with jitter (see rateLimitDelay), so parallel
+// back off exponentially with jitter (see nextRateLimitWait), so parallel
 // sessions throttled together do not retry in lockstep, and they are
-// bounded: after rateLimitMaxAttempts sends, or once waiting would pass
-// rateLimitMaxWait, the 429 is returned, wrapped in
-// ErrRateLimitRetriesExhausted. Any other error (including 429s from other
-// providers) is returned immediately.
+// bounded in time: once waiting would pass rateLimitMaxWait, the 429 is
+// returned, wrapped in ErrRateLimitRetriesExhausted. Any other error
+// (including 429s from other providers) is returned immediately.
 func (m *Manager) Send(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
 	// limited counts the sends rate limited so far; waited, the time spent
 	// waiting them out.
@@ -388,8 +387,8 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 			return Response{}, err
 		}
 		limited++
-		delay := rateLimitDelay(limited, retryAfter)
-		if limited >= rateLimitMaxAttempts || waited+delay > rateLimitMaxWait {
+		delay, ok := nextRateLimitWait(limited, waited, retryAfter)
+		if !ok {
 			return Response{}, fmt.Errorf("%w (%d attempts over %s): %w", ErrRateLimitRetriesExhausted, limited, waited.Round(time.Second), err)
 		}
 		waited += delay
@@ -637,24 +636,29 @@ func isThinkingLevelError(err error) bool {
 
 // Rate-limit waits in Manager.Send. The wait before retry n is
 // rateLimitBaseDelay doubled n-1 times, capped at the server's Retry-After
-// when it sends one and at rateLimitMaxDelay otherwise, with equal jitter
-// (half fixed, half random) so clients throttled together spread out even
-// at the cap. A Retry-After is the refill time of the backend's bucket, a
-// worst case: an early retry often gets through, and a late one only wastes
-// time.
-const (
+// when it sends one (but never below rateLimitBaseDelay) and at
+// rateLimitMaxDelay otherwise, with equal jitter (half fixed, half random)
+// so clients throttled together spread out even at the cap. A Retry-After
+// is the refill time of the backend's bucket, a worst case: an early retry
+// often gets through, and a late one only wastes time.
+//
+// The retries are bounded in time, not in count: early retries are cheap,
+// and a throttled request should keep its place for as long as the bound
+// allows (a sub-agent that gives up is re-run from scratch or fails, its
+// progress lost). Past rateLimitMaxWait of waiting the 429 is returned.
+const rateLimitMaxDelay = 20 * time.Second
+
+// rateLimitBaseDelay and rateLimitMaxWait are variables so tests can shrink
+// them.
+var (
 	rateLimitBaseDelay = time.Second
-	rateLimitMaxDelay  = 20 * time.Second
-	// rateLimitMaxAttempts bounds the sends of one request (first try
-	// included) and rateLimitMaxWait the total time spent waiting; past
-	// either the 429 is returned.
-	rateLimitMaxAttempts = 8
-	rateLimitMaxWait     = 3 * time.Minute
+	rateLimitMaxWait   = 3 * time.Minute
 )
 
 // ErrRateLimitRetriesExhausted wraps the 429 Manager.Send returns once it
-// has stopped waiting out a rate limit. The agent loop does not retry it
-// again (see ClassifyRetry): the waiting already happened here.
+// has stopped waiting out a rate limit. Neither the agent loop nor the
+// ultra and workflow sub-agent runners retry it again (see ClassifyRetry):
+// the waiting already happened here.
 var ErrRateLimitRetriesExhausted = errors.New("rate limited: gave up retrying")
 
 // rateLimitJitter returns a random fraction in [0, 1); swappable in tests.
@@ -666,11 +670,22 @@ var rateLimitJitter = rand.Float64
 func rateLimitDelay(attempts int, retryAfter time.Duration) time.Duration {
 	ceiling := rateLimitMaxDelay
 	if retryAfter > 0 {
-		ceiling = retryAfter
+		ceiling = max(retryAfter, rateLimitBaseDelay)
 	}
 	d := rateLimitBaseDelay << min(max(attempts-1, 0), 16)
 	d = min(d, ceiling)
 	return d/2 + time.Duration(rateLimitJitter()*float64(d/2))
+}
+
+// nextRateLimitWait reports how long to wait before retrying a request that
+// has now been rate limited attempts times after waiting waited in all, or
+// false once that wait would take the total past rateLimitMaxWait.
+func nextRateLimitWait(attempts int, waited, retryAfter time.Duration) (time.Duration, bool) {
+	delay := rateLimitDelay(attempts, retryAfter)
+	if waited+delay > rateLimitMaxWait {
+		return 0, false
+	}
+	return delay, true
 }
 
 // rateLimitRetryAfter reports whether err is a rate limit the CLI should

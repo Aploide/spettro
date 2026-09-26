@@ -676,7 +676,7 @@ func (w *workflowRunner) runWithRetries(ctx context.Context, sub LLMAgent, promp
 			return workflow.Response{Text: strings.TrimSpace(result.Content), Tokens: result.TokensUsed}, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || !provider.Classify(err).Transient() {
+		if ctx.Err() != nil || !rerunSubagentAfter(err) {
 			break
 		}
 	}

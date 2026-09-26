@@ -78,6 +78,10 @@ func TestRateLimitDelayBacksOffWithJitter(t *testing.T) {
 	if got := rateLimitDelay(4, 7*time.Second).Round(time.Millisecond); got != 7*time.Second {
 		t.Errorf("Retry-After 7s caps the wait: got %v", got)
 	}
+	// A tiny Retry-After does not turn the backoff into a busy loop.
+	if got := rateLimitDelay(4, time.Millisecond).Round(time.Millisecond); got != time.Second {
+		t.Errorf("Retry-After 1ms: max delay %v, want the 1s floor", got)
+	}
 	stubRateLimitJitter(t, 0)
 	if got := rateLimitDelay(1, 0); got != 500*time.Millisecond {
 		t.Errorf("min first delay %v, want 500ms", got)
@@ -85,6 +89,40 @@ func TestRateLimitDelayBacksOffWithJitter(t *testing.T) {
 	if got := rateLimitDelay(9, 7*time.Second); got != 3500*time.Millisecond {
 		t.Errorf("min capped delay %v, want 3.5s", got)
 	}
+}
+
+// Send keeps waiting for about rateLimitMaxWait whatever the Retry-After and
+// the jitter: the bound is on time, so short early waits do not use it up.
+func TestRateLimitGivesUpAfterMaxWait(t *testing.T) {
+	for _, retryAfter := range []time.Duration{0, time.Second, 7 * time.Second, 30 * time.Second} {
+		for _, jitter := range []float64{0, 0.5, 0.999999} {
+			stubRateLimitJitter(t, jitter)
+			var waited time.Duration
+			attempts := 0
+			for {
+				attempts++
+				d, ok := nextRateLimitWait(attempts, waited, retryAfter)
+				if !ok {
+					break
+				}
+				waited += d
+				if attempts > 10000 {
+					t.Fatalf("Retry-After %v, jitter %v: never gives up", retryAfter, jitter)
+				}
+			}
+			if floor := rateLimitMaxWait - max(retryAfter, rateLimitMaxDelay); waited < floor || waited > rateLimitMaxWait {
+				t.Errorf("Retry-After %v, jitter %v: gave up after waiting %v, want between %v and %v", retryAfter, jitter, waited, floor, rateLimitMaxWait)
+			}
+		}
+	}
+}
+
+// shrinkRateLimitWaits makes the rate-limit backoff fast enough for a test.
+func shrinkRateLimitWaits(t *testing.T, base, maxWait time.Duration) {
+	t.Helper()
+	savedBase, savedMax := rateLimitBaseDelay, rateLimitMaxWait
+	rateLimitBaseDelay, rateLimitMaxWait = base, maxWait
+	t.Cleanup(func() { rateLimitBaseDelay, rateLimitMaxWait = savedBase, savedMax })
 }
 
 // newRateLimitedSpettro serves the Spettro inference endpoint: the first
@@ -116,6 +154,7 @@ func newRateLimitedSpettro(t *testing.T, limited int) (*Manager, *atomic.Int32) 
 
 // Send waits out a few 429s and then succeeds.
 func TestSendWaitsOutRateLimit(t *testing.T) {
+	shrinkRateLimitWaits(t, time.Millisecond, time.Minute)
 	pm, calls := newRateLimitedSpettro(t, 3)
 	var waits []time.Duration
 	resp, err := pm.Send(context.Background(), spettroProviderID, "m", Request{
@@ -133,17 +172,19 @@ func TestSendWaitsOutRateLimit(t *testing.T) {
 	}
 }
 
-// Send stops waiting after rateLimitMaxAttempts sends and returns the 429,
-// which the agent loop then does not retry again (but may still fall back
-// to another model on).
+// Send stops waiting once it has waited rateLimitMaxWait and returns the
+// 429, which the agent loop then does not retry again (but may still fall
+// back to another model on).
 func TestSendGivesUpOnPersistentRateLimit(t *testing.T) {
-	pm, calls := newRateLimitedSpettro(t, 1000)
+	shrinkRateLimitWaits(t, time.Millisecond, 20*time.Millisecond)
+	pm, calls := newRateLimitedSpettro(t, 100000)
 	_, err := pm.Send(context.Background(), spettroProviderID, "m", Request{Prompt: "hi"})
 	if !errors.Is(err, ErrRateLimitRetriesExhausted) {
 		t.Fatalf("err = %v, want ErrRateLimitRetriesExhausted", err)
 	}
-	if got := calls.Load(); got != rateLimitMaxAttempts {
-		t.Errorf("requests = %d, want %d", got, rateLimitMaxAttempts)
+	// Waits of 0.5-1ms fill 20ms in 20 to 40 retries.
+	if got := calls.Load(); got < 20 || got > 42 {
+		t.Errorf("requests = %d, want about 20-40", got)
 	}
 	if ClassifyRetry(err) != RetryNever {
 		t.Errorf("ClassifyRetry = %v, want RetryNever", ClassifyRetry(err))
