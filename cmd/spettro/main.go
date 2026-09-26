@@ -29,10 +29,14 @@ func main() {
 	// otherwise.
 	sandbox.RunChildIfRequested()
 
-	// Foreground shell commands run in their own process groups, so the
-	// SIGHUP a closing terminal sends spettro's group never reaches them;
-	// kill them on the way out instead of leaving them orphaned.
-	shell.KillProcessTreesOnHangup()
+	// Foreground shell commands, background jobs and PTY sessions run in
+	// their own process groups or sessions, so the SIGHUP a closing terminal
+	// sends spettro's group never reaches them; kill them on the way out
+	// instead of leaving them orphaned (a dev server holding its port).
+	shell.KillProcessTreesOnHangup(
+		func() { jobs.Default().KillAll() },
+		func() { pty.Default().KillAll() },
+	)
 
 	// Subcommands run before flag parsing (the flag set below is for the
 	// TUI/headless modes). `spettro clean` works entirely without the TUI.

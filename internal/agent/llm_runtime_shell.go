@@ -35,14 +35,38 @@ func isBlockedCommand(cmd string) bool {
 }
 
 // shellToolArgs are the shell tool's arguments. cmd is accepted as an alias for
-// command, and fields other harnesses send (description, cwd) are ignored by
-// the lenient decoder rather than failing the call.
+// command, and cosmetic fields other harnesses send (description) are ignored
+// by the lenient decoder rather than failing the call. A working directory
+// (cwd, or Codex's workdir) changes what the command does, so it is honoured.
 type shellToolArgs struct {
 	Command         string   `json:"command"`
 	Cmd             string   `json:"cmd"`
 	RunInBackground flexBool `json:"run_in_background"`
 	// Timeout is an optional per-call limit in seconds; see shellTimeout.
 	Timeout flexInt `json:"timeout"`
+	Cwd     string  `json:"cwd"`
+	Workdir string  `json:"workdir"`
+}
+
+// shellDir resolves the directory a shell call runs in: the workspace, or the
+// requested working directory, which must be an existing directory inside it.
+func (r *toolRuntime) shellDir(prefix string, args shellToolArgs) (string, error) {
+	want := strings.TrimSpace(firstNonEmpty(args.Cwd, args.Workdir))
+	if want == "" || want == "." {
+		return r.cwd, nil
+	}
+	abs, _, err := r.resolvePath(want)
+	if err != nil {
+		return "", fmt.Errorf("%s cwd: %w", prefix, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("%s cwd: %w", prefix, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s cwd: %s is not a directory", prefix, want)
+	}
+	return abs, nil
 }
 
 func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
@@ -54,12 +78,16 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	if cmdText == "" {
 		return "", fmt.Errorf("%s: command is required", prefix)
 	}
+	dir, err := r.shellDir(prefix, args)
+	if err != nil {
+		return "", err
+	}
 	// Approval runs under its own window — the tool's default timeout, as
 	// before per-call timeouts existed — so a short per-call timeout never
 	// shortens the time the user has to read the prompt.
 	approvalWindow := time.Duration(r.defaultToolTimeoutSec(toolID)) * time.Second
 	approveCtx, cancelApproval := context.WithTimeout(ctx, approvalWindow)
-	err := r.authorizeShellCommand(approveCtx, toolID, cmdText)
+	err = r.authorizeShellCommand(approveCtx, toolID, cmdText)
 	approvalExpired := errors.Is(approveCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	cancelApproval()
 	if err != nil {
@@ -78,7 +106,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 		// sandbox policy still wraps the process.
 		shellName, shellArgs := shell.CommandLine(cmdText)
 		cmd := sandbox.Command(context.Background(), r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
-		cmd.Dir = r.cwd
+		cmd.Dir = dir
 		job, err := jobs.Default().Start(cmd, cmdText)
 		if err != nil {
 			return "", fmt.Errorf("start background job: %w", err)
@@ -98,7 +126,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// failures, with no hint that a sandbox exists.
 	shellName, shellArgs := shell.CommandLine(cmdText)
 	cmd := sandbox.Command(runCtx, r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
-	cmd.Dir = r.cwd
+	cmd.Dir = dir
 	// Own process group, group kill on timeout/cancel, and a bounded wait for
 	// the output pipes: a grandchild holding stdout (go test's test binaries,
 	// a server started with &) can no longer hang the call past its deadline.
@@ -107,10 +135,8 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	text := r.spoolResult(toolID, string(out))
 	status := shellFailureStatus(runCtx, cmd, err, timeout)
 	if status == "" {
-		if err != nil {
-			// Exited 0, but a background process kept the output pipe open
-			// past WaitDelay; anything it printed after that is not captured.
-			text = appendToolStatus(text, "note: a background process kept the output open after the command exited; later output was not captured")
+		if errors.Is(err, shell.ErrBackgroundLeft) {
+			text = appendToolStatus(text, "note: the command exited but left processes running (started with & or nohup); their later output is discarded and they are killed when the session ends. Use run_in_background for servers and watchers, so you can read their output with job-output and stop them with job-kill")
 		}
 		return text, nil
 	}
@@ -124,7 +150,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 // for success — including the case where the command exited 0 but a lingering
 // child made Wait give up on the pipes (exec.ErrWaitDelay).
 func shellFailureStatus(runCtx context.Context, cmd *exec.Cmd, err error, timeout time.Duration) string {
-	if err == nil {
+	if err == nil || errors.Is(err, shell.ErrBackgroundLeft) {
 		return ""
 	}
 	switch ctxErr := runCtx.Err(); {

@@ -144,9 +144,17 @@ func TestKillAllProcessTreesKillsRunningCommand(t *testing.T) {
 // the hangup handler and runs a long command in its own process group.
 const hangupHelperEnv = "SPETTRO_PROCTREE_HANGUP_HELPER"
 
+// hangupMarkerEnv, when set, makes the helper register an extra hangup
+// cleanup that creates the named file.
+const hangupMarkerEnv = "SPETTRO_PROCTREE_HANGUP_MARKER"
+
 func TestMain(m *testing.M) {
 	if pidFile := os.Getenv(hangupHelperEnv); pidFile != "" {
-		KillProcessTreesOnHangup()
+		var cleanups []func()
+		if marker := os.Getenv(hangupMarkerEnv); marker != "" {
+			cleanups = append(cleanups, func() { _ = os.WriteFile(marker, nil, 0o644) })
+		}
+		KillProcessTreesOnHangup(cleanups...)
 		cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30 & echo $! > "+pidFile+"; wait")
 		ConfigureProcessTree(cmd)
 		_, _ = CombinedOutput(cmd)
@@ -186,5 +194,104 @@ func TestHangupKillsCommandTrees(t *testing.T) {
 	if !processGone(pid) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("command %d survived the hangup", pid)
+	}
+}
+
+// A command that exits while something it started with & keeps running (and
+// holding the output pipe) returns promptly, and the leftover process stays
+// tracked so session cleanup still reaches it.
+func TestCombinedOutputTracksLeftoverBackgroundProcesses(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 47 & echo started $!")
+	ConfigureProcessTree(cmd)
+	start := time.Now()
+	out, err := CombinedOutput(cmd)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("CombinedOutput took %s for a command that exited at once", elapsed)
+	}
+	if !errors.Is(err, ErrBackgroundLeft) {
+		t.Fatalf("err = %v, want ErrBackgroundLeft", err)
+	}
+	if cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		t.Fatalf("exit status lost: %v", cmd.ProcessState)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 || fields[0] != "started" {
+		t.Fatalf("output = %q", out)
+	}
+	pid, _ := strconv.Atoi(fields[1])
+	if processGone(pid) {
+		t.Fatal("the background process must be left running until cleanup")
+	}
+	KillAllProcessTrees()
+	if !processGone(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("leftover background process %d survived KillAllProcessTrees", pid)
+	}
+}
+
+// Captured output is bounded: the head and tail are kept and the middle is
+// replaced by a marker, so a runaway command cannot exhaust memory.
+func TestCombinedOutputCapsCapturedBytes(t *testing.T) {
+	origHead, origTail := captureHeadBytes, captureTailBytes
+	captureHeadBytes, captureTailBytes = 1000, 1000
+	t.Cleanup(func() { captureHeadBytes, captureTailBytes = origHead, origTail })
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo FIRST; head -c 200000 /dev/zero | tr '\\0' 'a'; echo; echo LAST")
+	ConfigureProcessTree(cmd)
+	out, err := CombinedOutput(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > 2200 {
+		t.Fatalf("captured %d bytes, want about 2000", len(out))
+	}
+	s := string(out)
+	if !strings.HasPrefix(s, "FIRST\n") || !strings.HasSuffix(s, "LAST\n") || !strings.Contains(s, "bytes of output omitted") {
+		t.Fatalf("head/tail/marker missing: %.120q ... %.120q", s, s[max(0, len(s)-120):])
+	}
+}
+
+// Under nohup SIGHUP is ignored: the handler must not be installed, or a
+// hangup would SIGKILL every running command while spettro carries on.
+func TestHangupIgnoredUnderNohupLeavesCommandsAlone(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	helper := exec.Command("sh", "-c", `trap "" HUP; exec "$0" -test.run='^$'`, os.Args[0])
+	helper.Env = append(os.Environ(), hangupHelperEnv+"="+pidFile)
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = helper.Process.Kill(); _ = helper.Wait() }()
+	pid := waitForPIDFile(t, pidFile)
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	if err := helper.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("command %d was killed by an ignored hangup", pid)
+	}
+	if err := helper.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatal("helper died on an ignored hangup")
+	}
+}
+
+// The hangup cleanup also runs the extra cleanups (background jobs, PTY
+// sessions) main registers, before the process dies.
+func TestHangupRunsExtraCleanups(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+	marker := filepath.Join(dir, "cleaned")
+	helper := exec.Command(os.Args[0], "-test.run=^$")
+	helper.Env = append(os.Environ(), hangupHelperEnv+"="+pidFile, hangupMarkerEnv+"="+marker)
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := waitForPIDFile(t, pidFile)
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	if err := helper.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	_ = helper.Wait()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("extra hangup cleanup did not run")
 	}
 }

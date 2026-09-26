@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/jobs"
+	"spettro/internal/shell"
 	"spettro/internal/shell/shelltest"
 )
 
@@ -303,5 +306,54 @@ func TestShellOutputKeepsHeadAndTailWithSpoolPath(t *testing.T) {
 	}
 	if !strings.Contains(out, "full output saved to ") {
 		t.Fatalf("spool path not noted: %q", out)
+	}
+}
+
+// cwd/workdir (the spellings other harnesses use) change where the command
+// runs; silently running it in the workspace root would act on the wrong
+// directory. They are confined to the workspace like any path.
+func TestShellToolHonoursWorkingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell")
+	}
+	r := newShellTestRuntime(t)
+	if err := os.MkdirAll(filepath.Join(r.cwd, "frontend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"cwd", "workdir"} {
+		marker := "marker_" + key
+		_, err := r.runShellTool(context.Background(), "bash", shellArgsJSON(t, map[string]any{"command": "touch " + marker, key: "frontend"}), "bash")
+		if err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
+		if _, err := os.Stat(filepath.Join(r.cwd, "frontend", marker)); err != nil {
+			t.Fatalf("%s: command did not run in frontend/", key)
+		}
+	}
+	for _, dir := range []string{"..", "missing"} {
+		if _, err := r.runShellTool(context.Background(), "bash", shellArgsJSON(t, map[string]any{"command": "true", "cwd": dir}), "bash"); err == nil {
+			t.Fatalf("cwd %q accepted", dir)
+		}
+	}
+}
+
+// A process left running with & is reported, and the call does not wait
+// out the full pipe delay for it.
+func TestShellToolReportsLeftoverBackgroundProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell")
+	}
+	r := newShellTestRuntime(t)
+	start := time.Now()
+	out, err := r.runShellTool(context.Background(), "bash", shellArgsJSON(t, map[string]any{"command": "sleep 30 & echo started"}), "bash")
+	defer shell.KillAllProcessTrees()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("call took %s", time.Since(start))
+	}
+	if !strings.Contains(out, "started") || !strings.Contains(out, "run_in_background") {
+		t.Fatalf("output = %q", out)
 	}
 }
