@@ -69,6 +69,22 @@ func TestCompactHistoryAutoFiresUnderPressure(t *testing.T) {
 	}
 }
 
+// The trigger follows the caller's measure (provider-reported usage, tool
+// schemas) rather than the bare chars/4 history estimate, in both
+// directions.
+func TestCompactHistoryMeasuredUsesCallerMeasure(t *testing.T) {
+	msgs := msgsOfLen(10) // ~1000 estimated tokens: far below a 200k window
+	huge := func(string, []provider.Message) int { return 190_000 }
+	if _, did, err := CompactHistoryMeasured(context.Background(), fakeSend("s"), "", msgs, 200_000, false, Config{}, 0, huge); err != nil || !did {
+		t.Fatalf("a measured prompt near the window must compact, did=%v err=%v", did, err)
+	}
+	tiny := func(string, []provider.Message) int { return 10 }
+	// ~10k estimated tokens against a 40k window would trip the trigger.
+	if _, did, _ := CompactHistoryMeasured(context.Background(), fakeSend("s"), "", msgsOfLen(100), 40_000, false, Config{}, 0, tiny); did {
+		t.Fatal("a small measured prompt must not compact even when chars/4 says otherwise")
+	}
+}
+
 func TestCompactHistoryNeverSplitsToolCallFromResult(t *testing.T) {
 	msgs := msgsOfLen(20)
 	// Place an assistant tool-call right at the default cut boundary

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"spettro/internal/budget"
 	"spettro/internal/provider"
 )
 
@@ -19,19 +18,14 @@ type SendFunc func(ctx context.Context, req provider.Request) (provider.Response
 // same accounting the in-loop compaction uses, so pre-turn checks and in-loop
 // checks agree.
 func EstimateHistoryTokens(system string, msgs []provider.Message) int {
-	allContent := make([]string, 0, 1+len(msgs))
-	allContent = append(allContent, system)
-	for _, m := range msgs {
-		allContent = append(allContent, m.Content)
-		for _, tc := range m.ToolCalls {
-			allContent = append(allContent, tc.Name, string(tc.Args))
-		}
-		for _, tr := range m.ToolResults {
-			allContent = append(allContent, tr.Output)
-		}
-	}
-	return budget.EstimateTokens(allContent...)
+	return provider.EstimateRequestTokens(provider.Request{System: system, Messages: msgs})
 }
+
+// MeasureFunc returns the prompt tokens a request with this system prompt and
+// history would occupy. The agent loop passes one that adds the tool schemas
+// and is calibrated against the provider-reported prompt size of the previous
+// step; nil means EstimateHistoryTokens (chars/4 over the history alone).
+type MeasureFunc func(system string, msgs []provider.Message) int
 
 // CompactHistory summarizes the older portion of msgs into a single synthetic
 // message when the estimated request size approaches the context window (or
@@ -53,6 +47,15 @@ func CompactHistory(ctx context.Context, send SendFunc, system string, msgs []pr
 // (force still works). When failures has reached cfg.MaxFailures the
 // automatic trigger pauses, matching Evaluate's semantics.
 func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool, cfg Config, failures int) ([]provider.Message, bool, error) {
+	return CompactHistoryMeasured(ctx, send, system, msgs, window, force, cfg, failures, nil)
+}
+
+// CompactHistoryMeasured is CompactHistoryWithPolicy with a caller-supplied
+// measure for the trigger (see MeasureFunc).
+func CompactHistoryMeasured(ctx context.Context, send SendFunc, system string, msgs []provider.Message, window int, force bool, cfg Config, failures int, measure MeasureFunc) ([]provider.Message, bool, error) {
+	if measure == nil {
+		measure = EstimateHistoryTokens
+	}
 	if window <= 0 {
 		window = 128000 // sane default so compaction always has a threshold
 	}
@@ -63,7 +66,7 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 		if len(msgs) <= 5 {
 			return msgs, false, nil
 		}
-		estimate := EstimateHistoryTokens(system, msgs)
+		estimate := measure(system, msgs)
 		eval := Evaluate(window, cfg, State{TokensUsed: estimate, ConsecutiveFailures: failures})
 		// IsError acts as a backstop trigger only while auto compaction is on
 		// and not paused after repeated failures; with the off switch set, the
@@ -109,7 +112,7 @@ func CompactHistoryWithPolicy(ctx context.Context, send SendFunc, system string,
 	// call; an explicit /compact (force) always proceeds to stage 2.
 	msgs, offloaded := offloadToolResults(msgs, cutEnd)
 	if offloaded > 0 && !force {
-		estimate := EstimateHistoryTokens(system, msgs)
+		estimate := measure(system, msgs)
 		eval := Evaluate(window, cfg, State{TokensUsed: estimate, ConsecutiveFailures: failures})
 		if !eval.ShouldAutoCompact && !eval.IsError {
 			return msgs, true, nil
