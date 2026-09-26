@@ -1,18 +1,35 @@
 # Checkpointing and Rewind
 
-Spettro automatically snapshots the project working tree before every
-file-modifying tool call, so you can rewind files and/or conversation to any
+Spettro automatically snapshots the project working tree before every agent
+step that modifies files, so you can rewind files and/or conversation to any
 earlier step — like a time machine for your coding session.
 
 ## How it works
 
 Checkpointing is built on a **shadow git repository** stored in Spettro's data
-directory, completely separate from the project's own `.git`. Before each
-`file-write`, `file-edit`, `multi-edit`, or similar write tool, Spettro:
+directory, completely separate from the project's own `.git`. Before the
+first `file-write`, `file-edit`, `multi-edit`, shell command or similar write
+tool of each step (one model reply), Spettro:
 
 1. Stages all changes in the project working tree.
 2. Commits to the shadow repo with a label describing the pending tool call.
 3. Saves a snapshot of the current conversation alongside it.
+
+A step's mutating calls run one at a time in the order the model gave them,
+so that single snapshot captures the tree as it was before any of them, and
+rewinding to it undoes the whole step.
+
+Shell commands that provably cannot write to the working tree take no
+snapshot: `ls`, `cat`, `head`, `grep`/`rg`, `find` without `-delete`/`-exec`,
+`sed -n '<range>p'`, `git status`/`diff`/`log`/`show`, `go vet`/`list`, and
+pipelines of those. The classifier is deliberately narrow: anything else —
+build and test runners (`go test` can write golden files), interpreters,
+redirections into files, command substitution, background jobs — still
+snapshots first.
+
+Sub-agents running in their own git worktree (`isolation: "worktree"`) do not
+snapshot the main checkout, since their edits land outside it; instead a
+snapshot is taken right before their branch is merged back.
 
 The shadow repository lives under `~/.spettro/history/<project-hash>/repo.git`.
 It has its own identity (`spettro <spettro@localhost>`), its own config, and
@@ -34,9 +51,20 @@ Checkpointing is engineered to not duplicate your repository:
   (`*.iso`, `*.qcow2`, `*.safetensors`, `*.gguf`, …) seeded in the shadow
   repo's `info/exclude` (editable there). Skipped files are recorded on the
   checkpoint, and `/rewind` warns that they are unaffected by a restore.
+- **Few git processes per snapshot.** The shadow index persists between
+  snapshots, so `add -A` only rehashes files whose stat data changed, and a
+  single `diff-index` against the previous checkpoint decides whether
+  anything changed, counts the changed files and finds files over the size
+  cap. A changed tree then costs `write-tree`, `commit-tree` and one
+  `update-ref --stdin`.
 - **No-change fast path.** If the tree is identical to the previous
   checkpoint, no new commit is minted — the list entry points at the same
-  commit and only the conversation snapshot is stored.
+  commit and only the conversation snapshot is stored. If the conversation is
+  identical too, no entry is added at all.
+- **Conversation blobs are shared.** Every snapshot in one run records the
+  same run-start conversation; it is written once and later checkpoints
+  reference it, instead of one copy per snapshot. Retention only deletes a
+  blob once no kept checkpoint references it.
 - **Maintenance.** The shadow repo runs with `core.untrackedCache` and
   `index.version=4` to keep `add -A` fast on large trees, `git gc --auto`
   runs every 20 snapshots, and reflogs are disabled so pruned checkpoints

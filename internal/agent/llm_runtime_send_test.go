@@ -28,6 +28,8 @@ type loopReply struct {
 	toolArgs  string
 	finish    string // default: "tool_calls" with a tool, else "stop"
 	promptTok int
+	// delay holds the reply back (until the client gives up, if sooner).
+	delay time.Duration
 }
 
 type loopServer struct {
@@ -58,6 +60,13 @@ func newLoopServer(t *testing.T, replies ...loopReply) (*provider.Manager, strin
 			return
 		}
 		rep := replies[i]
+		if rep.delay > 0 {
+			select {
+			case <-time.After(rep.delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		for k, v := range rep.header {
 			w.Header().Set(k, v)
 		}

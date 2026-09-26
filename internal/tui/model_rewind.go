@@ -114,7 +114,7 @@ func (m Model) openRewind() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if len(items) == 0 {
-		m.showBanner("no checkpoints yet — they are taken before each file-modifying tool", "info")
+		m.showBanner("no checkpoints yet — one is taken before each agent step that modifies files", "info")
 		return m, nil
 	}
 	// Each checkpoint is taken *before* its tool call runs, so the edits of

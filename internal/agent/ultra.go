@@ -281,6 +281,11 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 	// every worktree instead of leaking them.
 	if workspaces != nil {
 		mergeCtx := context.WithoutCancel(ctx)
+		if ctx.Err() == nil {
+			// Merges write into the main checkout, which the members' own
+			// snapshots (taken in their worktrees) never covered.
+			r.checkpointStep(ultraToolID)
+		}
 		for i := range results {
 			// A cancelled swarm must not merge anything behind the user's
 			// back: preserve whatever work exists and drop empty worktrees.
@@ -316,7 +321,7 @@ func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpe
 		parentSnapshot:  r.sessionCtx,
 		parentCWD:       r.cwd,
 		ToolCallback:    r.toolCallback,
-		Checkpoint:      r.checkpoint,
+		Checkpoint:      r.subagentCheckpoint(cwd),
 		ShellApproval:   r.shellApproval,
 		AskUser:         r.askUser,
 		Manifest:        r.manifest,
