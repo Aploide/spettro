@@ -600,7 +600,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// once tool-search (or a call by name) activated it — in this turn or an
 	// earlier one of the carried conversation. It changes only on an
 	// activation, so the cached prompt prefix survives every other step.
-	runtime.surface = runtime.buildToolSurface(cfg.AllowedTools)
+	runtime.surface = runtime.buildToolSurface(cfg.AllowedTools, cfg.SystemPrompt)
 	runtime.restoreActivations(cfg.Messages)
 	cfg.toolSurfaceNote = toolSurfacePrompt(runtime.surface.deferredNames(), len(runtime.surface.droppedNames()) > 0)
 	nativeToolSpecs := runtime.surface.specs()
@@ -934,6 +934,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// A deferred tool the model called by name is advertised from
 			// the next step on, so its next call has the schema.
 			runtime.noteCalls(toolCallNames(resp.ToolCalls))
+			runtime.recordActivations(convMsgs)
 			// Loop check after execution: the signature includes each result,
 			// so re-running a command whose output changes (edit → test) is
 			// progress; only the same call with the same result repeats. On

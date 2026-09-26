@@ -25,23 +25,28 @@ An agent holding `tool-search` gets only its core tools advertised up front:
 `job-output`, `job-kill`, `tool-output`, `todo-write`, `web-fetch`, `lsp`,
 `ask-user`, `comment`, `tool-search`, `goal-complete`, the plan-mode tools,
 `ultra`, `workflow` and the MCP resource tools (plus `skill-read` when there
-are skills). Its other tools (`send-message`, `save-memory`, `config`,
-`download`, `skill-list`, `task-stop`, the `pty-*` tools, `view-image`,
-`rename-symbol`, `web-search`, `mcp-auth`, the worktree tools, ...) are
-deferred: the system prompt names them in one line, and a `tool-search` for a
-name or keyword returns the matching tools' descriptions and schemas and
-advertises them from the next step on. A deferred tool stays callable: a call
-by name runs, and advertises it too. The tool list therefore changes only
-when a tool is loaded, and a later turn of the conversation keeps what an
-earlier one loaded. Deferral never grants anything: `tool-search` only finds
-tools on the agent's `allowed_tools`, and an agent without `tool-search` gets
-all its tools advertised.
+are skills), and any tool it holds that its prompt names in backticks (the
+coding agent's prompt names `view-image`, the ask agent's `web-search`).
+Its other tools (`send-message`, `save-memory`, `config`, `download`,
+`skill-list`, `task-stop`, the `pty-*` tools, `rename-symbol`, `mcp-auth`,
+the worktree tools, ...) are deferred: the system prompt names them in one
+line, and a `tool-search` for a name or keyword returns the matching tools'
+descriptions and schemas and advertises them from the next step on. A
+deferred tool stays callable: a call by name runs, and advertises it too.
+Loaded tools follow the core ones in `allowed_tools` order, and the
+conversation records which are loaded, even through compaction. The tool
+list therefore changes only when a tool is loaded, and a later turn of the
+conversation advertises exactly the list the last request did. Deferral
+never grants anything: `tool-search` only finds tools on the agent's
+`allowed_tools`, and an agent without `tool-search` gets all its tools
+advertised.
 
 With no language server configured or installed for the workspace (see
 [lsp](lsp.md)), `lsp` and `rename-symbol` are neither advertised nor found by
 `tool-search`, and the system prompt says there is none. This is decided
-once per process: a server installed mid-session is picked up by the next
-session.
+once per process, for the life of that process: a server installed while
+spettro runs is picked up only after spettro restarts (a new session in the
+same TUI or ACP process does not re-check).
 
 ## Retired names
 

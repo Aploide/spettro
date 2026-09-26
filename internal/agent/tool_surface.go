@@ -20,10 +20,14 @@ import (
 // holds are advertised, deferred or found.
 //
 // The advertised list changes only when a deferred tool is activated, so the
-// prompt cache misses on that one step, not on every step.
+// prompt cache misses on that one step, not on every step. Activated tools
+// follow the core ones in allow-list order, not activation order, and the
+// conversation records them (provider.Message.LoadedTools), so a later turn
+// rebuilds the exact list the last request carried and hits the cache.
 
-// coreTools are the built-ins advertised from the first step. The rest of an
-// agent's built-ins are deferred behind tool-search.
+// coreTools are the built-ins advertised from the first step, together with
+// any held tool the agent's prompt names (see buildToolSurface). The rest of
+// an agent's built-ins are deferred behind tool-search.
 var coreTools = map[string]bool{
 	"agent":      true,
 	"glob":       true,
@@ -66,19 +70,23 @@ var coreTools = map[string]bool{
 var lspBuiltinTools = []string{"lsp", "rename-symbol", "diagnostics", "references", "hover", "lsp-restart"}
 
 // lspAvailable reports whether a language server is configured or installed
-// for the workspace. lsp.ForWorkspace caches its answer for the process, so
-// the tool list a session advertises does not change under it; a server
-// installed mid-session is picked up by the next one. Swappable in tests.
+// for the workspace. lsp.ForWorkspace caches its answer, "none" included,
+// for the life of the process, so the tool list a session advertises does
+// not change under it; a server installed while spettro runs is picked up
+// only after it restarts (a new session in the same TUI or ACP process gets
+// the cached answer). Swappable in tests.
 var lspAvailable = func(cwd string) bool { return lsp.ForWorkspace(cwd) != nil }
 
 // toolSurface is the set of tool schemas a run advertises: the core tools,
-// then each deferred tool activated so far, in activation order.
+// then each deferred tool activated so far, in allow-list order.
 type toolSurface struct {
 	mu       sync.Mutex
 	core     []provider.ToolSpec
 	deferred map[string]provider.ToolSpec
-	// deferredOrder lists the deferred tools in allow-list order.
+	// deferredOrder lists the deferred tools in allow-list order, and
+	// deferredRank maps each to its index there.
 	deferredOrder []string
+	deferredRank  map[string]int
 	// hidden are held tools left off the surface entirely (the language-server
 	// tools without a server).
 	hidden map[string]bool
@@ -92,7 +100,7 @@ type toolSurface struct {
 // without it every tool is advertised. isCore reports the tools always
 // advertised; hidden tools are dropped.
 func newToolSurface(specs []provider.ToolSpec, isCore func(string) bool, hidden map[string]bool) *toolSurface {
-	s := &toolSurface{deferred: map[string]provider.ToolSpec{}, hidden: hidden}
+	s := &toolSurface{deferred: map[string]provider.ToolSpec{}, deferredRank: map[string]int{}, hidden: hidden}
 	canDefer := slices.ContainsFunc(specs, func(t provider.ToolSpec) bool { return t.Name == "tool-search" })
 	for _, spec := range specs {
 		switch {
@@ -102,6 +110,7 @@ func newToolSurface(specs []provider.ToolSpec, isCore func(string) bool, hidden 
 			s.core = append(s.core, spec)
 		default:
 			s.deferred[spec.Name] = spec
+			s.deferredRank[spec.Name] = len(s.deferredOrder)
 			s.deferredOrder = append(s.deferredOrder, spec.Name)
 		}
 	}
@@ -172,7 +181,10 @@ func (s *toolSurface) activeLocked(name string) bool {
 
 // activate advertises the named deferred tools from the next request on and
 // returns the ones that were not active yet. Names that are not deferred
-// tools are ignored.
+// tools are ignored. The active tools stay in allow-list order, so the list
+// depends only on which tools are active: activations racing in concurrent
+// tool calls, or replayed from a carried conversation in another order,
+// give the same list.
 func (s *toolSurface) activate(names ...string) []string {
 	if s == nil {
 		return nil
@@ -188,7 +200,27 @@ func (s *toolSurface) activate(names ...string) []string {
 		s.active = append(s.active, spec)
 		added = append(added, name)
 	}
+	if len(added) > 0 {
+		slices.SortFunc(s.active, func(a, b provider.ToolSpec) int { return s.deferredRank[a.Name] - s.deferredRank[b.Name] })
+	}
 	return added
+}
+
+// activeNames lists the activated deferred tools, in allow-list order.
+func (s *toolSurface) activeNames() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.active) == 0 {
+		return nil
+	}
+	names := make([]string, len(s.active))
+	for i, t := range s.active {
+		names[i] = t.Name
+	}
+	return names
 }
 
 // toolSearchActivatedPrefix starts the line of a tool-search result naming
@@ -236,13 +268,16 @@ func (r *toolRuntime) noteCalls(names []string) {
 }
 
 // restoreActivations re-activates the deferred tools an earlier turn of the
-// carried conversation activated, by calling one or through tool-search, so
-// the tool list the conversation was using carries over.
+// carried conversation activated, so the tool list the conversation was
+// using carries over. The record on the first message
+// (provider.Message.LoadedTools) survives compaction; the calls and
+// tool-search results cover conversations saved before it existed.
 func (r *toolRuntime) restoreActivations(msgs []provider.Message) {
 	if r.surface == nil {
 		return
 	}
 	for _, m := range msgs {
+		r.surface.activate(m.LoadedTools...)
 		for _, tc := range m.ToolCalls {
 			r.surface.activate(r.canonicalName(tc.Name))
 		}
@@ -254,8 +289,22 @@ func (r *toolRuntime) restoreActivations(msgs []provider.Message) {
 	}
 }
 
+// recordActivations stores the activated deferred tools on the
+// conversation's first message (see provider.Message.LoadedTools).
+func (r *toolRuntime) recordActivations(msgs []provider.Message) {
+	if len(msgs) == 0 {
+		return
+	}
+	if names := r.surface.activeNames(); len(names) > 0 {
+		msgs[0].LoadedTools = names
+	}
+}
+
 // buildToolSurface builds the run's tool surface from its allow-list.
-func (r *toolRuntime) buildToolSurface(allowedTools []string) *toolSurface {
+// prompt is the agent's system prompt: a held tool it names in backticks
+// (`view-image`) is one the prompt tells the model to use, so it is
+// advertised up front rather than deferred.
+func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *toolSurface {
 	specs := buildToolSpecs(allowedTools)
 	specs = append(specs, r.unfoldedLSPToolSpecs(allowedTools)...)
 	hidden := map[string]bool{}
@@ -270,7 +319,7 @@ func (r *toolRuntime) buildToolSurface(allowedTools []string) *toolSurface {
 	// skill-read, so it is advertised whenever there is one.
 	hasSkills := len(r.skillsCatalog.Active()) > 0
 	isCore := func(name string) bool {
-		return coreTools[name] || (name == "skill-read" && hasSkills)
+		return coreTools[name] || (name == "skill-read" && hasSkills) || strings.Contains(prompt, "`"+name+"`")
 	}
 	return newToolSurface(specs, isCore, hidden)
 }

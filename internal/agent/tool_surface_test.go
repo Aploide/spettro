@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	agentprompts "spettro/agents"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 )
@@ -23,14 +24,25 @@ func stubLSPAvailable(t *testing.T, ok bool) {
 // codingSurface builds the default coding agent's tool surface.
 func codingSurface(t *testing.T) (*toolRuntime, map[string]struct{}) {
 	t.Helper()
+	return agentSurface(t, "coding")
+}
+
+// agentSurface builds a default agent's tool surface, with its built-in
+// prompt.
+func agentSurface(t *testing.T, id string) (*toolRuntime, map[string]struct{}) {
+	t.Helper()
 	m := config.DefaultAgentManifest()
-	spec, ok := m.AgentByID("coding")
+	spec, ok := m.AgentByID(id)
 	if !ok {
-		t.Fatal("coding agent missing")
+		t.Fatalf("%s agent missing", id)
+	}
+	prompt, ok := agentprompts.Prompt(spec.PromptFile)
+	if !ok {
+		t.Fatalf("%s agent prompt %q missing", id, spec.PromptFile)
 	}
 	allowedTools, policies := resolveToolPolicies(spec, &m)
 	r := &toolRuntime{cwd: t.TempDir(), toolPolicies: policies, manifest: &m}
-	r.surface = r.buildToolSurface(allowedTools)
+	r.surface = r.buildToolSurface(allowedTools, prompt)
 	allowed := map[string]struct{}{}
 	for _, id := range allowedTools {
 		allowed[id] = struct{}{}
@@ -54,10 +66,12 @@ func TestCodingAgentAdvertisesCoreToolsOnly(t *testing.T) {
 		"agent", "glob", "grep", "file-read", "file-write", "file-edit", "lsp", "bash",
 		"job-output", "job-kill", "tool-search", "todo-write", "ask-user", "comment",
 		"web-fetch", "tool-output",
+		// Named by the coding prompt.
+		"view-image",
 	}
 	wantDeferred := []string{
 		"task-stop", "config", "send-message", "skill-read", "skill-list", "save-memory",
-		"download", "view-image", "rename-symbol", "pty-start", "pty-write", "pty-kill",
+		"download", "rename-symbol", "pty-start", "pty-write", "pty-kill",
 	}
 	got := specNames(r.surface.specs())
 	if !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(wantCore))) {
@@ -96,7 +110,7 @@ func TestLSPToolsHiddenWithoutServer(t *testing.T) {
 	}
 	// An agent that never held the lsp tools gets no such note.
 	plain := &toolRuntime{cwd: t.TempDir()}
-	plain.surface = plain.buildToolSurface([]string{"file-read", "bash"})
+	plain.surface = plain.buildToolSurface([]string{"file-read", "bash"}, "")
 	if len(plain.surface.droppedNames()) != 0 {
 		t.Errorf("dropped %v from an agent without lsp tools", plain.surface.droppedNames())
 	}
@@ -108,23 +122,24 @@ func TestLSPToolsHiddenWithoutServer(t *testing.T) {
 func TestToolSearchLoadsDeferredTools(t *testing.T) {
 	stubLSPAvailable(t, true)
 	r, allowed := codingSurface(t)
-	out, err := r.runToolSearch(allowed, []byte(`{"query":"select:view-image,save-memory"}`))
+	out, err := r.runToolSearch(allowed, []byte(`{"query":"select:save-memory,download"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseToolSearchActivated(out); !slices.Equal(got, []string{"save-memory", "view-image"}) {
+	if got := parseToolSearchActivated(out); !slices.Equal(got, []string{"download", "save-memory"}) {
 		t.Fatalf("activated %v:\n%s", got, out)
 	}
-	if !strings.Contains(out, "## view-image") || !strings.Contains(out, `"path"`) {
+	if !strings.Contains(out, "## download") || !strings.Contains(out, `"url"`) {
 		t.Errorf("schema missing from the result:\n%s", out)
 	}
+	// Activated tools follow the core ones in allow-list order.
 	specs := specNames(r.surface.specs())
-	if tail := specs[len(specs)-2:]; !slices.Equal(tail, []string{"save-memory", "view-image"}) {
+	if tail := specs[len(specs)-2:]; !slices.Equal(tail, []string{"save-memory", "download"}) {
 		t.Errorf("advertised tail = %v", tail)
 	}
 	// A second search lists it as available instead of loading it again.
-	again, _ := r.runToolSearch(allowed, []byte(`{"query":"view-image"}`))
-	if parseToolSearchActivated(again) != nil || !strings.Contains(again, "- view-image (available") {
+	again, _ := r.runToolSearch(allowed, []byte(`{"query":"download"}`))
+	if parseToolSearchActivated(again) != nil || !strings.Contains(again, "- download (available") {
 		t.Errorf("second search:\n%s", again)
 	}
 	// A keyword finds the deferred tools it describes.
@@ -149,7 +164,7 @@ func TestToolSearchLoadsDeferredTools(t *testing.T) {
 func TestNoDeferralWithoutToolSearch(t *testing.T) {
 	stubLSPAvailable(t, true)
 	r := &toolRuntime{cwd: t.TempDir()}
-	r.surface = r.buildToolSurface([]string{"file-read", "save-memory", "view-image"})
+	r.surface = r.buildToolSurface([]string{"file-read", "save-memory", "view-image"}, "")
 	if got := specNames(r.surface.specs()); !slices.Equal(got, []string{"file-read", "save-memory", "view-image"}) {
 		t.Errorf("advertised %v", got)
 	}
@@ -203,8 +218,13 @@ func TestRunToolLoopDeferredTools(t *testing.T) {
 			t.Errorf("deferred tool called by name was refused: %s", tr.Output)
 		}
 	}
-	if got := requestToolNames(reqs[2]); !slices.Equal(got, []string{"file-read", "tool-search", "comment", "save-memory", "skill-list"}) {
+	// Activated tools stand in allow-list order, whatever order they were
+	// loaded in, and the conversation records them.
+	if got := requestToolNames(reqs[2]); !slices.Equal(got, []string{"file-read", "tool-search", "comment", "skill-list", "save-memory"}) {
 		t.Errorf("after the direct call tools = %v", got)
+	}
+	if got := res.messages[0].LoadedTools; !slices.Equal(got, []string{"skill-list", "save-memory"}) {
+		t.Errorf("recorded loaded tools = %v", got)
 	}
 	if s2 := fmt.Sprint(requestMessages(reqs[2])[0]["content"]); s2 != system {
 		t.Error("system prompt changed between steps")
@@ -214,7 +234,67 @@ func TestRunToolLoopDeferredTools(t *testing.T) {
 	if _, err := runToolLoop(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got := requestToolNames(ls.requests()[3]); !slices.Equal(got, []string{"file-read", "tool-search", "comment", "save-memory", "skill-list"}) {
-		t.Errorf("next turn tools = %v", got)
+	if got := requestToolNames(ls.requests()[3]); !slices.Equal(got, requestToolNames(reqs[2])) {
+		t.Errorf("next turn tools = %v, want the last request's %v", got, requestToolNames(reqs[2]))
+	}
+}
+
+// A later turn rebuilds the exact tool list the last request carried, however
+// the tools were loaded: a call by name and a tool-search in one step (whose
+// live order used to differ from the replayed one), or loads a compaction
+// has since summarized away.
+func TestRestoredToolListMatchesLiveOne(t *testing.T) {
+	stubLSPAvailable(t, true)
+	live, allowed := codingSurface(t)
+	var msgs []provider.Message
+	msgs = append(msgs, provider.Message{Role: provider.RoleUser, Content: "task"})
+	// One step: download called by name, and a tool-search for save-memory
+	// (which activates while it runs, before noteCalls).
+	out, err := live.runToolSearch(allowed, []byte(`{"query":"select:save-memory"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.noteCalls([]string{"download", "tool-search"})
+	live.recordActivations(msgs)
+	msgs = append(msgs,
+		provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.NativeTool{{ID: "1", Name: "download"}, {ID: "2", Name: "tool-search"}}},
+		provider.Message{Role: provider.RoleUser, ToolResults: []provider.ToolResult{{ID: "1", Name: "download", Output: "ok"}, {ID: "2", Name: "tool-search", Output: out}}},
+	)
+	want := specNames(live.surface.specs())
+
+	// Replayed from the calls and results alone (a conversation saved
+	// before the record existed), the load order differs from the live one.
+	unrecorded := slices.Clone(msgs)
+	unrecorded[0].LoadedTools = nil
+	restored, _ := codingSurface(t)
+	restored.restoreActivations(unrecorded)
+	if got := specNames(restored.surface.specs()); !slices.Equal(got, want) {
+		t.Errorf("restored %v, live %v", got, want)
+	}
+	// After a compaction only the first message and a summary remain.
+	compacted := []provider.Message{msgs[0], {Role: provider.RoleUser, Content: "summary"}}
+	fromRecord, _ := codingSurface(t)
+	fromRecord.restoreActivations(compacted)
+	if got := specNames(fromRecord.surface.specs()); !slices.Equal(got, want) {
+		t.Errorf("restored after compaction %v, live %v", got, want)
+	}
+}
+
+// A held tool the agent's prompt tells the model to use is advertised up
+// front: the ask agent's prompt points at web-search.
+func TestPromptNamedToolsAreCore(t *testing.T) {
+	stubLSPAvailable(t, true)
+	r, _ := agentSurface(t, "ask")
+	if got := specNames(r.surface.specs()); !slices.Contains(got, "web-search") {
+		t.Errorf("ask agent advertises %v, want web-search among them", got)
+	}
+	if slices.Contains(r.surface.deferredNames(), "web-search") {
+		t.Error("web-search deferred for the ask agent")
+	}
+	// Without the prompt naming it, it is deferred.
+	plain := &toolRuntime{cwd: t.TempDir()}
+	plain.surface = plain.buildToolSurface([]string{"file-read", "tool-search", "web-search"}, "Use `file-read`.")
+	if !slices.Equal(plain.surface.deferredNames(), []string{"web-search"}) {
+		t.Errorf("deferred %v, want web-search", plain.surface.deferredNames())
 	}
 }
