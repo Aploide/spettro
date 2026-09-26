@@ -30,8 +30,9 @@ const (
 	// maxLoopNudges is how many nudges a run gets before the next trip
 	// aborts it.
 	maxLoopNudges = 3
-	// hardLoopRepeats aborts regardless of nudges once the very same
-	// (call, result) pair repeats this many times back to back.
+	// hardLoopRepeats aborts regardless of the remaining nudge budget once
+	// the very same (call, result) pair repeats this many times back to back
+	// (after at least one nudge).
 	hardLoopRepeats = 8
 	// loopClearAfter forgives earlier nudges once this many consecutive tool
 	// calls went by without a trip: the agent recovered, and a much later,
@@ -105,10 +106,11 @@ func newLoopDetector(p config.LoopDetectionPolicy) *loopDetector {
 }
 
 // volatileOutput matches result fragments that change between otherwise
-// identical runs (durations, timestamps, pointer addresses), so a failing
-// test that prints "FAIL pkg 0.012s" then "FAIL pkg 0.015s" still hashes the
-// same.
-var volatileOutput = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|µs|us|ms|s|m|h)\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|0x[0-9a-fA-F]+`)
+// identical runs (durations, timestamps, pointer addresses, and the spool /
+// background-job ids a fresh run is always given — every oversized output's
+// truncation footer carries a new "spool:N"), so a failing test that prints
+// "FAIL pkg 0.012s" then "FAIL pkg 0.015s" still hashes the same.
+var volatileOutput = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|µs|us|ms|s|m|h)\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|0x[0-9a-fA-F]+|\bspool:\d+|\bjob-\d+`)
 
 // callSignature normalizes one executed tool call to
 // "name\x00hash(args)\x00hash(status+output)". JSON args are compacted first
@@ -128,8 +130,8 @@ func callSignature(name string, args json.RawMessage, status, output string) str
 // (results[i] belongs to calls[i]; missing results hash as empty) and the
 // assistant text — and returns the action to take. Trips nudge (resetting
 // the repetition counters so the agent is judged on fresh behavior) until
-// maxLoopNudges nudges were spent or hardLoopRepeats identical outcomes ran
-// back to back; then it aborts.
+// maxLoopNudges nudges were spent, or hardLoopRepeats identical outcomes ran
+// back to back after a nudge; then it aborts.
 func (d *loopDetector) observe(calls []toolCall, results []parallelResult, text string) loopAction {
 	if d == nil || !d.enabled {
 		return loopOK
@@ -156,7 +158,9 @@ func (d *loopDetector) observe(calls []toolCall, results []parallelResult, text 
 		return loopOK
 	}
 	d.cleanCalls = 0
-	if hard || d.nudges >= maxLoopNudges {
+	// The hard limit ends the run only once the agent was warned: a single
+	// response with 8+ identical parallel calls gets its nudge first.
+	if (hard && d.nudges > 0) || d.nudges >= maxLoopNudges {
 		return loopAbort
 	}
 	d.nudges++

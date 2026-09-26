@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"spettro/internal/config"
@@ -178,5 +179,42 @@ func TestLoopDetectorCustomThreshold(t *testing.T) {
 	d.observe(call("shell", `{"cmd":"ls"}`), res("a b"), "")
 	if got := d.observe(call("shell", `{"cmd":"ls"}`), res("a b"), ""); got != loopNudge {
 		t.Fatalf("got %v, want loopNudge at custom threshold 2", got)
+	}
+}
+
+// Oversized outputs are truncated with a footer naming a fresh spool id on
+// every run; the id must not make identical results look different.
+func TestLoopDetectorSpooledOutputStillMatches(t *testing.T) {
+	d := newLoopDetector(config.LoopDetectionPolicy{})
+	big := strings.Repeat("--- FAIL: TestX\n    x_test.go:12: boom\n", 3000)
+	var got []loopAction
+	for i := range 20 {
+		out := spoolTruncate(big, 4000, true, fmt.Sprintf("spool:%d", 100+i))
+		a := d.observe(call("shell-exec", `{"command":"go test ./..."}`), res(out), "")
+		got = append(got, a)
+		if a == loopAbort {
+			break
+		}
+	}
+	if got[2] != loopNudge || got[len(got)-1] != loopAbort {
+		t.Fatalf("identical spooled results must nudge then abort, got %v", got)
+	}
+}
+
+// A single response with hardLoopRepeats identical parallel calls is warned
+// first; only persisting after the nudge aborts.
+func TestLoopDetectorIdenticalParallelBatchNudgesFirst(t *testing.T) {
+	d := newLoopDetector(config.LoopDetectionPolicy{})
+	var calls []toolCall
+	var results []parallelResult
+	for range hardLoopRepeats {
+		calls = append(calls, call("file-read", `{"path":"a.go"}`)...)
+		results = append(results, res("package a")...)
+	}
+	if got := d.observe(calls, results, ""); got != loopNudge {
+		t.Fatalf("first trip: got %v, want loopNudge", got)
+	}
+	if got := d.observe(call("file-read", `{"path":"a.go"}`), res("package a"), ""); got != loopAbort {
+		t.Fatalf("repeat after the nudge: got %v, want loopAbort", got)
 	}
 }
