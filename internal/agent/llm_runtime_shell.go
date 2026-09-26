@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"spettro/internal/config"
 	"spettro/internal/fsperm"
@@ -31,15 +34,23 @@ func isBlockedCommand(cmd string) bool {
 	return isDangerousRM(cmd)
 }
 
+// shellToolArgs are the shell tool's arguments. cmd is accepted as an alias for
+// command, and fields other harnesses send (description, cwd) are ignored by
+// the lenient decoder rather than failing the call.
+type shellToolArgs struct {
+	Command         string   `json:"command"`
+	Cmd             string   `json:"cmd"`
+	RunInBackground flexBool `json:"run_in_background"`
+	// Timeout is an optional per-call limit in seconds; see shellTimeout.
+	Timeout flexInt `json:"timeout"`
+}
+
 func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
-	var args struct {
-		Command         string `json:"command"`
-		RunInBackground bool   `json:"run_in_background"`
-	}
+	var args shellToolArgs
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("%s args: %w", prefix, err)
 	}
-	cmdText := strings.TrimSpace(args.Command)
+	cmdText := firstNonEmpty(args.Command, args.Cmd)
 	if cmdText == "" {
 		return "", fmt.Errorf("%s: command is required", prefix)
 	}
@@ -63,19 +74,151 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 		}
 		return fmt.Sprintf("started background job %s (poll with job-output, terminate with job-kill)", job.ID), nil
 	}
+	// The deadline starts here, after approval, so time spent waiting on the
+	// user is never charged to the command.
+	timeout := r.shellTimeout(toolID, int(args.Timeout))
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	// OS-native confinement enforces the active sandbox policy at the kernel
 	// level. The policy is set once at startup (CLI flags / manifest) and is
 	// not visible to the model: blocked operations surface as ordinary command
 	// failures, with no hint that a sandbox exists.
 	shellName, shellArgs := shell.CommandLine(cmdText)
-	cmd := sandbox.Command(ctx, r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
+	cmd := sandbox.Command(runCtx, r.sandboxPolicy(), r.cwd, shellName, shellArgs...)
 	cmd.Dir = r.cwd
+	// Own process group, group kill on timeout/cancel, and a bounded wait for
+	// the output pipes: a grandchild holding stdout (go test's test binaries,
+	// a server started with &) can no longer hang the call past its deadline.
+	shell.ConfigureProcessTree(cmd)
 	out, err := cmd.CombinedOutput()
 	text := r.spoolResult(toolID, string(out))
-	if err != nil {
-		return text, fmt.Errorf("command failed: %w", err)
+	status := shellFailureStatus(runCtx, cmd, err, timeout)
+	if status == "" {
+		if err != nil {
+			// Exited 0, but a background process kept the output pipe open
+			// past WaitDelay; anything it printed after that is not captured.
+			text = appendToolStatus(text, "note: a background process kept the output open after the command exited; later output was not captured")
+		}
+		return text, nil
 	}
-	return text, nil
+	// The status goes after the (possibly truncated) output, never instead of
+	// it: a failing build or test run is exactly when the model needs to read
+	// what the command printed.
+	return appendToolStatus(text, status), &toolOutputError{msg: status}
+}
+
+// shellFailureStatus classifies how a foreground command ended. It returns ""
+// for success — including the case where the command exited 0 but a lingering
+// child made Wait give up on the pipes (exec.ErrWaitDelay).
+func shellFailureStatus(runCtx context.Context, cmd *exec.Cmd, err error, timeout time.Duration) string {
+	if err == nil {
+		return ""
+	}
+	switch ctxErr := runCtx.Err(); {
+	case errors.Is(ctxErr, context.DeadlineExceeded):
+		return fmt.Sprintf("command timed out after %s; process group killed", formatTimeoutSeconds(timeout))
+	case errors.Is(ctxErr, context.Canceled):
+		return "command cancelled; process group killed"
+	}
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		return ""
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if code := exitErr.ExitCode(); code >= 0 {
+			return fmt.Sprintf("exit status %d", code)
+		}
+		return exitErr.String() // e.g. "signal: killed"
+	}
+	return err.Error()
+}
+
+// formatTimeoutSeconds renders a timeout as whole seconds ("120s").
+func formatTimeoutSeconds(d time.Duration) string {
+	return fmt.Sprintf("%ds", int((d+time.Second-1)/time.Second))
+}
+
+// maxShellTimeoutSec caps the per-call timeout a model may request. A
+// configured default above it (goal_shell_timeout_sec) raises the cap to match.
+const maxShellTimeoutSec = 600
+
+// shellTimeoutGrace is added to the outer per-tool deadline of a foreground
+// shell call (executeWithTimeout) so the command's own deadline, which starts
+// after approval, always fires first and produces the timeout message.
+const shellTimeoutGrace = 30 * time.Second
+
+// shellTimeout returns how long a foreground shell command may run: the
+// configured default for the tool unless the call asked for its own limit, in
+// which case that is clamped to [1s, max(maxShellTimeoutSec, default)].
+//
+// Models trained on harnesses whose timeout is in milliseconds send values
+// like 120000; anything above an hour is read as milliseconds, since a seconds
+// value that large would be clamped to the cap anyway.
+func (r *toolRuntime) shellTimeout(toolID string, requestedSec int) time.Duration {
+	def := r.defaultToolTimeoutSec(toolID)
+	if requestedSec <= 0 {
+		return time.Duration(def) * time.Second
+	}
+	if requestedSec > 3600 {
+		requestedSec = (requestedSec + 999) / 1000
+	}
+	ceiling := max(maxShellTimeoutSec, def)
+	return time.Duration(min(max(requestedSec, 1), ceiling)) * time.Second
+}
+
+// foregroundShellTimeout reports the timeout a shell tool call will run under,
+// and false for calls that are not foreground shell commands (other tools,
+// background jobs, bash-output polling a job).
+func (r *toolRuntime) foregroundShellTimeout(call toolCall) (time.Duration, bool) {
+	switch call.Tool {
+	case "shell-exec", "bash", "bash-output":
+	default:
+		return 0, false
+	}
+	var probe struct {
+		JobID           string   `json:"job_id"`
+		RunInBackground flexBool `json:"run_in_background"`
+		Timeout         flexInt  `json:"timeout"`
+	}
+	if json.Unmarshal(call.Args, &probe) != nil {
+		// Malformed arguments fail in runShellTool; bound the call by default.
+		return r.shellTimeout(call.Tool, 0), true
+	}
+	if strings.TrimSpace(probe.JobID) != "" || probe.RunInBackground {
+		return 0, false
+	}
+	return r.shellTimeout(call.Tool, int(probe.Timeout)), true
+}
+
+// toolOutputError is returned by a tool whose output already describes the
+// failure (a shell command's output ending in "[exit status 1]"). The result
+// is still marked as an error, but the output is passed to the model as-is
+// instead of being replaced by the error text.
+type toolOutputError struct{ msg string }
+
+func (e *toolOutputError) Error() string { return e.msg }
+
+// appendToolStatus appends a bracketed status line to a tool's output.
+func appendToolStatus(output, status string) string {
+	if output == "" {
+		return "[" + status + "]"
+	}
+	return strings.TrimRight(output, "\n") + "\n[" + status + "]"
+}
+
+// toolErrorOutput renders a failed call's result for the model. Output the
+// tool produced before failing is kept — a failure's diagnostics usually live
+// there — with the error appended; a tool that returned nothing gets the plain
+// "error: ..." line.
+func toolErrorOutput(output string, err error) string {
+	var described *toolOutputError
+	if errors.As(err, &described) {
+		return output
+	}
+	if strings.TrimSpace(output) == "" {
+		return "error: " + err.Error()
+	}
+	return strings.TrimRight(output, "\n") + "\nerror: " + err.Error()
 }
 
 type allowedCommandsFile struct {

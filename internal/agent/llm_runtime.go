@@ -963,7 +963,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			status := "success"
 			if err != nil {
 				status = "error"
-				output = "error: " + err.Error()
+				output = toolErrorOutput(output, err)
 			}
 			results[idx] = parallelResult{
 				agentID: r.traceID(),
@@ -1023,18 +1023,36 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
 		return out, err
 	}
+	timeout := time.Duration(r.defaultToolTimeoutSec(call.Tool)) * time.Second
+	if shellTimeout, ok := r.foregroundShellTimeout(call); ok {
+		// runShellTool bounds the command itself (honouring a per-call
+		// timeout argument) and reports the timeout with the partial output;
+		// this outer deadline is only a backstop, so it must fire later.
+		timeout = shellTimeout + shellTimeoutGrace
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := r.execute(tctx, call, allowed)
+	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
+	return out, err
+}
+
+// defaultToolTimeoutSec is a tool's execution limit in seconds when the call
+// does not ask for its own: the manifest's timeout_sec, else 45s, with longer
+// floors for swarms/workflows and for shell tools in goal mode.
+func (r *toolRuntime) defaultToolTimeoutSec(tool string) int {
 	timeoutSec := 45
-	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
+	if spec, ok := r.toolPolicies[tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
 	}
-	if call.Tool == "ultra" || call.Tool == "workflow" {
+	if tool == "ultra" || tool == "workflow" {
 		// A swarm — or a workflow script, which may run several rounds of them
 		// — is many full sub-agent turns; the per-tool default (and any
 		// manifest value tuned for single tools) would kill it mid-flight.
 		timeoutSec = 7200
 	}
 	if r.goalMode {
-		switch call.Tool {
+		switch tool {
 		case "shell-exec", "bash", "bash-output":
 			if r.shellTimeoutSec > 0 {
 				timeoutSec = r.shellTimeoutSec
@@ -1043,11 +1061,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 			}
 		}
 	}
-	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-	out, err := r.execute(tctx, call, allowed)
-	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
-	return out, err
+	return timeoutSec
 }
 
 // blocksOnUserInput reports whether a tool's execution is a wait on the human,

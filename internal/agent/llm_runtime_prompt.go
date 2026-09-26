@@ -22,7 +22,11 @@ func toolOutputHistoryLimit(name string) int {
 		return 40000
 	case "repo-search", "grep", "glob", "ls", "diagnostics", "references", "hover":
 		return 16000
-	case "shell-exec", "bash", "bash-output", "job-output", "tool-output", "pty-start", "pty-write":
+	case "shell-exec", "bash", "bash-output":
+		// Build and test logs are what the model iterates on; the failures
+		// usually sit at the end, which spoolResult keeps (head + tail).
+		return shellOutputHistoryLimit
+	case "job-output", "tool-output", "pty-start", "pty-write":
 		return 8000
 	case "web-fetch":
 		return webFetchDefaultBudget
@@ -218,8 +222,8 @@ var builtinNativeToolDescs = map[string]string{
 	"glob":               "Find files matching a glob pattern (** for recursive search).",
 	"grep":               "Search files with a regular expression.",
 	"repo-search":        "Full-text search across the repository. For a symbol name (function, type, class, const) it lists ranked definitions first, then usages.",
-	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
-	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately.",
+	"shell-exec":         "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately. Foreground commands run under a timeout (optional timeout argument in seconds, max 600); on timeout the whole process group is killed and the partial output returned. A failing command returns its full output followed by [exit status N].",
+	"bash":               "Execute a shell command. Set run_in_background for long-running commands (servers, watchers); a job ID is returned immediately. Foreground commands run under a timeout (optional timeout argument in seconds, max 600); on timeout the whole process group is killed and the partial output returned. A failing command returns its full output followed by [exit status N].",
 	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",
 	"job-output":         "Fetch accumulated stdout/stderr of a background job (job-N) or page through a spooled truncated tool result (spool:N). Pass the next_offset from the previous call to read incrementally.",
 	"job-kill":           "Terminate a background job by ID.",
@@ -278,8 +282,8 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"glob":               json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
 	"grep":               json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"glob":{"type":"string"},"type":{"type":"string"},"case_insensitive":{"type":"boolean"},"context":{"type":"integer"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"max_results":{"type":"integer"}},"required":["pattern"]}`),
 	"repo-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
-	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
-	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["command"]}`),
+	"shell-exec":         json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"},"timeout":{"type":"integer","description":"optional limit in seconds for a foreground command (default as configured, max 600)"}},"required":["command"]}`),
+	"bash":               json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"},"timeout":{"type":"integer","description":"optional limit in seconds for a foreground command (default as configured, max 600)"}},"required":["command"]}`),
 	"bash-output":        json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"run_in_background":{"type":"boolean"},"job_id":{"type":"string"},"offset":{"type":"number"}}}`),
 	"job-output":         json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer"}},"required":["job_id"]}`),
 	"job-kill":           json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}`),
