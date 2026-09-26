@@ -57,6 +57,7 @@ func TestEnvironmentSectionContents(t *testing.T) {
 	cwd := t.TempDir()
 	writeFileAt(t, filepath.Join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n")
 	writeFileAt(t, filepath.Join(cwd, "go.mod"), "module x\n")
+	writeFileAt(t, filepath.Join(cwd, ".spettro", "cache", "symbols.json"), "{}")
 	if err := os.MkdirAll(filepath.Join(cwd, "internal"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -74,11 +75,25 @@ func TestEnvironmentSectionContents(t *testing.T) {
 			t.Errorf("environment missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, ".git/") {
-		t.Errorf(".git must be hidden from the listing:\n%s", got)
+	for _, hidden := range []string{".git/", ".spettro/"} {
+		if strings.Contains(got, hidden) {
+			t.Errorf("%s must be hidden from the listing:\n%s", hidden, got)
+		}
 	}
 	if strings.Contains(got, "# Project instructions") {
 		t.Errorf("no instruction files exist, section must be omitted:\n%s", got)
+	}
+}
+
+// TestTopLevelListingHidesSpettroDir: a work dir holding nothing but Spettro's
+// own state reads as empty, so the model doesn't go exploring it.
+func TestTopLevelListingHidesSpettroDir(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, ".spettro"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := topLevelListing(cwd, 5); got != "- Top-level entries: (empty directory)" {
+		t.Fatalf("listing = %q", got)
 	}
 }
 

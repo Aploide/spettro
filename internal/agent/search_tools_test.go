@@ -300,6 +300,33 @@ func TestGrepSkipDirsExcludeOnlyDirectories(t *testing.T) {
 	})
 }
 
+// Spettro's own state dir never shows up in a workspace-wide glob or grep.
+func TestSearchToolsHideSpettroDir(t *testing.T) {
+	setup := func(t *testing.T) *toolRuntime {
+		r := newShellTestRuntime(t)
+		writeTree(t, r.cwd, map[string]string{
+			"main.go":                   "Foo\n",
+			".spettro/cache/symbols.go": "Foo\n",
+			".spettro/memory.md":        "Foo\n",
+		})
+		return r
+	}
+	r := setup(t)
+	out, err := r.runGlob(context.Background(), "**/*", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, ".spettro") || !strings.Contains(out, "main.go") {
+		t.Fatalf("glob output: %q", out)
+	}
+	grepBackends(t, func(t *testing.T) {
+		r := setup(t)
+		if got, want := grepFiles(t, r, grepArgs{Pattern: "Foo"}), []string{"main.go"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("files = %v, want %v", got, want)
+		}
+	})
+}
+
 // glob lists symlinks to files (the CLAUDE.md -> AGENTS.md pair) but does not
 // descend into symlinked directories; grep, like ripgrep, skips symlinks met
 // while walking, so both of its backends agree.

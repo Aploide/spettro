@@ -23,11 +23,13 @@ func TestNewCreatesDirs(t *testing.T) {
 	if s.GlobalDir != filepath.Join(home, ".spettro") {
 		t.Errorf("GlobalDir = %q", s.GlobalDir)
 	}
-	for _, dir := range []string{s.ProjectDir, s.GlobalDir} {
-		info, err := os.Stat(dir)
-		if err != nil || !info.IsDir() {
-			t.Errorf("dir %q not created: %v", dir, err)
-		}
+	if info, err := os.Stat(s.GlobalDir); err != nil || !info.IsDir() {
+		t.Errorf("global dir %q not created: %v", s.GlobalDir, err)
+	}
+	// The project dir is created on first write, not by New: an empty
+	// .spettro/ in every work dir is clutter the model goes probing.
+	if _, err := os.Stat(s.ProjectDir); !os.IsNotExist(err) {
+		t.Errorf("project dir %q must not be created eagerly (stat err: %v)", s.ProjectDir, err)
 	}
 	// The global store holds credentials, so it must not be reachable by other
 	// accounts. Asserted through fsperm rather than on mode bits, which
@@ -74,5 +76,20 @@ func TestWriteAndAppendProjectFile(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(filepath.Join(s.ProjectDir, "new.log")); string(data) != "line" {
 		t.Errorf("appended new file = %q", data)
+	}
+}
+
+// Appending first (no prior write) must also create the lazy project dir.
+func TestAppendProjectFileCreatesProjectDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendProjectFile("log.txt", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(s.ProjectDir, "log.txt")); string(data) != "x" {
+		t.Errorf("content = %q", data)
 	}
 }
