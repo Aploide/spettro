@@ -28,11 +28,11 @@ func loadV12Default(t *testing.T) AgentManifest {
 	return m
 }
 
-// lspOpsUsable is the set of language-server operations, by the name of the
-// tool that did each before v13, an agent can call: before the fold, the
-// retired tools it can call; after it, those the lsp tool's rules leave it
-// (the runtime applies a rule naming a retired tool to its op, see
-// agent.lspOpDenied).
+// lspOpsUsable is the set of language-server ops an agent can call: before
+// the fold, the ops of the retired built-ins it can call (references is ops
+// references and definition); after it, the ops of the built-in lsp tool, if
+// it can call that, that no lsp-op rule denies it, exactly as the runtime
+// decides (agent.lspOpDenied).
 func lspOpsUsable(m AgentManifest, agentID string) []string {
 	a, ok := m.AgentByID(agentID)
 	if !ok {
@@ -41,20 +41,18 @@ func lspOpsUsable(m AgentManifest, agentID string) []string {
 	var out []string
 	for _, id := range a.AllowedTools {
 		t, ok := m.toolNamed(id)
-		if !ok || !m.ToolUsableBy(a, t) {
+		if !ok || t.Kind != "builtin" || !m.ToolUsableBy(a, t) {
 			continue
 		}
-		if slices.Contains(lspConsolidatedTools[0].retired, id) && t.ID == id {
-			out = append(out, id)
+		if t.ID == id && len(LSPOpsOf(id)) > 0 {
+			out = append(out, LSPOpsOf(id)...)
 			continue
 		}
-		if t.ID != "lsp" || t.Kind != "builtin" {
+		if t.ID != "lsp" {
 			continue
 		}
-		for _, op := range lspConsolidatedTools[0].retired {
-			asOp := t
-			asOp.ID = op
-			if m.ToolAllowedByRules(a, asOp) && !slices.Contains(out, op) {
+		for _, op := range []string{"diagnostics", "references", "definition", "hover", "restart"} {
+			if !LSPOpDenied(op, m.Runtime.PermissionRules, a.PermissionRules, t.PermissionRules) {
 				out = append(out, op)
 			}
 		}
@@ -165,19 +163,19 @@ func TestV13GrantsOnlyTheOpsAnAgentHad(t *testing.T) {
 	if got := agentTools(t, after, "restarter"); !slices.Equal(got, []string{"file-read", "lsp"}) {
 		t.Fatalf("restarter tools = %v", got)
 	}
-	if got := lspOpsUsable(after, "restarter"); !slices.Equal(got, []string{"lsp-restart"}) {
-		t.Fatalf("restarter ops = %v, want only lsp-restart", got)
+	if got := lspOpsUsable(after, "restarter"); !slices.Equal(got, []string{"restart"}) {
+		t.Fatalf("restarter ops = %v, want only restart", got)
 	}
-	if got := lspOpsUsable(after, "looker"); !slices.Equal(got, []string{"hover", "references"}) {
-		t.Fatalf("looker ops = %v, want hover and references", got)
+	if got := lspOpsUsable(after, "looker"); !slices.Equal(got, []string{"definition", "hover", "references"}) {
+		t.Fatalf("looker ops = %v, want definition, hover and references", got)
 	}
 	if got := agentTools(t, after, "reader"); !slices.Equal(got, []string{"file-read"}) {
 		t.Fatalf("an agent with no language-server tool must not gain lsp: %v", got)
 	}
 	looker, _ := after.AgentByID("looker")
 	want := []PermissionRule{
-		{Permission: "tool", Pattern: "diagnostics", Action: RuleDeny},
-		{Permission: "tool", Pattern: "lsp-restart", Action: RuleDeny},
+		{Permission: LSPOpPermission, Pattern: "diagnostics", Action: RuleDeny},
+		{Permission: LSPOpPermission, Pattern: "restart", Action: RuleDeny},
 	}
 	if !slices.Equal(looker.PermissionRules, want) {
 		t.Fatalf("looker rules = %v, want %v", looker.PermissionRules, want)
@@ -207,8 +205,8 @@ func TestV13DeniedOrDisabledToolGrantsNothing(t *testing.T) {
 	if got := agentTools(t, after, "diag"); !slices.Equal(got, []string{"file-read"}) {
 		t.Fatalf("diag could call no language-server tool, so it gains nothing: %v", got)
 	}
-	if got := lspOpsUsable(after, "coding"); !slices.Equal(got, []string{"hover", "references"}) {
-		t.Fatalf("coding ops = %v, want hover and references", got)
+	if got := lspOpsUsable(after, "coding"); !slices.Equal(got, []string{"definition", "hover", "references"}) {
+		t.Fatalf("coding ops = %v, want definition, hover and references", got)
 	}
 	// The runtime rule is kept as written.
 	if !slices.Contains(after.Runtime.PermissionRules, PermissionRule{Permission: "tool", Pattern: "lsp-restart", Action: RuleDeny}) {
@@ -279,9 +277,15 @@ enabled = true
 // With no lsp definition, diagnostics becomes it in place (the operator's
 // settings kept, the name and description the tool's own) and the others
 // merge into it toward the stricter side. A user's own tool that shares a
-// retired name is theirs: not folded, not aliased, and not denied.
+// retired name is theirs: not folded, not aliased, and holding it is not
+// holding the built-in's op.
 func TestV13FoldsIntoLSPAndLeavesCustomToolsAlone(t *testing.T) {
+	before := decodeManifestAt(t, v12LSPManifest)
 	m := decodeV12(t, v12LSPManifest)
+	assertNoAddedOps(t, before, m)
+	if got := lspOpsUsable(m, "coder"); !slices.Equal(got, []string{"diagnostics", "restart"}) {
+		t.Fatalf("coder ops = %v, want diagnostics and restart only", got)
+	}
 	lsp := toolByID(t, m, "lsp")
 	if lsp.Name != "LSP" || lsp.Description == "Fetch language-server diagnostics for a file or the workspace." {
 		t.Fatalf("lsp name/description = %q / %q", lsp.Name, lsp.Description)
@@ -305,9 +309,17 @@ func TestV13FoldsIntoLSPAndLeavesCustomToolsAlone(t *testing.T) {
 		t.Fatalf("coder tools = %v", got)
 	}
 	coder, _ := m.AgentByID("coder")
-	want := []PermissionRule{{Permission: "tool", Pattern: "references", Action: RuleDeny}}
+	want := []PermissionRule{
+		{Permission: LSPOpPermission, Pattern: "references", Action: RuleDeny},
+		{Permission: LSPOpPermission, Pattern: "definition", Action: RuleDeny},
+		{Permission: LSPOpPermission, Pattern: "hover", Action: RuleDeny},
+	}
 	if !slices.Equal(coder.PermissionRules, want) {
-		t.Fatalf("coder rules = %v, want only references denied (not the custom hover)", coder.PermissionRules)
+		t.Fatalf("coder rules = %v, want %v", coder.PermissionRules, want)
+	}
+	// Its custom hover tool is still its own, and still callable.
+	if !slices.Contains(usableTools(m, "coder"), "hover") {
+		t.Fatalf("coder lost its hover script: %v", usableTools(m, "coder"))
 	}
 }
 
@@ -351,5 +363,111 @@ func TestV13MigrationWritesBackup(t *testing.T) {
 	rewritten, _ := os.ReadFile(path)
 	if !strings.Contains(string(rewritten), "version = 13") || strings.Contains(string(rewritten), "id = 'diagnostics'") {
 		t.Fatalf("manifest not rewritten at v13:\n%s", rewritten)
+	}
+}
+
+// decodeManifestAt decodes a manifest as written, without migrating it.
+func decodeManifestAt(t *testing.T, src string) AgentManifest {
+	t.Helper()
+	var m AgentManifest
+	if err := toml.Unmarshal([]byte(src), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// An agent whose rules are its allow-list ("*" denied, each tool allowed by
+// name) keeps the language-server access it had: it gets a rule allowing lsp,
+// which the rules naming the retired tools no longer cover, and only the ops
+// it held.
+func TestV13KeepsAnAllowListWrittenAsRules(t *testing.T) {
+	before := loadV12Default(t)
+	rule := func(pat string, action RuleAction) PermissionRule {
+		return PermissionRule{Permission: "tool", Pattern: pat, Action: action}
+	}
+	before.Agents = append(before.Agents,
+		AgentSpec{ID: "ruled", Name: "R", Mode: "worker", Permission: "ask-first", Enabled: true,
+			AllowedTools: []string{"file-read", "diagnostics", "references", "hover", "lsp-restart"},
+			PermissionRules: []PermissionRule{rule("*", RuleDeny), rule("file-read", RuleAllow), rule("diagnostics", RuleAllow),
+				rule("references", RuleAllow), rule("hover", RuleAllow), rule("lsp-restart", RuleAllow)}},
+		AgentSpec{ID: "narrow", Name: "N", Mode: "worker", Permission: "ask-first", Enabled: true,
+			AllowedTools:    []string{"file-read", "diagnostics", "hover"},
+			PermissionRules: []PermissionRule{{Permission: "search", Pattern: "*", Action: RuleDeny}, {Permission: "search", Pattern: "diagnostics", Action: RuleAllow}, {Permission: "search", Pattern: "hover", Action: RuleAllow}}},
+	)
+	after := migrateEdited(t, before)
+	assertNoAddedAccess(t, before, after)
+	assertNoAddedOps(t, before, after)
+
+	if got := usableTools(after, "ruled"); !slices.Equal(got, []string{"file-read", "lsp"}) {
+		t.Fatalf("ruled can call %v, want file-read and lsp", got)
+	}
+	if got := lspOpsUsable(after, "ruled"); !slices.Equal(got, lspOpsUsable(before, "ruled")) {
+		t.Fatalf("ruled ops = %v, want %v", got, lspOpsUsable(before, "ruled"))
+	}
+	if got := usableTools(after, "narrow"); !slices.Equal(got, []string{"file-read", "lsp"}) {
+		t.Fatalf("narrow can call %v, want file-read and lsp", got)
+	}
+	if got := lspOpsUsable(after, "narrow"); !slices.Equal(got, []string{"diagnostics", "hover"}) {
+		t.Fatalf("narrow ops = %v, want diagnostics and hover", got)
+	}
+	narrow, _ := after.AgentByID("narrow")
+	if !slices.Contains(narrow.PermissionRules, PermissionRule{Permission: "search", Pattern: "lsp", Action: RuleAllow}) {
+		t.Fatalf("narrow rules = %v, want search allowed for lsp", narrow.PermissionRules)
+	}
+}
+
+// A manifest from before v11 gets the general-purpose agent with every
+// language-server tool it has, so v13 hands it the whole lsp tool, as today's
+// default agent has, not just the diagnostics op.
+func TestV13GeneralPurposeAgentFromBeforeV11GetsEveryOp(t *testing.T) {
+	m := loadV11Default(t)
+	m.Version = 10
+	m.Agents = slices.DeleteFunc(m.Agents, func(a AgentSpec) bool { return a.ID == generalPurposeAgentSpec.ID })
+	after := migrateEdited(t, m)
+	gp, ok := after.AgentByID(generalPurposeAgentSpec.ID)
+	if !ok {
+		t.Fatal("general-purpose agent not added")
+	}
+	if len(gp.PermissionRules) != 0 {
+		t.Fatalf("general-purpose rules = %v, want none", gp.PermissionRules)
+	}
+	if got := lspOpsUsable(after, gp.ID); !slices.Equal(got, []string{"definition", "diagnostics", "hover", "references", "restart"}) {
+		t.Fatalf("general-purpose ops = %v, want all of them", got)
+	}
+	def, _ := DefaultAgentManifest().AgentByID(generalPurposeAgentSpec.ID)
+	if !slices.Equal(gp.AllowedTools, def.AllowedTools) {
+		t.Fatalf("general-purpose tools = %v, want the default's %v", gp.AllowedTools, def.AllowedTools)
+	}
+}
+
+// The v6 retrofit reads the built-in lsp as trust in references, never a
+// tool of the operator's own that is called lsp.
+func TestV6RetrofitIgnoresAUserToolCalledLSP(t *testing.T) {
+	src := strings.Replace(lspMigrationManifest, `[[agents]]
+id = "coder"`, `[[tools]]
+id = "lsp"
+name = "My LSP"
+kind = "script"
+entry_point = "./lsp.sh"
+enabled = true
+timeout_sec = 5
+permitted_actions = ["read"]
+
+[[agents]]
+id = "scripted"
+name = "Scripted"
+mode = "worker"
+allowed_tools = ["file-edit", "lsp"]
+permission = "ask-first"
+enabled = true
+
+[[agents]]
+id = "coder"`, 1)
+	m := decodeV12(t, src)
+	if got := agentTools(t, m, "scripted"); !slices.Equal(got, []string{"file-edit", "lsp"}) {
+		t.Fatalf("scripted tools = %v, want no rename-symbol", got)
+	}
+	if lsp := toolByID(t, m, "lsp"); lsp.Kind != "script" {
+		t.Fatalf("the user's lsp tool changed: %+v", lsp)
 	}
 }

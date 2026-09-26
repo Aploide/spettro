@@ -588,6 +588,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// TOOL_CALL text-protocol fallback caused tool-capable local models to
 	// emit unparsed TOOL_CALL strings instead of real tool calls.
 	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
+	nativeToolSpecs = append(nativeToolSpecs, runtime.unfoldedLSPToolSpecs(cfg.AllowedTools)...)
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
@@ -1178,6 +1179,10 @@ func concurrentCall(call toolCall) bool {
 	if call.Tool == "lsp" {
 		return lspCallOp(call.Args) != "restart"
 	}
+	if lt, ok := legacyTools[call.Tool]; ok && lt.canonical == "lsp" {
+		// A language-server built-in left unfolded (see unfoldedLSPTool).
+		return call.Tool != "lsp-restart"
+	}
 	return concurrentTools[call.Tool]
 }
 
@@ -1616,7 +1621,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "config":
 		return r.runConfigTool(call.Args)
 	case "lsp":
-		return r.runLSP(ctx, call.Args)
+		return r.runLSP(ctx, call.Args, call.CalledAs)
+	case "diagnostics", "references", "hover", "lsp-restart":
+		return r.runUnfoldedLSPTool(ctx, call)
 	case "rename-symbol":
 		return r.runLSPRename(ctx, call.Args)
 	case "mcp-list-resources":

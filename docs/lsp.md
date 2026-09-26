@@ -80,7 +80,9 @@ edit; an `lsp` restart (`op: "restart"`) clears the failure mark.
   1-based `line`/`character`. The former `diagnostics`, `references`,
   `hover` and `lsp-restart` tools are hidden aliases of these ops
   (`references` with `kind: "definition"` is `op: "definition"`); see
-  [Built-in tools](tools.md#retired-names).
+  [Built-in tools](tools.md#retired-names). To keep an agent from some ops,
+  give it `lsp-op` rules with the op as the pattern, e.g.
+  `{ permission = "lsp-op", pattern = "restart", action = "deny" }`.
 - **`rename-symbol` tool** — rename a symbol across the workspace. The
   combined multi-file diff goes through the same approval flow as
   `file-write`, a checkpoint is taken first (so `/rewind` covers it), and the

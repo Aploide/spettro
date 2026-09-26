@@ -94,14 +94,46 @@ func canonicalToolCall(call toolCall) (toolCall, error) {
 	return out, nil
 }
 
-// canonicalCall is canonicalToolCall for this run: a retired name the
-// manifest defines as a tool of its own (a user's script or MCP tool that
-// happens to be called "ls") is that tool, not an alias.
+// canonicalCall is canonicalToolCall for this run. A retired name that a
+// tool of the operator's own answers to (a script or MCP tool that happens to
+// be called "ls" or "hover") is that tool, not an alias. And when the
+// operator's own tool is called lsp, v13 left the language-server built-ins
+// unfolded: their calls keep their own names (see unfoldedLSPTool).
 func (r *toolRuntime) canonicalCall(call toolCall) (toolCall, error) {
-	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.ID == call.Tool && spec.Kind != "" && spec.Kind != "builtin" {
+	if r.userToolNamed(call.Tool) || r.unfoldedLSPTool(call.Tool) {
 		return call, nil
 	}
 	return canonicalToolCall(call)
+}
+
+// userToolNamed reports whether name is the ID or an alias of a tool that is
+// not a built-in: one of this agent's, or any in the manifest.
+func (r *toolRuntime) userToolNamed(name string) bool {
+	if spec, ok := r.toolPolicies[name]; ok && !isBuiltinTool(spec) {
+		return true
+	}
+	if r.manifest != nil {
+		for _, t := range r.manifest.Tools {
+			if !isBuiltinTool(t) && (t.ID == name || slices.Contains(t.Aliases, name)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isBuiltinTool(t config.ToolSpec) bool {
+	return t.Kind == "" || t.Kind == "builtin"
+}
+
+// unfoldedLSPTool reports whether name is one of the retired language-server
+// built-ins while the operator has a tool of their own called lsp. v13 left
+// those built-ins unfolded then, so a call keeps its name and runs the
+// built-in (when the agent holds it) rather than becoming a call of the
+// operator's lsp.
+func (r *toolRuntime) unfoldedLSPTool(name string) bool {
+	lt, ok := legacyTools[name]
+	return ok && lt.canonical == "lsp" && r.userToolNamed("lsp")
 }
 
 // hookAlias is the retired name the hooks of this (canonical) call also
@@ -109,38 +141,40 @@ func (r *toolRuntime) canonicalCall(call toolCall) (toolCall, error) {
 // by, or, for an lsp call made under its own name, the retired tool its op
 // replaced. Each op is exactly one of the old tools, so a hook written for
 // "diagnostics" keeps firing on lsp {op: "diagnostics"} and on nothing else.
+// A retired name the operator's own tool now answers to (a "hover" script) is
+// that tool's, so its hooks do not fire on the op.
 func (r *toolRuntime) hookAlias(call toolCall) string {
 	if call.CalledAs != "" || call.Tool != "lsp" {
 		return call.CalledAs
 	}
-	if spec, ok := r.toolPolicies["lsp"]; ok && spec.Kind != "" && spec.Kind != "builtin" {
+	if r.userToolNamed("lsp") {
 		return ""
 	}
-	return lspOpTools[lspCallOp(call.Args)]
+	name := lspOpTools[lspCallOp(call.Args)]
+	if name == "" || r.userToolNamed(name) {
+		return ""
+	}
+	return name
 }
 
-// lspOpDenied applies, to a call of the built-in lsp tool, the permission
-// rules that name the retired tool its op replaced: a rule denying
-// "lsp-restart" still denies lsp {op: "restart"}. The v13 manifest migration
-// writes such a rule for each op an agent could not call before (it held
-// diagnostics but not lsp-restart, say), so folding the tools into one never
-// hands an agent an operation it did not have.
+// lspOpDenied applies, to a call of the built-in lsp tool, the lsp-op
+// permission rules (config.LSPOpDenied): { permission = "lsp-op", pattern =
+// "restart", action = "deny" } still lets the agent look symbols up but not
+// restart a server. The v13 manifest migration writes such a rule for each
+// op an agent could not call before (it held diagnostics but not
+// lsp-restart, say), so folding the tools into one never hands an agent an
+// operation it did not have. Rules for any other permission, "tool" and "*"
+// included, only decide whether lsp can be called at all.
 func (r *toolRuntime) lspOpDenied(call toolCall, spec config.ToolSpec) error {
-	if call.Tool != "lsp" || (spec.Kind != "" && spec.Kind != "builtin") {
+	if call.Tool != "lsp" || !isBuiltinTool(spec) {
 		return nil
 	}
 	op := lspCallOp(call.Args)
-	name, ok := lspOpTools[op]
-	if !ok {
+	if _, ok := lspOpTools[op]; !ok {
 		return nil
 	}
-	if evaluatePermissionRule("tool", name, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
-		return fmt.Errorf("lsp op %q denied by policy (a rule denies %s)", op, name)
-	}
-	for _, fam := range toolPermissionFamilies(spec) {
-		if evaluatePermissionRule(fam, name, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
-			return fmt.Errorf("lsp op %q denied by policy for permission %q (a rule denies %s)", op, fam, name)
-		}
+	if config.LSPOpDenied(op, r.runtimeRules, r.agentRules, spec.PermissionRules) {
+		return fmt.Errorf("lsp op %q denied by policy (a %s rule denies it)", op, config.LSPOpPermission)
 	}
 	return nil
 }
@@ -172,8 +206,9 @@ func lspOpArgs(op string) func(json.RawMessage) (json.RawMessage, error) {
 }
 
 // lspReferencesArgs maps references {kind} onto lsp: kind "definition" is
-// op definition, "references" or none is op references, and any other kind
-// stays the error it was.
+// op definition, anything else op references with the kind left in place,
+// where the lsp tool checks it after the path and position and reports a bad
+// one as the references tool did.
 func lspReferencesArgs(raw json.RawMessage) (json.RawMessage, error) {
 	var in map[string]json.RawMessage
 	if err := decodeJSONStrict(raw, &in); err != nil {
@@ -182,19 +217,12 @@ func lspReferencesArgs(raw json.RawMessage) (json.RawMessage, error) {
 	if in == nil {
 		in = map[string]json.RawMessage{}
 	}
-	var kind string
-	if k, ok := in["kind"]; ok && json.Unmarshal(k, &kind) != nil {
-		return nil, fmt.Errorf("kind must be a string")
-	}
 	op := "references"
-	switch kind {
-	case "", "references":
-	case "definition":
+	var kind string
+	if k, ok := in["kind"]; ok && json.Unmarshal(k, &kind) == nil && kind == "definition" {
 		op = "definition"
-	default:
-		return nil, fmt.Errorf("kind must be \"references\" or \"definition\"")
+		delete(in, "kind")
 	}
-	delete(in, "kind")
 	in["op"], _ = json.Marshal(op)
 	return json.Marshal(in)
 }

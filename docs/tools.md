@@ -47,9 +47,12 @@ clients see the canonical name. Hooks match the canonical name and the name
 the model called; a hook for `shell-exec` or `bash-output`, which were the
 very same tool as `bash`, also keeps firing on `bash`, and a hook for a
 former language-server tool fires on the `lsp` op that replaced it however
-the model calls it (see [hooks](hooks.md#matcher-syntax)). Likewise a
-permission rule naming a former language-server tool (`lsp-restart`, say)
-still denies that `lsp` op.
+the model calls it (see [hooks](hooks.md#matcher-syntax)). Which `lsp` ops an
+agent may call is set by `lsp-op` permission rules, with the op as the
+pattern (`{ permission = "lsp-op", pattern = "restart", action = "deny" }`);
+rules naming the former tools no longer decide anything. A tool of your own
+that shares a former name (a `hover` script, say) is yours: calls, hooks and
+rules under that name are its, never the `lsp` op's.
 
 `task-update` keeps its old contract: an unknown `id` is an error rather
 than a new task, and an empty `dependencies` list leaves the stored ones as
@@ -59,6 +62,7 @@ Manifests are migrated on load. v12 replaces the old names in
 `allowed_tools` (only where the agent could actually call the old tool) and
 removes the former `grok-image`/`grok-video` generators; v13 does the same
 for the language-server tools, and gives an agent that held only some of
-them a rule denying the other ops, so it gains none. Permission rules are
-left as written. See the v12 and v13 notes in
+them an `lsp-op` rule denying each of the other ops, so it gains none. Other
+permission rules are left as written. With a tool of your own called `lsp`,
+v13 folds nothing: the built-ins keep their own names. See the v12 and v13 notes in
 [AGENTS.md](../AGENTS.md#root-fields).

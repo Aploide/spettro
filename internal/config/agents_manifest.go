@@ -650,11 +650,16 @@ func (m *AgentManifest) ensureGeneralPurposeAgent() {
 			continue
 		}
 		// A pre-v12 manifest may hold the tool under a name v12 or v13
-		// retires; grant that one and let the migration fold it.
+		// retires; grant that and let the migration fold it. A duplicate
+		// needs one of its old names; a tool whose old names became its ops
+		// (lsp) needs all of them, or the migration would hold the agent to
+		// the ops of the one it got.
 		for _, old := range retiredToolNames(id) {
 			if builtin[old] && !readOnlyRetiredTools[old] && !slices.Contains(tools, old) {
 				tools = append(tools, old)
-				break
+				if !opFolds[id] {
+					break
+				}
 			}
 		}
 	}
@@ -799,6 +804,12 @@ func (m *AgentManifest) ensureRepoSearchTool() {
 // definition is added next to it, and an agent holding lsp counts as holding
 // references for rename-symbol.
 func (m *AgentManifest) ensureLSPDeepTools() {
+	// Only the built-in lsp does what references did; a tool of the
+	// operator's own called lsp is no sign of trust.
+	builtinLSP := false
+	if i := m.toolIndex("lsp"); i >= 0 && m.Tools[i].Kind == "builtin" {
+		builtinLSP = true
+	}
 	for _, t := range lspDeepTools {
 		if _, ok := m.toolNamed(t.ID); !ok {
 			m.Tools = append(m.Tools, t)
@@ -812,7 +823,7 @@ func (m *AgentManifest) ensureLSPDeepTools() {
 		if allowed["references"] && !allowed["hover"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "hover")
 		}
-		if (allowed["references"] || allowed["lsp"]) && allowed["file-edit"] && !allowed["rename-symbol"] {
+		if (allowed["references"] || (builtinLSP && allowed["lsp"])) && allowed["file-edit"] && !allowed["rename-symbol"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "rename-symbol")
 		}
 	}

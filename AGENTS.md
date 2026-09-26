@@ -80,12 +80,18 @@ This file lets you define, in one place:
   when there is no `lsp` definition, the others merge into it toward the
   stricter side, and the old names become its aliases. Because the old tools
   are now operations of one tool, an agent that could call only some of them
-  gets an agent-level rule `{ permission = "tool", pattern = "<old name>",
-  action = "deny" }` for each of the others, and the runtime applies a rule
-  naming an old tool to its op: an agent that held `hover` but not
-  `lsp-restart` still cannot restart a server. The stock agents held all
-  four, so they get no rules. `lsp` is low-risk and needs no approval, as
-  the four tools were.
+  gets an agent-level rule `{ permission = "lsp-op", pattern = "<op>",
+  action = "deny" }` for each op of the others (`references` is ops
+  `references` and `definition`): an agent that held `hover` but not
+  `lsp-restart` still cannot restart a server. A tool of your own that shares
+  an old name (a `hover` script) is not the built-in, so holding it grants
+  no op. An agent whose own rules would deny `lsp` (a `"*"` deny with an
+  allow per tool) gets a rule allowing `lsp`, so it keeps the ops it had.
+  Rules naming the old tools are left as written and no longer decide
+  anything. If you have a tool of your own called `lsp`, nothing is folded:
+  the four built-ins stay tools of their own, under their own names. The
+  stock agents held all four, so they get no rules. `lsp` is low-risk and
+  needs no approval, as the four tools were.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
@@ -112,6 +118,11 @@ This file lets you define, in one place:
   CLI: `--sandbox-allow-read-dir` (repeatable).
 - `log_tool_calls`: boolean.
 - `permission_rules`: optional layered policy rules (`permission`, `pattern`, `action`).
+  The permission `lsp-op` takes an `lsp` op as its pattern and decides which
+  ops an agent may call: `{ permission = "lsp-op", pattern = "restart",
+  action = "deny" }` keeps the lookups but not restarts. Only rules naming
+  `lsp-op` itself apply to ops, so a `"*"` permission or pattern that the
+  `lsp` tool is allowed around does not take its ops away.
 - `[runtime.delegation]`: defaults for `max_parallel_workers` and `max_depth`.
 
 ### `[[tools]]`
