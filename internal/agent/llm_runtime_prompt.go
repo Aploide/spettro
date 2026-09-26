@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 
@@ -113,7 +112,9 @@ func summarizeLoopToolArgs(name, args string) string {
 // The result MUST be byte-for-byte identical for every step of a run (and every
 // turn of a session): the system prompt is the first segment of the provider
 // cache prefix, so any variation invalidates prompt caching for the entire
-// request. Never embed step counters, timestamps, or other per-call state here.
+// request. Never embed step counters, timestamps, or other per-call state here;
+// the environment and project-instruction sections come from sessionContext,
+// which is frozen per process for exactly this reason.
 func buildSystemString(cfg toolLoopConfig) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
@@ -122,14 +123,12 @@ func buildSystemString(cfg toolLoopConfig) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	if slices.Contains(cfg.AllowedTools, "comment") {
-		base += "\n- Use the comment tool to report meaningful progress steps."
-	}
-	return base
+	return base + sessionContext(cfg.CWD)
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation
-// history, the task, required reads, and the working directory.
+// history, the task and required reads. The working directory and environment
+// live in the system prompt (see sessionContext).
 func buildInitialUserMessage(cfg toolLoopConfig) string {
 	var sb strings.Builder
 	if h := strings.TrimSpace(cfg.History); h != "" {
@@ -153,15 +152,11 @@ func buildInitialUserMessage(cfg toolLoopConfig) string {
 			sb.WriteString(strings.Join(paths, "\n- "))
 		}
 	}
-	sb.WriteString("\n\nWorking directory:\n")
-	sb.WriteString(cfg.CWD)
-	sb.WriteString("\n\nEnvironment:\n")
-	sb.WriteString(environmentBrief())
 	return sb.String()
 }
 
 // environmentBrief tells the model which OS and shell dialect its command
-// lines will actually be executed by. Without it the model defaults to POSIX
+// lines will actually be executed by (rendered inside the environment section). Without it the model defaults to POSIX
 // pipelines everywhere, which on a PowerShell host fail in confusing ways
 // (`2>/dev/null` redirects to a file named "null", `&&` is a parse error).
 func environmentBrief() string {
@@ -182,9 +177,9 @@ func environmentBrief() string {
 
 // buildTurnUserMessage returns the user turn appended when a structured prior
 // conversation (cfg.Messages) is carried in. Unlike buildInitialUserMessage it
-// contains only this turn's task and required reads: the working directory and
-// any earlier context already live in the carried messages, and repeating them
-// here would both waste tokens and change the prompt prefix between turns.
+// contains only this turn's task and required reads: any earlier context
+// already lives in the carried messages, and repeating it here would both
+// waste tokens and change the prompt prefix between turns.
 func buildTurnUserMessage(cfg toolLoopConfig) string {
 	var sb strings.Builder
 	sb.WriteString("Task:\n")
