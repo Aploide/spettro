@@ -102,62 +102,90 @@ func summaryPrompt(task provider.Message, middle []provider.Message, focus strin
 		tail.WriteString(" Pay particular attention to: " + focus + ".")
 	}
 
+	const open, closing = "<transcript>\n", "</transcript>\n"
+	room := budget - head.Len() - tail.Len() - len(open) - len(closing)
 	names := callNames(middle)
 	caps := fullCaps
 	for {
 		body := renderTurns(turns, names, caps)
-		if head.Len()+len(body)+tail.Len() <= budget || caps == minCaps {
-			if over := head.Len() + len(body) + tail.Len() - budget; over > 0 {
-				body = dropOldest(turns, names, caps, budget-head.Len()-tail.Len())
+		if len(body) <= room || caps == minCaps {
+			if len(body) > room {
+				body = dropOldest(turns, names, caps, room)
 			}
-			return head.String() + "<transcript>\n" + body + "</transcript>\n" + tail.String()
+			return head.String() + open + body + closing + tail.String()
 		}
 		caps = caps.halve()
 	}
 }
 
 // dropOldest renders the newest turns that fit in room characters, noting how
-// many older turns were left out.
+// many older turns were left out. Each turn is rendered once and the longest
+// fitting suffix is found from suffix lengths, so it stays linear in the size
+// of the transcript however many turns it drops.
 func dropOldest(turns []provider.Message, names map[string]string, caps renderCaps, room int) string {
-	for skip := 1; skip < len(turns); skip++ {
-		body := fmt.Sprintf("[%d older turns omitted]\n", skip) + renderTurns(turns[skip:], names, caps)
-		if len(body) <= room {
-			return body
-		}
-	}
 	if len(turns) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("[%d older turns omitted]\n", len(turns)-1) + headTail(renderTurns(turns[len(turns)-1:], names, caps), max(room, 1000))
+	parts := make([]string, len(turns))
+	for i, m := range turns {
+		parts[i] = renderTurn(m, names, caps)
+	}
+	// suffix[i] is the rendered length of turns[i:].
+	suffix := make([]int, len(parts)+1)
+	for i := len(parts) - 1; i >= 0; i-- {
+		suffix[i] = suffix[i+1] + len(parts[i])
+	}
+	for skip := 1; skip < len(parts); skip++ {
+		note := omittedNote(skip)
+		if len(note)+suffix[skip] <= room {
+			return note + strings.Join(parts[skip:], "")
+		}
+	}
+	return omittedNote(len(parts)-1) + headTail(parts[len(parts)-1], max(room, 1000))
+}
+
+func omittedNote(n int) string {
+	return fmt.Sprintf("[%d older turns omitted]\n", n)
 }
 
 // renderTurns writes turns as a plain-text transcript for the summarizer.
 func renderTurns(turns []provider.Message, names map[string]string, caps renderCaps) string {
 	var sb strings.Builder
 	for _, m := range turns {
-		if m.Content != "" {
-			fmt.Fprintf(&sb, "[%s]\n%s\n", m.Role, headTail(m.Content, caps.content))
-		}
-		for _, tc := range m.ToolCalls {
-			fmt.Fprintf(&sb, "[tool call %s] %s\n", tc.Name, headTail(string(tc.Args), caps.args))
-		}
-		for _, tr := range m.ToolResults {
-			name := tr.Name
-			if name == "" {
-				name = names[tr.ID]
-			}
-			status, limit := "ok", caps.result
-			if tr.IsErr {
-				status, limit = "error", caps.errResult
-			}
-			ref := ""
-			if tr.SpoolID != "" {
-				ref = ", full output stored as " + tr.SpoolID
-			}
-			fmt.Fprintf(&sb, "[tool result %s, %s%s]\n%s\n", name, status, ref, headTail(tr.Output, limit))
-		}
+		writeTurn(&sb, m, names, caps)
 	}
 	return sb.String()
+}
+
+// renderTurn renders one turn of the summarizer transcript.
+func renderTurn(m provider.Message, names map[string]string, caps renderCaps) string {
+	var sb strings.Builder
+	writeTurn(&sb, m, names, caps)
+	return sb.String()
+}
+
+func writeTurn(sb *strings.Builder, m provider.Message, names map[string]string, caps renderCaps) {
+	if m.Content != "" {
+		fmt.Fprintf(sb, "[%s]\n%s\n", m.Role, headTail(m.Content, caps.content))
+	}
+	for _, tc := range m.ToolCalls {
+		fmt.Fprintf(sb, "[tool call %s] %s\n", tc.Name, headTail(string(tc.Args), caps.args))
+	}
+	for _, tr := range m.ToolResults {
+		name := tr.Name
+		if name == "" {
+			name = names[tr.ID]
+		}
+		status, limit := "ok", caps.result
+		if tr.IsErr {
+			status, limit = "error", caps.errResult
+		}
+		ref := ""
+		if tr.SpoolID != "" {
+			ref = ", full output stored as " + tr.SpoolID
+		}
+		fmt.Fprintf(sb, "[tool result %s, %s%s]\n%s\n", name, status, ref, headTail(tr.Output, limit))
+	}
 }
 
 // callNames maps call IDs to tool names, for results that don't carry one.

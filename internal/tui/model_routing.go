@@ -329,9 +329,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.showBanner("compact error: "+msg.err.Error(), "error")
 		} else if msg.noop {
-			m.showBanner("history is small enough already; nothing was compacted", "info")
+			if wasAutoCompact {
+				// Nothing worth compacting yet (see autoCompactParams): stay
+				// quiet, and don't try again until the history has grown.
+				m.autoCompactNoopLen = len(m.convHistory)
+			} else {
+				m.showBanner("history is small enough already; nothing was compacted", "info")
+			}
 		} else {
 			m.autoCompactFailures = 0
+			m.autoCompactNoopLen = 0
 			m.autoSave()
 			m.sessionID = ""
 			m.todos = nil

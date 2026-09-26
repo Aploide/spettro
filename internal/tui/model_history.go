@@ -376,11 +376,14 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 		// user messages and the most recent tool calls stay verbatim, old
 		// tool outputs are stubbed, and the rest becomes a structured summary.
 		history := m.convHistory
-		window := resolveGoalContextWindow(m)
+		params := compact.Params{Window: resolveGoalContextWindow(m), Force: true, Focus: focus}
+		if auto {
+			params = m.autoCompactParams(history, focus)
+		}
 		return m, tea.Batch(
 			m.spin.Tick,
 			func() tea.Msg {
-				return runStructuredCompact(ctx, pm, providerName, modelName, history, window, focus)
+				return runStructuredCompact(ctx, pm, providerName, modelName, history, params)
 			},
 		)
 	}
@@ -415,14 +418,15 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 	)
 }
 
-// runStructuredCompact compacts the carried structured history (forced, so
-// an explicit /compact always summarizes) and reports the result. A history
-// too short to shrink is reported as a no-op, not a failure.
-func runStructuredCompact(ctx context.Context, pm *provider.Manager, providerName, modelName string, history []provider.Message, window int, focus string) compactDoneMsg {
+// runStructuredCompact compacts the carried structured history with p (an
+// explicit /compact forces a summary; auto-compaction goes cheapest first) and
+// reports the result. A history too short to shrink is reported as a no-op,
+// not a failure.
+func runStructuredCompact(ctx context.Context, pm *provider.Manager, providerName, modelName string, history []provider.Message, p compact.Params) compactDoneMsg {
 	send := func(ctx context.Context, req provider.Request) (provider.Response, error) {
 		return pm.Send(ctx, providerName, modelName, req)
 	}
-	res, err := compact.Compact(ctx, send, history, compact.Params{Window: window, Force: true, Focus: focus})
+	res, err := compact.Compact(ctx, send, history, p)
 	if err != nil {
 		return compactDoneMsg{err: err}
 	}
@@ -434,6 +438,30 @@ func runStructuredCompact(ctx context.Context, pm *provider.Manager, providerNam
 		summary = fmt.Sprintf("%d old tool outputs were replaced by re-readable stubs.", res.Pruned)
 	}
 	return compactDoneMsg{summary: summary, messages: res.Messages}
+}
+
+// autoCompactParams configures an automatic compaction of history. Unlike
+// /compact it is not forced: it prunes old tool outputs before paying for a
+// summary, and skips the summarizer when summarizing would free too little
+// (the pressure then comes from the system prompt and tool schemas). The
+// measure adds that overhead, the part of the last run's reported occupancy
+// the history does not account for, so Compact sees the same pressure that
+// fired the trigger.
+func (m Model) autoCompactParams(history []provider.Message, focus string) compact.Params {
+	overhead := max(m.contextTokens-compact.EstimateHistoryTokens("", history), 0)
+	return compact.Params{
+		Window: resolveGoalContextWindow(m),
+		Policy: compact.Config{
+			AutoEnabled:      m.cfg.AutoCompactEnabled,
+			AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+			MaxFailures:      m.cfg.AutoCompactMaxFailures,
+		},
+		Failures: m.autoCompactFailures,
+		Measure: func(system string, msgs []provider.Message) int {
+			return compact.EstimateHistoryTokens(system, msgs) + overhead
+		},
+		Focus: focus,
+	}
 }
 
 func (m Model) runInit() (tea.Model, tea.Cmd) {

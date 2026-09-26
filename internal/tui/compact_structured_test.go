@@ -64,7 +64,7 @@ func carriedHistory() []provider.Message {
 func TestStructuredCompactKeepsTaskAndPairing(t *testing.T) {
 	pm, url, prompts := summarizerServer(t, "## Goal\nadd and document --json")
 	history := carriedHistory()
-	msg := runStructuredCompact(context.Background(), pm, url, "m", history, 200000, "the flag")
+	msg := runStructuredCompact(context.Background(), pm, url, "m", history, compact.Params{Window: 200000, Force: true, Focus: "the flag"})
 	if msg.err != nil || msg.noop {
 		t.Fatalf("compaction failed: err=%v noop=%v", msg.err, msg.noop)
 	}
@@ -110,7 +110,7 @@ func TestStructuredCompactShortHistoryIsNoop(t *testing.T) {
 		{Role: provider.RoleUser, Content: "and?"},
 		{Role: provider.RoleAssistant, Content: "done"},
 	}
-	msg := runStructuredCompact(context.Background(), pm, url, "m", history, 200000, "")
+	msg := runStructuredCompact(context.Background(), pm, url, "m", history, compact.Params{Window: 200000, Force: true})
 	if msg.err != nil || !msg.noop {
 		t.Fatalf("want a no-op, got err=%v noop=%v", msg.err, msg.noop)
 	}
@@ -120,5 +120,88 @@ func TestStructuredCompactShortHistoryIsNoop(t *testing.T) {
 	next, _ := m.update(msg)
 	if got := next.(Model).convHistory; len(got) != len(history) {
 		t.Fatal("a no-op compaction must keep the history")
+	}
+}
+
+// shortCarried is a carried history too small for a summary to free anything
+// worth a model call.
+func shortCarried(n int) []provider.Message {
+	msgs := []provider.Message{{Role: provider.RoleUser, Content: "Task:\nsay hi"}}
+	for i := range n {
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, Content: fmt.Sprintf("reply %d", i)},
+			provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("Task:\nmessage %d", i)},
+		)
+	}
+	return msgs
+}
+
+// Auto-compaction with the pressure coming from outside the history (system
+// prompt, tool schemas) makes no summarizer call, shows no banner, and does
+// not fire again until the history changes.
+func TestAutoCompactSkipsSummarizerWhenNothingToGain(t *testing.T) {
+	pm, url, prompts := summarizerServer(t, "summary")
+	m := NewModelForTesting()
+	m.cfg.AutoCompactEnabled = true
+	m.convHistory = shortCarried(4)
+	m.messages = []ChatMessage{{Role: RoleUser, Content: "a"}, {Role: RoleAssistant, Content: "b"}, {Role: RoleUser, Content: "c"}}
+	m.contextTokens = resolveGoalContextWindow(m)
+	if m.autoCompactIfNeeded() == nil {
+		t.Fatal("the trigger should fire at a full window")
+	}
+
+	msg := runStructuredCompact(context.Background(), pm, url, "m", m.convHistory, m.autoCompactParams(m.convHistory, ""))
+	if msg.err != nil || !msg.noop {
+		t.Fatalf("want a no-op, got err=%v noop=%v", msg.err, msg.noop)
+	}
+	if len(*prompts) != 0 {
+		t.Fatalf("auto-compaction called the summarizer %d times for nothing", len(*prompts))
+	}
+	m.thinking, m.autoCompactInFlight = true, true
+	next, _ := m.update(msg)
+	m = next.(Model)
+	if m.banner != "" {
+		t.Fatalf("an automatic no-op should be silent, banner %q", m.banner)
+	}
+	if m.autoCompactIfNeeded() != nil {
+		t.Fatal("auto-compaction re-fired on an unchanged history")
+	}
+	m.convHistory = append(m.convHistory, provider.Message{Role: provider.RoleAssistant, Content: "more"})
+	if m.autoCompactIfNeeded() == nil {
+		t.Fatal("auto-compaction should try again once the history grew")
+	}
+}
+
+// Auto-compaction goes cheapest first: large spooled tool outputs are stubbed
+// without a summarizer call when that is enough.
+func TestAutoCompactPrunesBeforeSummarizing(t *testing.T) {
+	pm, url, prompts := summarizerServer(t, "summary")
+	history := []provider.Message{{Role: provider.RoleUser, Content: "Task:\nread everything"}}
+	for i := range 17 {
+		id := fmt.Sprintf("r%d", i)
+		history = append(history,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.NativeTool{{ID: id, Name: "file-read", Args: json.RawMessage(`{"path":"big.go"}`)}}},
+			provider.Message{Role: provider.RoleUser, ToolResults: []provider.ToolResult{{ID: id, Name: "file-read", Output: strings.Repeat("x", 40000), SpoolID: fmt.Sprintf("spool:%d", i)}}},
+		)
+	}
+	m := NewModelForTesting()
+	m.cfg.AutoCompactEnabled = true
+	m.convHistory = history
+	m.contextTokens = compact.EstimateHistoryTokens("", history) + 2000
+	if !m.evaluateCompact().ShouldAutoCompact {
+		t.Fatalf("test history (%d tokens) should trigger auto-compaction", m.contextTokens)
+	}
+	msg := runStructuredCompact(context.Background(), pm, url, "m", history, m.autoCompactParams(history, ""))
+	if msg.err != nil || msg.noop || msg.messages == nil {
+		t.Fatalf("want a pruned history, got err=%v noop=%v", msg.err, msg.noop)
+	}
+	if len(*prompts) != 0 {
+		t.Fatal("pruning was enough; the summarizer should not have been called")
+	}
+	if len(msg.messages) != len(history) || !strings.Contains(msg.summary, "stubs") {
+		t.Fatalf("pruning should keep every turn: %d -> %d, summary %q", len(history), len(msg.messages), msg.summary)
+	}
+	if err := compact.ValidatePairing(msg.messages); err != nil {
+		t.Fatal(err)
 	}
 }

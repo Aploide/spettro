@@ -180,7 +180,8 @@ Stage 1 is cheap and needs no model call; stage 2 is the summarizer.
   forgotten. If the summarizer fails while the run is recovering from an
   overflowing context, a summary extracted from the transcript (user
   messages, files modified, recent commands and errors) is used instead of
-  failing the run. A compaction that would not make the history smaller is
+  failing the run (not when the run itself was cancelled: the history is then
+  left as it was). A compaction that would not make the history smaller is
   discarded.
 
 After compaction:
@@ -204,7 +205,10 @@ configured threshold:
 When enabled, Spettro compacts in two places:
 
 - **Between turns** (TUI and ACP): after an agent turn, if context occupancy
-  is above the threshold percentage.
+  is above the threshold percentage. This goes cheapest first like the run
+  loop: pruning before summarizing, and no summarizer call when the pressure
+  comes from the system prompt and tool schemas rather than the history (it
+  then waits, silently, for the history to grow before trying again).
 - **Inside the run loop** (all modes, including headless and `/goal`): before
   each model step, the runtime estimates context pressure and, past the
   threshold, prunes old tool outputs and, if that is not enough, summarizes

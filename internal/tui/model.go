@@ -448,7 +448,11 @@ type Model struct {
 	autoCompactFailures int
 	compactWarningLevel int
 	autoCompactInFlight bool
-	sessionID           string
+	// autoCompactNoopLen is the length of convHistory when an automatic
+	// compaction last found nothing worth compacting; auto-compaction waits
+	// for the history to change before trying again.
+	autoCompactNoopLen int
+	sessionID          string
 
 	// lastAutoSaveAt throttles debounced session writes (see
 	// autoSaveDebounced). Zero value means "never saved", so the first save

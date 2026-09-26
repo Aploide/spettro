@@ -228,7 +228,11 @@ func Compact(ctx context.Context, send SendFunc, msgs []provider.Message, p Para
 		err = fmt.Errorf("compaction: empty summary")
 	}
 	if err != nil {
-		if !p.Force || !p.ExtractiveFallback {
+		// A cancelled or expired caller context is the run stopping, not the
+		// summarizer failing: report it, so no model-free summary replaces a
+		// history the caller may still keep (the ACP bridge adopts the
+		// result even when the turn was cancelled).
+		if !p.Force || !p.ExtractiveFallback || ctx.Err() != nil {
 			return noop, err
 		}
 		res.Summary, res.Fallback = fallbackSummary(middle), true

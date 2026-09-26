@@ -179,6 +179,7 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// conversation; drop it so the resumed session's first turn rebuilds
 			// context from the loaded transcript instead.
 			m.convHistory = nil
+			m.autoCompactNoopLen = 0
 			m.messages = make([]ChatMessage, 0, len(state.Messages))
 			for _, cm := range state.Messages {
 				m.messages = append(m.messages, ChatMessage{

@@ -233,6 +233,7 @@ func (m Model) applyRewind(cp checkpoint.Checkpoint, mode int) (tea.Model, tea.C
 			return m, nil
 		}
 		m.convHistory = conv.ConvHistory
+		m.autoCompactNoopLen = 0
 		m.messages = make([]ChatMessage, 0, len(conv.Messages))
 		for _, cm := range conv.Messages {
 			m.messages = append(m.messages, ChatMessage{
