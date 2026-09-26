@@ -155,7 +155,8 @@ type FallbackPolicy struct {
 // ContextLimits caps how many characters of tool output are retained in model
 // context. Zero for any field means use the built-in default.
 type ContextLimits struct {
-	// FileReadChars is the max chars returned by file-read and kept in history.
+	// FileReadChars is the max chars of file content one file-read returns
+	// and keeps in history (the line-number prefixes come on top).
 	FileReadChars int `toml:"file_read_chars"`
 	// SearchChars is the max chars returned by grep/glob and kept in history.
 	SearchChars int `toml:"search_chars"`

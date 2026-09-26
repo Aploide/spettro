@@ -3,8 +3,8 @@ package agent
 import "testing"
 
 func TestToolOutputHistoryLimit(t *testing.T) {
-	if got := toolOutputHistoryLimit("file-read"); got != 40000 {
-		t.Errorf("file-read limit = %d, want 40000", got)
+	if got := toolOutputHistoryLimit("file-read"); got != 60000 {
+		t.Errorf("file-read limit = %d, want 60000", got)
 	}
 	if got := toolOutputHistoryLimit("comment"); got != 2000 {
 		t.Errorf("default limit = %d, want 2000", got)
