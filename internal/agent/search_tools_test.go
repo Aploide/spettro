@@ -260,3 +260,80 @@ func TestCapGrepResultsKeepsContextOfKeptMatches(t *testing.T) {
 		t.Fatal("exact fit reported as truncated")
 	}
 }
+
+// Include globs and type filters must not resurrect gitignored files. rg lets
+// a --glob override win over ignore files, so its results are re-filtered.
+func TestGrepFiltersDoNotBypassGitignore(t *testing.T) {
+	grepBackends(t, func(t *testing.T) {
+		r := newSearchWorkspace(t)
+		cases := []struct {
+			name string
+			args grepArgs
+			want []string
+		}{
+			{"glob on ignored files", grepArgs{Pattern: "Foo", Glob: "*.log"}, nil},
+			{"glob into ignored dir", grepArgs{Pattern: "Foo", Glob: "*.go"}, []string{"a.go", "sub/b.go"}},
+			{"type into ignored dir", grepArgs{Pattern: "Foo", Type: "go"}, []string{"a.go", "sub/b.go"}},
+			{"explicit ignored dir with glob", grepArgs{Pattern: "Foo", Path: "ignored", Glob: "*.go"}, []string{"ignored/c.go"}},
+		}
+		for _, c := range cases {
+			if got := grepFiles(t, r, c.args); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("%s: files = %v, want %v", c.name, got, c.want)
+			}
+		}
+	})
+}
+
+// skipDirs names prune directories only: a file called build is searched.
+func TestGrepSkipDirsExcludeOnlyDirectories(t *testing.T) {
+	grepBackends(t, func(t *testing.T) {
+		r := newShellTestRuntime(t)
+		writeTree(t, r.cwd, map[string]string{
+			"scripts/build": "Foo\n",
+			"build/out.txt": "Foo\n",
+			"dist":          "Foo\n",
+		})
+		got := grepFiles(t, r, grepArgs{Pattern: "Foo"})
+		if want := []string{"dist", "scripts/build"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("files = %v, want %v", got, want)
+		}
+	})
+}
+
+// glob lists symlinks to files (the CLAUDE.md -> AGENTS.md pair) but does not
+// descend into symlinked directories; grep, like ripgrep, skips symlinks met
+// while walking, so both of its backends agree.
+func TestSearchToolsAndSymlinks(t *testing.T) {
+	setup := func(t *testing.T) *toolRuntime {
+		r := newShellTestRuntime(t)
+		writeTree(t, r.cwd, map[string]string{"AGENTS.md": "Foo\n", "real/x.md": "Foo\n"})
+		if err := os.Symlink("AGENTS.md", filepath.Join(r.cwd, "CLAUDE.md")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := os.Symlink("real", filepath.Join(r.cwd, "linked")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("missing.md", filepath.Join(r.cwd, "dangling.md")); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	r := setup(t)
+	out, err := r.runGlob(context.Background(), "**/*.md", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "3 files:\nAGENTS.md\nCLAUDE.md\nreal/x.md" {
+		t.Fatalf("glob output: %q", out)
+	}
+	grepBackends(t, func(t *testing.T) {
+		r := setup(t)
+		if got, want := grepFiles(t, r, grepArgs{Pattern: "Foo"}), []string{"AGENTS.md", "real/x.md"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("grep files = %v, want %v", got, want)
+		}
+		// Named explicitly, a symlinked file is searched.
+		if got, want := grepFiles(t, r, grepArgs{Pattern: "Foo", Path: "CLAUDE.md"}), []string{"CLAUDE.md"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("explicit symlink = %v, want %v", got, want)
+		}
+	})
+}

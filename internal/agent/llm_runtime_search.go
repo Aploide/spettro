@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -50,17 +51,41 @@ const (
 
 // workspaceWalker walks a directory tree below the workspace the way the
 // search tools see it: skipDirs and the root .gitignore prune entries, and
-// symlinks are not followed (ripgrep's behaviour, which grep prefers).
+// symlinked directories are not followed.
 type workspaceWalker struct {
 	cwd     string
 	matcher *ignore.Matcher
+	// symlinkedFiles makes the walk visit symlinks to regular files (glob:
+	// a CLAUDE.md -> AGENTS.md link is a file the model should see listed).
+	// grep leaves it off, matching ripgrep, which skips every symlink it
+	// meets while traversing; both grep backends then agree.
+	symlinkedFiles bool
 }
 
 func (r *toolRuntime) newWorkspaceWalker() workspaceWalker {
 	return workspaceWalker{cwd: r.cwd, matcher: ignore.NewMatcher(r.cwd)}
 }
 
-// walk calls visit for every regular file below root with its path relative
+// ignoredBelow reports whether rel (a file, relative to the workspace) is
+// excluded by the root .gitignore, checking the file and each directory
+// strictly below rootRel — the same entries the walk would have pruned.
+func (w workspaceWalker) ignoredBelow(rootRel, rel string) bool {
+	if w.matcher.Ignored(rel, false) {
+		return true
+	}
+	for dir := path.Dir(rel); dir != "." && dir != "/" && dir != rootRel; dir = path.Dir(dir) {
+		if rootRel != "." && !strings.HasPrefix(dir, rootRel+"/") {
+			break
+		}
+		if w.matcher.Ignored(dir, true) {
+			return true
+		}
+	}
+	return false
+}
+
+// walk calls visit for every regular file below root (and, with
+// symlinkedFiles, every symlink to one) with its path relative
 // to the workspace (slash-separated). It stops early when ctx is done (the
 // ctx error is returned) or when visit returns errStopWalk.
 func (w workspaceWalker) walk(ctx context.Context, root string, visit func(abs, rel string, d fs.DirEntry) error) error {
@@ -85,7 +110,14 @@ func (w workspaceWalker) walk(ctx context.Context, root string, visit func(abs, 
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() {
+		if d.Type()&fs.ModeSymlink != 0 {
+			if !w.symlinkedFiles {
+				return nil
+			}
+			if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+				return nil // dangling, or a link to a directory (not followed)
+			}
+		} else if !d.Type().IsRegular() {
 			return nil
 		}
 		if w.matcher.Ignored(rel, false) {
@@ -123,7 +155,9 @@ func (r *toolRuntime) runGlob(ctx context.Context, pattern, subPath string) (str
 
 	var matches []string
 	total := 0
-	err := r.newWorkspaceWalker().walk(ctx, root, func(abs, rel string, _ fs.DirEntry) error {
+	walker := r.newWorkspaceWalker()
+	walker.symlinkedFiles = true
+	err := walker.walk(ctx, root, func(abs, rel string, _ fs.DirEntry) error {
 		relRoot := rel
 		if root != r.cwd {
 			if rr, err := filepath.Rel(root, abs); err == nil {
@@ -539,21 +573,34 @@ func (r *toolRuntime) grepWithRipgrep(ctx context.Context, rg string, q grepQuer
 	if q.mode == "content" && q.context > 0 {
 		args = append(args, "--context", strconv.Itoa(q.context))
 	}
+	// keep re-applies the root .gitignore to rg's results when include globs
+	// were delegated: rg lets a --glob override win over every ignore file,
+	// so `--glob '*.log'` would search the *.log files .gitignore excludes.
+	var keep func(rel string) bool
 	if !q.rootIsFile {
+		// The trailing slash limits the exclusion to directories, as in the
+		// Go walk: a file named build or dist is still searched.
 		for name := range skipDirs {
-			args = append(args, "--glob", "!"+name)
+			args = append(args, "--glob", "!"+name+"/")
 		}
 		// rg ORs include globs, so only one kind of include can be delegated
 		// to it; wantsFile applies every filter again on the results anyway.
+		delegated := false
 		switch {
 		case len(q.globs) > 0 && !slices.ContainsFunc(q.globs, func(g string) bool { return strings.Contains(g, "/") }):
 			for _, g := range q.globs {
 				args = append(args, "--glob", g)
 			}
+			delegated = true
 		case len(q.globs) == 0 && len(q.exts) > 0:
 			for _, ext := range q.exts {
 				args = append(args, "--glob", "*"+ext)
 			}
+			delegated = true
+		}
+		if delegated {
+			walker := r.newWorkspaceWalker()
+			keep = func(rel string) bool { return !walker.ignoredBelow(q.rootRel, rel) }
 		}
 	}
 	args = append(args, "--regexp", q.pattern, "--", q.rootRel)
@@ -572,7 +619,7 @@ func (r *toolRuntime) grepWithRipgrep(ctx context.Context, rg string, q grepQuer
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	results, total, parseErr := parseRipgrepJSON(stdout, q)
+	results, total, parseErr := parseRipgrepJSON(stdout, q, keep)
 	stoppedEarly := total > q.max
 	if stoppedEarly {
 		cancel() // enough matches: stop rg instead of draining it
@@ -611,7 +658,8 @@ type rgText struct {
 
 // parseRipgrepJSON reads rg --json output into per-file results, stopping once
 // more than q.max matches have been seen. total is the number of matches read.
-func parseRipgrepJSON(stdout io.Reader, q grepQuery) (results []grepFileResult, total int, err error) {
+// keep, when set, is an extra filter on each file's workspace-relative path.
+func parseRipgrepJSON(stdout io.Reader, q grepQuery, keep func(rel string) bool) (results []grepFileResult, total int, err error) {
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
 	var cur *grepFileResult
@@ -633,7 +681,7 @@ func parseRipgrepJSON(stdout io.Reader, q grepQuery) (results []grepFileResult, 
 				continue // non-UTF-8 path
 			}
 			rel := filepath.ToSlash(filepath.Clean(*msg.Data.Path.Text))
-			if !q.wantsFile(rel) {
+			if !q.wantsFile(rel) || (keep != nil && !keep(rel)) {
 				continue
 			}
 			cur = &grepFileResult{path: rel}
