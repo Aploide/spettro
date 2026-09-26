@@ -141,7 +141,7 @@ func TestMultiEdit_AmbiguousMatchFailsWithoutReplaceAll(t *testing.T) {
 	if len(result.Tools) == 0 || result.Tools[0].Status != "error" {
 		t.Fatalf("expected ambiguous-match error trace, got: %+v", result.Tools)
 	}
-	if !strings.Contains(result.Tools[0].Output, "matches 2 times") {
+	if !strings.Contains(result.Tools[0].Output, "matches 2 locations (lines 1, 2)") {
 		t.Errorf("expected ambiguity error, got: %q", result.Tools[0].Output)
 	}
 	data, _ := os.ReadFile(path)
