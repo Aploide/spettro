@@ -8,7 +8,7 @@ import (
 	"spettro/internal/fsperm"
 )
 
-func TestNewCreatesDirs(t *testing.T) {
+func TestNewCreatesGlobalDirOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cwd := t.TempDir()
