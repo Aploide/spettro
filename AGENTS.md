@@ -21,17 +21,40 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `10`. Older manifests
+- `version` (int, required): schema version, currently `12`. Older manifests
   are migrated on load (with a `.bak` backup): v3 rewrites the previously
   inert `sandbox_mode = "workspace-write"` default to `full-access` (the
   field is now enforced — re-set it explicitly if you want the OS sandbox);
   later versions retrofit new built-in tools (v5 `view-image`, v6
   `hover`/`rename-symbol`, v7 `repo-search`, v8 the
   `pty-start`/`pty-write`/`pty-kill` interactive terminal tools, granted to
-  agents that already hold `shell-exec`, v9 `tool-output` for agents that
-  already hold `file-read`, v10 `ask-user`). Each retrofit widens only
-  allow-lists that already show the same level of trust, so a deliberately
-  restricted agent is never opened up.
+  agents that already hold a shell tool, v9 `tool-output` for agents that
+  already hold `file-read`, v10 `ask-user`, v11 the `general-purpose`
+  subagent). Each retrofit widens only allow-lists that already show the
+  same level of trust, so a deliberately restricted agent is never opened
+  up.
+- v12 folds duplicate built-ins into one canonical tool each and removes the
+  `grok-image`/`grok-video` generators:
+
+  | Canonical | Retired (hidden aliases) |
+  |---|---|
+  | `bash` | `shell-exec`, `bash-output` |
+  | `file-edit` | `multi-edit` |
+  | `grep` | `repo-search` (now `grep`'s `symbol` argument) |
+  | `glob` | `ls` (`glob` without a pattern lists one directory) |
+  | `todo-write` | `task-create`, `task-update`, `task-delete`, `task-get`, `task-list` |
+
+  A retired definition's settings merge into the canonical tool (approval if
+  either required it, the longer timeout, the higher risk, both rule sets;
+  `permitted_actions` stay the canonical tool's), or it becomes the canonical
+  tool in place when that is missing. Allow-lists and tool-level rules
+  (`permission = "tool"` or `"*"`) naming a retired ID exactly are rewritten
+  to the canonical ID. An agent that could only read tasks
+  (`task-get`/`task-list`) loses them instead of gaining `todo-write`; an
+  agent left with no tools keeps `comment` and is disabled. Tools of another
+  kind that share a retired name are left alone. The retired names stay
+  callable, but are never advertised to the model and cannot be listed in
+  `allowed_tools`.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
@@ -71,7 +94,7 @@ This file lets you define, in one place:
 - `timeout_sec`: positive integer
 - `requires_approval`: boolean
 - `permitted_actions`: non-empty string list, e.g. `read`, `write`, `search`, `execute`, `git`, `chat`, `network`
-- `aliases`: optional alternate tool IDs
+- `aliases`: optional alternate tool IDs (unique across the manifest: an alias may not repeat a tool `id` or another tool's alias)
 - `input_schema`: optional JSON-like schema metadata
 - `risk_level`: optional `low|medium|high`
 - `primary_only`: optional boolean (only primary/orchestrator agents can use)

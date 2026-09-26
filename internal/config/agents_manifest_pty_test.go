@@ -99,8 +99,8 @@ func TestDefaultManifestIncludesPTYTools(t *testing.T) {
 		for _, id := range ag.AllowedTools {
 			found[id] = true
 		}
-		if found["shell-exec"] && (!found["pty-start"] || !found["pty-write"] || !found["pty-kill"]) {
-			t.Fatalf("agent %q holds shell-exec but lacks pty tools: %v", ag.ID, ag.AllowedTools)
+		if found["bash"] && (!found["pty-start"] || !found["pty-write"] || !found["pty-kill"]) {
+			t.Fatalf("agent %q holds bash but lacks pty tools: %v", ag.ID, ag.AllowedTools)
 		}
 	}
 }
