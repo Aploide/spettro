@@ -553,6 +553,9 @@ func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runE
 		ws.abandon(mergeCtx)
 		return
 	}
+	// The merge writes into the main checkout, which the call's own
+	// snapshots (taken in its worktree) never covered.
+	w.rt.checkpointStep(workflowToolID)
 	if m := ws.finalize(mergeCtx); m.Status != "merged" && m.Status != "no_changes" {
 		// Anything that is not a clean merge has to reach both the user and
 		// the model: silently dropping it leaves work on a branch nobody
@@ -609,7 +612,7 @@ func (w *workflowRunner) RunAgent(ctx context.Context, req workflow.Request) (wo
 		parentSnapshot:  r.sessionCtx,
 		parentCWD:       r.cwd,
 		ToolCallback:    r.toolCallback,
-		Checkpoint:      r.checkpoint,
+		Checkpoint:      r.subagentCheckpoint(cwd),
 		ShellApproval:   r.shellApproval,
 		AskUser:         r.askUser,
 		Manifest:        r.manifest,

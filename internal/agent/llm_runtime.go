@@ -188,8 +188,9 @@ type toolLoopConfig struct {
 	PermissionFn  func() config.PermissionLevel
 	ShellApproval ShellApprovalCallback
 	AskUser       AskUserCallback
-	// Checkpoint, when set, is invoked synchronously right before any
-	// file-modifying tool executes (file-write, file-edit, shell), so the host
+	// Checkpoint, when set, is invoked synchronously right before the first
+	// file-modifying tool call of each step (file-write, file-edit, a shell
+	// command not provably read-only; see checkpoint_policy.go), so the host
 	// can snapshot the working tree and conversation for /rewind.
 	Checkpoint      func(tool string)
 	Manifest        *config.AgentManifest
@@ -204,7 +205,8 @@ type toolLoopConfig struct {
 	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
 	// Steering, when set, is drained at every step boundary; each pending
 	// message is appended to the conversation as a user turn so the model sees
-	// it before its next step. Top-level runs only — sub-agents never get one.
+	// it before its next step. Top-level runs get the host's queue; a delegated
+	// sub-agent gets one that only ever carries its time-limit wrap-up notice.
 	Steering *SteeringQueue
 }
 
@@ -273,6 +275,11 @@ type toolRuntime struct {
 	agentID       string
 	instanceID    string
 	parentID      string
+
+	// stepCheckpointed records that the current step already snapshotted the
+	// working tree (checkpoint_policy.go); parallelExec clears it per step.
+	stepCheckpointMu sync.Mutex
+	stepCheckpointed bool
 
 	delegationDepth      int
 	maxParallelWorkers   int
@@ -1168,6 +1175,7 @@ func planToolBatches(calls []toolCall, indices []int) [][]int {
 //     within a single batch.
 func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowed map[string]struct{}, callback func(ToolTrace)) []parallelResult {
 	results := make([]parallelResult, len(calls))
+	r.resetStepCheckpoint()
 	agentBudget := r.maxParallelWorkers
 	if r.delegationDepth > 0 {
 		agentBudget = r.maxParallelMicroagnt
@@ -1314,6 +1322,13 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		out, err := r.execute(ctx, call, allowed)
 		return r.finishToolCall(ctx, call, out, err), err
 	}
+	if call.Tool == "agent" {
+		// The agent case bounds the sub-agent run itself (agentTimeout), so
+		// that a sub-agent running out of time is reported with its partial
+		// work instead of the whole call being cut off.
+		out, err := r.execute(ctx, call, allowed)
+		return r.finishToolCall(ctx, call, out, err), err
+	}
 	if r.isForegroundShellCall(call) {
 		// runShellTool owns both deadlines of a foreground command: the
 		// approval prompt gets the tool's default window, and the command's
@@ -1395,8 +1410,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
-	if r.checkpoint != nil && isMutatingTool(call.Tool) {
-		r.checkpoint(call.Tool)
+	if r.checkpoint != nil && needsCheckpoint(call) {
+		r.checkpointStep(call.Tool)
 	}
 	switch call.Tool {
 	case "repo-search":
@@ -1813,7 +1828,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			parentSnapshot:  r.sessionCtx,
 			parentCWD:       r.cwd,
 			ToolCallback:    r.toolCallback,
-			Checkpoint:      r.checkpoint,
+			Checkpoint:      r.subagentCheckpoint(subCWD),
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,
 			Manifest:        r.manifest,
@@ -1821,20 +1836,50 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			SessionDir:      r.sessionDir,
 			DelegationDepth: r.delegationDepth + 1,
 			ParentAgentID:   parentID,
+			// Carries only the wrap-up notice (subagent_timeout.go).
+			Steering: NewSteeringQueue(),
 		}
-		result, err := subAgent.Run(ctx, subTask)
+		// The sub-agent's deadline is set here rather than by
+		// executeWithTimeout, so that when it passes the parent is still
+		// running and can report the partial work.
+		limit := r.agentTimeout(*spec)
+		runCtx, cancelRun := context.WithTimeout(ctx, limit)
+		stopWrapUp := scheduleWrapUp(subAgent.Steering, limit)
+		result, err := subAgent.Run(runCtx, subTask)
+		stopWrapUp()
+		timedOut := err != nil && subagentTimedOut(ctx, runCtx)
+		cancelRun()
 		if err != nil {
+			// The workspace outlives the (possibly cancelled) run context so
+			// throwaway worktrees still get cleaned up.
+			var kept *workspaceMerge
+			var files []string
 			if workspace != nil {
-				// The workspace outlives the (possibly cancelled) run context so
-				// throwaway worktrees still get cleaned up.
-				if kept := workspace.abandon(context.WithoutCancel(ctx)); kept != nil {
+				files = workspace.changedFiles(context.WithoutCancel(ctx))
+				kept = workspace.abandon(context.WithoutCancel(ctx))
+			} else {
+				files = modifiedFilesFromTraces(result.Tools)
+			}
+			if ctx.Err() != nil {
+				// The parent itself was cancelled: nobody is waiting on a
+				// report.
+				if kept != nil {
 					return "", fmt.Errorf("agent %s: %w (work preserved on branch %s at %s)", target, err, kept.Branch, kept.Path)
 				}
+				return "", fmt.Errorf("agent %s: %w", target, err)
 			}
-			return "", fmt.Errorf("agent %s: %w", target, err)
+			status, reason := "failed", err.Error()
+			if timedOut {
+				status, reason = "timed_out", fmt.Sprintf("time limit of %s reached", limit)
+			}
+			return marshalSubagentPartial(target, status, reason, result, files, kept),
+				&toolOutputError{msg: fmt.Sprintf("agent %s %s: %s", target, strings.ReplaceAll(status, "_", " "), reason)}
 		}
 		var merge *workspaceMerge
 		if workspace != nil {
+			// The merge writes into the main checkout, which the sub-agent's
+			// own snapshots (taken in its worktree) never covered.
+			r.checkpointStep("agent")
 			m := workspace.finalize(context.WithoutCancel(ctx))
 			merge = &m
 		}
@@ -1849,9 +1894,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 }
 
 // isMutatingTool reports whether a tool can modify the working tree and thus
-// warrants a pre-execution checkpoint. Shell tools are always treated as
-// mutating: classifying arbitrary commands reliably is not possible, and a
-// spurious checkpoint is cheap while a missed one is unrecoverable.
+// warrants a pre-execution checkpoint. Shell tools count as mutating;
+// needsCheckpoint (checkpoint_policy.go) exempts the narrow set of shell
+// command lines that provably only read.
 func isMutatingTool(tool string) bool {
 	switch tool {
 	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash", "pty-start", "pty-write":

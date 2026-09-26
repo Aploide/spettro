@@ -193,9 +193,10 @@ type LLMAgent struct {
 	PermissionFn  func() config.PermissionLevel
 	ShellApproval ShellApprovalCallback
 	AskUser       AskUserCallback
-	// Checkpoint, when set, is called synchronously before every
-	// file-modifying tool executes (including in sub-agents) so the host can
-	// snapshot files + conversation for /rewind.
+	// Checkpoint, when set, is called synchronously before the first
+	// file-modifying tool call of each step (including in sub-agents sharing
+	// this checkout) so the host can snapshot files + conversation for
+	// /rewind. See checkpoint_policy.go for what counts as file-modifying.
 	Checkpoint func(tool string)
 	Manifest   *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
@@ -349,7 +350,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		// Preserve the partial conversation so hosts can carry it into the
 		// next turn: a failed or cancelled run must not wipe the context the
 		// user already built up (tool results, steering, prior steps).
-		return RunResult{Messages: res.messages}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
+		// Traces and token use come back too, so a delegating parent can
+		// report what a failed or timed-out sub-agent already did.
+		return RunResult{Messages: res.messages, Tools: res.traces, TokensUsed: res.tokens}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
 	}
 	out := strings.TrimSpace(res.content)
 	out = stripLeakedToolCalls(out)
