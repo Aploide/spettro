@@ -64,12 +64,12 @@ func TestCoreToolParamsDocumented(t *testing.T) {
 
 func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 	cases := map[string][]string{
-		"file-edit":  {"read the file first", "exactly one location", "replace_all", "line-number prefix"},
-		"file-write": {"read it", "prefer file-edit"},
-		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "60,000"},
-		"grep":       {"RE2", "path", "max_results", "symbol"},
-		"glob":       {"**/*.go", "Without a pattern"},
-		"bash":       {"timeout", "run_in_background", "fresh process", "file-read"},
+		"file-edit":  {"read the file first", "refused if it changed", "byte for byte", "exactly one location", "replace_all", "line-number prefix", "edits[]", "Cannot create files"},
+		"file-write": {"refused unless you read it", "prefer file-edit"},
+		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "60,000", "before editing or overwriting"},
+		"grep":       {"RE2", "path", "max_results", "default 200", "symbol"},
+		"glob":       {"**/*.go", "at most 1000", "Without a pattern"},
+		"bash":       {"timeout", "max 600", "run_in_background", "fresh process", "file-read", "[exit status N]", "30,000", "tool-output", "pty-start"},
 		"todo-write": {"merge=true", "delete", "clear_completed", "no arguments"},
 	}
 	for name, needles := range cases {
@@ -78,6 +78,13 @@ func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 			if !strings.Contains(desc, n) {
 				t.Errorf("%s description should mention %q", name, n)
 			}
+		}
+	}
+	// Long tool descriptions measurably inflated the model's reasoning in a
+	// benchmark replay; keep the core ones down to their contracts.
+	for _, name := range []string{"file-read", "file-write", "file-edit", "glob", "grep", "bash", "todo-write", "ask-user"} {
+		if desc, _ := toolDescription(name); len(desc) > 900 {
+			t.Errorf("%s description is %d characters; keep it under 900", name, len(desc))
 		}
 	}
 	if !strings.HasPrefix(builtinNativeToolDescs["comment"], "Optional") {
