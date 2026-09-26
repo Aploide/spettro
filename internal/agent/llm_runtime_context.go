@@ -10,6 +10,7 @@ import (
 
 	"spettro/internal/homedir"
 	"spettro/internal/provider"
+	"spettro/internal/shell"
 )
 
 // Project instruction files, loaded from every directory between the git root
@@ -344,7 +345,7 @@ func instructionsSection(cwd, gitRoot, home string) string {
 		fmt.Fprintf(&sb, "\nNot loaded (over the size cap; read them with file-read if relevant): %s\n", strings.Join(skippedIn, ", "))
 	}
 	if len(skippedOut) > 0 {
-		fmt.Fprintf(&sb, "\nNot loaded (over the size cap; outside the working directory, so file-read cannot open them: read them with a read-only shell command such as sed -n if relevant): %s\n", strings.Join(skippedOut, ", "))
+		fmt.Fprintf(&sb, "\nNot loaded (over the size cap; outside the working directory, so file-read cannot open them: read them with %s if relevant): %s\n", shellReadCommand(shell.Dialect()), strings.Join(skippedOut, ", "))
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
@@ -354,7 +355,7 @@ func readHint(f instructionFile) string {
 	if f.inWorkspace {
 		return "read the rest with file-read"
 	}
-	return "the file is outside the working directory, so file-read cannot open it: read the rest of " + f.abs + " with a read-only shell command such as sed -n"
+	return "the file is outside the working directory, so file-read cannot open it: read the rest of " + f.abs + " with " + shellReadCommand(shell.Dialect())
 }
 
 // capInstructionText truncates text to at most max bytes at a line boundary,

@@ -1,15 +1,17 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 
+	"spettro/internal/config"
 	"spettro/internal/jobs"
 )
 
-var spoolFooterRe = regexp.MustCompile(`\[truncated: ([\d,]+) of ([\d,]+) lines omitted; (?:full output saved to [^;]+; )?use job-output \{"job_id":"(spool:\d+)","offset":(\d+)\} to read more\]`)
+var spoolFooterRe = regexp.MustCompile(`\[truncated: ([\d,]+) of ([\d,]+) lines omitted; (?:full output saved to [^;]+; )?use tool-output \{"id":"(spool:\d+)","offset":(\d+)\} to read more\]`)
 
 func TestSpoolIfLargeSmallPassThrough(t *testing.T) {
 	out := "just a few lines\nof output\n"
@@ -213,5 +215,39 @@ func TestSpoolSurvivesRunEndUntilCleanup(t *testing.T) {
 	jobs.Spool().Cleanup()
 	if _, _, _, err := jobs.Spool().Read(id, 0, 0); err == nil {
 		t.Fatal("spool must be gone after Cleanup (/clear)")
+	}
+}
+
+// The truncation footer must name a tool every agent that can see oversized
+// output can call: tool-output, which comes with file-read. Read-only agents
+// (explore, docs, ask) have no job-output and no shell, and the spool file
+// lies outside the workspace, where file-read cannot open it.
+func TestSpoolFooterIsUsableByReadOnlyAgents(t *testing.T) {
+	t.Cleanup(jobs.Spool().Cleanup)
+	out := strings.Repeat("grep hit line with some content\n", 2000)
+	got := spoolIfLarge(out, 4000, false)
+	m := spoolFooterRe.FindStringSubmatch(got)
+	if m == nil {
+		t.Fatalf("footer = %q", got[max(0, len(got)-300):])
+	}
+	manifest := config.DefaultAgentManifest()
+	for _, id := range []string{"explore", "docs", "ask"} {
+		spec, ok := manifest.AgentByID(id)
+		if !ok {
+			t.Fatalf("no %s agent in the default manifest", id)
+		}
+		allowed, _ := resolveToolPolicies(spec, &manifest)
+		set := map[string]struct{}{}
+		for _, a := range allowed {
+			set[a] = struct{}{}
+		}
+		r := &toolRuntime{cwd: t.TempDir()}
+		page, err := r.execute(context.Background(), toolCall{Tool: "tool-output", Args: fmt.Appendf(nil, `{"id":%q,"offset":%s}`, m[3], m[4])}, set)
+		if err != nil {
+			t.Fatalf("%s cannot page the footer: %v", id, err)
+		}
+		if !strings.Contains(page, "grep hit line") {
+			t.Fatalf("%s paged %q", id, page[:min(len(page), 120)])
+		}
 	}
 }

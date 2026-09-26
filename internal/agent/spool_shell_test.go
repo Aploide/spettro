@@ -24,7 +24,7 @@ func TestShellExecSpoolsAndJobOutputPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("shell-exec: %v", err)
 	}
-	m := regexp.MustCompile(`"job_id":"(spool:\d+)","offset":(\d+)`).FindStringSubmatch(out)
+	m := regexp.MustCompile(`tool-output \{"id":"(spool:\d+)","offset":(\d+)`).FindStringSubmatch(out)
 	if m == nil {
 		t.Fatalf("no spool footer in shell output; tail: %q", out[len(out)-200:])
 	}

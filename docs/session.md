@@ -353,9 +353,10 @@ Terminates every running job at once.
 Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
 `bash`, `web-fetch`) are automatically spooled to disk instead of being
 hard-truncated. The model receives a truncated head with a footer containing a
-`spool:N` ID and an offset, and can page through the full result using
-`job-output {"job_id":"spool:N","offset":Z}` or the dedicated `tool-output`
-tool (`{"id":"spool:N","offset":Z,"limit":M}`).
+`spool:N` ID and an offset, and can page through the full result with the
+`tool-output` tool (`{"id":"spool:N","offset":Z,"limit":M}`), which every agent
+holding `file-read` has; `job-output {"job_id":"spool:N","offset":Z}` works too
+for agents that hold it.
 
 In addition, *every* tool result over ~500 tokens — even ones small enough to
 stay in context untruncated — is written to the spool at execution time. This
@@ -369,11 +370,11 @@ run end, and are deleted on `/clear` and when the process exits (TUI exit,
 
 ```text
 # example: model receives truncated grep output with a footer
-[truncated: 12,400 of 13,000 lines omitted; use job-output {"job_id":"spool:2","offset":1800} to read more]
+[truncated: 12,400 of 13,000 lines omitted; use tool-output {"id":"spool:2","offset":1800} to read more]
 
 # model pages through the omitted portion
-~> job-output {"job_id":"spool:2","offset":1800}
-<~ spool=spool:2 size=280000 next_offset=9800 (more available)
+~> tool-output {"id":"spool:2","offset":1800}
+<~ output=spool:2 size=280000 next_offset=9800 (more available)
 # the next chunk of content...
 ```
 

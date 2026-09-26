@@ -18,7 +18,7 @@ const offloadFloor = 2000
 // spoolFooterIDRe extracts the spool ID from the deterministic truncation
 // footer written by spoolTruncate, so already-spooled outputs are not written
 // to disk a second time by ensureSpooled.
-var spoolFooterIDRe = regexp.MustCompile(`job-output \{"job_id":"(spool:\d+)"`)
+var spoolFooterIDRe = regexp.MustCompile(`tool-output \{"id":"(spool:\d+)"`)
 
 // ensureSpooled guarantees that a tool result over the offload floor has a
 // spool file backing it and returns the spool ID ("" for small outputs or on
@@ -43,7 +43,7 @@ func ensureSpooled(out string) string {
 // spoolFooterReserve is the budget slice held back for the truncation footer
 // so the assembled result never exceeds the tool's history budget (downstream
 // history truncation would otherwise cut the footer off). It covers the spool
-// file path the footer names.
+// file path a shell-output footer names.
 const spoolFooterReserve = 400
 
 // shellOutputHistoryLimit is the in-history character budget for foreground
@@ -54,14 +54,14 @@ const shellOutputHistoryLimit = 30000
 // spoolResult enforces the per-tool history budget on a tool's output. Small
 // outputs pass through untouched; oversized outputs are written in full to the
 // session spool and replaced by their head (plus, for shell output, the tail)
-// with a footer telling the model how to page the rest via job-output.
+// with a footer telling the model how to page the rest via tool-output.
 func (r *toolRuntime) spoolResult(toolName, out string) string {
 	switch toolName {
 	case "shell-exec", "bash", "bash-output", "pty-start", "pty-write":
 		return spoolIfLarge(out, r.historyLimit(toolName), true)
 	case "file-read":
 		// The file itself is the backing store: point at a ranged file-read,
-		// not at a job-output spool.
+		// not at a spool copy.
 		return fileReadTruncate(out, r.historyLimit(toolName))
 	}
 	return spoolIfLarge(out, r.historyLimit(toolName), false)
@@ -117,12 +117,17 @@ func spoolTruncate(out string, budget int, keepTail bool, id string) string {
 		omittedLines++
 	}
 
+	// The footer names tool-output, which every agent that holds file-read
+	// has (job-output is withheld from read-only agents). The spool file lies
+	// outside the workspace, where file-read cannot open it, so it is only
+	// named for shell output (keepTail): an agent that ran a command has a
+	// shell to search the file with.
 	saved := ""
-	if path := jobs.Spool().Path(id); path != "" {
+	if path := jobs.Spool().Path(id); path != "" && keepTail {
 		saved = "full output saved to " + path + "; "
 	}
 	footer := fmt.Sprintf(
-		"[truncated: %s of %s lines omitted; %suse job-output {\"job_id\":%q,\"offset\":%d} to read more]",
+		"[truncated: %s of %s lines omitted; %suse tool-output {\"id\":%q,\"offset\":%d} to read more]",
 		groupDigits(omittedLines), groupDigits(totalLines), saved, id, len(head))
 
 	if tail == "" {

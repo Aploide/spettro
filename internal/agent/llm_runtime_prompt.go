@@ -214,6 +214,37 @@ func buildTurnUserMessage(cfg toolLoopConfig) string {
 // shellToolDesc describes shell-exec and bash, which are the same tool.
 const shellToolDesc = "Run a command in the working directory with the host shell (see Environment) and return its combined stdout+stderr. Each call is a fresh process: cd, exported variables and shell state do not carry over, so chain dependent steps in one command (e.g. `cd web && npm test`). Use it for builds, tests, linters, git and package managers. Do not use it to read, search or list files (cat/head/tail/grep/rg/find/ls): file-read, grep and glob are faster, cheaper and tracked. A failing command returns its full output followed by `[exit status N]`. Foreground commands run under a timeout: pass timeout (seconds, max 600) for slow builds, installs or test suites; on timeout the whole process group is killed and the partial output returned. Set run_in_background for servers and watchers that never exit; it returns a job ID immediately (read output with job-output, stop with job-kill). Never run interactive commands (editors, pagers, prompts, REPLs): pass non-interactive flags (--yes, -y, --no-pager, CI=1) or use pty-start. Output beyond the history cap (about 30,000 characters) keeps the head and the tail (where errors usually are); the footer names a spool ID to page the rest with tool-output. Quote paths that contain spaces."
 
+// shellToolDescFor is shellToolDesc in the host shell's dialect: a
+// PowerShell host gets a chaining example that parses there (Windows
+// PowerShell 5.1 has no &&).
+func shellToolDescFor(kind shell.Kind) string {
+	if kind == shell.KindPowerShell {
+		return strings.Replace(shellToolDesc, "(e.g. `cd web && npm test`)", "(e.g. `Set-Location web; npm test` — Windows PowerShell 5.1 has no `&&`)", 1)
+	}
+	return shellToolDesc
+}
+
+// shellReadCommand names a read-only command for reading part of a file
+// outside the workspace (where file-read cannot go) in the host dialect.
+func shellReadCommand(kind shell.Kind) string {
+	switch kind {
+	case shell.KindPowerShell:
+		return "a read-only shell command such as Get-Content (with -TotalCount, or piped to Select-Object -Skip/-First)"
+	case shell.KindCmd:
+		return "a read-only shell command such as type or more"
+	}
+	return "a read-only shell command such as sed -n"
+}
+
+// toolDescription is a built-in tool's description for this host.
+func toolDescription(name string) (string, bool) {
+	if name == "shell-exec" || name == "bash" {
+		return shellToolDescFor(shell.Dialect()), true
+	}
+	desc, ok := builtinNativeToolDescs[name]
+	return desc, ok
+}
+
 // builtinNativeToolDescs and builtinNativeToolSchemas define the description and
 // real JSON Schema for each built-in tool on the native tool-calling path.
 var builtinNativeToolDescs = map[string]string{
@@ -231,7 +262,7 @@ var builtinNativeToolDescs = map[string]string{
 	"bash-output":        "Fetch output of a background job or spooled result by job_id (job-N or spool:N), or execute a shell command when given command.",
 	"job-output":         "Fetch accumulated stdout/stderr of a background job (job-N) or page through a spooled truncated tool result (spool:N). Pass the next_offset from the previous call to read incrementally.",
 	"job-kill":           "Terminate a background job by ID.",
-	"tool-output":        "Re-read the full output of an earlier tool call that was offloaded to disk (stubs like [offloaded: … tool-output {\"id\":\"spool:N\"}]). Page with offset/limit; pass the next_offset from the previous call to continue.",
+	"tool-output":        "Re-read the full output of an earlier tool call that was cut or offloaded to disk (truncation footers and stubs name it: [truncated: … use tool-output {\"id\":\"spool:N\",\"offset\":Z} …], [offloaded: … tool-output {\"id\":\"spool:N\"}]). Page with offset/limit; pass the next_offset from the previous call to continue.",
 	"pty-start":          "Start an interactive terminal session (REPL, debugger, ssh, watch-mode server) under a pseudo-terminal. Returns a session ID plus the initial screen; drive it with pty-write.",
 	"pty-write":          "Send input to a pty session and return output produced since the last read. Backslash escapes in input are decoded server-side (\\r \\n \\t \\e \\xHH \\uHHHH; \\\\ for a literal backslash), so {\"input\":\"2+2\",\"submit\":true} runs a REPL line and {\"input\":\"\\x03\"} sends Ctrl-C. submit:true appends \\r. Prefer wait_for (return as soon as this literal string, e.g. the prompt \">>> \", appears in new output) over guessing wait_ms. Empty input just polls.",
 	"pty-kill":           "Terminate a pty session (SIGTERM, then SIGKILL) and free it.",
@@ -351,7 +382,7 @@ func buildToolSpecs(allowedTools []string) []provider.ToolSpec {
 		if _, dup := seen[name]; dup {
 			continue
 		}
-		desc, hasDesc := builtinNativeToolDescs[name]
+		desc, hasDesc := toolDescription(name)
 		schema, hasSchema := builtinNativeToolSchemas[name]
 		if !hasDesc || !hasSchema {
 			continue
