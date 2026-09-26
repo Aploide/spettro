@@ -43,8 +43,8 @@ func TestBuiltinToolSchemasAreValidObjects(t *testing.T) {
 }
 
 // TestCoreToolParamsDocumented requires every parameter of the core file,
-// search and shell tools to carry a description, and pins the parameters the
-// tool-behavior work added (grep path, shell timeout in seconds).
+// search and shell tools to carry a description, and pins grep path and the
+// shell timeout in seconds (tool_path_timeout_test.go covers their behavior).
 func TestCoreToolParamsDocumented(t *testing.T) {
 	core := []string{"file-read", "file-write", "file-edit", "glob", "grep", "repo-search", "shell-exec", "bash", "ls"}
 	for _, name := range core {
@@ -69,7 +69,7 @@ func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 	cases := map[string][]string{
 		"file-edit":  {"read the file first", "exactly one location", "replace_all", "line-number prefix"},
 		"file-write": {"read it", "prefer file-edit"},
-		"file-read":  {"line number", "start_line", "40,000"},
+		"file-read":  {"line number", "start_line", "40,000", "`12. code`"},
 		"grep":       {"RE2", "path", "max_results"},
 		"glob":       {"**/*.go"},
 		"shell-exec": {"timeout", "run_in_background", "fresh process", "file-read"},
