@@ -286,6 +286,16 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// SubscriberCount reports how many clients are connected to /events right
+// now. A headless run uses it to tell "nobody could answer this question"
+// apart from "somebody might": with no subscriber an ask-user event would
+// reach no one, so waiting for the answer would wait forever.
+func (s *Server) SubscriberCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.subs)
+}
+
 // Publish records an event in the replay buffer and fans it out to every
 // connected /events subscriber. Slow subscribers are skipped (we never block
 // the TUI).

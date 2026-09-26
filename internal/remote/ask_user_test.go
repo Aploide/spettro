@@ -3,6 +3,8 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -136,6 +138,41 @@ func TestRequestAskUser_CancelResolvesOnce(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("late answer = %d, want 404", resp.StatusCode)
 	}
+}
+
+// SubscriberCount tracks /events connections, which is how a headless run
+// knows whether an ask_user event could reach anyone at all.
+func TestSubscriberCountTracksEventStreams(t *testing.T) {
+	s := startTestServer(t)
+	if n := s.SubscriberCount(); n != 0 {
+		t.Fatalf("idle server has %d subscribers", n)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/events", s.Port()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	go func() {
+		if resp, err := testHTTPClient.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	waitFor := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for s.SubscriberCount() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("subscriber count = %d, want %d", s.SubscriberCount(), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitFor(1)
+	cancel()
+	waitFor(0)
 }
 
 // Answering twice is a conflict, not a second delivery to a call that already

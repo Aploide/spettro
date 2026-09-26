@@ -185,8 +185,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 				return agent.ShellApprovalAllowOnce, nil
 			},
 			AskUser: func(ctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
-				// In headless mode, we can't ask the user, so return error
-				return nil, fmt.Errorf("cannot ask user in headless mode")
+				// Nobody is attending a headless goal run; the ask-user tool
+				// tells the agent to proceed on its own judgment.
+				return nil, agent.ErrNoUserAvailable
 			},
 		}
 

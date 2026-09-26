@@ -256,6 +256,14 @@ Answering is one-shot per `question_id`: a second POST gets `409`, and a
 question whose run was cancelled or interrupted gets `404` because the pending
 answer was already resolved.
 
+**When nobody answers.** A headless run never waits on a question nobody can
+see: with no client connected to `/events` the tool returns at once, telling
+the agent that no user is available and to proceed on its best judgment. With
+a client connected it waits up to 5 minutes (override with
+`SPETTRO_ASK_USER_TIMEOUT_SEC`, in seconds; `0` waits indefinitely), then the
+agent is told the same thing and the question expires (`404`). Sub-agents and
+goal-mode runs never ask at all.
+
 ## Quick examples
 
 ### `curl` — submit a prompt
