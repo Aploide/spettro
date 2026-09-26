@@ -54,7 +54,18 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	if cmdText == "" {
 		return "", fmt.Errorf("%s: command is required", prefix)
 	}
-	if err := r.authorizeShellCommand(ctx, toolID, cmdText); err != nil {
+	// Approval runs under its own window — the tool's default timeout, as
+	// before per-call timeouts existed — so a short per-call timeout never
+	// shortens the time the user has to read the prompt.
+	approvalWindow := time.Duration(r.defaultToolTimeoutSec(toolID)) * time.Second
+	approveCtx, cancelApproval := context.WithTimeout(ctx, approvalWindow)
+	err := r.authorizeShellCommand(approveCtx, toolID, cmdText)
+	approvalExpired := errors.Is(approveCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	cancelApproval()
+	if err != nil {
+		if approvalExpired {
+			return "", fmt.Errorf("%s: no approval decision within %s; command not run", prefix, formatTimeoutSeconds(approvalWindow))
+		}
 		return "", err
 	}
 	// Spettro mandates that every commit carries its Co-Authored-By trailer.
@@ -75,7 +86,9 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 		return fmt.Sprintf("started background job %s (poll with job-output, terminate with job-kill)", job.ID), nil
 	}
 	// The deadline starts here, after approval, so time spent waiting on the
-	// user is never charged to the command.
+	// user is never charged to the command. ctx carries no per-tool deadline
+	// for foreground calls (see executeWithTimeout), so the command gets its
+	// full timeout and a timeout report always means the command ran that long.
 	timeout := r.shellTimeout(toolID, int(args.Timeout))
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -142,52 +155,47 @@ func formatTimeoutSeconds(d time.Duration) string {
 // configured default above it (goal_shell_timeout_sec) raises the cap to match.
 const maxShellTimeoutSec = 600
 
-// shellTimeoutGrace is added to the outer per-tool deadline of a foreground
-// shell call (executeWithTimeout) so the command's own deadline, which starts
-// after approval, always fires first and produces the timeout message.
-const shellTimeoutGrace = 30 * time.Second
-
 // shellTimeout returns how long a foreground shell command may run: the
 // configured default for the tool unless the call asked for its own limit, in
 // which case that is clamped to [1s, max(maxShellTimeoutSec, default)].
 //
 // Models trained on harnesses whose timeout is in milliseconds send values
-// like 120000; anything above an hour is read as milliseconds, since a seconds
-// value that large would be clamped to the cap anyway.
+// like 120000. A request above both the ceiling and an hour is read as
+// milliseconds: as seconds it would be clamped to the ceiling anyway. Anything
+// up to the ceiling is always seconds, so a raised goal-mode ceiling
+// (goal_shell_timeout_sec=7200) lets "timeout": 5400 mean 90 minutes rather
+// than 6 seconds.
 func (r *toolRuntime) shellTimeout(toolID string, requestedSec int) time.Duration {
 	def := r.defaultToolTimeoutSec(toolID)
 	if requestedSec <= 0 {
 		return time.Duration(def) * time.Second
 	}
-	if requestedSec > 3600 {
+	ceiling := max(maxShellTimeoutSec, def)
+	if requestedSec > max(ceiling, 3600) {
 		requestedSec = (requestedSec + 999) / 1000
 	}
-	ceiling := max(maxShellTimeoutSec, def)
 	return time.Duration(min(max(requestedSec, 1), ceiling)) * time.Second
 }
 
-// foregroundShellTimeout reports the timeout a shell tool call will run under,
-// and false for calls that are not foreground shell commands (other tools,
-// background jobs, bash-output polling a job).
-func (r *toolRuntime) foregroundShellTimeout(call toolCall) (time.Duration, bool) {
+// isForegroundShellCall reports whether a tool call runs a foreground shell
+// command, whose deadlines runShellTool manages itself. Background jobs and
+// bash-output polling a job are not: they return promptly and keep the
+// ordinary per-tool deadline.
+func (r *toolRuntime) isForegroundShellCall(call toolCall) bool {
 	switch call.Tool {
 	case "shell-exec", "bash", "bash-output":
 	default:
-		return 0, false
+		return false
 	}
 	var probe struct {
 		JobID           string   `json:"job_id"`
 		RunInBackground flexBool `json:"run_in_background"`
-		Timeout         flexInt  `json:"timeout"`
 	}
 	if json.Unmarshal(call.Args, &probe) != nil {
-		// Malformed arguments fail in runShellTool; bound the call by default.
-		return r.shellTimeout(call.Tool, 0), true
+		// Malformed arguments fail in runShellTool before anything runs.
+		return true
 	}
-	if strings.TrimSpace(probe.JobID) != "" || probe.RunInBackground {
-		return 0, false
-	}
-	return r.shellTimeout(call.Tool, int(probe.Timeout)), true
+	return strings.TrimSpace(probe.JobID) == "" && !bool(probe.RunInBackground)
 }
 
 // toolOutputError is returned by a tool whose output already describes the

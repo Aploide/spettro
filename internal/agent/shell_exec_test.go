@@ -174,6 +174,7 @@ func TestShellTimeoutResolution(t *testing.T) {
 		{5, 5 * time.Second},        // per-call override
 		{900, 600 * time.Second},    // clamped to the cap
 		{120000, 120 * time.Second}, // milliseconds from another harness
+		{1000, 600 * time.Second},   // under an hour is seconds, clamped
 		{-4, 120 * time.Second},     // nonsense falls back to the default
 	}
 	for _, c := range cases {
@@ -187,22 +188,102 @@ func TestShellTimeoutResolution(t *testing.T) {
 	if got := r.shellTimeout("bash", 1500); got != 1500*time.Second {
 		t.Errorf("goal-mode per-call timeout = %s, want 1500s", got)
 	}
+	// Within a raised ceiling a large value is still seconds, not milliseconds.
+	r.shellTimeoutSec = 7200
+	if got := r.shellTimeout("bash", 5400); got != 5400*time.Second {
+		t.Errorf("goal-mode 5400 = %s, want 5400s", got)
+	}
+	if got := r.shellTimeout("bash", 900000); got != 900*time.Second {
+		t.Errorf("goal-mode 900000 = %s, want 900s (milliseconds)", got)
+	}
 }
 
-func TestForegroundShellTimeoutClassification(t *testing.T) {
+func TestForegroundShellCallClassification(t *testing.T) {
 	r := newShellTestRuntime(t)
-	if _, ok := r.foregroundShellTimeout(toolCall{Tool: "bash", Args: []byte(`{"command":"make","run_in_background":true}`)}); ok {
+	if r.isForegroundShellCall(toolCall{Tool: "bash", Args: []byte(`{"command":"make","run_in_background":true}`)}) {
 		t.Fatal("background job treated as foreground")
 	}
-	if _, ok := r.foregroundShellTimeout(toolCall{Tool: "bash-output", Args: []byte(`{"job_id":"job-1"}`)}); ok {
+	if r.isForegroundShellCall(toolCall{Tool: "bash-output", Args: []byte(`{"job_id":"job-1"}`)}) {
 		t.Fatal("job polling treated as foreground")
 	}
-	if _, ok := r.foregroundShellTimeout(toolCall{Tool: "file-read", Args: []byte(`{"path":"x"}`)}); ok {
+	if r.isForegroundShellCall(toolCall{Tool: "file-read", Args: []byte(`{"path":"x"}`)}) {
 		t.Fatal("non-shell tool treated as shell")
 	}
-	d, ok := r.foregroundShellTimeout(toolCall{Tool: "shell-exec", Args: []byte(`{"command":"go test ./...","timeout":300}`)})
-	if !ok || d != 300*time.Second {
-		t.Fatalf("foreground timeout = %s/%v, want 300s", d, ok)
+	if !r.isForegroundShellCall(toolCall{Tool: "shell-exec", Args: []byte(`{"command":"go test ./...","timeout":300}`)}) {
+		t.Fatal("foreground command not recognised")
+	}
+}
+
+// newApprovalTestRuntime is a runtime that must ask before running bash, with
+// the given default timeout; approve is the user's side of the prompt.
+func newApprovalTestRuntime(t *testing.T, defaultSec int, approve func(context.Context) (ShellApprovalDecision, error)) (*toolRuntime, *bool) {
+	t.Helper()
+	r := newShellTestRuntime(t)
+	r.permission = config.PermissionAskFirst
+	r.toolPolicies["bash"] = config.ToolSpec{ID: "bash", TimeoutSec: defaultSec, RequiresApproval: true}
+	asked := new(bool)
+	r.shellApproval = func(ctx context.Context, _ ShellApprovalRequest) (ShellApprovalDecision, error) {
+		*asked = true
+		return approve(ctx)
+	}
+	return r, asked
+}
+
+// The approval prompt gets the tool's default window whatever per-call
+// timeout the model asked for: a short command timeout must not shorten the
+// time the user has to read the prompt.
+func TestShellApprovalWindowIgnoresPerCallTimeout(t *testing.T) {
+	var window time.Duration
+	r, asked := newApprovalTestRuntime(t, 120, func(ctx context.Context) (ShellApprovalDecision, error) {
+		if dl, ok := ctx.Deadline(); ok {
+			window = time.Until(dl)
+		}
+		return ShellApprovalAllowOnce, nil
+	})
+	call := toolCall{Tool: "bash", Args: shellArgsJSON(t, map[string]any{"command": shelltest.Echo("hi"), "timeout": 5})}
+	if _, err := r.executeWithTimeout(context.Background(), call, map[string]struct{}{"bash": {}}); err != nil {
+		t.Fatal(err)
+	}
+	if !*asked {
+		t.Fatal("command was not sent for approval")
+	}
+	if window < 110*time.Second || window > 120*time.Second {
+		t.Fatalf("approval window = %s, want the 120s default", window)
+	}
+}
+
+// Time spent waiting for approval is not charged to the command: it still
+// gets its whole timeout once approved.
+func TestShellTimeoutStartsAfterApproval(t *testing.T) {
+	r, asked := newApprovalTestRuntime(t, 120, func(context.Context) (ShellApprovalDecision, error) {
+		time.Sleep(1500 * time.Millisecond)
+		return ShellApprovalAllowOnce, nil
+	})
+	cmd := shelltest.Join(shelltest.Sleep(time.Second), shelltest.Echo("end"))
+	call := toolCall{Tool: "bash", Args: shellArgsJSON(t, map[string]any{"command": cmd, "timeout": 2})}
+	out, err := r.executeWithTimeout(context.Background(), call, map[string]struct{}{"bash": {}})
+	if err != nil {
+		t.Fatalf("command lost its budget to the approval wait: %v (%q)", err, out)
+	}
+	if !*asked || !strings.Contains(out, "end") {
+		t.Fatalf("asked=%v output %q", *asked, out)
+	}
+}
+
+// An approval nobody answers expires after the default window with a clear
+// error, and the command never runs.
+func TestShellApprovalExpiryIsReported(t *testing.T) {
+	r, _ := newApprovalTestRuntime(t, 1, func(ctx context.Context) (ShellApprovalDecision, error) {
+		<-ctx.Done()
+		return ShellApprovalDeny, ctx.Err()
+	})
+	call := toolCall{Tool: "bash", Args: shellArgsJSON(t, map[string]any{"command": shelltest.Echo("ran")})}
+	out, err := r.executeWithTimeout(context.Background(), call, map[string]struct{}{"bash": {}})
+	if err == nil || !strings.Contains(err.Error(), "no approval decision within 1s") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(out, "ran") {
+		t.Fatalf("command ran without approval: %q", out)
 	}
 }
 

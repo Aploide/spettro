@@ -1106,13 +1106,19 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
 		return out, err
 	}
-	timeout := time.Duration(r.defaultToolTimeoutSec(call.Tool)) * time.Second
-	if shellTimeout, ok := r.foregroundShellTimeout(call); ok {
-		// runShellTool bounds the command itself (honouring a per-call
-		// timeout argument) and reports the timeout with the partial output;
-		// this outer deadline is only a backstop, so it must fire later.
-		timeout = shellTimeout + shellTimeoutGrace
+	if r.isForegroundShellCall(call) {
+		// runShellTool owns both deadlines of a foreground command: the
+		// approval prompt gets the tool's default window, and the command's
+		// own timeout (honouring a per-call timeout argument) starts only once
+		// it is approved. An outer deadline here would start before approval,
+		// so a slow approval — or a short per-call timeout — would eat into
+		// the other. The command's wait is itself bounded (process-group kill
+		// plus WaitDelay), and hooks carry their own timeouts.
+		out, err := r.execute(ctx, call, allowed)
+		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
+		return out, err
 	}
+	timeout := time.Duration(r.defaultToolTimeoutSec(call.Tool)) * time.Second
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	out, err := r.execute(tctx, call, allowed)
