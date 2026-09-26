@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
+	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/session"
@@ -367,6 +368,27 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
+	if len(m.convHistory) > 0 {
+		// The structured history the model actually sees is compacted with
+		// the same core as in-run compaction: the original task, the latest
+		// user messages and the most recent tool calls stay verbatim, old
+		// tool outputs are stubbed, and the rest becomes a structured summary.
+		history := m.convHistory
+		params := compact.Params{Window: resolveGoalContextWindow(m), Force: true, Focus: focus}
+		if auto {
+			params = m.autoCompactParams(history, focus)
+		}
+		return m, tea.Batch(
+			m.spin.Tick,
+			func() tea.Msg {
+				return runStructuredCompact(ctx, pm, providerName, modelName, history, params)
+			},
+		)
+	}
+	// No structured history yet (the first turn after resuming a session):
+	// summarize the visible transcript.
 	var sb strings.Builder
 	for _, msg := range m.messages {
 		if msg.Role == RoleSystem {
@@ -378,8 +400,6 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 		sb.WriteString("\n\n")
 	}
 	transcript := sb.String()
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
@@ -396,6 +416,52 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 			return compactDoneMsg{summary: resp.Content}
 		},
 	)
+}
+
+// runStructuredCompact compacts the carried structured history with p (an
+// explicit /compact forces a summary; auto-compaction goes cheapest first) and
+// reports the result. A history too short to shrink is reported as a no-op,
+// not a failure.
+func runStructuredCompact(ctx context.Context, pm *provider.Manager, providerName, modelName string, history []provider.Message, p compact.Params) compactDoneMsg {
+	send := func(ctx context.Context, req provider.Request) (provider.Response, error) {
+		return pm.Send(ctx, providerName, modelName, req)
+	}
+	res, err := compact.Compact(ctx, send, history, p)
+	if err != nil {
+		return compactDoneMsg{err: err}
+	}
+	if !res.Compacted() {
+		return compactDoneMsg{noop: true}
+	}
+	summary := res.Summary
+	if summary == "" {
+		summary = fmt.Sprintf("%d old tool outputs were replaced by re-readable stubs.", res.Pruned)
+	}
+	return compactDoneMsg{summary: summary, messages: res.Messages}
+}
+
+// autoCompactParams configures an automatic compaction of history. Unlike
+// /compact it is not forced: it prunes old tool outputs before paying for a
+// summary, and skips the summarizer when summarizing would free too little
+// (the pressure then comes from the system prompt and tool schemas). The
+// measure adds that overhead, the part of the last run's reported occupancy
+// the history does not account for, so Compact sees the same pressure that
+// fired the trigger.
+func (m Model) autoCompactParams(history []provider.Message, focus string) compact.Params {
+	overhead := max(m.contextTokens-compact.EstimateHistoryTokens("", history), 0)
+	return compact.Params{
+		Window: resolveGoalContextWindow(m),
+		Policy: compact.Config{
+			AutoEnabled:      m.cfg.AutoCompactEnabled,
+			AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+			MaxFailures:      m.cfg.AutoCompactMaxFailures,
+		},
+		Failures: m.autoCompactFailures,
+		Measure: func(system string, msgs []provider.Message) int {
+			return compact.EstimateHistoryTokens(system, msgs) + overhead
+		},
+		Focus: focus,
+	}
 }
 
 func (m Model) runInit() (tea.Model, tea.Cmd) {

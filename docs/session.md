@@ -113,16 +113,27 @@ transcript. Use `/resume` explicitly to return to a previous session.
 ## Compact (`/compact`)
 
 When the conversation grows long, the context window fills up. Compaction
-replaces the entire transcript with a summary, freeing token budget for new
-work:
+shrinks the conversation the model sees, freeing token budget for new work:
 
 ```text
 /compact
 ```
 
-The LLM reads the full conversation and produces a condensed summary. The
-summary is injected as a system message prefixed with `── conversation
-compacted ──`, and the old messages are discarded.
+The TUI, ACP and the run loop (every mode, headless and `/goal` included)
+share one compaction core, which always keeps, verbatim:
+
+- **the original task**: the conversation's first message (with its
+  environment snapshot), even many turns later;
+- **the latest user messages**: up to three of the most recent user
+  requests and steering messages from the compacted span, so the current
+  request is never summarized away however long the run on it has been;
+- **the most recent tool exchanges**: the last three tool calls with their
+  results (two on a forced compaction), with call/result pairing checked
+  before the history is used, so providers never see an orphaned tool result
+  or an unanswered call.
+
+In the TUI the transcript view is replaced by the summary, prefixed with
+`── conversation compacted ──`.
 
 You can focus the compaction on a specific topic:
 
@@ -132,36 +143,51 @@ You can focus the compaction on a specific topic:
 
 This gives the LLM a hint about what to prioritise in the summary.
 
-### Two-stage compaction (reference-based)
+### Two-stage compaction: prune, then summarize
 
-Compaction is two-stage. Stage 1 is cheap and lossless-by-reference; stage 2
-is the summarizer.
+Stage 1 is cheap and needs no model call; stage 2 is the summarizer.
 
-- **Stage 1 — offload tool results.** Every tool result larger than ~500
+- **Stage 1: prune old tool outputs.** Every tool result larger than ~500
   tokens is already persisted to the session spool at execution time. Before
-  summarizing anything, compaction replaces each such result in the older
-  turns with a short stub that keeps the tool name, an args digest, the size,
-  the ok/error status, and the first/last line:
+  summarizing anything, compaction replaces old results with a short stub
+  that keeps the size, the spool ID, the tool name, an args digest, the
+  ok/error status, and the first and last line:
 
   ```text
-  [offloaded: re-read with tool-output {"id":"spool:7"}] shell-exec args={"command":"go test ./..."} — 48210 chars, 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
+  [output elided: 48210 chars, spool:7 — re-read with tool-output {"id":"spool:7"}] shell-exec args={"command":"go test ./..."} — 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
   ```
 
-  The full output stays on disk and the model can re-read it at any time with
-  the `tool-output` tool (`{"id":"spool:7","offset":0,"limit":4000}`). If
-  offloading alone brings the estimate back under the auto-compact threshold,
-  compaction stops here — no summarizer call, no token spend, nothing lost.
+  Spooled outputs go first, and the most recent ones (about a fifth of the
+  window, up to 40k tokens) are left alone. If that is not enough, every
+  large output before the verbatim tail is stubbed, with a head/tail excerpt
+  for outputs that have no spool copy, and very large strings in old tool-call
+  arguments (such as a whole file passed to `file-write`) are elided. The full
+  output stays on disk and the model can re-read it at any time with the
+  `tool-output` tool (`{"id":"spool:7","offset":0,"limit":4000}`). If pruning
+  brings the estimate back under the auto-compact threshold, compaction stops
+  here: no summarizer call and no turn dropped.
 
-- **Stage 2 — summarize.** If the history is still too large (or on an
-  explicit `/compact`), the older turns are summarized as before, but the
-  summarizer sees the stubs instead of raw truncations and is instructed to
-  carry the `tool-output` IDs into the summary verbatim, so dropped outputs
-  remain re-readable after summarization.
+- **Stage 2: summarize.** If the history is still too large, or on an
+  explicit `/compact`, the turns between the task and the verbatim tail are
+  replaced by one structured summary with these sections: *Goal*, *Decisions
+  and findings*, *Files modified* (each path and what changed), *Current
+  state* (test and build status, with exact failing tests and error text),
+  *Next steps* and *References* (spool IDs worth re-reading). The summarizer
+  sees edits, commands and error output (bounded per item to fit its window,
+  keeping the head and tail of long outputs), plus any earlier summary to
+  merge. The list of files changed by the edit tools is also derived straight
+  from the tool log and attached to the summary, so no edited file can be
+  forgotten. If the summarizer fails while the run is recovering from an
+  overflowing context, a summary extracted from the transcript (user
+  messages, files modified, recent commands and errors) is used instead of
+  failing the run (not when the run itself was cancelled: the history is then
+  left as it was). A compaction that would not make the history smaller is
+  discarded.
 
 After compaction:
 
 - Token usage and context pressure are reset to zero.
-- The structured conversation history is rebuilt from the summary (one cache
+- The compacted structured history is carried to the next turn (one cache
   miss on the next request, then the new prefix caches again).
 - Session tasks are kept.
 
@@ -179,11 +205,14 @@ configured threshold:
 When enabled, Spettro compacts in two places:
 
 - **Between turns** (TUI and ACP): after an agent turn, if context occupancy
-  is above the threshold percentage.
+  is above the threshold percentage. This goes cheapest first like the run
+  loop: pruning before summarizing, and no summarizer call when the pressure
+  comes from the system prompt and tool schemas rather than the history (it
+  then waits, silently, for the history to grow before trying again).
 - **Inside the run loop** (all modes, including headless and `/goal`): before
   each model step, the runtime estimates context pressure and, past the
-  threshold, summarizes older turns into a single message while keeping the
-  first turn (the task) and the most recent turns verbatim. A one-line notice
+  threshold, prunes old tool outputs and, if that is not enough, summarizes
+  older turns as described above. A one-line notice
   ("compacted 42k → 6k tokens …") appears in the transcript. This is what
   lets long unattended goal runs survive without anyone watching the gauge.
 
@@ -361,7 +390,7 @@ for agents that hold it.
 In addition, *every* tool result over ~500 tokens — even ones small enough to
 stay in context untruncated — is written to the spool at execution time. This
 backs reference-based compaction (see [Compact](#compact-compact)): when the
-context fills up, oversized results are swapped for `[offloaded: …]` stubs
+context fills up, old oversized results are swapped for `[output elided: …]` stubs
 pointing at their spool IDs rather than being lost to summarization.
 
 Spool files are tied to the conversation, not to a single run: they survive

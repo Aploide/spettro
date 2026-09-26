@@ -131,7 +131,13 @@ type quitWarningMsg struct{}
 
 type compactDoneMsg struct {
 	summary string
-	err     error
+	// messages is the compacted structured history, when the carried one
+	// was compacted (nil after summarizing the flat transcript: the history
+	// is then reseeded from the summary).
+	messages []provider.Message
+	// noop reports that the history was too short to shrink.
+	noop bool
+	err  error
 }
 
 type toolProgressMsg struct {
@@ -442,7 +448,11 @@ type Model struct {
 	autoCompactFailures int
 	compactWarningLevel int
 	autoCompactInFlight bool
-	sessionID           string
+	// autoCompactNoopLen is the length of convHistory when an automatic
+	// compaction last found nothing worth compacting; auto-compaction waits
+	// for the history to change before trying again.
+	autoCompactNoopLen int
+	sessionID          string
 
 	// lastAutoSaveAt throttles debounced session writes (see
 	// autoSaveDebounced). Zero value means "never saved", so the first save

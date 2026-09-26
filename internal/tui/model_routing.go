@@ -328,8 +328,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoCompactFailures++
 			}
 			m.showBanner("compact error: "+msg.err.Error(), "error")
+		} else if msg.noop {
+			if wasAutoCompact {
+				// Nothing worth compacting yet (see autoCompactParams): stay
+				// quiet, and don't try again until the history has grown.
+				m.autoCompactNoopLen = len(m.convHistory)
+			} else {
+				m.showBanner("history is small enough already; nothing was compacted", "info")
+			}
 		} else {
 			m.autoCompactFailures = 0
+			m.autoCompactNoopLen = 0
 			m.autoSave()
 			m.sessionID = ""
 			m.todos = nil
@@ -341,10 +350,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content: compactSummaryPrefix + "\n\n" + msg.summary,
 				At:      time.Now(),
 			}}
-			// Reseed the carried structured history from the summary. The old
-			// prefix is gone (one deliberate cache miss); every turn after this
+			// Carry the compacted structured history (or, after summarizing
+			// the flat transcript, reseed it from the summary). The old prefix
+			// is gone (one deliberate cache miss); every turn after this
 			// extends the new prefix and caches again.
-			m.convHistory = compactedHistorySeed(msg.summary)
+			if msg.messages != nil {
+				m.convHistory = msg.messages
+			} else {
+				m.convHistory = compactedHistorySeed(msg.summary)
+			}
 		}
 		m.publishRemoteState("compact_done")
 		m.refreshViewport()

@@ -194,6 +194,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.autoSave()
 		m.messages = nil
 		m.convHistory = nil
+		m.autoCompactNoopLen = 0
 		// Spooled tool outputs are only reachable through the cleared
 		// history's references; drop them with the conversation.
 		jobs.Spool().Cleanup()

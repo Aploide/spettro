@@ -838,6 +838,9 @@ func (m Model) autoCompactIfNeeded() tea.Cmd {
 	if len(m.messages) < 3 {
 		return nil
 	}
+	if n := len(m.convHistory); n > 0 && n == m.autoCompactNoopLen {
+		return nil
+	}
 	_, cmd := m.runCompactWithMode("preserve all key decisions, code changes, and action items", true)
 	return cmd
 }
