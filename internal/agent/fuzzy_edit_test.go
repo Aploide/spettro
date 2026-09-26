@@ -28,6 +28,7 @@ func TestApplyEdit(t *testing.T) {
 		old, new   string
 		replaceAll bool
 		lineOffset int
+		trustLines bool
 		want       string
 		wantTier   int
 		wantCount  int
@@ -94,7 +95,25 @@ func TestApplyEdit(t *testing.T) {
 			wantTier: editTierExact, wantCount: 1, wantNote: "line-number prefixes"},
 		{name: "cat -n prefixes stripped", content: "a\n\tb\nc\n", old: "     2\t\tb\n     3\tc\n", new: "\tB\nc\n", want: "a\n\tB\nc\n", wantTier: editTierExact, wantCount: 1},
 		{name: "prefix on blank line", content: "a\n\nc", old: "1. a\n2.\n3. c", new: "x", want: "x", wantTier: editTierExact, wantCount: 1},
-		{name: "prefix number disambiguates", content: "x\ny\nx\ny\n", old: "3. x\n4. y", new: "z\nw", want: "x\ny\nz\nw\n", wantTier: editTierExact, wantCount: 1},
+		{name: "prefix number disambiguates", content: "x\ny\nx\ny\n", old: "3. x\n4. y", new: "z\nw", trustLines: true,
+			want: "x\ny\nz\nw\n", wantTier: editTierExact, wantCount: 1, wantNote: "occurrence at line 3"},
+		{name: "untrusted prefix number stays ambiguous", content: "x\ny\nx\ny\n", old: "3. x\n4. y", new: "z\nw",
+			wantErr: "matches 2 locations (lines 1, 3)"},
+		{name: "new_string with a deleted line", content: "foo\nbar\nbaz\nqux\n", old: "2. bar\n3. baz\n4. qux", new: "2. bar\n4. qux",
+			want: "foo\nbar\nqux\n", wantTier: editTierExact, wantCount: 1},
+		{name: "new_string with an inserted unnumbered line", content: "foo\nbar\nbaz\n", old: "2. bar\n3. baz", new: "2. bar\n    new line\n3. baz",
+			want: "foo\nbar\n    new line\nbaz\n", wantTier: editTierExact, wantCount: 1},
+		{name: "numbered list keeps fuzzy tiers", content: "Steps:\n  1. Install\n  2. Run\n", old: "1. Install\n2. Run", new: "1. Install deps\n2. Run",
+			want: "Steps:\n  1. Install deps\n  2. Run\n", wantTier: editTierIndentFlexible, wantCount: 1},
+		{name: "numbered list whitespace drift", content: "Steps:\n1. Install the tool\n2. Run it\n", old: "1. Install  the tool\n2. Run it", new: "1. Install the CLI\n2. Run it",
+			want: "Steps:\n1. Install the CLI\n2. Run it\n", wantTier: editTierWhitespace, wantCount: 1},
+		{name: "numbered list trailing newline at eof", content: "1. Install\n2. Run", old: "1. Install\n2. Run\n", new: "1. Setup\n2. Run\n",
+			want: "1. Setup\n2. Run", wantTier: editTierLineExact, wantCount: 1},
+		{name: "indented numeric keys are content, not prefixes", content: "NAMES = [\n    'one',\n    'two',\n]\nNUMS = {\n    1: 'one',\n    2: 'two',\n}\n",
+			old: "    1: 'one',\n    2:  'two',", new: "    1: 'uno',\n    2: 'dos',",
+			want: "NAMES = [\n    'one',\n    'two',\n]\nNUMS = {\n    1: 'uno',\n    2: 'dos',\n}\n", wantTier: editTierWhitespace, wantCount: 1},
+		{name: "stripped prefixes never reach loose tiers", content: "alpha beta\n", old: "1. alpha   beta", new: "x",
+			wantErr: "not found"},
 		{name: "non consecutive numbers not stripped", content: "a\nb\nc\n", old: "1. a\n3. c", new: "z", wantErr: "not found"},
 		{name: "real numbered list matches literally", content: "1. one\n2. two\n", old: "1. one", new: "1. uno", want: "1. uno\n2. two\n", wantTier: editTierExact, wantCount: 1},
 
@@ -132,7 +151,7 @@ func TestApplyEdit(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := applyEdit(tc.content, editRequest{Old: tc.old, New: tc.new, ReplaceAll: tc.replaceAll, LineOffset: tc.lineOffset})
+			res, err := applyEdit(tc.content, editRequest{Old: tc.old, New: tc.new, ReplaceAll: tc.replaceAll, LineOffset: tc.lineOffset, TrustLineNumbers: tc.trustLines})
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("want error %q, got success %q (tier %d)", tc.wantErr, res.Content, res.Tier)
@@ -169,16 +188,21 @@ func TestStripLineNumberPrefixes(t *testing.T) {
 		{"10. a\n11. b", "a\nb", 10, true},
 		{"  7\tx\n  8\ty\n", "x\ny\n", 7, true},
 		{"3: a\n4: b", "a\nb", 3, true},
-		{"5" + string(rune(0x2192)) + "a", "a", 5, true},
-		{"1. a\nb", "1. a\nb", 0, false},       // not every line numbered
-		{"1. a\n1. b", "1. a\n1. b", 0, false}, // not consecutive
+		{"   5" + string(rune(0x2192)) + "a", "a", 5, true},
+		{"1. a\nb", "1. a\nb", 0, false},               // not every line numbered
+		{"1. a\n1. b", "1. a\n1. b", 0, false},         // not consecutive
+		{"1. a\n2: b", "1. a\n2: b", 0, false},         // mixed separators
+		{"  1: a\n  2: b", "  1: a\n  2: b", 0, false}, // indented "N: " is content
 		{"3.14 is pi", "3.14 is pi", 0, false},
 	}
 	for _, tc := range tests {
-		got, first, ok := stripLineNumberPrefixes(tc.in)
+		got, first, _, ok := stripLineNumberPrefixes(tc.in)
 		if got != tc.want || first != tc.first || ok != tc.ok {
 			t.Errorf("strip(%q) = %q,%d,%v want %q,%d,%v", tc.in, got, first, ok, tc.want, tc.first, tc.ok)
 		}
+	}
+	if got := stripPrefixesWithSep("2. bar\n    new\n3: kept\n4. qux", "."); got != "bar\n    new\n3: kept\nqux" {
+		t.Errorf("stripPrefixesWithSep = %q", got)
 	}
 }
 
@@ -523,5 +547,43 @@ func TestRunMultiEditNotFoundShowsClosestMatch(t *testing.T) {
 	_, err := rt.runMultiEdit(context.Background(), args)
 	if err == nil || !strings.Contains(err.Error(), "2. \treturn compute(1)") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunFileEditLineHintTrustedOnlyWhileFresh(t *testing.T) {
+	ctx := context.Background()
+	rt, dir := newEditTestRuntime(t)
+	var content strings.Builder
+	for i := 1; i <= 12; i++ {
+		if i == 5 || i == 9 {
+			content.WriteString("\treturn nil\n}\n")
+			i++
+			continue
+		}
+		fmt.Fprintf(&content, "line %d\n", i)
+	}
+	path := writeTestFile(t, dir, "h.go", content.String())
+	if _, err := runTool(t, rt, "file-read", map[string]any{"path": "h.go"}); err != nil {
+		t.Fatal(err)
+	}
+	// Straight after the read the numbers name the second copy.
+	if _, err := rt.runFileEdit(ctx, editArgs("h.go", "9. \treturn nil\n10. }", "9. \treturn err\n10. }")); err != nil {
+		t.Fatalf("fresh hint: %v", err)
+	}
+	if got := readTestFile(t, path); !strings.Contains(got, "\treturn nil\n}\nline 7") || !strings.Contains(got, "\treturn err\n}\nline 11") {
+		t.Fatalf("hint picked the wrong copy:\n%s", got)
+	}
+	// Lines move after the agent's own edit; the stale numbers must not pick.
+	if _, err := rt.runFileEdit(ctx, editArgs("h.go", "line 1\n", "line 0\nline 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.runFileEdit(ctx, editArgs("h.go", "7. \treturn nil\n8. }", "7. \treturn nil // x\n8. }")); err != nil {
+		t.Fatalf("unique match still applies: %v", err)
+	}
+	multi, _ := json.Marshal(map[string]any{"path": "h.go", "edits": []map[string]any{
+		{"old_string": "6. }\n", "new_string": "6. }\n\n"},
+	}})
+	if _, err := rt.runMultiEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "locations") {
+		t.Fatalf("stale hint on ambiguous match err=%v", err)
 	}
 }

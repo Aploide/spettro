@@ -77,6 +77,11 @@ type editRequest struct {
 	// LineOffset is added to every line number an error reports, for callers
 	// that pass a slice of the file (file-edit's start_line).
 	LineOffset int
+	// TrustLineNumbers lets line-number prefixes copied into old_string pick
+	// between identical matches. Set it only when the content is unchanged
+	// since the read those numbers came from; once lines have moved, the
+	// number would silently pick the wrong occurrence.
+	TrustLineNumbers bool
 }
 
 type editResult struct {
@@ -113,7 +118,7 @@ func applyEdit(content string, req editRequest) (editResult, error) {
 		newStr = strings.ReplaceAll(newStr, "\r\n", "\n")
 	}
 	m := newEditMatcher(content, req.LineOffset)
-	res, err := m.run(oldStr, newStr, req.ReplaceAll)
+	res, err := m.run(oldStr, newStr, req.ReplaceAll, req.TrustLineNumbers)
 	if err != nil {
 		return editResult{}, err
 	}
@@ -235,30 +240,64 @@ var editStrategies = []editStrategy{
 	{tier: editTierContextAware, find: findContextAware, unique: true},
 }
 
-func (m *editMatcher) run(oldStr, newStr string, replaceAll bool) (editResult, error) {
-	if spans := m.literalSpans(oldStr, newStr); len(spans) > 0 {
-		return m.apply(spans, editTierExact, replaceAll, 0, nil)
-	}
-	var notes []string
-	hint := 0
-	// Line-number prefixes copied from file-read output are only stripped
-	// after the literal text failed, so a real numbered list still matches.
-	if stripped, first, ok := stripLineNumberPrefixes(oldStr); ok {
-		oldStr, hint = stripped, first
-		if s, _, ok := stripLineNumberPrefixes(newStr); ok {
-			newStr = s
-		}
-		notes = append(notes, "stripped line-number prefixes copied from file-read output")
-	}
+// strippedMaxTier is the loosest tier a prefix-stripped old_string may match
+// at. Copied read output is verbatim apart from its prefixes, so whole-line
+// tiers are enough; the inline and similarity tiers would let text that
+// really starts with numbers land on some other block.
+const strippedMaxTier = editTierLineTrim
+
+// run tries the chain on old_string as written, then, only if nothing
+// matched, on old_string with line-number prefixes copied from a read
+// stripped. Numbered content (a Markdown list, "1: 'one'" map entries) thus
+// keeps every tier. trustLines lets those prefixes pick between identical
+// matches; callers set it only when the numbers still describe the content.
+func (m *editMatcher) run(oldStr, newStr string, replaceAll, trustLines bool) (editResult, error) {
 	q := newEditQuery(oldStr, newStr)
+	if res, ok, err := m.runChain(q, replaceAll, 0, editTierContextAware, nil); ok {
+		return res, err
+	}
+	sq, first, ok := stripQueryPrefixes(oldStr, newStr)
+	if !ok {
+		return editResult{}, m.notFoundError(q)
+	}
+	hint := 0
+	if trustLines {
+		hint = first
+	}
+	notes := []string{"stripped line-number prefixes copied from file-read output"}
+	if res, ok, err := m.runChain(sq, replaceAll, hint, strippedMaxTier, notes); ok {
+		return res, err
+	}
+	return editResult{}, m.notFoundError(q, sq)
+}
+
+// runChain runs the tiers up to maxTier; ok reports that one of them found
+// old_string, in which case res or err is the outcome.
+func (m *editMatcher) runChain(q editQuery, replaceAll bool, hint, maxTier int, notes []string) (res editResult, ok bool, err error) {
 	for _, s := range editStrategies {
+		if s.tier > maxTier {
+			break
+		}
 		spans := s.find(m, q)
 		if len(spans) == 0 {
 			continue
 		}
-		return m.apply(spans, s.tier, replaceAll && !s.unique, hint, notes)
+		res, err = m.apply(spans, s.tier, replaceAll && !s.unique, hint, notes)
+		return res, true, err
 	}
-	return editResult{}, m.notFoundError(q)
+	return editResult{}, false, nil
+}
+
+// stripQueryPrefixes strips line-number prefixes from old_string (every line
+// must carry one) and, with the same separator, from whichever new_string
+// lines carry one: an edit built from a read deletes or inserts lines, so
+// new_string's numbering is rarely complete or consecutive.
+func stripQueryPrefixes(oldStr, newStr string) (editQuery, int, bool) {
+	stripped, first, sep, ok := stripLineNumberPrefixes(oldStr)
+	if !ok {
+		return editQuery{}, 0, false
+	}
+	return newEditQuery(stripped, stripPrefixesWithSep(newStr, sep)), first, true
 }
 
 // apply writes spans (sorted, non-overlapping) into the content. hint is the
@@ -616,8 +655,17 @@ func findContextAware(m *editMatcher, q editQuery) []editSpan {
 
 // notFoundError explains a miss and shows the most similar block of the file
 // with line numbers, so the model can fix old_string without another read.
-func (m *editMatcher) notFoundError(q editQuery) error {
-	start, count, sim, ok := m.closestBlock(q)
+// With several forms of old_string (as written, prefixes stripped), the
+// closest block of any of them is shown.
+func (m *editMatcher) notFoundError(qs ...editQuery) error {
+	var start, count int
+	var sim float64
+	ok := false
+	for _, q := range qs {
+		if s, c, sm, found := m.closestBlock(q); found && (!ok || sm > sim) {
+			start, count, sim, ok = s, c, sm, true
+		}
+	}
 	if !ok {
 		return errors.New("old_string not found in the file and nothing similar exists; file-read it again and copy old_string verbatim")
 	}
@@ -807,14 +855,36 @@ func lineSimilarity(a, b string) float64 {
 }
 
 // lineNumberPrefixRE matches a line-number prefix the model may copy from a
-// read: file-read's "N. ", cat -n's "   N\t", "N: " and "N→". A bare "N." or
-// "N:" is accepted only on an otherwise empty line.
-var lineNumberPrefixRE = regexp.MustCompile(`^ *(\d+)(?:\t|\. |: |\x{2192}|\.$|:$)`)
+// read: file-read's "N. ", "N: ", and the padded "   N\t" (cat -n) and
+// "   N→". Only those last two may be indented, since an indented "1: " or
+// "1. " is far more likely to be the file's own text (a map entry, a nested
+// list). A bare "N." or "N:" is accepted only on an otherwise empty line.
+// Group 1 or 3 is the number, group 2 or 4 the separator.
+var lineNumberPrefixRE = regexp.MustCompile(`^(?: *(\d+)(\t|\x{2192})|(\d+)(\. |: |\.$|:$))`)
+
+// matchLineNumberPrefix returns the number and separator ("\t", "→", "." or
+// ":") of l's line-number prefix and the offset where the text starts.
+func matchLineNumberPrefix(l string) (n int, sep string, end int, ok bool) {
+	loc := lineNumberPrefixRE.FindStringSubmatchIndex(l)
+	if loc == nil {
+		return 0, "", 0, false
+	}
+	num, sepLoc := loc[2:4], loc[4:6]
+	if num[0] < 0 {
+		num, sepLoc = loc[6:8], loc[8:10]
+	}
+	n, err := strconv.Atoi(l[num[0]:num[1]])
+	if err != nil {
+		return 0, "", 0, false
+	}
+	return n, strings.TrimSpace(l[sepLoc[0]:sepLoc[1]]), loc[1], true
+}
 
 // stripLineNumberPrefixes removes line-number prefixes when every line of s
-// carries one and the numbers are consecutive; otherwise it returns s
-// unchanged and ok=false. first is the number of the first line.
-func stripLineNumberPrefixes(s string) (stripped string, first int, ok bool) {
+// carries one with the same separator and the numbers are consecutive;
+// otherwise it returns s unchanged and ok=false. first is the number of the
+// first line.
+func stripLineNumberPrefixes(s string) (stripped string, first int, sep string, ok bool) {
 	body, trail := s, ""
 	if strings.HasSuffix(body, "\n") {
 		body, trail = body[:len(body)-1], "\n"
@@ -822,22 +892,30 @@ func stripLineNumberPrefixes(s string) (stripped string, first int, ok bool) {
 	lines := strings.Split(body, "\n")
 	for i, l := range lines {
 		l = strings.TrimSuffix(l, "\r")
-		loc := lineNumberPrefixRE.FindStringSubmatchIndex(l)
-		if loc == nil {
-			return s, 0, false
-		}
-		n, err := strconv.Atoi(l[loc[2]:loc[3]])
-		if err != nil {
-			return s, 0, false
+		n, lsep, end, ok := matchLineNumberPrefix(l)
+		if !ok {
+			return s, 0, "", false
 		}
 		if i == 0 {
-			first = n
-		} else if n != first+i {
-			return s, 0, false
+			first, sep = n, lsep
+		} else if n != first+i || lsep != sep {
+			return s, 0, "", false
 		}
-		lines[i] = l[loc[1]:]
+		lines[i] = l[end:]
 	}
-	return strings.Join(lines, "\n") + trail, first, true
+	return strings.Join(lines, "\n") + trail, first, sep, true
+}
+
+// stripPrefixesWithSep removes a line-number prefix using separator sep from
+// every line of s that has one, leaving the other lines as written.
+func stripPrefixesWithSep(s, sep string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if _, lsep, end, ok := matchLineNumberPrefix(strings.TrimSuffix(l, "\r")); ok && lsep == sep {
+			lines[i] = l[end:]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // collapseWS trims a line and collapses every internal whitespace run to a

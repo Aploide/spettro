@@ -521,6 +521,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	if err := r.checkFileStamp("file-edit", rel, raw); err != nil {
 		return "", err
 	}
+	trustLines := r.unchangedSinceRead(rel, raw)
 	content := string(raw)
 	scope := content
 	prefix := ""
@@ -576,7 +577,10 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		if op.old == op.new {
 			return "", fmt.Errorf("file-edit: %sold_string and new_string are identical", label)
 		}
-		res, err := applyEdit(updated, editRequest{Old: op.old, New: op.new, ReplaceAll: op.replaceAll, LineOffset: lineOffset})
+		// Line numbers the model copied only describe the file as it was
+		// read; after the first op they may have moved.
+		res, err := applyEdit(updated, editRequest{Old: op.old, New: op.new, ReplaceAll: op.replaceAll, LineOffset: lineOffset,
+			TrustLineNumbers: i == 0 && trustLines})
 		if err != nil {
 			return "", fmt.Errorf("file-edit: %s%w", label, err)
 		}
@@ -647,6 +651,7 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 	if err := r.checkFileStamp("multi-edit", rel, raw); err != nil {
 		return "", err
 	}
+	trustLines := r.unchangedSinceRead(rel, raw)
 	content := string(raw)
 	updated := content
 	totalReplacements := 0
@@ -658,7 +663,8 @@ func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string,
 		if e.OldString == e.NewString {
 			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
 		}
-		res, err := applyEdit(updated, editRequest{Old: e.OldString, New: e.NewString, ReplaceAll: e.ReplaceAll})
+		res, err := applyEdit(updated, editRequest{Old: e.OldString, New: e.NewString, ReplaceAll: e.ReplaceAll,
+			TrustLineNumbers: i == 0 && trustLines})
 		if err != nil {
 			return "", fmt.Errorf("multi-edit: edit %d: %w (file untouched)", i+1, err)
 		}

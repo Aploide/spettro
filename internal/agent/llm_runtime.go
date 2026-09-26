@@ -227,8 +227,10 @@ type toolRuntime struct {
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
 	// fileStamps and fileLocks back the stale-read guard and per-file write
-	// serialization (file_stamps.go); both are created lazily.
+	// serialization (file_stamps.go); readStamps holds the content hash of
+	// each path's last file-read. All are created lazily.
 	fileStamps    map[string][32]byte
+	readStamps    map[string][32]byte
 	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
@@ -1120,15 +1122,20 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err != nil {
 			return "", err
 		}
+		// The lock keeps a concurrent edit in the same batch from landing
+		// between the read and the stamp, which would stamp stale content.
+		unlock := r.lockFile(abs)
 		data, err := os.ReadFile(abs)
 		if err != nil {
+			unlock()
 			return "", err
 		}
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		delete(r.requiredReads, rel)
 		r.mu.Unlock()
-		r.recordFileStamp(rel, data)
+		r.recordReadStamp(rel, data)
+		unlock()
 		content := string(data)
 		if args.StartLine > 0 {
 			// Bounded reads are already scoped by the model; plain truncation

@@ -28,6 +28,31 @@ func (r *toolRuntime) recordFileStamp(rel string, content []byte) {
 	r.fileStamps[rel] = sum
 }
 
+// recordReadStamp stamps rel after a file-read and remembers that content as
+// the one whose line numbers the model was shown.
+func (r *toolRuntime) recordReadStamp(rel string, content []byte) {
+	sum := sha256.Sum256(content)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fileStamps == nil {
+		r.fileStamps = map[string][32]byte{}
+	}
+	if r.readStamps == nil {
+		r.readStamps = map[string][32]byte{}
+	}
+	r.fileStamps[rel] = sum
+	r.readStamps[rel] = sum
+}
+
+// unchangedSinceRead reports whether content is exactly what the last
+// file-read of rel returned, so line numbers from that read still hold.
+func (r *toolRuntime) unchangedSinceRead(rel string, content []byte) bool {
+	r.mu.Lock()
+	sum, ok := r.readStamps[rel]
+	r.mu.Unlock()
+	return ok && sum == sha256.Sum256(content)
+}
+
 // stampFromDisk stamps rel with whatever is on disk now, for tools that wrote
 // the file without holding its content (downloads, generated media).
 func (r *toolRuntime) stampFromDisk(rel, abs string) {
