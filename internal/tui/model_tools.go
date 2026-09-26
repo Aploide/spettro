@@ -157,6 +157,44 @@ func (m Model) renderAnnotatedPicker(title string, options []pickerOption, curso
 	return sb.String()
 }
 
+// todoWriteLabel describes a todo-write call by what it did: replaced the
+// list, merged tasks into it, removed tasks, or only read it.
+func todoWriteLabel(argsJSON string) string {
+	var args struct {
+		Todos          *[]json.RawMessage `json:"todos"`
+		Merge          bool               `json:"merge"`
+		Delete         []string           `json:"delete"`
+		ClearCompleted bool               `json:"clear_completed"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return "Wrote todos"
+	}
+	var parts []string
+	if args.Todos != nil {
+		n := len(*args.Todos)
+		noun := "todos"
+		if n == 1 {
+			noun = "todo"
+		}
+		if args.Merge {
+			parts = append(parts, fmt.Sprintf("Updated %d %s", n, noun))
+		} else {
+			parts = append(parts, fmt.Sprintf("Wrote %d %s", n, noun))
+		}
+	}
+	if len(args.Delete) > 0 {
+		parts = append(parts, fmt.Sprintf("deleted %d", len(args.Delete)))
+	}
+	if args.ClearCompleted {
+		parts = append(parts, "cleared completed")
+	}
+	if len(parts) == 0 {
+		return "Read todos"
+	}
+	label := strings.Join(parts, ", ")
+	return strings.ToUpper(label[:1]) + label[1:]
+}
+
 func formatToolLabel(name, argsJSON string) string {
 	switch name {
 	case "file-read":
@@ -268,17 +306,29 @@ func formatToolLabel(name, argsJSON string) string {
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
 			p := truncateLabel(args.Pattern, 50)
 			return fmt.Sprintf("Matched %q", p)
 		}
-		return "Matched files"
+		// Without a pattern glob lists one directory (what ls used to do).
+		if strings.TrimSpace(args.Path) != "" {
+			return "Listed " + truncateLabel(args.Path, 60)
+		}
+		return "Listed directory"
 	case "grep":
 		var args struct {
-			Pattern string `json:"pattern"`
+			Pattern string  `json:"pattern"`
+			Symbol  *string `json:"symbol"`
 		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Symbol != nil && args.Pattern == "" {
+			if s := strings.TrimSpace(*args.Symbol); s != "" {
+				return fmt.Sprintf("Searched repo for %q", truncateLabel(s, 50))
+			}
+			return "Searched repository"
+		}
+		if args.Pattern != "" {
 			p := truncateLabel(args.Pattern, 50)
 			return fmt.Sprintf("Grepped %q", p)
 		}
@@ -293,16 +343,7 @@ func formatToolLabel(name, argsJSON string) string {
 		}
 		return "Listed directory"
 	case "todo-write":
-		var args struct {
-			Todos []json.RawMessage `json:"todos"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && len(args.Todos) > 0 {
-			if len(args.Todos) == 1 {
-				return "Wrote 1 todo"
-			}
-			return fmt.Sprintf("Wrote %d todos", len(args.Todos))
-		}
-		return "Wrote todos"
+		return todoWriteLabel(argsJSON)
 	case "task-create":
 		var args struct {
 			ID string `json:"id"`

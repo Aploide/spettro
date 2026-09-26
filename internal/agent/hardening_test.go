@@ -2,12 +2,9 @@ package agent
 
 import (
 	"context"
-	"encoding/base64"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -60,28 +57,6 @@ func TestSafeHTTPClientBlocksLoopback(t *testing.T) {
 	// srv.URL is http://127.0.0.1:<port>; the safe client must refuse to dial it.
 	if _, err := newSafeHTTPClient(5 * time.Second).Get(srv.URL); err == nil {
 		t.Fatalf("expected loopback dial to be blocked, got nil error")
-	}
-}
-
-func TestWriteMediaFileContainment(t *testing.T) {
-	cwd := t.TempDir()
-	r := &toolRuntime{cwd: cwd, readSet: map[string]struct{}{}}
-	item := grokImageData{B64JSON: base64.StdEncoding.EncodeToString([]byte("payload"))}
-
-	// Escaping the workspace must be refused.
-	outside := filepath.Join(filepath.Dir(cwd), "evil.png")
-	if _, err := r.writeMediaFile(context.Background(), outside, item); err == nil ||
-		!strings.Contains(err.Error(), "outside the workspace") {
-		t.Fatalf("expected containment error, got %v", err)
-	}
-
-	// A path inside the workspace succeeds and returns a relative path.
-	rel, err := r.writeMediaFile(context.Background(), filepath.Join(cwd, "assets", "ok.png"), item)
-	if err != nil {
-		t.Fatalf("contained write failed: %v", err)
-	}
-	if rel != "assets/ok.png" {
-		t.Fatalf("unexpected rel path %q", rel)
 	}
 }
 

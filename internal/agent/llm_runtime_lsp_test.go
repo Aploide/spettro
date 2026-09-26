@@ -84,7 +84,7 @@ func TestEditToolsAppendDiagnostics(t *testing.T) {
 		t.Fatalf("a clean edit should add nothing, got:\n%s", out)
 	}
 
-	out, err = rt.runMultiEdit(ctx, toolArgs(t, map[string]any{
+	out, err = rt.runFileEdit(ctx, toolArgs(t, map[string]any{
 		"path": "a.fk",
 		"edits": []map[string]any{
 			{"old_string": "fine", "new_string": "ERR first"},
@@ -95,7 +95,7 @@ func TestEditToolsAppendDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasSuffix(out, "Diagnostics (errors) in a.fk:\na.fk:1:1: bad thing: ERR first (fake)\na.fk:2:1: bad thing: ERR second (fake)") {
-		t.Fatalf("multi-edit result:\n%s", out)
+		t.Fatalf("file-edit edits[] result:\n%s", out)
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "a.fk")); string(got) != "ERR first\nERR second\n" {
 		t.Fatalf("file content %q", got)

@@ -20,7 +20,6 @@ import (
 	"spettro/internal/diff"
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
-	"spettro/internal/session"
 	"spettro/internal/skills"
 )
 
@@ -83,7 +82,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "tool-output", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
+		AllowedTools:    []string{"file-read", "file-write", "bash", "job-output", "job-kill", "tool-output", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -222,6 +221,9 @@ func (r *toolRuntime) traceID() string {
 type toolCall struct {
 	Tool string          `json:"tool"`
 	Args json.RawMessage `json:"args"`
+	// CalledAs is the retired name the model used when canonicalToolCall
+	// rewrote the call to its canonical tool; hooks match it as well.
+	CalledAs string `json:"-"`
 }
 
 type toolRuntime struct {
@@ -929,7 +931,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images})
 				toolResults[i] = provider.ToolResult{
 					ID:      resp.ToolCalls[i].ID,
-					Name:    res.name,
+					Name:    resp.ToolCalls[i].Name,
 					Output:  res.output,
 					IsErr:   res.status == "error",
 					Images:  res.images,
@@ -1128,8 +1130,6 @@ var concurrentTools = map[string]bool{
 	"file-read":          true,
 	"grep":               true,
 	"glob":               true,
-	"ls":                 true,
-	"repo-search":        true,
 	"web-fetch":          true,
 	"web-search":         true,
 	"view-image":         true,
@@ -1139,8 +1139,6 @@ var concurrentTools = map[string]bool{
 	"skill-read":         true,
 	"skill-list":         true,
 	"tool-search":        true,
-	"task-get":           true,
-	"task-list":          true,
 	"job-output":         true,
 	"tool-output":        true,
 	"mcp-list-resources": true,
@@ -1197,7 +1195,32 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	toolCap := r.maxToolCallsPerStep
 	agentCalls := 0
 	runnable := make([]int, 0, len(calls))
+	// Retired tool names become their canonical tool before anything else
+	// looks at the call, so the allow-list, policies, hooks, batching, traces
+	// and hosts only ever see canonical names.
+	calls = slices.Clone(calls)
 	for i, call := range calls {
+		canon, err := r.canonicalCall(call)
+		if err != nil {
+			results[i] = parallelResult{
+				agentID: r.traceID(),
+				name:    call.Tool,
+				args:    singleLine(string(call.Args)),
+				output:  "error: " + err.Error(),
+				status:  "error",
+			}
+			if callback != nil {
+				callback(ToolTrace{AgentID: r.traceID(), Name: call.Tool, Status: "error", Args: results[i].args, Output: results[i].output})
+			}
+			calls[i] = toolCall{}
+			continue
+		}
+		calls[i] = canon
+	}
+	for i, call := range calls {
+		if call.Tool == "" {
+			continue
+		}
 		if toolCap > 0 && i >= toolCap {
 			results[i] = parallelResult{
 				agentID: r.traceID(),
@@ -1313,7 +1336,7 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 			if lim.FileReadChars > 0 {
 				return lim.FileReadChars
 			}
-		case "repo-search", "grep", "glob", "ls":
+		case "grep", "glob":
 			if lim.SearchChars > 0 {
 				return lim.SearchChars
 			}
@@ -1327,6 +1350,11 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 }
 
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	// The PostToolUse hooks in finishToolCall need the canonical call too.
+	if canon, err := r.canonicalCall(call); err == nil {
+		call = canon
+	}
+	ctx = withCalledAs(ctx, call.CalledAs)
 	if blocksOnUserInput(call.Tool) {
 		// The tool is waiting on a person, who may take as long as they take.
 		// A deadline here would cancel the question out from under them and
@@ -1377,7 +1405,7 @@ func (r *toolRuntime) defaultToolTimeoutSec(tool string) int {
 	}
 	if r.goalMode {
 		switch tool {
-		case "shell-exec", "bash", "bash-output":
+		case "bash":
 			if r.shellTimeoutSec > 0 {
 				timeoutSec = r.shellTimeoutSec
 			} else if timeoutSec < 600 {
@@ -1396,6 +1424,13 @@ func blocksOnUserInput(tool string) bool {
 }
 
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	// parallelExec already canonicalized the call; this covers direct callers,
+	// so a retired name never reaches the dispatch below.
+	call, err := r.canonicalCall(call)
+	if err != nil {
+		return "", err
+	}
+	ctx = withCalledAs(ctx, call.CalledAs)
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
 	}
@@ -1428,19 +1463,6 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.checkpointStep(call.Tool)
 	}
 	switch call.Tool {
-	case "repo-search":
-		var args struct {
-			Query string `json:"query"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("repo-search args: %w", err)
-		}
-		out, err := r.searcher.Search(ctx, r.cwd, strings.TrimSpace(args.Query))
-		if err != nil {
-			return "", err
-		}
-		r.markReadFromSearch(out)
-		return r.spoolResult("repo-search", out), nil
 	case "file-read":
 		return r.runFileRead(ctx, call.Args)
 	case "file-write":
@@ -1468,7 +1490,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			oldRaw = raw
 		}
 		oldContent := string(oldRaw)
-		// Overwriting needs a full read (a stamp); a grep or repo-search hit
+		// Overwriting needs a full read (a stamp); a grep hit
 		// only showed the model a line or two of the file. Appending replaces
 		// nothing, so it needs no read — and does not count as one.
 		stampedBefore := exists && r.stampMatches(rel, oldRaw)
@@ -1526,8 +1548,6 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
 		return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("created %s", rel)), nil
-	case "shell-exec":
-		return r.runShellTool(ctx, call.Tool, call.Args, "shell-exec")
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
@@ -1535,6 +1555,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("glob args: %w", err)
+		}
+		if strings.TrimSpace(args.Pattern) == "" {
+			return r.runListDir(args.Path)
 		}
 		out, err := r.runGlob(ctx, args.Pattern, args.Path)
 		if err != nil {
@@ -1546,51 +1569,20 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
 			return "", fmt.Errorf("grep args: %w", err)
 		}
+		if gargs.Symbol != nil {
+			return r.runSymbolSearch(ctx, gargs)
+		}
 		out, err := r.runGrep(ctx, gargs)
 		if err != nil {
 			return "", err
 		}
 		return r.spoolResult("grep", out), nil
-	case "ls":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("ls args: %w", err)
-		}
-		dir := "."
-		if args.Path != "" {
-			abs, _, err := r.resolvePath(args.Path)
-			if err != nil {
-				return "", fmt.Errorf("ls: %w", err)
-			}
-			dir = abs
-		} else {
-			dir = r.cwd
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return "", fmt.Errorf("ls: %w", err)
-		}
-		var lines []string
-		for _, e := range entries {
-			if e.IsDir() {
-				lines = append(lines, e.Name()+"/")
-			} else {
-				lines = append(lines, e.Name())
-			}
-		}
-		return strings.Join(lines, "\n"), nil
 	case "web-fetch":
 		return r.runWebFetch(ctx, call.Args)
 	case "download":
 		return r.runDownload(ctx, call.Args)
 	case "web-search":
 		return r.runWebSearch(ctx, call.Args)
-	case "grok-image":
-		return r.runGrokImage(ctx, call.Args)
-	case "grok-video":
-		return r.runGrokVideo(ctx, call.Args)
 	case "view-image":
 		return r.runViewImage(ctx, call.Args)
 	case "ask-user":
@@ -1599,23 +1591,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runPlanModeToggle(call.Args, true)
 	case "exit-plan-mode":
 		return r.runPlanModeToggle(call.Args, false)
-	case "task-create":
-		return r.runTaskCreate(call.Args)
-	case "task-get":
-		return r.runTaskGet(call.Args)
-	case "task-update":
-		return r.runTaskUpdate(call.Args)
-	case "task-list":
-		return r.runTaskList(call.Args)
-	case "task-delete":
-		return r.runTaskDelete(call.Args)
 	case "task-stop":
 		return r.runTaskStop(call.Args)
 	case "goal-complete":
 		return r.runGoalComplete(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
-	case "skill-read", "activate-skill", "skill-activate":
+	case "skill-read":
 		return r.runSkillRead(call.Args)
 	case "skill-list":
 		return r.runSkillList(call.Args)
@@ -1640,75 +1622,19 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "save-memory":
 		return r.runSaveMemory(call.Args)
 	case "todo-write":
-		var args struct {
-			Todos []any `json:"todos"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("todo-write args: %w", err)
-		}
-		if strings.TrimSpace(r.sessionDir) == "" {
-			return "", fmt.Errorf("todo-write requires an active session")
-		}
-		out := make([]session.Todo, 0, len(args.Todos))
-		now := time.Now()
-		for i, item := range args.Todos {
-			m, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			id, _ := m["id"].(string)
-			if strings.TrimSpace(id) == "" {
-				id = fmt.Sprintf("todo-%d", i+1)
-			}
-			content, _ := m["content"].(string)
-			status, _ := m["status"].(string)
-			if status == "" {
-				status = "pending"
-			}
-			owner, _ := m["owner"].(string)
-			source, _ := m["source"].(string)
-			priority, _ := m["priority"].(string)
-			var deps []string
-			if rawDeps, ok := m["dependencies"].([]any); ok {
-				for _, d := range rawDeps {
-					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
-						deps = append(deps, strings.TrimSpace(s))
-					}
-				}
-			}
-			out = append(out, session.Todo{
-				ID:           id,
-				Content:      content,
-				Status:       status,
-				Owner:        owner,
-				Source:       source,
-				Priority:     priority,
-				Dependencies: deps,
-				UpdatedAt:    now,
-			})
-		}
-		// Route through the session store so the write is atomic and holds the
-		// same lock as the task tools; direct file writes here raced with them.
-		sid := filepath.Base(r.sessionDir)
-		if err := session.SaveTodos(filepath.Dir(filepath.Dir(r.sessionDir)), sid, out); err != nil {
-			return "", fmt.Errorf("todo-write: %w", err)
-		}
-		return fmt.Sprintf("wrote %d todos", len(out)), nil
+		return r.runTodoWrite(call.Args)
 	case "file-edit":
 		defer r.lockFileForMutation(call.Args)()
 		return r.runFileEdit(ctx, call.Args)
-	case "multi-edit":
-		defer r.lockFileForMutation(call.Args)()
-		return r.runMultiEdit(ctx, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
 		return r.runExitWorktree(ctx, call.Args)
 	case "send-message":
 		return r.runSendMessage(call.Args)
-	case "bash", "bash-output":
-		// Models frequently treat bash-output as the polling tool for background
-		// jobs (job_id + offset) rather than as a bash alias; honor that reading
+	case "bash":
+		// Models frequently treat bash (or its bash-output alias) as the polling
+		// tool for background jobs (job_id + offset); honor that reading
 		// whenever a job_id is supplied so both conventions work.
 		var probe struct {
 			JobID string `json:"job_id"`
@@ -1913,7 +1839,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 // command lines that provably only read.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash", "pty-start", "pty-write":
+	case "file-write", "file-edit", "rename-symbol", "bash", "pty-start", "pty-write":
 		return true
 	}
 	return false
@@ -2026,12 +1952,12 @@ func realPathEscapes(dir, abs string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// searchLineNumberRE matches ":<digits>" segments in repo-search output, used
+// searchLineNumberRE matches ":<digits>" segments in symbol-search output, used
 // by markReadFromSearch to detect ripgrep-style "path:lineno:..." rows.
 var searchLineNumberRE = regexp.MustCompile(`^\d+$`)
 
 // invalidateSymbolIndex drops rel from the repo symbol index after one of the
-// agent's own write tools touched it, so the next repo-search re-parses it
+// agent's own write tools touched it, so the next symbol search re-parses it
 // even if the filesystem mtime didn't visibly change.
 func (r *toolRuntime) invalidateSymbolIndex(rel string) {
 	if r.searcher.Index != nil {

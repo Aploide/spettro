@@ -29,7 +29,7 @@ key, or a bare JSON array of rules:
     {
       "id": "deny-rm-rf",
       "event": "PreToolUse",
-      "matcher": "shell-exec",
+      "matcher": "bash",
       "command": "if echo '$SPETTRO_HOOK_COMMAND' | grep -q 'rm -rf'; then echo '{\"decision\":\"deny\",\"reason\":\"rm -rf is not allowed\"}'; else echo '{\"decision\":\"allow\"}'; fi",
       "timeout_sec": 5
     }
@@ -44,7 +44,7 @@ Equivalent array form:
   {
     "id": "deny-rm-rf",
     "event": "PreToolUse",
-    "matcher": "shell-exec",
+    "matcher": "bash",
     "command": "if echo '$SPETTRO_HOOK_COMMAND' | grep -q 'rm -rf'; then echo '{\"decision\":\"deny\",\"reason\":\"rm -rf is not allowed\"}'; else echo '{\"decision\":\"allow\"}'; fi",
     "timeout_sec": 5
   }
@@ -57,7 +57,7 @@ Equivalent array form:
 |-------|------|----------|---------|-------------|
 | `id` | string | No | `global-1`, `project-1`, ... | Unique identifier for the rule. Auto-generated when empty. |
 | `event` | string | Yes | — | One of `PreToolUse`, `PostToolUse`, `PermissionRequest`, `SessionStart`. |
-| `matcher` | string | No | `*` (all tools) | Glob pattern or `re:regex` to match tool IDs (`shell-exec`, `bash`, `file-write`, `file-edit`, `agent`, ...). |
+| `matcher` | string | No | `*` (all tools) | Glob pattern or `re:regex` to match tool IDs (`bash`, `file-write`, `file-edit`, `agent`, ...). |
 | `command` | string | Yes | — | Shell command to execute. Receives event data on stdin. |
 | `timeout_sec` | int | No | `15` | Maximum execution time for the command. |
 | `enabled` | bool | No | `true` | Set to `false` to disable a rule without deleting it. |
@@ -67,11 +67,21 @@ Equivalent array form:
 | Pattern | Matches |
 |---------|---------|
 | `*` or `""` | Every tool. |
-| `shell-exec` | Exactly the `shell-exec` tool. |
-| `bash` | Exactly the `bash` tool. |
+| `bash` | Exactly the `bash` tool (the shell). |
 | `file-*` | Glob: `file-write`, `file-edit`, etc. |
 | `re:^git` | Regex: any tool ID starting with `git`. |
-| `re:(shell-exec\|bash)` | Regex: either shell tool. |
+| `re:(bash\|pty-start)` | Regex: a shell command or an interactive terminal. |
+
+A matcher is tested against the tool's canonical ID and against the retired
+name the model called it by, if any (see [Built-in tools](tools.md)). A rule
+for `shell-exec` or `bash-output`, which were the very same tool as `bash`,
+also fires on every `bash` call; a rule copied under both `shell-exec` and
+`bash` (same `command`) runs once per call. A rule for a retired name that
+was a narrower operation (`multi-edit`, `repo-search`, `ls`, `task-*`) fires
+only when the model calls that name, not on every `file-edit`, `grep`, `glob`
+or `todo-write`. The `tool_id` the hook receives is always the canonical ID
+(`bash`, never `shell-exec`): a script that checks `tool_id` itself must
+test the canonical name.
 
 ### What the hook receives on stdin
 
@@ -80,7 +90,7 @@ The hook command receives a JSON object on stdin:
 ```json
 {
   "event": "PreToolUse",
-  "tool_id": "shell-exec",
+  "tool_id": "bash",
   "tool_args": {"command": "rm -rf /tmp/x"},
   "tool_output": "",
   "command": "rm -rf /tmp/x"
@@ -92,7 +102,7 @@ Fields:
 | Field | Type | Description |
 |-------|------|-------------|
 | `event` | string | The event that triggered the hook. |
-| `tool_id` | string | The tool ID (`shell-exec`, `file-write`, etc.). |
+| `tool_id` | string | The canonical tool ID (`bash`, `file-write`, etc.). |
 | `tool_args` | object | The arguments the tool was called with (varies by tool). |
 | `tool_output` | string | The output of the tool call (only meaningful for `PostToolUse`). |
 | `command` | string | Shortcut to the command string when the tool is a shell executor. |
@@ -122,7 +132,7 @@ of stdout**:
 {"decision":"deny","reason":"use --soft flag instead","message":"Please use --soft when deleting"}
 ```
 
-For `PreToolUse` shell-exec tools, you can also modify the arguments:
+For `PreToolUse` hooks on `bash`, you can also modify the arguments:
 
 ```json
 {"decision":"allow","updated_args":"pip install requests --no-cache-dir"}
@@ -165,9 +175,9 @@ validation issues:
 
 ```
 Effective hooks (2 global, 1 project):
-  global  PreToolUse    deny-rm-rf      shell-exec     ✓
+  global  PreToolUse    deny-rm-rf      bash           ✓
   global  PostToolUse   log-edits       file-write     ✓
-  project PreToolUse    custom-approve  shell-exec     ✗ unsupported event "foo"
+  project PreToolUse    custom-approve  bash           ✗ unsupported event "foo"
 ```
 
 ## Writing a hook
@@ -182,7 +192,7 @@ File: `~/.spettro/hooks.json`
     {
       "id": "block-force-push",
       "event": "PreToolUse",
-      "matcher": "re:(shell-exec|bash)",
+      "matcher": "bash",
       "command": "if echo \"$SPETTRO_HOOK_COMMAND\" | grep -qP 'git\s+push\s+.*--force'; then echo '{\"decision\":\"deny\",\"reason\":\"force push is not allowed\"}'; else echo '{\"decision\":\"allow\"}'; fi",
       "timeout_sec": 3
     }
@@ -215,7 +225,7 @@ File: `.spettro/hooks.json` (project-scoped)
     {
       "id": "add-cache-dir",
       "event": "PreToolUse",
-      "matcher": "shell-exec",
+      "matcher": "bash",
       "command": "read input; cmd=$(echo \"$input\" | jq -r '.command // empty'); if echo \"$cmd\" | grep -q 'pip install'; then echo '{\"decision\":\"allow\",\"updated_args\":\"'"$cmd"' --no-cache-dir\"}'; else echo '{\"decision\":\"allow\"}'; fi",
       "timeout_sec": 3
     }

@@ -15,7 +15,7 @@ import (
 	"spettro/internal/safeio"
 )
 
-// Build/scan bounds. The index must never make repo-search slower than plain
+// Build/scan bounds. The index must never make a symbol search slower than plain
 // grep in the fallback case, so an oversized or slow repo simply stops
 // indexing where the cap hits and later queries answer from what was indexed.
 const (

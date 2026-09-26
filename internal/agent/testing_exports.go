@@ -35,7 +35,7 @@ func SplitShellCommandSegmentsForTesting(command string) []string {
 }
 
 func AuthorizeShellCommandForTesting(r *toolRuntime, ctx context.Context, command string) error {
-	return r.authorizeShellCommand(ctx, "shell-exec", command)
+	return r.authorizeShellCommand(ctx, "bash", command)
 }
 
 // BuildLoopPromptForTesting concatenates the system string and the initial user
@@ -78,24 +78,4 @@ func LexShellTokensForTesting(seg string) []string {
 
 func SpettroCoAuthorTrailerForTesting() string {
 	return spettroCoAuthorTrailer
-}
-
-func ResolveMediaPathForTesting(cwd, requested, prompt, kind string) (dir, baseName, fixedExt string, hasExt, dirOnly bool) {
-	return resolveMediaPath(cwd, requested, prompt, kind)
-}
-
-func SlugifyPromptForTesting(prompt string) string {
-	return slugifyPrompt(prompt)
-}
-
-func IsNextJSProjectForTesting(cwd string) bool {
-	return isNextJSProject(cwd)
-}
-
-func PickExtensionForTesting(mime, kind string) string {
-	return pickExtension(mime, kind)
-}
-
-func DefaultMediaDirForTesting(cwd string) string {
-	return defaultMediaDirFor(cwd)
 }

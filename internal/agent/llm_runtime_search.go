@@ -392,7 +392,11 @@ func typeExtensions(t string) (exts []string, ok bool) {
 // max_results, and the rg/grep flags -i (case_insensitive), -C/-A/-B
 // (context), -c (count mode) and -l (files_with_matches mode).
 type grepArgs struct {
-	Pattern         string   `json:"pattern"`
+	Pattern string `json:"pattern"`
+	// Symbol, when present (even empty), runs the symbol-index search instead
+	// of a regex: ranked definitions of an identifier, then its usages. It is
+	// what the retired repo-search tool did; an empty symbol lists all files.
+	Symbol          *string  `json:"symbol"`
 	Path            string   `json:"path"`
 	Glob            string   `json:"glob"`
 	Include         string   `json:"include"`
@@ -570,6 +574,49 @@ func (q grepQuery) wantsFile(rel string) bool {
 // runGrep implements the grep tool: ripgrep when it is installed (fast, and
 // exact about .gitignore), otherwise a Go walk honouring the root .gitignore.
 // Both skip binary files, clip long lines and stop at max_results.
+// runSymbolSearch answers grep's symbol form: a case-insensitive literal
+// search backed by the symbol index, listing ranked definitions of an
+// identifier before its usages.
+func (r *toolRuntime) runSymbolSearch(ctx context.Context, args grepArgs) (string, error) {
+	if strings.TrimSpace(args.Pattern) != "" {
+		return "", fmt.Errorf("grep: pass either pattern (a regex search) or symbol (a definitions-first lookup), not both")
+	}
+	out, err := r.searcher.Search(ctx, r.cwd, strings.TrimSpace(*args.Symbol))
+	if err != nil {
+		return "", err
+	}
+	r.markReadFromSearch(out)
+	return r.spoolResult("grep", out), nil
+}
+
+// runListDir answers glob without a pattern: the immediate entries of one
+// directory (default: the working directory), directories marked with a
+// trailing slash. Unlike a pattern walk it is not recursive and shows every
+// entry, ignored or not, exactly as the directory holds them.
+func (r *toolRuntime) runListDir(dirPath string) (string, error) {
+	dir := r.cwd
+	if strings.TrimSpace(dirPath) != "" {
+		abs, _, err := r.resolvePath(dirPath)
+		if err != nil {
+			return "", fmt.Errorf("glob: %w", err)
+		}
+		dir = abs
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("glob: %w", err)
+	}
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			lines = append(lines, e.Name()+"/")
+		} else {
+			lines = append(lines, e.Name())
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 func (r *toolRuntime) runGrep(ctx context.Context, args grepArgs) (string, error) {
 	q, err := r.newGrepQuery(args)
 	if err != nil {

@@ -205,12 +205,10 @@ func (r *toolRuntime) shellTimeout(toolID string, requestedSec int) time.Duratio
 
 // isForegroundShellCall reports whether a tool call runs a foreground shell
 // command, whose deadlines runShellTool manages itself. Background jobs and
-// bash-output polling a job are not: they return promptly and keep the
+// bash polling a job (job_id) are not: they return promptly and keep the
 // ordinary per-tool deadline.
 func (r *toolRuntime) isForegroundShellCall(call toolCall) bool {
-	switch call.Tool {
-	case "shell-exec", "bash", "bash-output":
-	default:
+	if call.Tool != "bash" {
 		return false
 	}
 	var probe struct {
@@ -347,7 +345,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 	command = strings.TrimSpace(command)
 	normalized := normalizeCommand(command)
 	if normalized == "" {
-		return fmt.Errorf("shell-exec command is required")
+		return fmt.Errorf("%s command is required", toolID)
 	}
 
 	segments := splitShellCommandSegments(command)
@@ -382,7 +380,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 			switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
 			case config.RuleDeny:
 				r.emitApprovalTrace("denied", "policy", toolID, segNorm, "blocked by permission rules")
-				return fmt.Errorf("shell-exec denied by policy for command segment %q", segNorm)
+				return fmt.Errorf("%s denied by policy for command segment %q", toolID, segNorm)
 			case config.RuleAllow:
 				continue
 			}
@@ -405,7 +403,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 			reason = "denied by permission hook"
 		}
 		r.emitApprovalTrace("denied", "hook", toolID, strings.Join(missingApprovals, " | "), reason)
-		return fmt.Errorf("shell-exec denied by hook: %s", reason)
+		return fmt.Errorf("%s denied by hook: %s", toolID, reason)
 	} else if decision == "allow" {
 		r.emitApprovalTrace("allowed", "hook", toolID, strings.Join(missingApprovals, " | "), reason)
 		return nil
@@ -413,7 +411,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 
 	if r.shellApproval == nil {
 		r.emitApprovalTrace("denied", "policy", toolID, strings.Join(missingApprovals, " | "), "approval required outside yolo mode")
-		return fmt.Errorf("shell-exec requires approval outside yolo mode")
+		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
 
 	decision, err := r.shellApproval(ctx, ShellApprovalRequest{
@@ -442,7 +440,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		return nil
 	default:
 		r.emitApprovalTrace("denied", "user", toolID, strings.Join(missingApprovals, " | "), "denied by user")
-		return fmt.Errorf("shell-exec denied by user")
+		return fmt.Errorf("%s denied by user", toolID)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"spettro/internal/hooks"
@@ -40,10 +41,7 @@ func (r *toolRuntime) runSessionStartHooks(ctx context.Context) error {
 
 func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args json.RawMessage) (json.RawMessage, string, error) {
 	updated := args
-	for _, rule := range r.hooksConfig.Rules {
-		if !rule.Enabled || rule.Event != hooks.EventPreToolUse || !hooks.Match(rule, toolID) {
-			continue
-		}
+	for _, rule := range r.toolHookRules(ctx, hooks.EventPreToolUse, toolID) {
 		res, err := hooks.Run(ctx, rule, hooks.RunInput{Event: hooks.EventPreToolUse, ToolID: toolID, ToolArgs: updated})
 		if err != nil {
 			return nil, "", err
@@ -60,7 +58,7 @@ func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args j
 			r.emitApprovalTrace("denied", "hook", toolID, "", reason)
 			return nil, reason, nil
 		case "allow":
-			if len(res.UpdatedArgs) > 0 && (toolID == "shell-exec" || toolID == "bash" || toolID == "bash-output") {
+			if len(res.UpdatedArgs) > 0 && toolID == "bash" {
 				updated = res.UpdatedArgs
 			}
 		}
@@ -69,10 +67,7 @@ func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args j
 }
 
 func (r *toolRuntime) runPostToolHooks(ctx context.Context, toolID string, args json.RawMessage, output string) error {
-	for _, rule := range r.hooksConfig.Rules {
-		if !rule.Enabled || rule.Event != hooks.EventPostToolUse || !hooks.Match(rule, toolID) {
-			continue
-		}
+	for _, rule := range r.toolHookRules(ctx, hooks.EventPostToolUse, toolID) {
 		_, err := hooks.Run(ctx, rule, hooks.RunInput{Event: hooks.EventPostToolUse, ToolID: toolID, ToolArgs: args, ToolOutput: truncate(output, 2000)})
 		if err != nil {
 			return err
@@ -82,23 +77,90 @@ func (r *toolRuntime) runPostToolHooks(ctx context.Context, toolID string, args 
 }
 
 // hasPostToolHooks reports whether any enabled PostToolUse hook matches toolID.
-func (r *toolRuntime) hasPostToolHooks(toolID string) bool {
-	for _, rule := range r.hooksConfig.Rules {
-		if rule.Enabled && rule.Event == hooks.EventPostToolUse && hooks.Match(rule, toolID) {
-			return true
+func (r *toolRuntime) hasPostToolHooks(ctx context.Context, toolID string) bool {
+	return len(r.toolHookRules(ctx, hooks.EventPostToolUse, toolID)) > 0
+}
+
+// toolHookRules returns, in order, the enabled hooks of event that apply to
+// a call of toolID. A matcher is tested against:
+//
+//   - the canonical name, always, so an alias is never a way around a hook
+//     on the tool it runs;
+//   - the retired name the model called the tool by, if any (withCalledAs),
+//     so a hook written for "task-delete" fires on task-delete calls, as it
+//     always did, but not on every todo-write;
+//   - the retired names that were the very same tool (sameTool: shell-exec
+//     is bash), so a hook written for "shell-exec" keeps guarding the shell
+//     now that the model only sees bash.
+//
+// A hook that applies only through a retired name is skipped when a hook
+// with the same command already applies, so a hook copied under both
+// "shell-exec" and "bash" runs once per call, not twice. The tool_id a hook
+// script receives is the canonical name.
+func (r *toolRuntime) toolHookRules(ctx context.Context, event hooks.Event, toolID string) []hooks.EffectiveRule {
+	var retired []string
+	if alias := calledAs(ctx); alias != "" && alias != toolID {
+		retired = append(retired, alias)
+	}
+	for _, name := range LegacyToolNames(toolID) {
+		if legacyTools[name].sameTool && !slices.Contains(retired, name) {
+			retired = append(retired, name)
 		}
 	}
-	return false
+	var out []hooks.EffectiveRule
+	var viaRetired []bool
+	for _, rule := range r.hooksConfig.Rules {
+		if !rule.Enabled || rule.Event != event {
+			continue
+		}
+		switch {
+		case hooks.Match(rule, toolID):
+			out, viaRetired = append(out, rule), append(viaRetired, false)
+		case hooks.MatchAny(rule, retired...):
+			out, viaRetired = append(out, rule), append(viaRetired, true)
+		}
+	}
+	seen := map[string]bool{}
+	for i, rule := range out {
+		if !viaRetired[i] {
+			seen[strings.TrimSpace(rule.Command)] = true
+		}
+	}
+	kept := out[:0]
+	for i, rule := range out {
+		if cmd := strings.TrimSpace(rule.Command); viaRetired[i] {
+			if seen[cmd] {
+				continue
+			}
+			seen[cmd] = true
+		}
+		kept = append(kept, rule)
+	}
+	return kept
+}
+
+type calledAsKey struct{}
+
+// withCalledAs records, for the hooks of one tool call, the retired name the
+// model called the tool by ("" when it used the canonical name). It is set
+// for every call, so a sub-agent's calls never inherit the parent's.
+func withCalledAs(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, calledAsKey{}, name)
+}
+
+func calledAs(ctx context.Context) string {
+	name, _ := ctx.Value(calledAsKey{}).(string)
+	return name
 }
 
 // finishToolCall runs the PostToolUse hooks for a finished call and returns
-// the output to hand the model. After a successful file-edit, multi-edit or
-// file-write, a hook that rewrites the file (gofmt -w, prettier --write) is
-// part of the agent's own write: the file is re-stamped so the stale-read
+// the output to hand the model. After a successful file-edit or file-write,
+// a hook that rewrites the file (gofmt -w, prettier --write) is part of the
+// agent's own write: the file is re-stamped so the stale-read
 // guard doesn't refuse the next edit, and the model is told the file changed.
 func (r *toolRuntime) finishToolCall(ctx context.Context, call toolCall, out string, err error) string {
 	abs, rel, ok := "", "", false
-	if err == nil && r.hasPostToolHooks(call.Tool) {
+	if err == nil && r.hasPostToolHooks(ctx, call.Tool) {
 		abs, rel, ok = r.writtenFile(call)
 	}
 	if !ok {
@@ -124,7 +186,7 @@ func (r *toolRuntime) finishToolCall(ctx context.Context, call toolCall, out str
 // writtenFile returns the file a successful write tool call changed.
 func (r *toolRuntime) writtenFile(call toolCall) (abs, rel string, ok bool) {
 	switch call.Tool {
-	case "file-edit", "multi-edit", "file-write":
+	case "file-edit", "file-write":
 	default:
 		return "", "", false
 	}
@@ -144,10 +206,7 @@ func (r *toolRuntime) writtenFile(call toolCall) (abs, rel string, ok bool) {
 }
 
 func (r *toolRuntime) runPermissionRequestHooks(ctx context.Context, toolID, command string) (string, string, error) {
-	for _, rule := range r.hooksConfig.Rules {
-		if !rule.Enabled || rule.Event != hooks.EventPermissionRequest || !hooks.Match(rule, toolID) {
-			continue
-		}
+	for _, rule := range r.toolHookRules(ctx, hooks.EventPermissionRequest, toolID) {
 		res, err := hooks.Run(ctx, rule, hooks.RunInput{Event: hooks.EventPermissionRequest, ToolID: toolID, Command: command})
 		if err != nil {
 			return "", "", err

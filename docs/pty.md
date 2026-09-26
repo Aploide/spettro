@@ -1,6 +1,6 @@
 # Interactive PTY sessions
 
-Plain `shell-exec` runs commands through pipes: anything that needs a real
+Plain `bash` runs commands through pipes: anything that needs a real
 terminal — REPLs (`python`, `node`), debuggers (`gdb`, `dlv`), `ssh`,
 password prompts, watch-mode dev servers, TUI programs — either hangs until
 the tool timeout or misbehaves (no line editing, `isatty` false paths). PTY
@@ -9,7 +9,7 @@ sessions give the agent a real pseudo-terminal it can type into.
 ## Tools
 
 Three model-facing tools (granted by default to every agent that already has
-`shell-exec`):
+`bash`):
 
 | Tool | Description |
 |------|-------------|
@@ -36,7 +36,7 @@ pty-kill  {"id": "pty-1"}                          (or rely on session cleanup)
 
 ## Security and approval
 
-- `pty-start` goes through the exact same approval path as `shell-exec`: the
+- `pty-start` goes through the exact same approval path as `bash`: the
   same blocked-command list, permission rules, allowlist, and permission
   hooks apply.
 - **Approval policy for input:** approving a `pty-start` command covers all
@@ -45,7 +45,7 @@ pty-kill  {"id": "pty-1"}                          (or rely on session cleanup)
   so under `ask-first` treat a pty-start approval as "this program may be
   driven unattended". Deny the start if that is not acceptable.
 - The child runs under the same [OS sandbox policy](sandbox.md) as
-  `shell-exec` — the PTY is not a sandbox escape; kernel-level confinement
+  `bash` — the PTY is not a sandbox escape; kernel-level confinement
   wraps the process identically.
 
 ## Output handling
@@ -78,6 +78,6 @@ the necessary primitive in ConPTY, but `creack/pty` does not implement it and
 `os/exec` cannot pass the process attribute list a pseudoconsole is attached
 through — so supporting it means driving `CreateProcess` directly and
 re-implementing stdio plumbing and sandbox token handling by hand. Everything
-else on Windows works normally; agents fall back to `shell-exec` with
+else on Windows works normally; agents fall back to `bash` with
 `run_in_background` for long-running commands, which covers dev servers and
 watch builds but not programs that must be driven interactively.

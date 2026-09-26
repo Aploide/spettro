@@ -187,7 +187,7 @@ func TestNeedsCheckpoint(t *testing.T) {
 		{"grep", `{"pattern":"x"}`, false},
 		{"file-edit", `{"path":"a"}`, true},
 		{"file-write", `{"path":"a"}`, true},
-		{"multi-edit", `{"path":"a"}`, true},
+		{"file-edit", `{"path":"a","edits":[{"old_string":"x","new_string":"y"}]}`, true},
 		{"bash", `{"command":"git status"}`, false},
 		{"shell-exec", `{"cmd":"ls -la"}`, false},
 		{"bash", `{"command":"go test ./..."}`, true},

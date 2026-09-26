@@ -11,7 +11,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 ## Core packages
 
 - `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions.
-- `internal/agent`: LLM runtime loop, native tool-call execution, delegation, policy checks, and **tool output spooling** (large results from `file-read`, `grep`, `shell-exec`, `web-fetch` etc. are written to a session-scoped spool file with a truncated head and a pageable offset, so the model can retrieve the full content via `tool-output` with `spool:N` IDs).
+- `internal/agent`: LLM runtime loop, native tool-call execution, delegation, policy checks, and **tool output spooling** (large results from `file-read`, `grep`, `bash`, `web-fetch` etc. are written to a session-scoped spool file with a truncated head and a pageable offset, so the model can retrieve the full content via `tool-output` with `spool:N` IDs).
 - `internal/config`: config persistence, encrypted keys, trust list, manifest parsing/validation/migration.
 - `internal/provider`: provider adapters, endpoint resolution, connected model routing, and Fantasy-backed text model execution with legacy SDK fallback for vision or legacy completion endpoints.
 - `internal/models`: fetch/cache of `models.dev` catalog.
@@ -41,7 +41,7 @@ See [AGENTS.md](../AGENTS.md) for schema details (`version = 2`, `[runtime]`, `[
 Spettro deliberately splits the agent roster into **orchestrators** (`plan`, `coding`, `ask`) and **workers** (`explore`, `code`, `git`, `test`, `review`, `docs`, `general-purpose`). The orchestration contract is:
 
 - Orchestrators are coordinators. They decompose the user's request and spawn workers via the `agent` tool, preferring parallel batches (the runtime allows up to 4 concurrent sub-agents per step). Their prompts in `agents/planning.md`, `agents/coding.md`, and `agents/chat.md` enforce "delegate first".
-- `plan` is enforced at the manifest level: it has **no** direct read tools (`glob`/`grep`/`file-read`/`ls`). Discovery must go through an `explore` worker. The corresponding contract tests live in `tests/config/manifest_test.go`.
+- `plan` is enforced at the manifest level: it has **no** direct read tools (`glob`/`grep`/`file-read`). Discovery must go through an `explore` worker. The corresponding contract tests live in `tests/config/manifest_test.go`.
 - `coding` keeps its raw write/exec tools as an emergency escape hatch, but the prompt strongly discourages using them directly. The expected default path is `coding → {explore, docs}` (parallel) `→ code` (impl) `→ {test, review}` (parallel) `→ git`.
 - Workers are individual contributors. `agents/code.md` is the dedicated `code` worker prompt; the orchestrator-style `agents/coding.md` is used only by the `coding` orchestrator. Workers do not re-delegate (and `code` is the only worker that has the `agent` tool, gated by handoffs).
 - `general-purpose` is the fallback worker: every other worker covers one slice, so an open-ended subtask that mixes discovery, change, and verification had to be split by hand. It holds the read/write/execute surface those specialists split between them, and its prompt lives in `agents/general-purpose.md`.

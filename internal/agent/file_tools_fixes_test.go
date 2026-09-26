@@ -13,7 +13,7 @@ import (
 )
 
 // A whitespace-only old_string (collapsing blank lines) is a real edit in
-// both forms of file-edit, as it is in multi-edit; an empty one in edits[] is
+// both forms of file-edit (old_string and edits[]); an empty one in edits[] is
 // an error, never a silently skipped item.
 func TestFileEditWhitespaceOnlyOldString(t *testing.T) {
 	r, dir := newEditTestRuntime(t)
@@ -68,7 +68,7 @@ func TestWritesRecheckTheFileAfterApproval(t *testing.T) {
 		args string
 	}{
 		{"file-edit", `{"path":"f.go","old_string":"a := 1","new_string":"a := 10"}`},
-		{"multi-edit", `{"path":"f.go","edits":[{"old_string":"a := 1","new_string":"a := 10"}]}`},
+		{"file-edit", `{"path":"f.go","edits":[{"old_string":"a := 1","new_string":"a := 10"}]}`},
 		{"file-write", `{"path":"f.go","content":"new\n"}`},
 	}
 	for _, c := range cases {

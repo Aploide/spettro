@@ -142,7 +142,13 @@ func loopCalls(tcs []provider.NativeTool) []toolCall {
 				args = raw
 			}
 		}
-		out[i] = toolCall{Tool: tc.Name, Args: args}
+		call := toolCall{Tool: tc.Name, Args: args}
+		// A retired name and its canonical tool are one action: shell-exec
+		// then bash with the same command is a repeat.
+		if canon, err := canonicalToolCall(call); err == nil {
+			call = canon
+		}
+		out[i] = call
 	}
 	return out
 }

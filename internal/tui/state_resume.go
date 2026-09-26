@@ -43,7 +43,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 			}
 			toolID := strings.TrimSpace(ev.ToolID)
 			if toolID == "" {
-				toolID = "shell-exec"
+				toolID = "bash"
 			}
 			segment := strings.TrimSpace(ev.CommandSegment)
 			if segment == "" {

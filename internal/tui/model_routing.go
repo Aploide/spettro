@@ -386,11 +386,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t := msg.trace
 			m.applyToolTraceToObservability(t)
 			m.publishRemoteToolTrace(t)
-			// When an agent finishes generating an image/video, push the
-			// produced files into every bound Telegram chat. The
-			// dispatcher is a no-op when the relay is offline or nobody
-			// is subscribed, so it stays cheap on the hot path.
-			m.dispatchTelegramMedia(t)
 			if t.Name == "comment" {
 				if t.Status == "success" {
 					if message := extractCommentMessage(t.Args, t.Output); message != "" {
@@ -404,7 +399,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			switch t.Name {
-			case "todo-write", "task-create", "task-update", "task-delete":
+			case "todo-write":
 				if t.Status != "running" {
 					m.syncTodosFromSession()
 				}
@@ -412,7 +407,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.trackSessionEditFromTrace(t)
 			if t.Status != "running" {
 				switch t.Name {
-				case "file-write", "shell-exec", "bash", "agent":
+				case "file-write", "bash", "agent":
 					// Refresh the side-panel file list off the Update
 					// goroutine, throttled so a burst of traces does not
 					// spawn git serially on the hot path.

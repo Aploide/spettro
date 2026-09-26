@@ -144,7 +144,7 @@ func (m *Model) recordApprovalTrace(t agent.ToolTrace) {
 	}
 	toolID := strings.TrimSpace(payload.ToolID)
 	if toolID == "" {
-		toolID = "shell-exec"
+		toolID = "bash"
 	}
 	segment := strings.TrimSpace(payload.Segment)
 	if segment == "" {

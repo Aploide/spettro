@@ -37,6 +37,19 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+func TestMatchAny(t *testing.T) {
+	rule := EffectiveRule{Rule: Rule{Matcher: "shell-exec"}}
+	if !MatchAny(rule, "bash", "bash-output", "shell-exec") {
+		t.Error("a matcher for a retired name should match through the canonical tool's names")
+	}
+	if MatchAny(rule, "bash", "bash-output") {
+		t.Error("MatchAny matched none of the given names")
+	}
+	if MatchAny(rule) {
+		t.Error("MatchAny with no names should not match")
+	}
+}
+
 func writeHooksFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -68,7 +68,7 @@ func TestEnvironmentSectionContents(t *testing.T) {
 		"- Today's date: 2026-09-26",
 		"- Git repository: yes (root: " + cwd + "; branch: main)",
 		"- Top-level entries: go.mod, internal/",
-		"Shell for shell-exec/bash tools:",
+		"Shell for the bash tool:",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("environment missing %q:\n%s", want, got)

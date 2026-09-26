@@ -17,7 +17,7 @@ func newWriteTestRuntime(t *testing.T) (*toolRuntime, map[string]struct{}) {
 		t.Fatal(err)
 	}
 	r.readSet["keep.go"] = struct{}{}
-	allowed := map[string]struct{}{"file-write": {}, "file-edit": {}, "multi-edit": {}}
+	allowed := map[string]struct{}{"file-write": {}, "file-edit": {}}
 	return r, allowed
 }
 

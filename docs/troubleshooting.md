@@ -23,7 +23,7 @@
 
 - Run `/hooks` to inspect merged global+project rules and warnings.
 - Verify event names are exactly: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `SessionStart`.
-- Confirm matcher patterns target the tool IDs you expect (`bash`, `shell-exec`, etc.).
+- Confirm matcher patterns target the tool IDs you expect (`bash`, `file-edit`, etc.). A matcher written for `shell-exec` still fires on `bash`; one for a narrower retired name (`multi-edit`, `ls`, `task-*`, ...) fires only when the model calls that name. The `tool_id` your script receives is always the canonical name.
 - Hook commands must exit with code `0` to be treated as successful.
 
 ## `/approve` does nothing useful

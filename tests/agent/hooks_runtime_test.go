@@ -95,7 +95,7 @@ func TestRuntimeHook_PermissionRequestAllowBypassesPrompt(t *testing.T) {
 	}
 
 	ag := agent.LLMAgent{
-		Spec:            config.AgentSpec{ID: "code", Mode: "worker", AllowedTools: []string{"shell-exec"}, Permission: config.PermissionRestricted, MaxSteps: 4, Enabled: true},
+		Spec:            config.AgentSpec{ID: "code", Mode: "worker", AllowedTools: []string{"bash"}, Permission: config.PermissionRestricted, MaxSteps: 4, Enabled: true},
 		ProviderManager: pm,
 		ProviderName:    func() string { return providerName },
 		ModelName:       func() string { return modelName },

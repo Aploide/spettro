@@ -60,7 +60,7 @@ func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (RunResult, err
 		SystemPrompt:    systemPrompt,
 		UserTask:        prompt,
 		CWD:             p.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "glob", "grep"},
+		AllowedTools:    []string{"file-read", "glob", "grep"},
 		LogToolCalls:    true,
 		ProviderManager: p.ProviderManager,
 		ProviderName:    p.ProviderName,

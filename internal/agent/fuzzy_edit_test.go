@@ -450,8 +450,8 @@ func TestStaleReadGuard(t *testing.T) {
 		t.Fatalf("stale edit err=%v", err)
 	}
 	multi, _ := json.Marshal(map[string]any{"path": "s.go", "edits": []map[string]any{{"old_string": "c := 3", "new_string": "c := 30"}}})
-	if _, err := rt.runMultiEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "modified on disk") {
-		t.Fatalf("stale multi-edit err=%v", err)
+	if _, err := rt.runFileEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "modified on disk") {
+		t.Fatalf("stale edits[] err=%v", err)
 	}
 	if got := readTestFile(t, path); got != "a := 10\nb := 20\nc := 3\n" {
 		t.Fatalf("stale edit wrote the file: %q", got)
@@ -535,7 +535,7 @@ func TestParallelEditsOnOneFileBothLand(t *testing.T) {
 	}
 }
 
-func TestRunMultiEditRollsBackOnFuzzyAmbiguity(t *testing.T) {
+func TestRunFileEditEditsRollBackOnFuzzyAmbiguity(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	orig := "  foo()\nmid\n\tfoo()\n"
 	path := writeTestFile(t, dir, "g.go", orig)
@@ -546,8 +546,8 @@ func TestRunMultiEditRollsBackOnFuzzyAmbiguity(t *testing.T) {
 			{"old_string": "\t foo()", "new_string": "\t bar()"}, // fuzzy-ambiguous
 		},
 	})
-	_, err := rt.runMultiEdit(context.Background(), args)
-	if err == nil || !strings.Contains(err.Error(), "file untouched") || !strings.Contains(err.Error(), "edit 2") {
+	_, err := rt.runFileEdit(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "edit 2") {
 		t.Fatalf("err=%v", err)
 	}
 	if got := readTestFile(t, path); got != orig {
@@ -555,7 +555,7 @@ func TestRunMultiEditRollsBackOnFuzzyAmbiguity(t *testing.T) {
 	}
 }
 
-func TestRunMultiEditFuzzySucceeds(t *testing.T) {
+func TestRunFileEditEditsFuzzySucceeds(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	path := writeTestFile(t, dir, "h.go", "a\n    b\nc\n")
 	args, _ := json.Marshal(map[string]any{
@@ -565,11 +565,11 @@ func TestRunMultiEditFuzzySucceeds(t *testing.T) {
 			{"old_string": "c", "new_string": "C"},
 		},
 	})
-	out, err := rt.runMultiEdit(context.Background(), args)
+	out, err := rt.runFileEdit(context.Background(), args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "edit 1 matched") || !strings.Contains(out, "diff (+2 -2 lines)") {
+	if !strings.Contains(out, "edit 1: matched") || !strings.Contains(out, "diff (+2 -2 lines)") {
 		t.Fatalf("out=%q", out)
 	}
 	if got := readTestFile(t, path); got != "a\n    B\nC\n" {
@@ -577,14 +577,14 @@ func TestRunMultiEditFuzzySucceeds(t *testing.T) {
 	}
 }
 
-func TestRunMultiEditNotFoundShowsClosestMatch(t *testing.T) {
+func TestRunFileEditEditsNotFoundShowsClosestMatch(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	writeTestFile(t, dir, "n.go", "func a() {\n\treturn compute(1)\n}\n")
 	args, _ := json.Marshal(map[string]any{
 		"path":  "n.go",
 		"edits": []map[string]any{{"old_string": "return compute(2)", "new_string": "return 0"}},
 	})
-	_, err := rt.runMultiEdit(context.Background(), args)
+	_, err := rt.runFileEdit(context.Background(), args)
 	if err == nil || !strings.Contains(err.Error(), "2. \treturn compute(1)") {
 		t.Fatalf("err=%v", err)
 	}
@@ -623,7 +623,7 @@ func TestRunFileEditLineHintTrustedOnlyWhileFresh(t *testing.T) {
 	multi, _ := json.Marshal(map[string]any{"path": "h.go", "edits": []map[string]any{
 		{"old_string": "6. }\n", "new_string": "6. }\n\n"},
 	}})
-	if _, err := rt.runMultiEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "locations") {
+	if _, err := rt.runFileEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "locations") {
 		t.Fatalf("stale hint on ambiguous match err=%v", err)
 	}
 }
@@ -686,9 +686,9 @@ func TestPostToolHookRewriteRestampsFile(t *testing.T) {
 	path := writeTestFile(t, dir, "f.go", "a := 1\nb := 2\n")
 	// A formatter-like hook that rewrites the file after every write tool.
 	rt.hooksConfig = hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
-		hookRule("fmt", hooks.EventPostToolUse, "re:^(file-edit|multi-edit|file-write)$", "echo '// formatted' >> '"+path+"'"),
+		hookRule("fmt", hooks.EventPostToolUse, "re:^(file-edit|file-write)$", "echo '// formatted' >> '"+path+"'"),
 	}}
-	allowed := map[string]struct{}{"file-read": {}, "file-edit": {}, "multi-edit": {}}
+	allowed := map[string]struct{}{"file-read": {}, "file-edit": {}}
 	call := func(tool string, args map[string]any) (string, error) {
 		raw, _ := json.Marshal(args)
 		return rt.executeWithTimeout(ctx, toolCall{Tool: tool, Args: raw}, allowed)
@@ -707,8 +707,8 @@ func TestPostToolHookRewriteRestampsFile(t *testing.T) {
 	if _, err := call("file-edit", map[string]any{"path": "f.go", "old_string": "b := 2", "new_string": "b := 20"}); err != nil {
 		t.Fatalf("edit after hook: %v", err)
 	}
-	if _, err := call("multi-edit", map[string]any{"path": "f.go", "edits": []map[string]any{{"old_string": "a := 10", "new_string": "a := 11"}}}); err != nil {
-		t.Fatalf("multi-edit after hook: %v", err)
+	if _, err := call("file-edit", map[string]any{"path": "f.go", "edits": []map[string]any{{"old_string": "a := 10", "new_string": "a := 11"}}}); err != nil {
+		t.Fatalf("edits[] after hook: %v", err)
 	}
 	if got := readTestFile(t, path); !strings.HasPrefix(got, "a := 11\nb := 20\n// formatted\n") {
 		t.Fatalf("file: %q", got)

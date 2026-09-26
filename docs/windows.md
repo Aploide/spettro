@@ -76,7 +76,7 @@ banner is attributed to PowerShell. Notifications must be enabled for
 
 Not available. The `pty-*` tools report unsupported; see
 [`docs/pty.md`](pty.md#platform-support). Long-running commands still work
-through `shell-exec` with `run_in_background`.
+through `bash` with `run_in_background`.
 
 ## Where files live
 

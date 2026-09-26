@@ -36,7 +36,7 @@ edit; the `lsp-restart` tool clears the failure mark.
 
 ## What the agent gets
 
-- **Post-edit diagnostics** — after `file-write` / `file-edit` / `multi-edit`
+- **Post-edit diagnostics** — after `file-write` / `file-edit`
   (and `rename-symbol`), the written file is synced to its server
   (`didOpen`/`didChange`, plus `didSave` for servers that check on save) and
   the errors it reports are appended to the tool result, so the agent fixes

@@ -90,7 +90,7 @@ receives a truncated head with a footer like:
 
 The model can then call `tool-output` with the `spool:N` ID and an `offset` to
 page through the omitted portion. This is the same paging mechanism used by
-other spooled tools (`file-read`, `grep`, `repo-search`, `shell-exec`, `bash`).
+other spooled tools (`file-read`, `grep`, `glob`, `bash`).
 
 Spool files are session state: they are deleted when the session ends (TUI
 exit, `/exit`, or goal completion).

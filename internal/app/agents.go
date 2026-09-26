@@ -138,11 +138,11 @@ func (a *App) promptShellApproval(ctx context.Context, req agent.ShellApprovalRe
 				a.printLine("empty alternative instruction; command denied")
 				return agent.ShellApprovalDeny, nil
 			}
-			return agent.ShellApprovalDeny, fmt.Errorf("shell-exec denied by user; do this instead: %s", instead)
+			return agent.ShellApprovalDeny, fmt.Errorf("command denied by user; do this instead: %s", instead)
 		default:
 			text := strings.TrimSpace(line)
 			if text != "" {
-				return agent.ShellApprovalDeny, fmt.Errorf("shell-exec denied by user; do this instead: %s", text)
+				return agent.ShellApprovalDeny, fmt.Errorf("command denied by user; do this instead: %s", text)
 			}
 			a.printLine("invalid choice; use 1, 2, 3, or 4")
 		}
@@ -165,7 +165,7 @@ func FormatShellApprovalPrompt(command string) string {
 func (a *App) printToolProgress(tr agent.ToolTrace) {
 	if tr.Status == "running" {
 		switch tr.Name {
-		case "file-write", "shell-exec", "bash", "agent":
+		case "file-write", "bash", "agent":
 			a.printLine(a.ui.Info(fmt.Sprintf("running %s...", tr.Name)))
 		}
 		return
