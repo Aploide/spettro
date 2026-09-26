@@ -166,6 +166,29 @@ func TestCodingPromptEvidenceContracts(t *testing.T) {
 	}
 }
 
+// TestCodingPromptReadsNarrowly: a benchmark replay showed broad up-front
+// reads (callers, callees, whole files, several at once) and per-task ceremony
+// calls (a separate build-system lookup, deleting scratch scripts) inflating
+// both reasoning and call counts. The prompt must start from what the task
+// points to and keep scratch files out of the repo.
+func TestCodingPromptReadsNarrowly(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	for _, needle := range []string{"Start from what the task points to", "Widen only when", "An existing failing test is the reproduction", "$TMPDIR"} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("coding prompt missing %q", needle)
+		}
+	}
+	for _, banned := range []string{"code they call or are called by", "read several files at once", "Read whole files", "Find out how the project builds", "delete throwaway scripts", "Remove temporary files"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("coding prompt still carries %q", banned)
+		}
+	}
+}
+
 // TestCodingPromptFinalAnswerIsShort keeps the report guidance brief: a few
 // lines covering change, verification and caveats.
 func TestCodingPromptFinalAnswerIsShort(t *testing.T) {
