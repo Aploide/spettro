@@ -13,25 +13,59 @@ import (
 )
 
 // lspDiagnosticsWait bounds how long a file-write/file-edit result waits for
-// fresh diagnostics. Short on purpose: post-edit diagnostics are a bonus and
-// must never make edits feel slow or block the run when a server is wedged.
+// fresh diagnostics, server start included. Short on purpose: post-edit
+// diagnostics are a bonus and must never make edits feel slow or block the
+// run when a server is wedged. The server itself starts once per session in
+// the background (warmed when a file is first read), so only the first edit
+// of a session can find it still starting.
 const lspDiagnosticsWait = 3 * time.Second
 
-// withLSPDiagnostics appends fresh diagnostics for the just-written file to a
-// mutating tool's result. Every failure path returns the result unchanged —
-// no configured server, dead server, timeout — per the degrade-silently rule.
-func (r *toolRuntime) withLSPDiagnostics(ctx context.Context, absPath, result string) string {
+// withLSPDiagnostics appends the errors a language server reports for the
+// just-written file to a mutating tool's result (see lsp.PostEditDiagnostics
+// for the block's shape); also lists the other files the call wrote. The edit
+// has already landed: no server for the file type, a crashed or slow server
+// all leave the result as it was, bar a one-line note when the server could
+// not answer in time.
+func (r *toolRuntime) withLSPDiagnostics(ctx context.Context, absPath, result string, also ...string) string {
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
 		return result
 	}
 	dctx, cancel := context.WithTimeout(ctx, lspDiagnosticsWait)
 	defer cancel()
-	diags, err := m.DiagnosticsForFile(dctx, absPath)
-	if err != nil || strings.TrimSpace(diags) == "" {
-		return result
+	if block := m.PostEditDiagnostics(dctx, absPath, also...); block != "" {
+		return result + "\n\n" + block
 	}
-	return result + "\n\nlsp diagnostics:\n" + diags
+	return result
+}
+
+// lspTools are the tools that use a language server: the edits get post-edit
+// diagnostics, the rest query it.
+var lspTools = []string{"file-write", "file-edit", "multi-edit", "rename-symbol", "diagnostics", "references", "hover"}
+
+// usesLanguageServer reports whether an agent with these tools would ever use
+// a language server. A read-only agent would not, and a server started for it
+// indexes the whole workspace for nothing.
+func usesLanguageServer(allowed map[string]struct{}) bool {
+	for _, t := range lspTools {
+		if _, ok := allowed[t]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// warmLSP starts, in the background, the language server for a file the model
+// is looking at, so it is running by the time the file is edited and the
+// first edit's diagnostics do not pay for the server's start. Only agents
+// that can use the server warm it.
+func (r *toolRuntime) warmLSP(absPath string) {
+	if !r.lspWarm {
+		return
+	}
+	if m := lsp.ForWorkspace(r.cwd); m != nil {
+		m.Warm(absPath)
+	}
 }
 
 func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (string, error) {
@@ -190,19 +224,20 @@ func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string,
 	if err := r.authorizeWriteAccess(ctx, "rename-symbol", rel, combined.String()); err != nil {
 		return "", err
 	}
-	var applied []string
+	var applied, written []string
 	for _, ch := range changes {
 		if err := os.WriteFile(ch.Path, []byte(ch.New), 0o644); err != nil {
 			return "", fmt.Errorf("rename-symbol: applied %d of %d files, then: %w", len(applied), len(changes), err)
 		}
 		applied = append(applied, ch.Rel)
+		written = append(written, ch.Path)
 		r.mu.Lock()
 		r.readSet[ch.Rel] = struct{}{}
 		r.mu.Unlock()
 		r.recordFileStamp(ch.Rel, []byte(ch.New))
 	}
 	msg := fmt.Sprintf("renamed to %q in %d file(s):\n- %s", newName, len(applied), strings.Join(applied, "\n- "))
-	return r.withLSPDiagnostics(ctx, abs, msg), nil
+	return r.withLSPDiagnostics(ctx, abs, msg, written...), nil
 }
 
 func (r *toolRuntime) runLSPRestart(rawArgs []byte) (string, error) {
