@@ -71,12 +71,15 @@ is shown alongside the plan name.
 When a pro or max account exhausts its monthly credit budget, inference
 continues on a free-tier model — but at a reduced rate. The Spettro backend
 returns `429 Too Many Requests` with a `Retry-After` header. The provider
-manager transparently waits out these delays and retries, so you never see
-a 429 error in the chat. You may notice slower response times when
-approaching or exceeding your credit limit.
+manager transparently waits these out and retries, so a short spell of
+throttling never shows up as an error in the chat. You may notice slower
+response times when approaching or exceeding your credit limit.
 
-The default retry delay is 7 seconds when no `Retry-After` header is
-present.
+The waits back off exponentially (about 1s, 2s, 4s, ...) with jitter, each
+capped at the `Retry-After` the backend sent (20 seconds without one), so
+parallel sessions throttled together do not retry in lockstep. After 8
+rate-limited attempts, or about 3 minutes of waiting, the 429 is reported
+as an error (and the model fallback chain, if configured, is offered).
 
 ## Configuration
 

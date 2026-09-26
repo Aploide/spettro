@@ -97,6 +97,10 @@ func ClassifyRetry(err error) RetryClass {
 	if IsContextOverflow(err) {
 		return RetryContextOverflow
 	}
+	if errors.Is(err, ErrRateLimitRetriesExhausted) {
+		// Manager.Send already waited it out as long as it should.
+		return RetryNever
+	}
 	if errors.Is(err, ErrStreamIdle) || errors.Is(err, ErrStreamIncomplete) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 		return RetryTransient
@@ -243,6 +247,11 @@ func (p RetryPolicy) NextDelay(err error, attempts int) (time.Duration, bool) {
 	if hint, ok := RetryAfterHint(err); ok {
 		if p.MaxRetryAfter > 0 && hint > p.MaxRetryAfter {
 			return 0, false
+		}
+		// Never earlier than asked, but not all at once either: parallel
+		// agents limited together would otherwise retry in lockstep.
+		if p.Jitter > 0 {
+			hint += time.Duration(rand.Float64() * p.Jitter * float64(hint))
 		}
 		return hint, true
 	}

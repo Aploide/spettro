@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -355,11 +355,19 @@ func (m *Manager) HasModel(providerName, modelName string) bool {
 // Send dispatches req and transparently waits out rate limits rather than
 // surfacing them as errors. The only rate limit this currently applies to is
 // the Spettro Subscription overflow tier: pro/max accounts get throttled onto
-// a free-tier model once their credit budget is exhausted, and the backend always returns 429 with
-// a bounded Retry-After for that specific case, so retrying is guaranteed to
-// eventually succeed. Any other error (including 429s from other providers)
-// is returned immediately.
+// a free-tier model once their credit budget is exhausted, and the backend
+// returns 429 with a bounded Retry-After for that specific case. The waits
+// back off exponentially with jitter (see rateLimitDelay), so parallel
+// sessions throttled together do not retry in lockstep, and they are
+// bounded: after rateLimitMaxAttempts sends, or once waiting would pass
+// rateLimitMaxWait, the 429 is returned, wrapped in
+// ErrRateLimitRetriesExhausted. Any other error (including 429s from other
+// providers) is returned immediately.
 func (m *Manager) Send(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
+	// limited counts the sends rate limited so far; waited, the time spent
+	// waiting them out.
+	limited := 0
+	var waited time.Duration
 	for {
 		resp, err := m.sendOnce(ctx, providerName, modelName, req)
 		if err == nil {
@@ -379,11 +387,17 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		if !ok {
 			return Response{}, err
 		}
+		limited++
+		delay := rateLimitDelay(limited, retryAfter)
+		if limited >= rateLimitMaxAttempts || waited+delay > rateLimitMaxWait {
+			return Response{}, fmt.Errorf("%w (%d attempts over %s): %w", ErrRateLimitRetriesExhausted, limited, waited.Round(time.Second), err)
+		}
+		waited += delay
 		if req.OnRateLimit != nil {
-			req.OnRateLimit(retryAfter)
+			req.OnRateLimit(delay)
 		}
 		select {
-		case <-time.After(retryAfter):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return Response{}, ctx.Err()
 		}
@@ -621,18 +635,51 @@ func isThinkingLevelError(err error) bool {
 	return false
 }
 
-// defaultRateLimitRetryAfter is used when a 429 carries no (or an
-// unparsable) Retry-After header. It matches the backend overflow bucket's
-// worst-case refill window (6s) plus the same +1s margin the backend itself
-// adds when it does send the header.
-const defaultRateLimitRetryAfter = 7 * time.Second
+// Rate-limit waits in Manager.Send. The wait before retry n is
+// rateLimitBaseDelay doubled n-1 times, capped at the server's Retry-After
+// when it sends one and at rateLimitMaxDelay otherwise, with equal jitter
+// (half fixed, half random) so clients throttled together spread out even
+// at the cap. A Retry-After is the refill time of the backend's bucket, a
+// worst case: an early retry often gets through, and a late one only wastes
+// time.
+const (
+	rateLimitBaseDelay = time.Second
+	rateLimitMaxDelay  = 20 * time.Second
+	// rateLimitMaxAttempts bounds the sends of one request (first try
+	// included) and rateLimitMaxWait the total time spent waiting; past
+	// either the 429 is returned.
+	rateLimitMaxAttempts = 8
+	rateLimitMaxWait     = 3 * time.Minute
+)
 
-// rateLimitRetryAfter reports how long to wait before retrying req after err,
-// or false if err is not a rate limit the CLI should wait out. Only the
+// ErrRateLimitRetriesExhausted wraps the 429 Manager.Send returns once it
+// has stopped waiting out a rate limit. The agent loop does not retry it
+// again (see ClassifyRetry): the waiting already happened here.
+var ErrRateLimitRetriesExhausted = errors.New("rate limited: gave up retrying")
+
+// rateLimitJitter returns a random fraction in [0, 1); swappable in tests.
+var rateLimitJitter = rand.Float64
+
+// rateLimitDelay is the wait before retrying a request that has now been
+// rate limited attempts times (1 after the first 429). retryAfter is the
+// server's hint, 0 when it sent none.
+func rateLimitDelay(attempts int, retryAfter time.Duration) time.Duration {
+	ceiling := rateLimitMaxDelay
+	if retryAfter > 0 {
+		ceiling = retryAfter
+	}
+	d := rateLimitBaseDelay << min(max(attempts-1, 0), 16)
+	d = min(d, ceiling)
+	return d/2 + time.Duration(rateLimitJitter()*float64(d/2))
+}
+
+// rateLimitRetryAfter reports whether err is a rate limit the CLI should
+// wait out, with the server's Retry-After (0 when it sent none). Only the
 // Spettro Subscription provider is eligible: it is the sole source of the
 // overflow-tier 429 (pro/max accounts throttled onto a free model once their
-// budget is exhausted), which always resolves on its own within a few
-// seconds. 429s from any other provider are treated as ordinary errors.
+// budget is exhausted), which resolves on its own within seconds. 429s from
+// any other provider are treated as ordinary errors (the agent loop's
+// RetryPolicy handles them).
 func rateLimitRetryAfter(providerName string, err error) (time.Duration, bool) {
 	if providerName != spettroProviderID {
 		return 0, false
@@ -641,7 +688,8 @@ func rateLimitRetryAfter(providerName string, err error) (time.Duration, bool) {
 	if !ok || statusCode != http.StatusTooManyRequests {
 		return 0, false
 	}
-	return retryAfterDuration(header), true
+	hint, _ := parseRetryAfter(header)
+	return hint, true
 }
 
 // httpErrorDetails unwraps err looking for the HTTP status code and response
@@ -661,22 +709,6 @@ func httpErrorDetails(err error) (statusCode int, header http.Header, ok bool) {
 		return apiErr.StatusCode, apiErr.Response.Header, true
 	}
 	return 0, nil, false
-}
-
-func retryAfterDuration(header http.Header) time.Duration {
-	v := header.Get("Retry-After")
-	if v == "" {
-		return defaultRateLimitRetryAfter
-	}
-	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return defaultRateLimitRetryAfter
 }
 
 func legacyAdapterFor(providerName, apiKind, apiKey, baseURL string) (Adapter, error) {
