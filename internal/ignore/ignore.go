@@ -30,6 +30,18 @@ func NewMatcher(root string) *Matcher {
 	return m
 }
 
+// Load reads the rules of one .gitignore file. It returns nil when the file
+// does not exist or holds no rules. Paths passed to the returned matcher are
+// relative to the directory holding the file.
+func Load(path string) *Matcher {
+	m := &Matcher{}
+	m.loadFile(path)
+	if len(m.patterns) == 0 {
+		return nil
+	}
+	return m
+}
+
 func (m *Matcher) loadFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -80,23 +92,35 @@ func parsePattern(line string) (pattern, bool) {
 // Ignored reports whether the given relative path (using forward slashes)
 // should be ignored. isDir should be true when the path refers to a directory.
 func (m *Matcher) Ignored(relPath string, isDir bool) bool {
-	ignored := false
+	ignored, _ := m.Match(relPath, isDir)
+	return ignored
+}
+
+// Match is Ignored that also reports whether any rule matched at all, so a
+// caller layering several .gitignore files (a nested one overriding its
+// parent's) can tell "not ignored" from "no opinion".
+func (m *Matcher) Match(relPath string, isDir bool) (ignored, matched bool) {
 	for _, p := range m.patterns {
 		if p.dirOnly && !isDir {
 			continue
 		}
 		if m.matchPattern(p, relPath) {
-			ignored = !p.negate
+			ignored, matched = !p.negate, true
 		}
 	}
-	return ignored
+	return ignored, matched
 }
 
 func (m *Matcher) matchPattern(p pattern, relPath string) bool {
 	relPath = filepath.ToSlash(relPath)
 
 	if p.rooted {
-		// Match against the full path from root
+		// Match against the full path from root. A literal rooted pattern
+		// ("/secret.txt", "docs/out") names one path, not any path ending
+		// in it; matchGlob's suffix shortcut is for unanchored names.
+		if !strings.ContainsAny(p.glob, "*?[\\") {
+			return p.glob == relPath
+		}
 		return matchGlob(p.glob, relPath)
 	}
 

@@ -50,11 +50,11 @@ const (
 )
 
 // workspaceWalker walks a directory tree below the workspace the way the
-// search tools see it: skipDirs and the root .gitignore prune entries, and
+// search tools see it: skipDirs and .gitignore files prune entries, and
 // symlinked directories are not followed.
 type workspaceWalker struct {
 	cwd     string
-	matcher *ignore.Matcher
+	ignores *gitignoreSet
 	// symlinkedFiles makes the walk visit symlinks to regular files (glob:
 	// a CLAUDE.md -> AGENTS.md link is a file the model should see listed).
 	// grep leaves it off, matching ripgrep, which skips every symlink it
@@ -63,21 +63,77 @@ type workspaceWalker struct {
 }
 
 func (r *toolRuntime) newWorkspaceWalker() workspaceWalker {
-	return workspaceWalker{cwd: r.cwd, matcher: ignore.NewMatcher(r.cwd)}
+	return workspaceWalker{cwd: r.cwd, ignores: newGitignoreSet()}
+}
+
+// gitignoreSet applies .gitignore files the way git and ripgrep (run with
+// --no-require-git, as grep does) layer them: the file in every directory
+// from the filesystem root down to an entry's parent applies, each to paths
+// relative to its own directory, and the deepest matching rule wins. Files
+// are loaded lazily and cached per directory.
+type gitignoreSet struct {
+	mu     sync.Mutex
+	chains map[string][]gitignoreLevel // directory → its applicable files, outermost first
+}
+
+type gitignoreLevel struct {
+	dir     string
+	matcher *ignore.Matcher
+}
+
+func newGitignoreSet() *gitignoreSet {
+	return &gitignoreSet{chains: map[string][]gitignoreLevel{}}
+}
+
+func (s *gitignoreSet) chain(dir string) []gitignoreLevel {
+	s.mu.Lock()
+	c, ok := s.chains[dir]
+	s.mu.Unlock()
+	if ok {
+		return c
+	}
+	if parent := filepath.Dir(dir); parent != dir {
+		c = slices.Clone(s.chain(parent))
+	}
+	if m := ignore.Load(filepath.Join(dir, ".gitignore")); m != nil {
+		c = append(c, gitignoreLevel{dir: dir, matcher: m})
+	}
+	s.mu.Lock()
+	s.chains[dir] = c
+	s.mu.Unlock()
+	return c
+}
+
+// ignored reports whether the entry at abs is excluded by the .gitignore
+// files of its ancestors. It does not look at whether a parent directory is
+// itself ignored; walks prune those, and ignoredBelow checks them.
+func (s *gitignoreSet) ignored(abs string, isDir bool) bool {
+	ignored := false
+	for _, lvl := range s.chain(filepath.Dir(abs)) {
+		rel, err := filepath.Rel(lvl.dir, abs)
+		if err != nil {
+			continue
+		}
+		if ig, ok := lvl.matcher.Match(filepath.ToSlash(rel), isDir); ok {
+			ignored = ig
+		}
+	}
+	return ignored
 }
 
 // ignoredBelow reports whether rel (a file, relative to the workspace) is
-// excluded by the root .gitignore, checking the file and each directory
-// strictly below rootRel — the same entries the walk would have pruned.
+// excluded by .gitignore rules, checking the file and each directory strictly
+// below rootRel — the same entries the walk would have pruned.
 func (w workspaceWalker) ignoredBelow(rootRel, rel string) bool {
-	if w.matcher.Ignored(rel, false) {
+	abs := func(p string) string { return filepath.Join(w.cwd, filepath.FromSlash(p)) }
+	if w.ignores.ignored(abs(rel), false) {
 		return true
 	}
 	for dir := path.Dir(rel); dir != "." && dir != "/" && dir != rootRel; dir = path.Dir(dir) {
 		if rootRel != "." && !strings.HasPrefix(dir, rootRel+"/") {
 			break
 		}
-		if w.matcher.Ignored(dir, true) {
+		if w.ignores.ignored(abs(dir), true) {
 			return true
 		}
 	}
@@ -105,7 +161,7 @@ func (w workspaceWalker) walk(ctx context.Context, root string, visit func(abs, 
 			if path == root {
 				return nil
 			}
-			if skipDirs[d.Name()] || w.matcher.Ignored(rel, true) {
+			if skipDirs[d.Name()] || w.ignores.ignored(path, true) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -120,7 +176,7 @@ func (w workspaceWalker) walk(ctx context.Context, root string, visit func(abs, 
 		} else if !d.Type().IsRegular() {
 			return nil
 		}
-		if w.matcher.Ignored(rel, false) {
+		if w.ignores.ignored(path, false) {
 			return nil
 		}
 		return visit(path, rel, d)
@@ -151,7 +207,15 @@ func (r *toolRuntime) runGlob(ctx context.Context, pattern, subPath string) (str
 		}
 		root = abs
 	}
-	patterns := expandBraces(strings.TrimPrefix(strings.TrimSpace(pattern), "./"))
+	pat := strings.TrimPrefix(strings.TrimSpace(pattern), "./")
+	if strings.HasPrefix(pat, "/") || filepath.IsAbs(pat) {
+		rel, ok := r.workspaceRelativePattern(pat)
+		if !ok {
+			return "", fmt.Errorf("glob: pattern %q is outside the working directory; patterns match paths relative to it (e.g. internal/**/*.go)", pattern)
+		}
+		pat = rel
+	}
+	patterns := expandBraces(pat)
 
 	var matches []string
 	total := 0
@@ -187,6 +251,27 @@ func (r *toolRuntime) runGlob(ctx context.Context, pattern, subPath string) (str
 		out += fmt.Sprintf("\n(showing the first %d of %d files; narrow the pattern or path to see the rest)", len(matches), total)
 	}
 	return out, nil
+}
+
+// workspaceRelativePattern turns an absolute glob pattern that starts with the
+// workspace path (as given, or with symlinks resolved) into the equivalent
+// relative pattern.
+func (r *toolRuntime) workspaceRelativePattern(pat string) (string, bool) {
+	pat = filepath.ToSlash(pat)
+	bases := []string{r.cwd}
+	if resolved, err := filepath.EvalSymlinks(r.cwd); err == nil && resolved != r.cwd {
+		bases = append(bases, resolved)
+	}
+	for _, base := range bases {
+		b := strings.TrimSuffix(filepath.ToSlash(base), "/")
+		if pat == b {
+			return "*", true
+		}
+		if rest, ok := strings.CutPrefix(pat, b+"/"); ok {
+			return rest, true
+		}
+	}
+	return "", false
 }
 
 // matchGlobPattern matches a slash-separated path against a glob pattern with ** support.
@@ -267,37 +352,45 @@ func expandBraces(pattern string) []string {
 	return out
 }
 
-// typeExtensions maps type names to file extensions.
-func typeExtensions(t string) []string {
-	switch strings.ToLower(t) {
-	case "go":
-		return []string{".go"}
-	case "ts":
-		return []string{".ts", ".tsx"}
-	case "js":
-		return []string{".js", ".jsx", ".mjs"}
-	case "py":
-		return []string{".py"}
-	case "rs":
-		return []string{".rs"}
-	case "md":
-		return []string{".md"}
+// grepTypeNames lists the grep type filters, for the unknown-type error.
+const grepTypeNames = "go, ts, js, py, rs, md, toml, json, yaml, sh"
+
+// typeExtensions maps type names (and the long names models often use for
+// them) to file extensions. ok is false for an unknown name: silently
+// searching every file would let the model believe the filter applied.
+func typeExtensions(t string) (exts []string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "":
+		return nil, true
+	case "go", "golang":
+		return []string{".go"}, true
+	case "ts", "typescript", "tsx":
+		return []string{".ts", ".tsx"}, true
+	case "js", "javascript", "jsx":
+		return []string{".js", ".jsx", ".mjs"}, true
+	case "py", "python":
+		return []string{".py"}, true
+	case "rs", "rust":
+		return []string{".rs"}, true
+	case "md", "markdown":
+		return []string{".md"}, true
 	case "toml":
-		return []string{".toml"}
+		return []string{".toml"}, true
 	case "json":
-		return []string{".json"}
+		return []string{".json"}, true
 	case "yaml", "yml":
-		return []string{".yaml", ".yml"}
-	case "sh":
-		return []string{".sh", ".bash"}
+		return []string{".yaml", ".yml"}, true
+	case "sh", "bash", "shell":
+		return []string{".sh", ".bash"}, true
 	default:
-		return nil
+		return nil, false
 	}
 }
 
 // grepArgs are the grep tool's arguments. Besides the canonical names it
-// accepts the spellings other harnesses use: include for glob, -i for
-// case_insensitive, -C for context and head_limit for max_results.
+// accepts the spellings other harnesses use: include for glob, head_limit for
+// max_results, and the rg/grep flags -i (case_insensitive), -C/-A/-B
+// (context), -c (count mode) and -l (files_with_matches mode).
 type grepArgs struct {
 	Pattern         string   `json:"pattern"`
 	Path            string   `json:"path"`
@@ -305,12 +398,47 @@ type grepArgs struct {
 	Include         string   `json:"include"`
 	Type            string   `json:"type"`
 	CaseInsensitive flexBool `json:"case_insensitive"`
-	DashI           flexBool `json:"-i"`
 	Context         flexInt  `json:"context"`
-	DashC           flexInt  `json:"-C"`
 	OutputMode      string   `json:"output_mode"`
 	MaxResults      flexInt  `json:"max_results"`
 	HeadLimit       flexInt  `json:"head_limit"`
+
+	// The flag spellings are decoded by UnmarshalJSON with exact-case keys:
+	// encoding/json folds case, which would read rg's -c (count) as -C.
+	DashI     flexBool `json:"-"`
+	DashC     flexInt  `json:"-"`
+	DashA     flexInt  `json:"-"`
+	DashB     flexInt  `json:"-"`
+	DashCount flexBool `json:"-"`
+	DashL     flexBool `json:"-"`
+}
+
+func (a *grepArgs) UnmarshalJSON(data []byte) error {
+	type plain grepArgs
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	flags := []struct {
+		key string
+		dst json.Unmarshaler
+	}{
+		{"-i", &p.DashI}, {"-C", &p.DashC}, {"-A", &p.DashA}, {"-B", &p.DashB},
+		{"-c", &p.DashCount}, {"-l", &p.DashL},
+	}
+	for _, f := range flags {
+		if v, ok := raw[f.key]; ok {
+			if err := f.dst.UnmarshalJSON(v); err != nil {
+				return fmt.Errorf("%s: %w", f.key, err)
+			}
+		}
+	}
+	*a = grepArgs(p)
+	return nil
 }
 
 // grepQuery is a validated grep request.
@@ -367,6 +495,9 @@ func (r *toolRuntime) newGrepQuery(args grepArgs) (grepQuery, error) {
 		if err != nil {
 			return q, fmt.Errorf("grep path: %w", err)
 		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return q, fmt.Errorf("grep path: %s is not a regular file", rel)
+		}
 		q.root, q.rootRel, q.rootIsFile = abs, rel, !info.IsDir()
 		if q.rootRel == "" {
 			q.rootRel = "."
@@ -375,11 +506,22 @@ func (r *toolRuntime) newGrepQuery(args grepArgs) (grepQuery, error) {
 	if g := firstNonEmpty(args.Glob, args.Include); g != "" {
 		q.globs = expandBraces(strings.TrimPrefix(g, "./"))
 	}
-	q.exts = typeExtensions(args.Type)
-	q.context = max(int(args.Context), int(args.DashC), 0)
+	exts, ok := typeExtensions(args.Type)
+	if !ok {
+		return q, fmt.Errorf("grep: unknown type %q (supported: %s); use glob for other extensions, e.g. *.java", args.Type, grepTypeNames)
+	}
+	q.exts = exts
+	q.context = max(int(args.Context), int(args.DashC), int(args.DashA), int(args.DashB), 0)
 	q.mode = strings.TrimSpace(args.OutputMode)
 	if q.mode == "" {
-		q.mode = "content"
+		switch {
+		case bool(args.DashCount):
+			q.mode = "count"
+		case bool(args.DashL):
+			q.mode = "files_with_matches"
+		default:
+			q.mode = "content"
+		}
 	}
 	switch q.mode {
 	case "content", "files_with_matches", "count":
@@ -448,7 +590,14 @@ func (r *toolRuntime) runGrep(ctx context.Context, args grepArgs) (string, error
 			return "", fmt.Errorf("grep walk: %w", err)
 		}
 	}
-	results, truncated := capGrepResults(results, q.max, q.context)
+	var truncated bool
+	if q.mode == "content" {
+		results, truncated = capGrepResults(results, q.max, q.context)
+	} else if len(results) > q.max {
+		// count and files_with_matches answer "how many" and "which files":
+		// max_results caps the files listed, never a file's count.
+		results, truncated = results[:q.max], true
+	}
 	if len(results) == 0 {
 		return fmt.Sprintf("no matches for %q", args.Pattern), nil
 	}
@@ -469,13 +618,13 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 		if !q.wantsFile(rel) {
 			return nil
 		}
-		fr, ok := grepFile(abs, rel, q)
-		if !ok {
-			return nil
+		fr, ok, err := grepFile(ctx, abs, rel, q, q.max-total, q.rootIsFile)
+		if err != nil || !ok {
+			return err
 		}
 		results = append(results, fr)
 		total += fr.count
-		if total > q.max {
+		if q.mode == "content" && total > q.max || q.mode != "content" && len(results) > q.max {
 			return errStopWalk
 		}
 		return nil
@@ -493,48 +642,71 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 	return results, err
 }
 
-// grepFile searches one file; ok is false when it has no match or is not a
-// searchable text file.
-func grepFile(abs, rel string, q grepQuery) (grepFileResult, bool) {
-	info, err := os.Stat(abs)
-	if err != nil || info.Size() > maxSearchFileBytes {
-		return grepFileResult{}, false
+// grepFile searches one file, streaming it line by line; ok is false when it
+// has no match or is not a searchable text file. In content mode it stops
+// reading after budget+1 matches (the caller trims to the budget and reports
+// the truncation); the other modes count every match. explicit marks a file
+// the model named as path: like ripgrep, it is searched whatever its size and
+// even if it looks binary, so "no matches" never hides a skipped file.
+func grepFile(ctx context.Context, abs, rel string, q grepQuery, budget int, explicit bool) (grepFileResult, bool, error) {
+	f, err := os.Open(abs)
+	if err != nil {
+		return grepFileResult{}, false, nil
 	}
-	data, err := os.ReadFile(abs)
-	if err != nil || looksBinary(data) {
-		return grepFileResult{}, false
-	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	var matchLines []int
-	for i, line := range lines {
-		if q.re.MatchString(line) {
-			matchLines = append(matchLines, i)
+	defer f.Close()
+	if !explicit {
+		if info, err := f.Stat(); err != nil || info.Size() > maxSearchFileBytes {
+			return grepFileResult{}, false, nil
 		}
 	}
-	if len(matchLines) == 0 {
-		return grepFileResult{}, false
-	}
-	fr := grepFileResult{path: rel, count: len(matchLines)}
-	if q.mode != "content" {
-		return fr, true
-	}
-	included := make([]bool, len(lines))
-	isMatch := make([]bool, len(lines))
-	for _, mi := range matchLines {
-		isMatch[mi] = true
-		for j := max(mi-q.context, 0); j <= min(mi+q.context, len(lines)-1); j++ {
-			included[j] = true
+	br := bufio.NewReaderSize(f, 64*1024)
+	if !explicit {
+		if head, _ := br.Peek(binarySniffBytes); looksBinary(head) {
+			return grepFileResult{}, false, nil
 		}
 	}
-	for i, line := range lines {
-		if included[i] {
-			fr.lines = append(fr.lines, grepLine{num: i + 1, text: line, match: isMatch[i]})
+	fr := grepFileResult{path: rel}
+	content := q.mode == "content"
+	var before []grepLine // context lines not yet printed, at most q.context
+	after := 0            // context lines still owed after the last match
+	for num := 1; ; num++ {
+		if num%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return grepFileResult{}, false, err
+			}
+		}
+		line, readErr := br.ReadString('\n')
+		if line == "" && readErr != nil {
+			break
+		}
+		text := strings.TrimSuffix(line, "\n")
+		switch {
+		case q.re.MatchString(text):
+			fr.count++
+			if content {
+				fr.lines = append(fr.lines, before...)
+				before = before[:0]
+				fr.lines = append(fr.lines, grepLine{num: num, text: text, match: true})
+				after = q.context
+			}
+		case !content:
+		case after > 0:
+			fr.lines = append(fr.lines, grepLine{num: num, text: text})
+			after--
+		case q.context > 0:
+			before = append(before, grepLine{num: num, text: text})
+			if len(before) > q.context {
+				before = before[1:]
+			}
+		}
+		if content && fr.count > budget && after == 0 {
+			break
+		}
+		if readErr != nil {
+			break
 		}
 	}
-	return fr, true
+	return fr, fr.count > 0, nil
 }
 
 // looksBinary reports whether data looks like a binary file: a NUL byte in
@@ -619,8 +791,7 @@ func (r *toolRuntime) grepWithRipgrep(ctx context.Context, rg string, q grepQuer
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	results, total, parseErr := parseRipgrepJSON(stdout, q, keep)
-	stoppedEarly := total > q.max
+	results, stoppedEarly, parseErr := parseRipgrepJSON(stdout, q, keep)
 	if stoppedEarly {
 		cancel() // enough matches: stop rg instead of draining it
 	}
@@ -657,9 +828,11 @@ type rgText struct {
 }
 
 // parseRipgrepJSON reads rg --json output into per-file results, stopping once
-// more than q.max matches have been seen. total is the number of matches read.
-// keep, when set, is an extra filter on each file's workspace-relative path.
-func parseRipgrepJSON(stdout io.Reader, q grepQuery, keep func(rel string) bool) (results []grepFileResult, total int, err error) {
+// more than q.max matches (content mode) or files (the other modes) have been
+// seen; stopped reports that. keep, when set, is an extra filter on each
+// file's workspace-relative path.
+func parseRipgrepJSON(stdout io.Reader, q grepQuery, keep func(rel string) bool) (results []grepFileResult, stopped bool, err error) {
+	total := 0
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
 	var cur *grepFileResult
@@ -700,13 +873,13 @@ func parseRipgrepJSON(stdout io.Reader, q grepQuery, keep func(rel string) bool)
 			}
 		case "end":
 			flush()
-			if total > q.max {
-				return results, total, nil
+			if q.mode == "content" && total > q.max || q.mode != "content" && len(results) > q.max {
+				return results, true, nil
 			}
 		}
 	}
 	flush()
-	return results, total, sc.Err()
+	return results, false, sc.Err()
 }
 
 // capGrepResults trims results to at most max matches, keeping the context
@@ -793,7 +966,11 @@ func formatGrepResults(results []grepFileResult, q grepQuery, truncated bool) st
 		}
 	}
 	if truncated {
-		fmt.Fprintf(&sb, "(results truncated at %d matches; narrow the pattern, path or glob, or raise max_results)\n", q.max)
+		unit := "matches"
+		if q.mode != "content" {
+			unit = "files"
+		}
+		fmt.Fprintf(&sb, "(results truncated at %d %s; narrow the pattern, path or glob, or raise max_results)\n", q.max, unit)
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }

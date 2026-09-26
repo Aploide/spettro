@@ -108,3 +108,39 @@ func TestMatchGlob(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAndMatch(t *testing.T) {
+	dir := t.TempDir()
+	if Load(filepath.Join(dir, ".gitignore")) != nil {
+		t.Fatal("missing file must load as nil")
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n!keep.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := Load(filepath.Join(dir, ".gitignore"))
+	if ig, ok := m.Match("a.log", false); !ig || !ok {
+		t.Fatalf("a.log: ignored=%v matched=%v", ig, ok)
+	}
+	if ig, ok := m.Match("keep.log", false); ig || !ok {
+		t.Fatalf("keep.log: ignored=%v matched=%v", ig, ok)
+	}
+	if _, ok := m.Match("a.go", false); ok {
+		t.Fatal("a.go must not match any rule")
+	}
+}
+
+// A pattern with a slash is anchored to the .gitignore's directory.
+func TestRootedLiteralPatternIsAnchored(t *testing.T) {
+	m := newTestMatcher(t, "/secret.txt\ndocs/out\n")
+	cases := map[string]bool{
+		"secret.txt":      true,
+		"deep/secret.txt": false,
+		"docs/out":        true,
+		"x/docs/out":      false,
+	}
+	for p, want := range cases {
+		if got := m.Ignored(p, false); got != want {
+			t.Errorf("Ignored(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
