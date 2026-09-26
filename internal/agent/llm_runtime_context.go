@@ -254,8 +254,14 @@ func collectInstructionFiles(cwd, gitRoot, home string) []instructionFile {
 		}
 	}
 	for _, dir := range instructionDirs(cwd, gitRoot) {
+		main, inWorktree := mainCheckoutPath(dir)
 		for _, name := range projectInstructionFiles {
 			abs := filepath.Join(dir, name)
+			if inWorktree && !fileExists(abs) && fileExists(filepath.Join(main, name)) {
+				// Uncommitted in the main checkout, so absent from this
+				// agent worktree: the project's rules still apply.
+				abs = filepath.Join(main, name)
+			}
 			shown := abs
 			if rel, err := filepath.Rel(cwd, abs); err == nil {
 				shown = filepath.ToSlash(rel)

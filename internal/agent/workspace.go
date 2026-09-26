@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -155,6 +156,28 @@ func ensureLocalGitExclude(ctx context.Context, repoRoot string) {
 
 // newAgentWorkspace creates the worktree+branch pair for one subagent. The
 // worktree forks from the current HEAD of the repository containing cwd.
+// mainCheckoutPath maps a directory inside an agent worktree
+// (<repo>/.spettro/worktrees/<slug>/...) to the same directory in the main
+// checkout. Files git never checks out — .spettro/ itself (prompt overrides)
+// and uncommitted instruction files — are only there. ok is false outside a
+// worktree.
+func mainCheckoutPath(dir string) (string, bool) {
+	dir = filepath.Clean(dir)
+	var rest []string
+	for d := dir; ; d = filepath.Dir(d) {
+		wt := filepath.Dir(d)
+		if filepath.Base(wt) == workspaceDirName && filepath.Base(filepath.Dir(wt)) == ".spettro" {
+			root := filepath.Dir(filepath.Dir(wt))
+			slices.Reverse(rest)
+			return filepath.Join(append([]string{root}, rest...)...), true
+		}
+		if filepath.Dir(d) == d {
+			return "", false
+		}
+		rest = append(rest, filepath.Base(d))
+	}
+}
+
 func newAgentWorkspace(ctx context.Context, cwd, name string) (*agentWorkspace, error) {
 	root, err := workspaceGit(ctx, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {

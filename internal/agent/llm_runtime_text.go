@@ -74,9 +74,19 @@ func loadPromptOrFallback(cwd, relative, fallback string) string {
 	case filepath.IsAbs(relative):
 		candidates = append(candidates, relative)
 	case strings.TrimSpace(cwd) != "":
-		candidates = append(candidates, filepath.Join(cwd, promptOverrideDir, relative))
-		if !builtin || fileExists(filepath.Join(cwd, config.AgentManifestFilename)) {
-			candidates = append(candidates, filepath.Join(cwd, relative))
+		dirs := []string{cwd}
+		// An agent worktree has no .spettro/ of its own (it is never
+		// checked out): the project's overrides are in the main checkout.
+		if main, ok := mainCheckoutPath(cwd); ok {
+			dirs = append(dirs, main)
+		}
+		for _, d := range dirs {
+			candidates = append(candidates, filepath.Join(d, promptOverrideDir, relative))
+		}
+		for _, d := range dirs {
+			if !builtin || fileExists(filepath.Join(d, config.AgentManifestFilename)) {
+				candidates = append(candidates, filepath.Join(d, relative))
+			}
 		}
 	}
 	for _, p := range candidates {
