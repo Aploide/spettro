@@ -144,21 +144,33 @@ func findGopls(t *testing.T) string {
 }
 
 // TestGoplsPostEditDiagnostics is the post-edit flow against a real gopls:
-// the edit's own type error is listed, a signature change that breaks a
-// caller in another file is counted there, and undoing it clears the block.
+// the edit's own type error is listed; a signature change that breaks a
+// caller in another package is counted there on the very same pass (gopls
+// checks reverse dependencies in a second pass unless told not to delay it);
+// undoing it clears the block; and after a rename, or a change made behind
+// the server's back, the counts describe the disk rather than what the
+// server last saw.
 func TestGoplsPostEditDiagnostics(t *testing.T) {
 	gopls := findGopls(t)
 	root := realPath(t.TempDir())
 	write := func(rel, content string) string {
-		p := filepath.Join(root, rel)
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
+	const (
+		libOK    = "package lib\n\nfunc Greet() string { return \"hi\" }\n"
+		mainOK   = "package main\n\nimport \"scratch/lib\"\n\nfunc main() {\n\tprintln(lib.Greet())\n}\n"
+		mainGone = "package main\n\nimport \"scratch/lib\"\n\nfunc main() {\n\tprintln(lib.Gone())\n}\n"
+	)
 	write("go.mod", "module scratch\n\ngo 1.22\n")
-	lib := write("lib.go", "package main\n\nfunc greet() string { return \"hi\" }\n")
-	write("main.go", "package main\n\nfunc main() {\n\tprintln(greet())\n}\n")
+	lib := write("lib/lib.go", libOK)
+	mainGo := write("main.go", mainOK)
 	m := newManager(root, Config{Servers: map[string]ServerConfig{
 		"go": {Command: gopls, Filetypes: []string{".go"}},
 	}})
@@ -171,35 +183,60 @@ func TestGoplsPostEditDiagnostics(t *testing.T) {
 	if _, _, err := m.clientFor(ctx, lib); err != nil {
 		t.Fatal(err)
 	}
-	pass := func() string {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// the budget the agent gives a real edit
+	pass := func(path string, also ...string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		return m.PostEditDiagnostics(ctx, lib)
+		return m.PostEditDiagnostics(ctx, path, also...)
 	}
-	if out := pass(); out != "" {
+	if out := pass(lib); out != "" {
 		t.Fatalf("clean workspace should add nothing, got:\n%s", out)
 	}
 
-	write("lib.go", "package main\n\nfunc greet() string { return 42 }\n")
-	out := pass()
-	if !strings.HasPrefix(out, "Diagnostics (errors) in lib.go:\nlib.go:3:") {
+	write("lib/lib.go", "package lib\n\nfunc Greet() string { return 42 }\n")
+	if out := pass(lib); !strings.HasPrefix(out, "Diagnostics (errors) in lib/lib.go:\nlib/lib.go:3:") {
 		t.Fatalf("expected lib.go's own type error, got:\n%s", out)
 	}
 
-	write("lib.go", "package main\n\nfunc greet(name string) string { return name }\n")
-	out = pass()
-	if !strings.Contains(out, "main.go (1)") {
-		// gopls may publish the dependent file a beat after the edited one
-		t.Logf("first pass after the signature change:\n%s", out)
-		time.Sleep(time.Second)
-		out = pass()
-	}
-	if !strings.HasPrefix(out, "No errors in lib.go; 1 error in 1 other file: main.go (1)") {
-		t.Fatalf("expected the broken caller in main.go to be counted, got:\n%s", out)
+	write("lib/lib.go", "package lib\n\nfunc Greet(name string) string { return name }\n")
+	if out := pass(lib); !strings.HasPrefix(out, "No errors in lib/lib.go; 1 error in 1 other file: main.go (1)") {
+		t.Fatalf("expected the broken caller in package main to be counted, got:\n%s", out)
 	}
 
-	write("lib.go", "package main\n\nfunc greet() string { return \"hi\" }\n")
-	if out := pass(); out != "" {
+	write("lib/lib.go", libOK)
+	if out := pass(lib); out != "" {
 		t.Fatalf("restoring the signature should clear everything, got:\n%s", out)
+	}
+
+	// main.go is opened by an edit, then renamed into along with lib.go
+	if out := pass(mainGo); out != "" {
+		t.Fatalf("clean main.go should add nothing, got:\n%s", out)
+	}
+	rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer rcancel()
+	changes, err := m.RenameEdits(rctx, lib, "Greet", 0, 0, "Hello")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	var written []string
+	for _, ch := range changes {
+		write(ch.Rel, ch.New)
+		written = append(written, ch.Path)
+	}
+	if out := pass(lib, written...); out != "" {
+		t.Fatalf("a complete rename should be clean, got:\n%s", out)
+	}
+	if out := pass(lib); out != "" {
+		t.Fatalf("a later edit must not see main.go as it was before the rename, got:\n%s", out)
+	}
+
+	// main.go broken and then fixed behind the server's back (a shell edit)
+	write("main.go", mainGone)
+	if out := pass(lib); !strings.Contains(out, "1 error in 1 other file: main.go (1)") {
+		t.Fatalf("expected main.go's out-of-band error, got:\n%s", out)
+	}
+	write("main.go", strings.ReplaceAll(mainOK, "Greet", "Hello"))
+	if out := pass(lib); out != "" {
+		t.Fatalf("main.go was fixed on disk, got:\n%s", out)
 	}
 }

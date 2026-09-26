@@ -316,6 +316,10 @@ type toolRuntime struct {
 	// [runtime.loop_detection]); nil when disabled.
 	loopDetect *loopDetector
 
+	// lspWarm makes file-read start the file's language server in the
+	// background: set when the agent has a tool that uses one.
+	lspWarm bool
+
 	// visionCheck overrides the provider manager's SupportsVision lookup for
 	// the view-image tool. Nil in production (test seam).
 	visionCheck func() bool
@@ -490,6 +494,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
 		compactCfg:      cfg.Compact,
+		lspWarm:         usesLanguageServer(allowed),
 	}
 	var loopPolicy config.LoopDetectionPolicy
 	if cfg.Manifest != nil {

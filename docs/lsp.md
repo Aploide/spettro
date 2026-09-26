@@ -26,10 +26,13 @@ just don't get diagnostics.
 | `swift` | `.swift` | `sourcekit-lsp` | ships with the Swift toolchain / Xcode |
 
 Servers start lazily (only when a matching file is read or edited), in the
-background, once per session, and are cached per workspace. Reading a file is
-enough to start its server, so it is usually up by the time the file is
-edited. A server that fails to start is not retried on every edit; the
-`lsp-restart` tool clears the failure mark.
+background, once per session, and are cached per workspace. For an agent that
+can edit files or query the server, reading a file is enough to start its
+server, so it is usually up by the time the file is edited; read-only agents
+(Ask, Explore, Review, ...) never start one. A sub-agent working in its own
+git worktree has its own servers, and they are stopped when its workspace is
+merged back or dropped. A server that fails to start is not retried on every
+edit; the `lsp-restart` tool clears the failure mark.
 
 ## What the agent gets
 
@@ -55,6 +58,14 @@ edited. A server that fails to start is not retried on every edit; the
   window catches servers that publish in stages. The edit itself never fails
   because of the server; when it is still starting or does not answer in
   time, a one-line note says the file was not checked.
+
+  The counts describe the files as they are on disk: before each check,
+  files the server holds open are re-sent if they changed behind its back
+  (a shell command, a `git checkout`) and closed if they were deleted, and
+  `rename-symbol` sends every file it wrote. gopls is started with
+  `diagnosticsDelay` set to `0s`, so it checks the packages that depend on
+  the edited one in the same pass instead of a second pass a second later —
+  a caller broken in another package is counted on the edit that broke it.
 - **`diagnostics` tool** — diagnostics for one file, or everything published
   so far across the workspace when called without a path.
 - **`references` tool** — references or definition for a symbol
@@ -66,6 +77,7 @@ edited. A server that fails to start is not retried on every edit; the
   `file-write`, a checkpoint is taken first (so `/rewind` covers it), and the
   result lists every file changed.
 - **`lsp-restart` tool** — restart one or all servers and reload the config.
+  A server still starting is cancelled rather than waited for.
 
 ## Optional overrides: `.spettro/lsp.json`
 

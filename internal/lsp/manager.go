@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -216,18 +217,29 @@ const serverStartTimeout = 30 * time.Second
 // later call finds it ready.
 var ErrServerStarting = errors.New("lsp server still starting")
 
+// errShutDown is returned by a Manager after Shutdown: it starts nothing more.
+var errShutDown = errors.New("lsp servers for this workspace were shut down")
+
 // Manager owns the lazily started language servers for one workspace root.
 type Manager struct {
 	root string
 	cfg  Config
 
 	mu       sync.Mutex
-	clients  map[string]*Client       // server key → running client
-	broken   map[string]string        // server key → start failure (until lsp-restart)
-	starting map[string]chan struct{} // server key → closed when its start ends
-	// epoch invalidates starts begun before a Restart or Shutdown: they
-	// close the server they started instead of registering it.
-	epoch int
+	clients  map[string]*Client      // server key → running client
+	broken   map[string]string       // server key → start failure (until lsp-restart)
+	starting map[string]*serverStart // server key → the start in flight
+	// shutDown is set by Shutdown. The manager is out of the registry by
+	// then, so a server it started afterwards would never be closed.
+	shutDown bool
+}
+
+// serverStart is one background server start. Restart and Shutdown abandon it
+// by removing it from Manager.starting and cancelling it; done closes once
+// the start has finished and, if abandoned, closed whatever it spawned.
+type serverStart struct {
+	done   chan struct{}
+	cancel context.CancelFunc
 }
 
 var (
@@ -265,7 +277,7 @@ func newManager(root string, cfg Config) *Manager {
 		cfg:      cfg,
 		clients:  map[string]*Client{},
 		broken:   map[string]string{},
-		starting: map[string]chan struct{}{},
+		starting: map[string]*serverStart{},
 	}
 }
 
@@ -333,51 +345,69 @@ func (m *Manager) Warm(path string) {
 func (m *Manager) ensureStarted(key string) (*Client, <-chan struct{}, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.shutDown {
+		return nil, nil, errShutDown
+	}
 	if c, ok := m.clients[key]; ok && c.alive() {
 		return c, nil, nil
 	}
 	if reason, bad := m.broken[key]; bad {
 		return nil, nil, fmt.Errorf("lsp server %q unavailable: %s (use lsp-restart to retry)", key, reason)
 	}
-	if done, ok := m.starting[key]; ok {
-		return nil, done, nil
+	if st, ok := m.starting[key]; ok {
+		return nil, st.done, nil
 	}
-	done := make(chan struct{})
-	m.starting[key] = done
-	go m.start(key, m.cfg.Servers[key], m.epoch, done)
-	return nil, done, nil
+	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
+	st := &serverStart{done: make(chan struct{}), cancel: cancel}
+	m.starting[key] = st
+	go m.start(ctx, key, m.cfg.Servers[key], st)
+	return nil, st.done, nil
 }
 
-// start spawns one server and registers the outcome, unless a Restart or
-// Shutdown happened meanwhile: then the new server is closed before done is,
-// so whoever waits on done knows it is gone.
-func (m *Manager) start(key string, sc ServerConfig, epoch int, done chan struct{}) {
-	defer close(done)
+// start spawns one server and registers the outcome, unless the start was
+// abandoned meanwhile (Restart, Shutdown): then the new server is closed
+// before done is, so whoever waits on done knows it is gone.
+func (m *Manager) start(ctx context.Context, key string, sc ServerConfig, st *serverStart) {
+	defer close(st.done)
+	defer st.cancel()
 	// A user-configured command gets the same install-location fallback as
 	// the auto-detected ones.
 	command := sc.Command
 	if found, ok := FindServerBinary(command, m.root); ok {
 		command = found
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
-	c, err := startClient(ctx, m.root, command, sc.Args)
-	cancel()
+	c, err := startClient(ctx, m.root, command, sc.Args, serverSettings(command))
 	m.mu.Lock()
-	stale := m.epoch != epoch
-	if !stale {
+	abandoned := m.starting[key] != st
+	if !abandoned {
+		delete(m.starting, key)
 		if err != nil {
 			m.broken[key] = err.Error()
 		} else {
 			m.clients[key] = c
 		}
 	}
-	if m.starting[key] == done {
-		delete(m.starting, key)
-	}
 	m.mu.Unlock()
-	if stale && c != nil {
+	if abandoned && c != nil {
 		c.Close()
 	}
+}
+
+// serverSettings returns the initializationOptions for a server command.
+//
+// gopls diagnoses a change in two passes by default: the changed package at
+// once, and its reverse dependencies only after diagnosticsDelay (1s). That
+// suits a person typing, but a post-edit check that stops listening after the
+// first pass would report a signature change as clean while the callers in
+// other packages no longer compile, and keep reporting callers as broken
+// after the signature is restored. With no delay gopls does one full pass
+// per change, so the edited file's publish comes with every other file's.
+func serverSettings(command string) map[string]any {
+	base := filepath.Base(command)
+	if strings.TrimSuffix(base, filepath.Ext(base)) == "gopls" {
+		return map[string]any{"diagnosticsDelay": "0s"}
+	}
+	return nil
 }
 
 // serverName is the human name of a server key: its command's base name
@@ -430,6 +460,37 @@ func (m *Manager) formatDiagnostics(path string, ds []Diagnostic) string {
 	return sb.String()
 }
 
+// syncFromDisk hands the server absPath's current on-disk content, after first
+// bringing the documents it already holds open back in line with the disk and
+// sending the also files (other files the caller just changed, such as the
+// rest of a rename, that the server may not have open yet), so whatever it
+// reports next describes the workspace as it is. It returns the synced
+// document and the content sent.
+func (m *Manager) syncFromDisk(c *Client, key, absPath string, also ...string) (doc, string, error) {
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return doc{}, "", err
+	}
+	c.resyncOpen(fileURI(absPath))
+	for _, p := range also {
+		p = realPath(p)
+		if p == absPath {
+			continue
+		}
+		if k, ok := m.serverKeyFor(p); !ok || k != key {
+			continue
+		}
+		if other, err := os.ReadFile(p); err == nil {
+			if d, err := c.syncFile(p, languageIDForPath(p, key), string(other)); err == nil {
+				_ = c.didSave(d, string(other))
+			}
+		}
+	}
+	content := string(raw)
+	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	return d, content, err
+}
+
 // DiagnosticsForFile syncs the file's current on-disk content to the server
 // and waits (bounded by ctx) for fresh diagnostics. Empty string means clean.
 func (m *Manager) DiagnosticsForFile(ctx context.Context, absPath string) (string, error) {
@@ -438,15 +499,11 @@ func (m *Manager) DiagnosticsForFile(ctx context.Context, absPath string) (strin
 	if err != nil {
 		return "", err
 	}
-	raw, err := os.ReadFile(absPath)
+	d, _, err := m.syncFromDisk(c, key, absPath)
 	if err != nil {
 		return "", err
 	}
-	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), string(raw))
-	if err != nil {
-		return "", err
-	}
-	ds := c.waitDiagnostics(ctx, d.key, d.sinceGen)
+	ds := c.waitDiagnostics(ctx, d)
 	return strings.TrimRight(m.formatDiagnostics(absPath, ds), "\n"), nil
 }
 
@@ -520,12 +577,7 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 	if err != nil {
 		return "", err
 	}
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", err
-	}
-	content := string(raw)
-	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, content, err := m.syncFromDisk(c, key, absPath)
 	if err != nil {
 		return "", err
 	}
@@ -578,12 +630,7 @@ func (m *Manager) Hover(ctx context.Context, absPath, symbol string, line, chara
 	if err != nil {
 		return "", err
 	}
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", err
-	}
-	content := string(raw)
-	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, content, err := m.syncFromDisk(c, key, absPath)
 	if err != nil {
 		return "", err
 	}
@@ -616,12 +663,7 @@ func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line,
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		return nil, err
-	}
-	content := string(raw)
-	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, content, err := m.syncFromDisk(c, key, absPath)
 	if err != nil {
 		return nil, err
 	}
@@ -715,9 +757,8 @@ func (m *Manager) Restart(name string) string {
 		m.mu.Unlock()
 	}
 	m.mu.Lock()
-	var stopped []string
 	var closing []*Client
-	pending := m.abandonStartsLocked()
+	pending, stopped := m.abandonStartsLocked(name)
 	for key, c := range m.clients {
 		if name != "" && key != name {
 			continue
@@ -736,9 +777,11 @@ func (m *Manager) Restart(name string) string {
 	// Close waits for the server to exit, which a wedged server can drag out
 	// to its full timeout. The clients are already unregistered, so do that
 	// waiting outside the lock rather than stalling every other LSP call.
+	// The abandoned starts were cancelled, so their wait is short too.
 	closeAll(closing)
 	waitAll(pending)
 	sort.Strings(stopped)
+	stopped = slices.Compact(stopped) // a dead client and its replacement's start
 	if len(stopped) == 0 {
 		return "no matching running lsp server; it will start on next use"
 	}
@@ -750,12 +793,13 @@ func (m *Manager) Restart(name string) string {
 // later ForWorkspace(root) builds a fresh manager.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	m.shutDown = true
 	closing := make([]*Client, 0, len(m.clients))
 	for key, c := range m.clients {
 		closing = append(closing, c)
 		delete(m.clients, key)
 	}
-	pending := m.abandonStartsLocked()
+	pending, _ := m.abandonStartsLocked("")
 	root := m.root
 	m.mu.Unlock()
 
@@ -767,26 +811,56 @@ func (m *Manager) Shutdown() {
 
 	closeAll(closing)
 	// A start still in flight would leave a live server behind (holding the
-	// workspace open on Windows); it closes its own server once it notices
-	// the epoch moved, so wait for that.
+	// workspace open on Windows). It was cancelled and closes whatever it
+	// spawned on its way out, so this wait is short.
 	waitAll(pending)
 }
 
-// abandonStartsLocked invalidates every in-flight start (each will close the
-// server it spawns) and returns their done channels. Callers hold m.mu.
-func (m *Manager) abandonStartsLocked() []chan struct{} {
-	m.epoch++
-	pending := make([]chan struct{}, 0, len(m.starting))
-	for key, done := range m.starting {
-		pending = append(pending, done)
+// abandonStartsLocked cancels the in-flight start of server name (every
+// server's when name is empty); each closes whatever it spawned and does not
+// register it. It returns their done channels and server keys. Callers hold
+// m.mu.
+func (m *Manager) abandonStartsLocked(name string) ([]chan struct{}, []string) {
+	var pending []chan struct{}
+	var keys []string
+	for key, st := range m.starting {
+		if name != "" && key != name {
+			continue
+		}
+		st.cancel()
+		pending = append(pending, st.done)
+		keys = append(keys, key)
 		delete(m.starting, key)
 	}
-	return pending
+	return pending, keys
 }
 
 func waitAll(chans []chan struct{}) {
 	for _, ch := range chans {
 		<-ch
+	}
+}
+
+// ShutdownUnder stops the servers of every workspace at or below dir, such as
+// a sub-agent's worktree that is about to be removed: nothing else would stop
+// them before the process exits, and a live server keeps the directory busy.
+func ShutdownUnder(dir string) {
+	dir = realPath(dir)
+	regMu.Lock()
+	var managers []*Manager
+	for root, m := range registry {
+		if _, ok := relTo(dir, root); !ok {
+			continue
+		}
+		if m != nil {
+			managers = append(managers, m)
+		}
+		delete(registry, root)
+	}
+	regMu.Unlock()
+
+	for _, m := range managers {
+		m.Shutdown()
 	}
 }
 

@@ -3,10 +3,14 @@ package lsp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -100,7 +104,7 @@ type Client struct {
 	diagGen  map[string]int
 
 	openMu   sync.Mutex
-	openDocs map[string]int // uri → version
+	openDocs map[string]*openDoc // uri → what the server was last told
 
 	// save is the server's textDocumentSync.save option: whether it wants
 	// didSave at all, and whether with the full text. Servers such as
@@ -113,10 +117,22 @@ type Client struct {
 
 // publishedDiags is one document's latest diagnostics together with the path
 // to display them under (the spelling the server used, so output keeps the
-// filesystem's own casing).
+// filesystem's own casing) and the document version they were computed for
+// (0 when the server did not say).
 type publishedDiags struct {
-	path string
-	list []Diagnostic
+	path    string
+	list    []Diagnostic
+	version int
+}
+
+// openDoc is a document the server holds open: once open, the server reads
+// it from what it was sent rather than from disk, so the client has to keep
+// it current. sum is the hash of the text last sent.
+type openDoc struct {
+	path       string
+	languageID string
+	version    int
+	sum        [32]byte
 }
 
 // fileURI converts an absolute path into a file:// URI. Windows drive paths
@@ -189,7 +205,7 @@ var stderrSink io.Writer
 
 // startClient spawns the server process, wires the reader loop, and completes
 // the initialize handshake. The passed context bounds only the handshake.
-func startClient(ctx context.Context, root, command string, args []string) (*Client, error) {
+func startClient(ctx context.Context, root, command string, args []string, settings map[string]any) (*Client, error) {
 	cmd := exec.Command(command, args...)
 	cmd.Dir = root
 	stdin, err := cmd.StdinPipe()
@@ -210,7 +226,7 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 		pending:  map[int64]chan rpcMessage{},
 		diags:    map[string]publishedDiags{},
 		diagGen:  map[string]int{},
-		openDocs: map[string]int{},
+		openDocs: map[string]*openDoc{},
 		closed:   make(chan struct{}),
 	}
 	c.diagCond = sync.NewCond(&c.diagMu)
@@ -244,6 +260,9 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 			},
 			"workspace": map[string]any{},
 		},
+	}
+	if settings != nil {
+		initParams["initializationOptions"] = settings
 	}
 	var initResult json.RawMessage
 	if err := c.call(ctx, "initialize", initParams, &initResult); err != nil {
@@ -362,6 +381,7 @@ func (c *Client) dispatch(msg rpcMessage) {
 	case msg.Method == "textDocument/publishDiagnostics":
 		var params struct {
 			URI         string       `json:"uri"`
+			Version     *int         `json:"version"`
 			Diagnostics []Diagnostic `json:"diagnostics"`
 		}
 		if json.Unmarshal(msg.Params, &params) != nil {
@@ -374,8 +394,12 @@ func (c *Client) dispatch(msg rpcMessage) {
 		// publish is never seen and the caller waits out its whole deadline.
 		path := realPath(uriToPath(params.URI))
 		key := foldPath(path)
+		version := 0
+		if params.Version != nil {
+			version = *params.Version
+		}
 		c.diagMu.Lock()
-		c.diags[key] = publishedDiags{path: path, list: params.Diagnostics}
+		c.diags[key] = publishedDiags{path: path, list: params.Diagnostics, version: version}
 		c.diagGen[key]++
 		c.diagMu.Unlock()
 		c.diagCond.Broadcast()
@@ -463,12 +487,13 @@ func (c *Client) call(ctx context.Context, method string, params, result any) er
 }
 
 // doc is a synced document: the URI to address it with in requests, plus the
-// diagnostics key and the generation seen at sync time, so the caller can wait
-// for a publish that happened afterwards.
+// diagnostics key, the generation seen at sync time and the version sent, so
+// the caller can wait for a publish about this very text.
 type doc struct {
 	uri      string
 	key      string
 	sinceGen int
+	version  int
 }
 
 // syncFile opens (or re-syncs with full text) a document.
@@ -479,10 +504,16 @@ func (c *Client) syncFile(path, languageID, content string) (doc, error) {
 	c.diagMu.Unlock()
 
 	c.openMu.Lock()
-	version, open := c.openDocs[d.uri]
-	version++
-	c.openDocs[d.uri] = version
+	od, open := c.openDocs[d.uri]
+	if !open {
+		od = &openDoc{path: path, languageID: languageID}
+		c.openDocs[d.uri] = od
+	}
+	od.version++
+	od.sum = sha256.Sum256([]byte(content))
+	version := od.version
 	c.openMu.Unlock()
+	d.version = version
 
 	var err error
 	if !open {
@@ -498,6 +529,57 @@ func (c *Client) syncFile(path, languageID, content string) (doc, error) {
 		})
 	}
 	return d, err
+}
+
+// resyncOpen brings every open document except skip (a URI) back in line with
+// the disk. The server reads an open document from what it was last sent, so
+// a file changed behind its back — by a shell command, a rename that wrote
+// several files, a git checkout — would otherwise be analysed, and reported
+// on, as it was: errors the disk no longer has, and none of the ones it does.
+// Changed files are re-sent (and saved, for on-save checkers); deleted ones
+// are closed.
+func (c *Client) resyncOpen(skip string) {
+	type entry struct {
+		uri string
+		doc openDoc
+	}
+	c.openMu.Lock()
+	docs := make([]entry, 0, len(c.openDocs))
+	for uri, od := range c.openDocs {
+		if uri != skip {
+			docs = append(docs, entry{uri, *od})
+		}
+	}
+	c.openMu.Unlock()
+	for _, e := range docs {
+		raw, err := os.ReadFile(e.doc.path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				c.closeDoc(e.uri)
+			}
+			continue
+		}
+		if sha256.Sum256(raw) == e.doc.sum {
+			continue
+		}
+		content := string(raw)
+		if d, err := c.syncFile(e.doc.path, e.doc.languageID, content); err == nil {
+			_ = c.didSave(d, content)
+		}
+	}
+}
+
+// closeDoc tells the server a document is gone, so it drops what it holds.
+func (c *Client) closeDoc(uri string) {
+	c.openMu.Lock()
+	_, open := c.openDocs[uri]
+	delete(c.openDocs, uri)
+	c.openMu.Unlock()
+	if open {
+		_ = c.notify("textDocument/didClose", map[string]any{
+			"textDocument": map[string]any{"uri": uri},
+		})
+	}
 }
 
 // saveOptions is the part of the server's textDocumentSync capability that
@@ -552,40 +634,44 @@ func (c *Client) didSave(d doc, content string) error {
 	return c.notify("textDocument/didSave", params)
 }
 
-// waitDiagnostics blocks until a publishDiagnostics newer than sinceGen lands
-// for the document, or the context expires; either way it returns the current
-// set.
-func (c *Client) waitDiagnostics(ctx context.Context, key string, sinceGen int) []Diagnostic {
-	c.waitGen(ctx, key, sinceGen)
-	return c.diagnosticsFor(key)
+// waitDiagnostics blocks until a publishDiagnostics about the synced text
+// lands for the document, or the context expires; either way it returns the
+// current set.
+func (c *Client) waitDiagnostics(ctx context.Context, d doc) []Diagnostic {
+	c.waitGen(ctx, d, d.sinceGen)
+	return c.diagnosticsFor(d.key)
 }
 
-// waitSettled waits for the first publish newer than sinceGen and then keeps
-// listening until the server has been quiet for the quiet window, because
-// several servers publish in stages (typescript-language-server sends
-// syntactic errors before semantic ones; gopls follows type errors with
-// analyzer results). fresh reports whether any new publish landed before ctx
-// expired; without one the returned set predates the edit.
-func (c *Client) waitSettled(ctx context.Context, key string, sinceGen int, quiet time.Duration) (ds []Diagnostic, fresh bool) {
-	gen := c.waitGen(ctx, key, sinceGen)
-	if gen <= sinceGen {
-		return c.diagnosticsFor(key), false
+// waitSettled waits for the first publish about the synced text and then
+// keeps listening until the server has been quiet for the quiet window,
+// because several servers publish in stages (typescript-language-server
+// sends syntactic errors before semantic ones). fresh reports whether such a
+// publish landed before ctx expired; without one the returned set predates
+// the edit.
+func (c *Client) waitSettled(ctx context.Context, d doc, quiet time.Duration) (ds []Diagnostic, fresh bool) {
+	gen, fresh := c.waitGen(ctx, d, d.sinceGen)
+	if !fresh {
+		return c.diagnosticsFor(d.key), false
 	}
 	for ctx.Err() == nil {
 		qctx, cancel := context.WithTimeout(ctx, quiet)
-		next := c.waitGen(qctx, key, gen)
+		next, _ := c.waitGen(qctx, d, gen)
 		cancel()
 		if next <= gen {
 			break
 		}
 		gen = next
 	}
-	return c.diagnosticsFor(key), true
+	return c.diagnosticsFor(d.key), true
 }
 
-// waitGen blocks until the document's publish generation exceeds sinceGen,
-// the context expires or the server exits, and returns the generation then.
-func (c *Client) waitGen(ctx context.Context, key string, sinceGen int) int {
+// waitGen blocks until the document has a publish newer than generation
+// sinceGen about the synced text, the context expires or the server exits,
+// and returns the generation then and whether that publish arrived. A publish
+// the server marks with an older document version answers an earlier state
+// of the file (one still in flight when the new text was sent), so it does
+// not count.
+func (c *Client) waitGen(ctx context.Context, d doc, sinceGen int) (int, bool) {
 	// Taking the lock before broadcasting closes the gap between the loop's
 	// ctx check and Wait: without it the wake-up could land in that gap and
 	// be lost, leaving the waiter asleep until some unrelated publish.
@@ -597,10 +683,17 @@ func (c *Client) waitGen(ctx context.Context, key string, sinceGen int) int {
 	defer stop()
 	c.diagMu.Lock()
 	defer c.diagMu.Unlock()
-	for c.diagGen[key] <= sinceGen && ctx.Err() == nil && c.closeErr == nil {
+	arrived := func() bool {
+		if c.diagGen[d.key] <= sinceGen {
+			return false
+		}
+		v := c.diags[d.key].version
+		return v == 0 || v >= d.version
+	}
+	for !arrived() && ctx.Err() == nil && c.closeErr == nil {
 		c.diagCond.Wait()
 	}
-	return c.diagGen[key]
+	return c.diagGen[d.key], arrived()
 }
 
 // diagnosticsFor returns a copy of the document's latest published set.

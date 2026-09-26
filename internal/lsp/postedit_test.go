@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -226,15 +227,23 @@ func TestPostEditMissingServerIsSilent(t *testing.T) {
 	}
 }
 
-// A restart during a start must not leak the half-started server into the new
-// epoch: it is discarded and the next use starts a fresh one.
+// A restart during a start must not leak the half-started server: the start
+// is cancelled rather than waited out, and the next use starts a fresh one.
 func TestRestartDuringStart(t *testing.T) {
 	startLog := filepath.Join(t.TempDir(), "starts")
-	m, root := fakeManager(t, lsptest.Options{InitDelay: 500 * time.Millisecond, StartLog: startLog})
+	m, root := fakeManager(t, lsptest.Options{InitDelay: 2 * time.Second, StartLog: startLog})
 	a := filepath.Join(root, "a.fk")
 	writeFile(t, a, "ERR one\n")
 	m.Warm(a)
-	m.Restart("")
+	waitForStarts(t, startLog, 1)
+	began := time.Now()
+	msg := m.Restart("")
+	if took := time.Since(began); took > time.Second {
+		t.Fatalf("restart waited %s for a start it should have cancelled", took)
+	}
+	if !strings.Contains(msg, "restarted lsp server(s): fake") {
+		t.Fatalf("restart should report the start it cancelled, got: %s", msg)
+	}
 	m.mu.Lock()
 	running := len(m.clients)
 	m.mu.Unlock()
@@ -248,6 +257,181 @@ func TestRestartDuringStart(t *testing.T) {
 	if n := countStarts(t, startLog); n != 2 {
 		t.Fatalf("got %d starts, want the discarded one plus a fresh one", n)
 	}
+}
+
+// Restarting one server leaves the other servers' starts alone.
+func TestRestartOneServerKeepsOtherStarts(t *testing.T) {
+	raw, _ := json.Marshal(lsptest.Options{InitDelay: 700 * time.Millisecond})
+	t.Setenv(lsptest.EnvVar, string(raw))
+	root := realPath(t.TempDir())
+	cfg := Config{Servers: map[string]ServerConfig{
+		"fake":  {Command: os.Args[0], Args: lsptest.Args, Filetypes: []string{".fk"}},
+		"other": {Command: os.Args[0], Args: lsptest.Args, Filetypes: []string{".ot"}},
+	}}
+	writeLspJSON(t, root, cfg)
+	m := newManager(root, cfg)
+	t.Cleanup(m.Shutdown)
+	a, b := filepath.Join(root, "a.fk"), filepath.Join(root, "b.ot")
+	writeFile(t, a, "x\n")
+	writeFile(t, b, "ERR\n")
+	m.Warm(a)
+	m.Warm(b)
+	m.Restart("fake")
+	m.mu.Lock()
+	_, otherStarting := m.starting["other"]
+	m.mu.Unlock()
+	if !otherStarting {
+		t.Fatal("restarting fake abandoned other's start")
+	}
+	if out, _ := postEdit(t, m, b, 10*time.Second); !strings.Contains(out, "bad thing: ERR") {
+		t.Fatalf("other server should have come up, got: %q", out)
+	}
+}
+
+// Shutdown cancels a start in flight instead of waiting it out, and a caller
+// that was waiting on that start does not bring a server back up on the
+// discarded manager, where nothing would ever close it.
+func TestShutdownDuringStartIsFastAndFinal(t *testing.T) {
+	startLog := filepath.Join(t.TempDir(), "starts")
+	m, root := fakeManager(t, lsptest.Options{InitDelay: 5 * time.Second, StartLog: startLog})
+	a := filepath.Join(root, "a.fk")
+	writeFile(t, a, "ERR one\n")
+	res := make(chan string, 1)
+	go func() {
+		out, _ := postEdit(t, m, a, 10*time.Second)
+		res <- out
+	}()
+	waitForStarts(t, startLog, 1)
+	began := time.Now()
+	m.Shutdown()
+	if took := time.Since(began); took > 1500*time.Millisecond {
+		t.Fatalf("shutdown waited %s for a start it should have cancelled", took)
+	}
+	select {
+	case out := <-res:
+		if out != "" {
+			t.Fatalf("post-edit after shutdown should add nothing, got: %q", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting post-edit call did not return after shutdown")
+	}
+	m.Warm(a)
+	time.Sleep(300 * time.Millisecond)
+	m.mu.Lock()
+	clients, starting := len(m.clients), len(m.starting)
+	m.mu.Unlock()
+	if clients != 0 || starting != 0 {
+		t.Fatalf("shut-down manager has %d clients and %d starts", clients, starting)
+	}
+	if n := countStarts(t, startLog); n != 1 {
+		t.Fatalf("got %d server starts, want only the cancelled one", n)
+	}
+}
+
+func TestShutdownUnder(t *testing.T) {
+	parent := realPath(t.TempDir())
+	wt := filepath.Join(parent, "wt")
+	sub := filepath.Join(wt, "pkg")
+	sibling := filepath.Join(parent, "wt2")
+	for _, d := range []string{sub, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgrs := map[string]*Manager{}
+	regMu.Lock()
+	for _, root := range []string{wt, sub, sibling} {
+		mgrs[root] = newManager(root, Config{})
+		registry[root] = mgrs[root]
+	}
+	regMu.Unlock()
+	t.Cleanup(func() {
+		regMu.Lock()
+		delete(registry, sibling)
+		regMu.Unlock()
+	})
+
+	ShutdownUnder(wt)
+
+	regMu.Lock()
+	_, wtKept := registry[wt]
+	_, subKept := registry[sub]
+	_, sibKept := registry[sibling]
+	regMu.Unlock()
+	if wtKept || subKept || !sibKept {
+		t.Fatalf("registry after ShutdownUnder: wt=%v sub=%v sibling=%v", wtKept, subKept, sibKept)
+	}
+	if !mgrs[wt].shutDown || !mgrs[sub].shutDown || mgrs[sibling].shutDown {
+		t.Fatal("ShutdownUnder must stop the worktree's managers and only those")
+	}
+}
+
+// A file changed on disk behind the server's back — by a shell command, or a
+// rename that wrote it — is re-sent before the next check, so its errors are
+// the disk's and not the ones the server saw last.
+func TestPostEditResyncsOpenFilesChangedOnDisk(t *testing.T) {
+	m, root := fakeManager(t, lsptest.Options{})
+	a, b, c := filepath.Join(root, "a.fk"), filepath.Join(root, "b.fk"), filepath.Join(root, "c.fk")
+	writeFile(t, a, "fine\n")
+	writeFile(t, b, "ERR in b\n")
+	writeFile(t, c, "ERR in c\n")
+	postEdit(t, m, b, 10*time.Second) // opens b with its error
+	postEdit(t, m, c, 10*time.Second) // and c
+	if out, _ := postEdit(t, m, a, 10*time.Second); !strings.Contains(out, "2 errors in 2 other files: b.fk (1), c.fk (1)") {
+		t.Fatalf("expected b and c counted, got: %q", out)
+	}
+
+	// b is fixed and c deleted, neither through the server
+	writeFile(t, b, "fine now\n")
+	if err := os.Remove(c); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := postEdit(t, m, a, 10*time.Second); out != "" {
+		t.Fatalf("b was fixed on disk and c deleted, got: %q", out)
+	}
+	cl, _, err := m.clientFor(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl.openMu.Lock()
+	_, cOpen := cl.openDocs[fileURI(c)]
+	cl.openMu.Unlock()
+	if cOpen {
+		t.Fatal("a deleted file should be closed on the server")
+	}
+
+	// and broken again behind the server's back
+	writeFile(t, b, "ERR again\n")
+	if out, _ := postEdit(t, m, a, 10*time.Second); !strings.Contains(out, "1 error in 1 other file: b.fk (1)") {
+		t.Fatalf("expected b's new error, got: %q", out)
+	}
+}
+
+// The other files a tool call wrote (the rest of a rename) reach the server
+// even when it never had them open, so their errors are counted.
+func TestPostEditSyncsAlsoChangedFiles(t *testing.T) {
+	m, root := fakeManager(t, lsptest.Options{})
+	a, b := filepath.Join(root, "a.fk"), filepath.Join(root, "b.fk")
+	writeFile(t, a, "fine\n")
+	writeFile(t, b, "ERR in b\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out := m.PostEditDiagnostics(ctx, a, a, b)
+	if out != "No errors in a.fk; 1 error in 1 other file: b.fk (1) — use the diagnostics tool to list them." {
+		t.Fatalf("got: %q", out)
+	}
+}
+
+func waitForStarts(t *testing.T, path string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(path); err == nil && strings.Count(string(raw), "start ") >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("server did not start %d time(s)", n)
 }
 
 func TestClientForHonoursContextWhileStarting(t *testing.T) {
@@ -324,7 +508,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 		stdin:    discardWriteCloser{},
 		diags:    map[string]publishedDiags{},
 		diagGen:  map[string]int{},
-		openDocs: map[string]int{},
+		openDocs: map[string]*openDoc{},
 		closed:   make(chan struct{}),
 	}
 	c.diagCond = sync.NewCond(&c.diagMu)
@@ -344,7 +528,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 
 	// nothing published: not fresh, returned at the deadline
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, fresh := c.waitSettled(ctx, d.key, d.sinceGen, 50*time.Millisecond); fresh {
+	if _, fresh := c.waitSettled(ctx, d, 50*time.Millisecond); fresh {
 		t.Fatal("no publish should not count as fresh")
 	}
 	cancel()
@@ -357,7 +541,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 	}()
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ds, fresh := c.waitSettled(ctx, d.key, d.sinceGen, 200*time.Millisecond)
+	ds, fresh := c.waitSettled(ctx, d, 200*time.Millisecond)
 	if !fresh || len(ds) != 1 || ds[0].Message != "semantic error" {
 		t.Fatalf("got %+v fresh=%v, want the later publish", ds, fresh)
 	}
@@ -388,5 +572,56 @@ func TestFindServerBinaryFallsBackToInstallDirs(t *testing.T) {
 	cfg, ok := loadConfig(t.TempDir())
 	if !ok || cfg.Servers["go"].Command != "/usr/bin/"+installed {
 		t.Fatalf("detection missed the install-dir gopls: %+v ok=%v", cfg.Servers["go"], ok)
+	}
+}
+
+// A publish marked with an older document version answers an earlier text,
+// still in flight when the new one was sent, so it is not the edit's answer.
+func TestWaitSettledIgnoresOlderVersions(t *testing.T) {
+	c := &Client{
+		stdin:    discardWriteCloser{},
+		diags:    map[string]publishedDiags{},
+		diagGen:  map[string]int{},
+		openDocs: map[string]*openDoc{},
+		closed:   make(chan struct{}),
+	}
+	c.diagCond = sync.NewCond(&c.diagMu)
+	file := filepath.Join(t.TempDir(), "a.go")
+	if _, err := c.syncFile(file, "go", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	d, err := c.syncFile(file, "go", "v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func(version int, msg string) {
+		params, _ := json.Marshal(map[string]any{"uri": fileURI(file), "version": version,
+			"diagnostics": []map[string]any{{"severity": 1, "message": msg}}})
+		c.dispatch(rpcMessage{Method: "textDocument/publishDiagnostics", Params: params})
+	}
+	publish(1, "about v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if _, fresh := c.waitSettled(ctx, d, 20*time.Millisecond); fresh {
+		t.Fatal("a publish for version 1 answered the sync of version 2")
+	}
+	cancel()
+	publish(2, "about v2")
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ds, fresh := c.waitSettled(ctx, d, 20*time.Millisecond)
+	if !fresh || len(ds) != 1 || ds[0].Message != "about v2" {
+		t.Fatalf("got %+v fresh=%v, want the version 2 publish", ds, fresh)
+	}
+}
+
+func TestServerSettings(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		"gopls": true, "/home/u/go/bin/gopls": true, `C:\go\bin\gopls.exe`: runtime.GOOS == "windows",
+		"typescript-language-server": false, "rust-analyzer": false,
+	} {
+		got := serverSettings(cmd)
+		if (got != nil) != want || (want && got["diagnosticsDelay"] != "0s") {
+			t.Errorf("serverSettings(%q) = %v", cmd, got)
+		}
 	}
 }

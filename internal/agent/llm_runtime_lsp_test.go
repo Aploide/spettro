@@ -3,9 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,7 +44,7 @@ func fakeLSPRuntime(t *testing.T, opts lsptest.Options) (*toolRuntime, string) {
 			m.Shutdown()
 		}
 	})
-	return &toolRuntime{cwd: dir, readSet: map[string]struct{}{}}, dir
+	return &toolRuntime{cwd: dir, readSet: map[string]struct{}{}, lspWarm: true}, dir
 }
 
 func toolArgs(t *testing.T, v any) json.RawMessage {
@@ -155,5 +158,102 @@ func TestEditNeverFailsOnSilentServer(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); string(got) != "ERR now\n" {
 		t.Fatalf("edit did not land: %q", got)
+	}
+}
+
+// An agent that cannot use a language server does not start one by reading:
+// the server would index the whole workspace for nothing.
+func TestFileReadDoesNotWarmForReadOnlyAgents(t *testing.T) {
+	startLog := filepath.Join(t.TempDir(), "starts")
+	rt, dir := fakeLSPRuntime(t, lsptest.Options{StartLog: startLog})
+	allowed := map[string]struct{}{"file-read": {}, "grep": {}, "glob": {}}
+	rt.lspWarm = usesLanguageServer(allowed)
+	if err := os.WriteFile(filepath.Join(dir, "a.fk"), []byte("fine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.execute(context.Background(), toolCall{Tool: "file-read", Args: toolArgs(t, map[string]any{"path": "a.fk"})}, allowed); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(startLog); err == nil {
+		t.Fatal("a read-only agent started a language server")
+	}
+}
+
+func TestUsesLanguageServer(t *testing.T) {
+	cases := []struct {
+		tools []string
+		want  bool
+	}{
+		{[]string{"file-read", "grep", "glob", "shell-exec"}, false},
+		{[]string{"file-read", "file-edit"}, true},
+		{[]string{"file-read", "references"}, true},
+		{nil, false},
+	}
+	for _, c := range cases {
+		allowed := map[string]struct{}{}
+		for _, t := range c.tools {
+			allowed[t] = struct{}{}
+		}
+		if got := usesLanguageServer(allowed); got != c.want {
+			t.Errorf("usesLanguageServer(%v) = %v, want %v", c.tools, got, c.want)
+		}
+	}
+}
+
+// A subagent's worktree is a workspace of its own; the servers it started
+// there are stopped when the workspace is folded back, not left running
+// until the process exits.
+func TestWorkspaceFinalizeStopsLanguageServers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("checks the server process with signal 0")
+	}
+	repo := testGitRepo(t)
+	ctx := context.Background()
+	w, err := newAgentWorkspace(ctx, repo, "lsp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startLog := filepath.Join(t.TempDir(), "starts")
+	raw, _ := json.Marshal(lsptest.Options{StartLog: startLog})
+	t.Setenv(lsptest.EnvVar, string(raw))
+	cfg, _ := json.Marshal(lsp.Config{Servers: map[string]lsp.ServerConfig{
+		"fake": {Command: os.Args[0], Args: lsptest.Args, Filetypes: []string{".fk"}},
+	}})
+	if err := os.MkdirAll(filepath.Join(w.subCWD, ".spettro"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.subCWD, ".spettro", "lsp.json"), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.subCWD, "a.fk"), []byte("fine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &toolRuntime{cwd: w.subCWD, readSet: map[string]struct{}{}, lspWarm: true}
+	if _, err := rt.execute(ctx, toolCall{Tool: "file-read", Args: toolArgs(t, map[string]any{"path": "a.fk"})}, map[string]struct{}{"file-read": {}}); err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	deadline := time.Now().Add(10 * time.Second)
+	for pid == 0 && time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(startLog); err == nil {
+			_, _ = fmt.Sscanf(string(raw), "start %d", &pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("the read did not start the worktree's server")
+	}
+
+	if m := w.finalize(ctx); m.Status != "merged" {
+		t.Fatalf("finalize: %+v", m)
+	}
+	proc, _ := os.FindProcess(pid)
+	deadline = time.Now().Add(5 * time.Second)
+	for proc.Signal(syscall.Signal(0)) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the worktree's language server outlived its workspace")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

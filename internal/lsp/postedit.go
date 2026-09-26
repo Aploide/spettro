@@ -61,12 +61,14 @@ type postEditReport struct {
 
 // PostEditDiagnostics syncs the just-written file to its language server and
 // returns a short report of the errors in it, plus a count of errors in other
-// files, for appending to an edit tool's result. It returns "" when there is
-// nothing to report: a clean file, or no server for the file type. It never
-// takes meaningfully longer than ctx allows, even when the server is wedged.
-func (m *Manager) PostEditDiagnostics(ctx context.Context, absPath string) string {
+// files, for appending to an edit tool's result. also names other files the
+// same tool call wrote (the rest of a rename), which are synced first. It
+// returns "" when there is nothing to report: a clean file, or no server for
+// the file type. It never takes meaningfully longer than ctx allows, even
+// when the server is wedged.
+func (m *Manager) PostEditDiagnostics(ctx context.Context, absPath string, also ...string) string {
 	ch := make(chan string, 1)
-	go func() { ch <- m.postEdit(ctx, absPath).format() }()
+	go func() { ch <- m.postEdit(ctx, absPath, also).format() }()
 	select {
 	case out := <-ch:
 		return out
@@ -83,7 +85,7 @@ func (m *Manager) PostEditDiagnostics(ctx context.Context, absPath string) strin
 	}
 }
 
-func (m *Manager) postEdit(ctx context.Context, absPath string) postEditReport {
+func (m *Manager) postEdit(ctx context.Context, absPath string, also []string) postEditReport {
 	absPath = realPath(absPath)
 	rep := postEditReport{rel: m.relPath(absPath)}
 	c, key, err := m.clientFor(ctx, absPath)
@@ -98,13 +100,7 @@ func (m *Manager) postEdit(ctx context.Context, absPath string) postEditReport {
 		rep.skip = !rep.starting
 		return rep
 	}
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		rep.skip = true
-		return rep
-	}
-	content := string(raw)
-	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, content, err := m.syncFromDisk(c, key, absPath, also...)
 	if err == nil {
 		err = c.didSave(d, content)
 	}
@@ -112,7 +108,7 @@ func (m *Manager) postEdit(ctx context.Context, absPath string) postEditReport {
 		rep.skip = true
 		return rep
 	}
-	ds, fresh := c.waitSettled(ctx, d.key, d.sinceGen, settleFor(key))
+	ds, fresh := c.waitSettled(ctx, d, settleFor(key))
 	if !fresh {
 		rep.noAnswer = true
 		return rep

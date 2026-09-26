@@ -18,6 +18,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/diff"
+	"spettro/internal/lsp"
 	"spettro/internal/mcp"
 	"spettro/internal/provider"
 	"spettro/internal/safeio"
@@ -786,6 +787,9 @@ func (r *toolRuntime) runExitWorktree(ctx context.Context, rawArgs []byte) (stri
 			return "", fmt.Errorf("exit-worktree: worktree has uncommitted changes (use force=true)")
 		}
 	}
+	// Language servers started in the worktree hold it open (and would run
+	// until the process exits); stop them before removing it.
+	lsp.ShutdownUnder(abs)
 	cmdArgs := []string{"worktree", "remove", abs}
 	if args.Force {
 		cmdArgs = append(cmdArgs, "--force")

@@ -105,7 +105,7 @@ func TestWaitDiagnosticsMatchesServerSpelling(t *testing.T) {
 		stdin:    discardWriteCloser{},
 		diags:    map[string]publishedDiags{},
 		diagGen:  map[string]int{},
-		openDocs: map[string]int{},
+		openDocs: map[string]*openDoc{},
 		closed:   make(chan struct{}),
 	}
 	c.diagCond = sync.NewCond(&c.diagMu)
@@ -125,7 +125,7 @@ func TestWaitDiagnosticsMatchesServerSpelling(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ds := c.waitDiagnostics(ctx, d.key, d.sinceGen)
+	ds := c.waitDiagnostics(ctx, d)
 	if len(ds) != 1 || !strings.Contains(ds[0].Message, "undeclared identifier") {
 		t.Fatalf("publish under a different spelling was not matched: %+v", ds)
 	}

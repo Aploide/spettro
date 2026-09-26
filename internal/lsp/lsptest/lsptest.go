@@ -141,6 +141,18 @@ func Serve(in io.Reader, out io.Writer, opts Options) {
 			if n := len(p.ContentChanges); n > 0 {
 				s.changed(p.TextDocument.URI, p.ContentChanges[n-1].Text, false)
 			}
+		case "textDocument/didClose":
+			var p struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			s.mu.Lock()
+			delete(s.docs, p.TextDocument.URI)
+			s.mu.Unlock()
+			// like real servers: a closed document has nothing to report
+			s.publish(p.TextDocument.URI, []map[string]any{})
 		case "textDocument/didSave":
 			var p struct {
 				TextDocument struct {

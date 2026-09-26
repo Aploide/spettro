@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"spettro/internal/lsp"
 )
 
 // Subagent workspace isolation. When a delegation (agent tool) or swarm
@@ -292,9 +294,18 @@ func (w *agentWorkspace) hasCommits(ctx context.Context) bool {
 	return err == nil && strings.TrimSpace(count) != "0"
 }
 
+// releaseServers stops the language servers the subagent started in its
+// worktree. Each worktree is a workspace of its own, so they would otherwise
+// run until the process exits, one copy per subagent, and keep the directory
+// busy (on Windows the worktree cannot be removed while they hold it).
+func (w *agentWorkspace) releaseServers() {
+	lsp.ShutdownUnder(w.path)
+}
+
 // cleanup removes the worktree and deletes the branch. Safe to call on a
 // partially torn-down workspace.
 func (w *agentWorkspace) cleanup(ctx context.Context) {
+	w.releaseServers()
 	workspaceMu.Lock()
 	defer workspaceMu.Unlock()
 	_, _ = workspaceGit(ctx, w.repoRoot, "worktree", "remove", "--force", "--", w.path)
@@ -306,6 +317,7 @@ func (w *agentWorkspace) cleanup(ctx context.Context) {
 // branch and worktree. On conflict the merge is aborted and the branch and
 // worktree are preserved for manual resolution.
 func (w *agentWorkspace) finalize(ctx context.Context) workspaceMerge {
+	w.releaseServers() // the subagent is done, whatever becomes of its tree
 	res := workspaceMerge{Branch: w.branch, Path: w.path}
 	if detail, err := w.commitPending(ctx); err != nil {
 		res.Status = "error"
@@ -342,6 +354,7 @@ func (w *agentWorkspace) finalize(ctx context.Context) workspaceMerge {
 // clean tree) are deleted; anything with work in it is preserved and reported
 // so nothing a subagent produced is silently lost.
 func (w *agentWorkspace) abandon(ctx context.Context) *workspaceMerge {
+	w.releaseServers()
 	dirty, err := isGitDirty(ctx, w.path)
 	if err == nil && !dirty && !w.hasCommits(ctx) {
 		w.cleanup(ctx)
