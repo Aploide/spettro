@@ -1,11 +1,9 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1304,7 +1302,11 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("glob args: %w", err)
 		}
-		return r.runGlob(args.Pattern, args.Path)
+		out, err := r.runGlob(ctx, args.Pattern, args.Path)
+		if err != nil {
+			return "", err
+		}
+		return r.spoolResult("glob", out), nil
 	case "grep":
 		var gargs grepArgs
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
@@ -1314,10 +1316,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err != nil {
 			return "", err
 		}
-		if gargs.OutputMode == "" || gargs.OutputMode == "content" {
-			return r.spoolResult("grep", out), nil
-		}
-		return out, nil
+		return r.spoolResult("grep", out), nil
 	case "ls":
 		var args struct {
 			Path string `json:"path"`
@@ -1683,313 +1682,6 @@ func (r *toolRuntime) lockFileForMutation(rawArgs []byte) (unlock func()) {
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
-}
-
-// skipDirs are directories to skip when walking the workspace.
-var skipDirs = map[string]bool{
-	".git":         true,
-	".spettro":     true,
-	"vendor":       true,
-	"node_modules": true,
-	"dist":         true,
-	"build":        true,
-}
-
-// runGlob implements the glob tool using filepath.WalkDir with ** support.
-func (r *toolRuntime) runGlob(pattern, subPath string) (string, error) {
-	if strings.TrimSpace(pattern) == "" {
-		return "", fmt.Errorf("glob: pattern is required")
-	}
-	root := r.cwd
-	if strings.TrimSpace(subPath) != "" {
-		abs, _, err := r.resolvePath(subPath)
-		if err != nil {
-			return "", fmt.Errorf("glob path: %w", err)
-		}
-		root = abs
-	}
-
-	var matches []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip inaccessible entries
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(r.cwd, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if matchGlobPattern(pattern, rel) {
-			matches = append(matches, rel)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("glob walk: %w", err)
-	}
-	sort.Strings(matches)
-	if len(matches) == 0 {
-		return fmt.Sprintf("no files match %q", pattern), nil
-	}
-	return fmt.Sprintf("%d files:\n%s", len(matches), strings.Join(matches, "\n")), nil
-}
-
-// matchGlobPattern matches a slash-separated path against a glob pattern with ** support.
-func matchGlobPattern(pattern, rel string) bool {
-	patParts := strings.Split(pattern, "/")
-	pathParts := strings.Split(rel, "/")
-	return globMatch(patParts, pathParts)
-}
-
-func globMatch(patParts, pathParts []string) bool {
-	if len(patParts) == 0 && len(pathParts) == 0 {
-		return true
-	}
-	if len(patParts) == 0 {
-		return false
-	}
-	if patParts[0] == "**" {
-		// ** can match zero or more path components
-		// Try matching rest of pattern against every suffix of path
-		restPat := patParts[1:]
-		// Zero-component match: skip ** entirely
-		if globMatch(restPat, pathParts) {
-			return true
-		}
-		// One or more components match
-		for i := 1; i <= len(pathParts); i++ {
-			if globMatch(restPat, pathParts[i:]) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(pathParts) == 0 {
-		return false
-	}
-	matched, err := filepath.Match(patParts[0], pathParts[0])
-	if err != nil || !matched {
-		return false
-	}
-	return globMatch(patParts[1:], pathParts[1:])
-}
-
-// typeExtensions maps type names to file extensions.
-func typeExtensions(t string) []string {
-	switch strings.ToLower(t) {
-	case "go":
-		return []string{".go"}
-	case "ts":
-		return []string{".ts", ".tsx"}
-	case "js":
-		return []string{".js", ".jsx", ".mjs"}
-	case "py":
-		return []string{".py"}
-	case "rs":
-		return []string{".rs"}
-	case "md":
-		return []string{".md"}
-	case "toml":
-		return []string{".toml"}
-	case "json":
-		return []string{".json"}
-	case "yaml", "yml":
-		return []string{".yaml", ".yml"}
-	case "sh":
-		return []string{".sh", ".bash"}
-	default:
-		return nil
-	}
-}
-
-type grepArgs struct {
-	Pattern         string `json:"pattern"`
-	Glob            string `json:"glob"`
-	Type            string `json:"type"`
-	CaseInsensitive bool   `json:"case_insensitive"`
-	Context         int    `json:"context"`
-	OutputMode      string `json:"output_mode"`
-	MaxResults      int    `json:"max_results"`
-}
-
-// runGrep implements the grep tool.
-func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) {
-	if strings.TrimSpace(args.Pattern) == "" {
-		return "", fmt.Errorf("grep: pattern is required")
-	}
-	regexPattern := args.Pattern
-	if args.CaseInsensitive {
-		regexPattern = "(?i)" + regexPattern
-	}
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return "", fmt.Errorf("grep: invalid pattern: %w", err)
-	}
-	if args.MaxResults <= 0 {
-		args.MaxResults = 200
-	}
-	outputMode := args.OutputMode
-	if outputMode == "" {
-		outputMode = "content"
-	}
-
-	exts := typeExtensions(args.Type)
-
-	type fileResult struct {
-		path   string
-		count  int
-		blocks []string // for content mode
-	}
-
-	var results []fileResult
-	totalMatches := 0
-	truncated := false
-
-	walkErr := filepath.WalkDir(r.cwd, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if truncated {
-			return nil
-		}
-
-		// Filter by type
-		if len(exts) > 0 {
-			ext := strings.ToLower(filepath.Ext(d.Name()))
-			found := slices.Contains(exts, ext)
-			if !found {
-				return nil
-			}
-		}
-		// Filter by glob
-		if args.Glob != "" {
-			matched, mErr := filepath.Match(args.Glob, d.Name())
-			if mErr != nil || !matched {
-				return nil
-			}
-		}
-
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		rel, relErr := filepath.Rel(r.cwd, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-
-		lines := strings.Split(string(data), "\n")
-		matchLines := make([]int, 0)
-		for i, line := range lines {
-			if re.MatchString(line) {
-				matchLines = append(matchLines, i)
-			}
-		}
-		if len(matchLines) == 0 {
-			return nil
-		}
-
-		// Mark as read from search
-		r.mu.Lock()
-		r.readSet[rel] = struct{}{}
-		r.mu.Unlock()
-
-		fr := fileResult{path: rel, count: len(matchLines)}
-
-		if outputMode == "content" {
-			// Build context blocks
-			included := make([]bool, len(lines))
-			for _, mi := range matchLines {
-				start := max(mi-args.Context, 0)
-				end := mi + args.Context
-				if end >= len(lines) {
-					end = len(lines) - 1
-				}
-				for j := start; j <= end; j++ {
-					included[j] = true
-				}
-			}
-
-			var blockBuf bytes.Buffer
-			prevIncluded := false
-			for i, line := range lines {
-				if included[i] {
-					if !prevIncluded && blockBuf.Len() > 0 {
-						blockBuf.WriteString("--\n")
-					}
-					fmt.Fprintf(&blockBuf, "%s:%d: %s\n", rel, i+1, line)
-					prevIncluded = true
-				} else {
-					prevIncluded = false
-				}
-			}
-			fr.blocks = []string{blockBuf.String()}
-		}
-
-		results = append(results, fr)
-		totalMatches += len(matchLines)
-		if totalMatches >= args.MaxResults {
-			truncated = true
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return "", fmt.Errorf("grep walk: %w", walkErr)
-	}
-
-	if len(results) == 0 {
-		return fmt.Sprintf("no matches for %q", args.Pattern), nil
-	}
-
-	var sb strings.Builder
-	switch outputMode {
-	case "files_with_matches":
-		for _, fr := range results {
-			sb.WriteString(fr.path)
-			sb.WriteString("\n")
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	case "count":
-		for _, fr := range results {
-			fmt.Fprintf(&sb, "%s: %d\n", fr.path, fr.count)
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	default: // "content"
-		for _, fr := range results {
-			for _, block := range fr.blocks {
-				sb.WriteString(block)
-			}
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	}
 }
 
 func (r *toolRuntime) nextRequiredRead() (string, bool) {
