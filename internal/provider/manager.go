@@ -612,6 +612,12 @@ func isThinkingLevelError(err error) bool {
 	if strings.Contains(msg, "budget_tokens") || strings.Contains(msg, "thinking.enabled") || strings.Contains(msg, "extended thinking") {
 		return true
 	}
+	// "When `thinking` is enabled, a final `assistant` message must start
+	// with a thinking block": the history cannot satisfy thinking, so step
+	// down (to off) rather than fail the run.
+	if strings.Contains(msg, "must start with a thinking block") {
+		return true
+	}
 	return false
 }
 

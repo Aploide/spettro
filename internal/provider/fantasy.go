@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -61,7 +62,7 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		reasoning = appendReasoning(reasoning, rc.Text, sig, redacted, providerName, modelName)
 	}
 	finish := detectTruncation(mapFinishReason(resp.FinishReason), resp.Usage, maxOut)
-	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut)
+	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut, int(resp.Usage.OutputTokens))
 	return Response{
 		Content:         fantasyText(resp),
 		ToolCalls:       toolCalls,
@@ -78,6 +79,12 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 // connection most likely stalled in a proxy or a local server, and the
 // request is safe to resend.
 var ErrStreamIdle = errors.New("stream idle timeout: the provider sent no data")
+
+// ErrStreamIncomplete is returned when a streaming response ends without the
+// provider saying why the reply ended (no finish reason): the stream was cut
+// mid-generation, typically by a proxy. It is transient: the request is safe
+// to resend.
+var ErrStreamIncomplete = errors.New("stream ended before the model finished its reply (no finish reason)")
 
 // Stream silence limits. Activity is measured on the raw response body, so
 // SSE keep-alives (Anthropic "ping" events, ": comment" lines) count as
@@ -253,10 +260,14 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 	}
 
 	var (
-		textSB    strings.Builder
-		usage     fantasy.Usage
-		finish    FinishReason
-		streamErr error
+		textSB strings.Builder
+		usage  fantasy.Usage
+		finish FinishReason
+		// finishReported is set once the provider said why the reply
+		// ended; fantasy emits a Finish part on any clean EOF, with an
+		// unknown reason when the stream simply stopped.
+		finishReported bool
+		streamErr      error
 		// Tool calls in first-seen order. Inputs are accumulated from the
 		// delta events too: the OpenAI-compatible stream only emits a
 		// ToolCall part once the arguments parse as JSON, so a call cut off
@@ -316,7 +327,9 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 			}
 		case fantasy.StreamPartTypeToolInputDelta:
 			if tc, ok := callsByID[part.ID]; ok && !tc.complete {
-				tc.input += part.Delta
+				// The OpenAI-style adapters carry the fragment in Delta,
+				// the Anthropic one in ToolCallInput.
+				tc.input += cmp.Or(part.Delta, part.ToolCallInput)
 			}
 		case fantasy.StreamPartTypeToolCall:
 			if part.ProviderExecuted {
@@ -328,6 +341,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		case fantasy.StreamPartTypeFinish:
 			usage = part.Usage
 			finish = mapFinishReason(part.FinishReason)
+			finishReported = part.FinishReason != "" && part.FinishReason != fantasy.FinishReasonUnknown
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
 				streamErr = part.Error
@@ -342,6 +356,14 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		// The watchdog fired but the iterator ended without an error part.
 		return Response{}, ErrStreamIdle
 	}
+	if !finishReported && !req.localEndpoint {
+		// The response ended cleanly but the model never said it was done
+		// (no finish_reason / message_delta): a proxy or load balancer cut
+		// the stream mid-generation. Accepting it would pass half an answer
+		// (or a half-streamed tool call) off as complete. Local servers are
+		// exempt: some omit the finish reason, and nothing sits between.
+		return Response{}, ErrStreamIncomplete
+	}
 
 	totalTokens := int(usage.TotalTokens)
 	if totalTokens == 0 {
@@ -354,7 +376,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		raw = append(raw, *tc)
 	}
 	finish = detectTruncation(finish, usage, maxOut)
-	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut)
+	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut, int(usage.OutputTokens))
 	var reasoning []ReasoningBlock
 	for _, r := range thoughts {
 		reasoning = appendReasoning(reasoning, r.text.String(), r.signature, r.redacted, providerName, modelName)
@@ -386,21 +408,36 @@ type streamReasoning struct {
 
 // finalizeToolCalls normalizes every call's arguments (see
 // normalizeToolArgs) and returns the finish reason, upgraded to FinishLength
-// when the reply evidently ended mid-call: the last call never finished
-// streaming and its arguments stop in the middle of a JSON value. (The
-// OpenAI-style adapters report "tool-calls" in that case, hiding the length
-// stop, and no output cap may have been sent to compare usage against.)
+// when the reply evidently ended mid-call at the output limit: the last call
+// never finished streaming, its arguments stop in the middle of a JSON value,
+// and the reply used (nearly) all the output it was allowed — or no cap or
+// usage is known to compare against. (The OpenAI-style adapters report
+// "tool-calls" in that case, hiding the length stop.) Well below the cap the
+// same shape is a malformed call — a forgotten closing brace — and gets the
+// parse error, not advice to split a large write.
+//
+// A call that never finished and carries no argument text at all is never
+// run with "{}": its arguments were lost, so it gets an error instead.
 // Unnamed fragments — an argument delta for a call the stream never
 // introduced — are dropped: there is nothing to route them to.
-func finalizeToolCalls(raw []rawToolCall, finish FinishReason, maxOut int) ([]NativeTool, FinishReason) {
+func finalizeToolCalls(raw []rawToolCall, finish FinishReason, maxOut, outputTokens int) ([]NativeTool, FinishReason) {
 	if n := len(raw); n > 0 && finish != FinishLength {
-		if last := raw[n-1]; !last.complete && endsMidJSON(last.input) {
+		nearCap := maxOut <= 0 || outputTokens <= 0 || outputTokens*10 >= maxOut*9
+		if last := raw[n-1]; !last.complete && endsMidJSON(last.input) && nearCap {
 			finish = FinishLength
 		}
 	}
 	var out []NativeTool
 	for _, tc := range raw {
 		if tc.name == "" {
+			continue
+		}
+		if !tc.complete && strings.TrimSpace(tc.input) == "" {
+			msg := "error: your tool call's arguments never arrived (the reply ended before they were sent) and the call was NOT executed; send the call again"
+			if finish == FinishLength {
+				msg = TruncatedArgsError(maxOut)
+			}
+			out = append(out, NativeTool{ID: tc.id, Name: tc.name, Args: json.RawMessage(`{}`), ArgsError: msg})
 			continue
 		}
 		args, argsErr := normalizeToolArgs(tc.input, finish == FinishLength, maxOut)
@@ -475,6 +512,59 @@ func appendReasoning(out []ReasoningBlock, text, signature, redacted, providerNa
 		Provider:     providerName,
 		Model:        modelName,
 	})
+}
+
+// Thinking budget bounds: Anthropic requires budget_tokens >= 1024 and
+// below max_tokens; the rest of max_tokens is left for the answer.
+const (
+	minThinkingBudget     = 1024
+	thinkingAnswerReserve = 4096
+)
+
+// fitThinkingBudget fits a thinking budget under the output cap the manager
+// resolved — the model's output limit and the room left in the context
+// window. Raising max_tokens to make room for the budget would undo that
+// clamp and turn into a hard 400 (max_tokens above the model's limit, or
+// prompt plus max_tokens past the window) that no retry or thinking
+// downgrade recovers from, so the budget shrinks instead: to leave the
+// answer reserve, or half the cap when that is too little, or to nothing
+// (0) below the minimum budget. With no cap known, max_tokens is raised to
+// budget plus the reserve.
+func fitThinkingBudget(budget int64, maxOutput *int64) (fitted, maxTokens int64) {
+	if maxOutput == nil || *maxOutput <= 0 {
+		return budget, budget + thinkingAnswerReserve
+	}
+	limit := *maxOutput
+	if budget+thinkingAnswerReserve <= limit {
+		return budget, limit
+	}
+	fitted = limit - thinkingAnswerReserve
+	if fitted < minThinkingBudget {
+		fitted = limit / 2
+	}
+	if fitted < minThinkingBudget {
+		return 0, limit
+	}
+	return fitted, limit
+}
+
+// toolTurnLacksThinking reports whether msgs end inside a tool loop — an
+// assistant turn with tool calls followed only by its tool results — whose
+// assistant turn carries no thinking block replayable to modelName.
+func toolTurnLacksThinking(providerName, modelName string, msgs []Message) bool {
+	i := len(msgs) - 1
+	for i >= 0 && msgs[i].Role == RoleUser && len(msgs[i].ToolResults) > 0 && strings.TrimSpace(msgs[i].Content) == "" {
+		i--
+	}
+	if i < 0 || i == len(msgs)-1 || msgs[i].Role != RoleAssistant || len(msgs[i].ToolCalls) == 0 {
+		return false
+	}
+	for _, b := range msgs[i].Reasoning {
+		if b.Provider == providerName && b.Model == modelName && (b.Signature != "" || b.RedactedData != "") {
+			return false
+		}
+	}
+	return true
 }
 
 // replayReasoning builds the reasoning parts to send back on an assistant
@@ -668,16 +758,26 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 	// provider default; a server that rejects "none" is retried without the
 	// field by the manager's downgrade ladder.
 	if isAnthropicAPI(providerName, apiKind) {
-		if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
-			budgetInt := int64(budget)
+		budget := int64(ThinkingBudgetTokens(ThinkingLevel(req.Thinking)))
+		if budget > 0 && toolTurnLacksThinking(providerName, modelName, req.Messages) {
+			// The in-progress tool-use turn came from another model (a
+			// fallback or a model switch mid-loop) or from a request without
+			// thinking, so it has no thinking block this model can replay.
+			// Anthropic rejects a thinking-enabled request whose final
+			// assistant turn does not start with one; think again from the
+			// next user turn on.
+			budget = 0
+		}
+		if budget > 0 {
+			var maxTokens int64
+			budget, maxTokens = fitThinkingBudget(budget, call.MaxOutputTokens)
+			call.MaxOutputTokens = &maxTokens
+		}
+		if budget > 0 {
 			call.ProviderOptions = fantasy.ProviderOptions{
 				"anthropic": &fantasyanthropic.ProviderOptions{
-					Thinking: &fantasyanthropic.ThinkingProviderOption{BudgetTokens: budgetInt},
+					Thinking: &fantasyanthropic.ThinkingProviderOption{BudgetTokens: budget},
 				},
-			}
-			needed := budgetInt + 4096
-			if call.MaxOutputTokens == nil || *call.MaxOutputTokens < needed {
-				call.MaxOutputTokens = &needed
 			}
 		}
 	} else if effort := ReasoningEffort(ThinkingLevel(req.Thinking)); effort != "" {

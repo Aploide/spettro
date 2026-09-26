@@ -23,8 +23,8 @@ func TruncatedArgsError(maxOutput int) string {
 	}
 	return "error: your tool call arguments were truncated at " + limit +
 		" and the call was NOT executed. Split the content into smaller pieces: write a large file in several" +
-		" steps (create it with the first part, then extend it with file-edit), or use file-edit for" +
-		" targeted changes instead of rewriting whole files."
+		" steps (create it with the first part, then add each further part with file-write append=true), or" +
+		" use file-edit for targeted changes instead of rewriting whole files."
 }
 
 // normalizeToolArgs turns the raw argument text a model produced for one tool
@@ -230,7 +230,7 @@ func argsParseError(s string) string {
 		fmt.Fprintf(&sb, " Near: %q.", snippet)
 	}
 	if err != nil && strings.Contains(err.Error(), "unexpected end of JSON input") {
-		sb.WriteString(" The arguments end abruptly: if they were long they were probably cut off by the output token limit, so split the content into smaller writes or use file-edit.")
+		sb.WriteString(" The arguments end abruptly: if they were long they were probably cut off by the output token limit, so split the content into smaller writes (file-write append=true adds to a file) or use file-edit.")
 	}
 	sb.WriteString(` Resend the call with a single valid JSON object: escape newlines as \n and quotes as \" inside strings, no trailing commas, no comments or code fences.`)
 	return sb.String()

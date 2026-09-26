@@ -69,6 +69,12 @@ var fatalPatterns = []string{
 	"billing",
 }
 
+// quotaPatterns match 4xx errors (429 included) caused by an exhausted
+// quota or balance rather than a rate limit.
+var quotaPatterns = []string{
+	"insufficient_quota", "exceeded your current quota", "credit balance", "billing",
+}
+
 // overflowPatterns match "the prompt is too long for this model" errors
 // across providers (Anthropic, OpenAI, vLLM, llama.cpp, Gemini, Bedrock, …).
 var overflowPatterns = []string{
@@ -91,7 +97,7 @@ func ClassifyRetry(err error) RetryClass {
 	if IsContextOverflow(err) {
 		return RetryContextOverflow
 	}
-	if errors.Is(err, ErrStreamIdle) || errors.Is(err, context.DeadlineExceeded) ||
+	if errors.Is(err, ErrStreamIdle) || errors.Is(err, ErrStreamIncomplete) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 		return RetryTransient
 	}
@@ -99,6 +105,12 @@ func ClassifyRetry(err error) RetryClass {
 	// that started fine (e.g. an overloaded_error event); only the message
 	// can classify it.
 	if status, _, ok := httpErrorDetails(err); ok && status >= 400 {
+		// Quota and billing failures often arrive as a 429 (OpenAI's
+		// insufficient_quota), which the SDK flags as retryable; waiting
+		// never fixes them, so they are checked before the status.
+		if status < 500 && containsAny(strings.ToLower(err.Error()), quotaPatterns...) {
+			return RetryNever
+		}
 		if pe, ok := errors.AsType[*fantasy.ProviderError](err); ok && pe.IsRetryable() {
 			return RetryTransient
 		}
