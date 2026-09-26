@@ -319,14 +319,34 @@ func (m *Manager) ModelContext(providerName, modelName string) int {
 // true: OpenAI-compatible servers that don't know reasoning_effort ignore
 // it, and ones that reject it trigger the downgrade ladder, so offering the
 // switcher is safe and refusing it would lock out genuinely reasoning-capable
-// local models.
+// local models. Spettro Subscription models are always offered it: the
+// inference proxy forwards reasoning_effort to its upstream, its model list
+// need not flag reasoning, and a rejection steps down the same ladder.
 func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
+	if providerName == spettroProviderID {
+		return true
+	}
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
 			return item.Reasoning || item.Local
 		}
 	}
 	return true
+}
+
+// ConfiguredThinking is the thinking level a run on the model sends for the
+// user's thinking_level setting: the level itself when the model supports
+// reasoning (see SupportsReasoning), "" (no thinking parameter) otherwise.
+// Every host (TUI, headless, ACP) starts its runs from it, so the setting
+// means the same everywhere: a token budget on Anthropic, reasoning_effort
+// on OpenAI and OpenAI-compatible backends (the Spettro Subscription
+// included).
+func (m *Manager) ConfiguredThinking(providerName, modelName, level string) ThinkingLevel {
+	level = strings.TrimSpace(level)
+	if level == "" || !m.SupportsReasoning(providerName, modelName) {
+		return ""
+	}
+	return ThinkingLevel(level)
 }
 
 // isLocalEndpoint reports whether the model is served by a local endpoint

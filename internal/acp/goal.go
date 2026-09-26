@@ -11,7 +11,6 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/provider"
 	"spettro/internal/session"
 )
 
@@ -94,10 +93,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		NoProgressLimit: goalNoProgressLimit(*cfg),
 	}
 
-	thinking := provider.ThinkingLevel("")
-	if b.opts.Providers.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		thinking = provider.ThinkingLevel(cfg.ThinkingLevel)
-	}
+	thinking := b.opts.Providers.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 
 	totalTokens := 0
 	retries := 0

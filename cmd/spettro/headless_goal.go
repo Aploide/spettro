@@ -249,12 +249,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 
 // configuredThinking returns the user's thinking_level for the active model,
 // or "" (no thinking parameter) when the model does not support reasoning —
-// the same gate the ACP bridge applies.
+// the same rule the TUI and the ACP bridge apply.
 func configuredThinking(pm *provider.Manager, cfg config.UserConfig) provider.ThinkingLevel {
-	if !pm.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		return ""
-	}
-	return provider.ThinkingLevel(cfg.ThinkingLevel)
+	return pm.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 }
 
 // resolveContextWindow looks up the context window size for the active model.
