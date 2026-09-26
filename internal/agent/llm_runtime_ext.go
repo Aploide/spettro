@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -159,6 +160,25 @@ func formatTodoList(todos []session.Todo, notes []string) string {
 	return string(raw)
 }
 
+// toolSearchMaxLoads caps how many deferred tools one tool-search loads, so
+// a vague query cannot put every schema back on the request.
+const toolSearchMaxLoads = 8
+
+// toolSearchHit is one tool a tool-search query matched.
+type toolSearchHit struct {
+	id      string
+	score   int
+	summary string
+	meta    string
+}
+
+// runToolSearch finds tools this agent holds by name or keyword and loads the
+// deferred ones among them (see tool_surface.go): the result carries each
+// one's description and schema, and they are advertised from the next step
+// on. The query is a keyword, or one or more tool names (comma or space
+// separated, optionally after "select:"); an empty query lists every tool
+// and loads none. Only tools on the agent's allow-list are ever listed or
+// loaded.
 func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte) (string, error) {
 	var args struct {
 		Query string `json:"query"`
@@ -167,13 +187,10 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		return "", fmt.Errorf("tool-search args: %w", err)
 	}
 	q := strings.ToLower(strings.TrimSpace(args.Query))
-	seen := map[string]struct{}{}
-	var rows []string
+	q = strings.TrimSpace(strings.TrimPrefix(q, "select:"))
+	tokens := strings.FieldsFunc(q, func(c rune) bool { return c == ',' || c == ' ' || c == '\t' || c == '\n' })
+	var hits []toolSearchHit
 	for id := range allowed {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
 		spec, hasSpec := r.toolPolicies[id]
 		// Aliases (a retired name, or a manifest alias) are callable but not
 		// advertised: listing them would offer the model the same tool twice.
@@ -183,12 +200,14 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		if _, retired := legacyTools[id]; retired && (!hasSpec || isBuiltinTool(spec)) && !r.unfoldedLSPTool(id) {
 			continue
 		}
+		if r.surface.isHidden(id) {
+			continue
+		}
 		label := id
 		risk := "unknown"
 		acts := ""
 		desc := ""
 		requiresApproval := false
-		timeoutSec := 0
 		if hasSpec {
 			if strings.TrimSpace(spec.Name) != "" {
 				label = spec.Name
@@ -198,27 +217,102 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 				risk = spec.RiskLevel
 			}
 			requiresApproval = spec.RequiresApproval
-			timeoutSec = spec.TimeoutSec
 			acts = strings.Join(spec.PermittedActions, ",")
 		}
-		hay := strings.ToLower(id + " " + label + " " + acts + " " + risk + " " + desc)
-		if q != "" && !strings.Contains(hay, q) {
+		if full, ok := toolDescription(id); ok && (!hasSpec || isBuiltinTool(spec)) {
+			desc = full
+		}
+		lowID, lowLabel := strings.ToLower(id), strings.ToLower(label)
+		hay := strings.ToLower(id + " " + label + " " + acts + " " + desc)
+		score := 0
+		switch {
+		case q == "":
+			score = 1
+		case slices.Contains(tokens, lowID):
+			score = 100
+		case strings.Contains(lowID, q) || strings.Contains(lowLabel, q):
+			score = 10
+		case strings.Contains(hay, q):
+			score = 2
+		case len(tokens) > 1 && allContained(hay, tokens):
+			score = 1
+		}
+		if score == 0 {
 			continue
 		}
-		score := 1
-		if strings.Contains(strings.ToLower(id), q) || strings.Contains(strings.ToLower(label), q) {
-			score += 3
+		meta := "risk=" + risk
+		if requiresApproval {
+			meta += ", needs approval"
 		}
-		if strings.Contains(acts, "search") {
-			score++
-		}
-		rows = append(rows, fmt.Sprintf("%03d | %s | risk=%s | approval=%t | timeout=%ds | actions=%s | %s", score, id, risk, requiresApproval, timeoutSec, emptyIfBlank(acts), emptyIfBlank(desc)))
+		hits = append(hits, toolSearchHit{id: id, score: score, summary: firstSentence(desc), meta: meta})
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i] > rows[j] })
-	if len(rows) == 0 {
+	if len(hits) == 0 {
 		return "no tools matched", nil
 	}
-	return strings.Join(rows, "\n"), nil
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].id < hits[j].id
+	})
+	var load []string
+	if q != "" {
+		for _, h := range hits {
+			if len(load) < toolSearchMaxLoads && r.surface.isDeferred(h.id) {
+				load = append(load, h.id)
+			}
+		}
+	}
+	r.surface.activate(load...)
+	var b strings.Builder
+	if len(load) > 0 {
+		fmt.Fprintf(&b, "%s%s (loaded: call them from your next step)\n", toolSearchActivatedPrefix, strings.Join(load, ", "))
+		for _, id := range load {
+			spec, _ := r.surface.deferredSpec(id)
+			fmt.Fprintf(&b, "\n## %s\n%s\nParameters (JSON Schema): %s\n", id, spec.Description, spec.Schema)
+		}
+	}
+	var rest []string
+	for _, h := range hits {
+		if slices.Contains(load, h.id) {
+			continue
+		}
+		state := "available"
+		if r.surface.isDeferred(h.id) {
+			state = "not loaded: search its name to load it"
+		}
+		rest = append(rest, fmt.Sprintf("- %s (%s; %s): %s", h.id, state, h.meta, emptyIfBlank(h.summary)))
+	}
+	if len(rest) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\nOther matches:\n")
+		}
+		b.WriteString(strings.Join(rest, "\n"))
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// allContained reports whether every token occurs in hay.
+func allContained(hay string, tokens []string) bool {
+	for _, t := range tokens {
+		if !strings.Contains(hay, t) {
+			return false
+		}
+	}
+	return true
+}
+
+// firstSentence returns the first sentence of a tool description, for a
+// one-line listing.
+func firstSentence(desc string) string {
+	desc = strings.TrimSpace(desc)
+	if i := strings.IndexAny(desc, "\n"); i >= 0 {
+		desc = desc[:i]
+	}
+	if i := strings.Index(desc, ". "); i >= 0 {
+		desc = desc[:i+1]
+	}
+	return truncate(desc, 200)
 }
 
 func (r *toolRuntime) runWebSearch(ctx context.Context, rawArgs []byte) (string, error) {

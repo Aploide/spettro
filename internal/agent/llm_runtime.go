@@ -207,6 +207,10 @@ type toolLoopConfig struct {
 	// it before its next step. Top-level runs get the host's queue; a delegated
 	// sub-agent gets one that only ever carries its time-limit wrap-up notice.
 	Steering *SteeringQueue
+
+	// toolSurfaceNote is the system prompt's note on the tools held but not
+	// advertised up front (see toolSurfacePrompt); set by runToolLoop.
+	toolSurfaceNote string
 }
 
 // traceID is the agent identity stamped on emitted ToolTraces: the unique
@@ -328,6 +332,11 @@ type toolRuntime struct {
 	// lspWarm makes file-read start the file's language server in the
 	// background: set when the agent has a tool that uses one.
 	lspWarm bool
+
+	// surface is the set of tool schemas the run advertises: the core tools
+	// plus the deferred ones activated so far (tool_surface.go). nil means
+	// no deferral (runtimes built outside runToolLoop).
+	surface *toolSurface
 
 	// visionCheck overrides the provider manager's SupportsVision lookup for
 	// the view-image tool. Nil in production (test seam).
@@ -582,13 +591,19 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	var traces []ToolTrace
 
 	// Native tool calling is always used: tool schemas ride on the API request
-	// for every model. The spec list is built once (it doesn't change between
-	// steps). Models whose catalog entry claims no tool support still get the
-	// schemas — local OpenAI-compatible servers accept them, and the old
-	// TOOL_CALL text-protocol fallback caused tool-capable local models to
+	// for every model. Models whose catalog entry claims no tool support still
+	// get the schemas — local OpenAI-compatible servers accept them, and the
+	// old TOOL_CALL text-protocol fallback caused tool-capable local models to
 	// emit unparsed TOOL_CALL strings instead of real tool calls.
-	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
-	nativeToolSpecs = append(nativeToolSpecs, runtime.unfoldedLSPToolSpecs(cfg.AllowedTools)...)
+	//
+	// The list is the tool surface: the core tools, plus each deferred tool
+	// once tool-search (or a call by name) activated it — in this turn or an
+	// earlier one of the carried conversation. It changes only on an
+	// activation, so the cached prompt prefix survives every other step.
+	runtime.surface = runtime.buildToolSurface(cfg.AllowedTools)
+	runtime.restoreActivations(cfg.Messages)
+	cfg.toolSurfaceNote = toolSurfacePrompt(runtime.surface.deferredNames(), len(runtime.surface.droppedNames()) > 0)
+	nativeToolSpecs := runtime.surface.specs()
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
@@ -712,6 +727,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	steps := 0
 
 	for {
+		nativeToolSpecs = runtime.surface.specs()
 		// Mid-run steering: deliver any guidance the user typed while the run
 		// was executing. Each message is appended as a user turn at this step
 		// boundary — the conversation only ever grows, so the cached prompt
@@ -915,6 +931,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			emitNarration(cfg, main)
 			internalCalls := loopCalls(resp.ToolCalls)
 			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
+			// A deferred tool the model called by name is advertised from
+			// the next step on, so its next call has the schema.
+			runtime.noteCalls(toolCallNames(resp.ToolCalls))
 			// Loop check after execution: the signature includes each result,
 			// so re-running a command whose output changes (edit → test) is
 			// progress; only the same call with the same result repeats. On

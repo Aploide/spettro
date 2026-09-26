@@ -8,9 +8,11 @@ import (
 	"spettro/internal/config"
 )
 
-// codingAgentAdvertisedTools is the tool list the coding agent's model sees
-// on every request, in manifest order. Pinned so a new duplicate, or a
-// retired name creeping back into a manifest, shows up as a diff here.
+// codingAgentAdvertisedTools is the tool list the coding agent holds, in
+// manifest order: the core tools its requests advertise up front plus the
+// deferred ones tool-search loads (see TestCodingAgentAdvertisesCoreToolsOnly).
+// Pinned so a new duplicate, or a retired name creeping back into a
+// manifest, shows up as a diff here.
 var codingAgentAdvertisedTools = []string{
 	"agent", "glob", "grep", "file-read", "file-write", "file-edit",
 	"lsp", "bash", "job-output", "job-kill",

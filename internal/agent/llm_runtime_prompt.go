@@ -116,7 +116,7 @@ func buildSystemStringWith(cfg toolLoopConfig, sessionCtx string) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	return base + sessionCtx
+	return base + cfg.toolSurfaceNote + sessionCtx
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation
@@ -258,7 +258,7 @@ var builtinNativeToolDescs = map[string]string{
 	"todo-write":         "Read and update the session task list, which the user sees as a live checklist. For work of 3+ steps, write the plan up front, then keep it current: mark a task in_progress when you start it and completed as soon as it is done. todos replaces the whole list; with merge=true it inserts or updates only the given tasks by id (omitted fields keep their value). delete removes tasks by id; clear_completed prunes completed and cancelled ones. Call with no arguments to read the list. dependencies lists task ids that must complete first: cycles are rejected, unknown ids are dropped with a note, and a merged task cannot start or complete before them. Every call returns the full list in dependency order, each task with blocked_by and ready.",
 	"task-stop":          "Stop the current task.",
 	"goal-complete":      "Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).",
-	"tool-search":        "Search available tool definitions.",
+	"tool-search":        "Find and load tools you hold whose schemas are not loaded yet (the system prompt lists them under More tools). Pass tool names (comma-separated) to load exactly those, or a keyword such as \"image\" or \"memory\": each matching unloaded tool comes back with its description and parameter schema, and you can call it from your next step on. An empty query lists every tool you hold.",
 	"skill-list":         "List available skills.",
 	"skill-read":         "Read a skill definition.",
 	"config":             "Get or set configuration values.",
@@ -300,7 +300,7 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"todo-write":         json.RawMessage(`{"type":"object","properties":{"todos":{"type":"array","description":"the whole task list, or with merge only the tasks to add or change","items":{"type":"object","properties":{"id":{"type":"string","description":"stable task id; omit on a new task to get the next task-N"},"content":{"type":"string","description":"what the task is; required for a new task"},"status":{"type":"string","enum":["pending","in_progress","completed","blocked","cancelled"]},"owner":{"type":"string"},"source":{"type":"string"},"priority":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"},"description":"ids of tasks that must complete first"}}}},"merge":{"type":"boolean","description":"insert or update the given tasks by id instead of replacing the whole list"},"delete":{"type":"array","items":{"type":"string"},"description":"ids of tasks to remove"},"clear_completed":{"type":"boolean","description":"remove every completed and cancelled task"}}}`),
 	"task-stop":          json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"goal-complete":      json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"},"verified":{"type":"boolean"}},"required":["summary"]}`),
-	"tool-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+	"tool-search":        json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"tool names separated by commas (e.g. \"view-image, web-search\"), or a keyword; empty lists every tool"}},"required":["query"]}`),
 	"skill-list":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
 	"skill-read":         json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),

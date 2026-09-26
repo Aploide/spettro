@@ -303,10 +303,10 @@ func TestToolSearchHidesAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "| bash |") {
+	if !strings.Contains(out, "- bash (") {
 		t.Fatalf("bash missing:\n%s", out)
 	}
-	for _, alias := range []string{"shell-exec", "bash-output", "| ls |"} {
+	for _, alias := range []string{"shell-exec", "bash-output", "- ls ("} {
 		if strings.Contains(out, alias) {
 			t.Errorf("tool-search lists alias %q:\n%s", alias, out)
 		}
