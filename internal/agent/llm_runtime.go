@@ -904,7 +904,67 @@ func formatTokens(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// parallelExec fires one goroutine per call and collects results in original order.
+// concurrentTools may run at the same time as each other within one step:
+// tools that only read (files, the index, the web, job/spool output) plus
+// `agent`, whose sub-agent spawns are Spettro's parallelism feature and were
+// always fanned out together (see agentBudget in parallelExec). Everything
+// else — file writes and edits, shell and pty commands, worktree and swarm
+// tools, and any tool not listed here (MCP included) — runs alone, in the
+// model's order.
+var concurrentTools = map[string]bool{
+	"file-read":          true,
+	"grep":               true,
+	"glob":               true,
+	"ls":                 true,
+	"repo-search":        true,
+	"web-fetch":          true,
+	"web-search":         true,
+	"view-image":         true,
+	"diagnostics":        true,
+	"references":         true,
+	"hover":              true,
+	"skill-read":         true,
+	"skill-list":         true,
+	"tool-search":        true,
+	"task-get":           true,
+	"task-list":          true,
+	"job-output":         true,
+	"tool-output":        true,
+	"mcp-list-resources": true,
+	"mcp-read-resource":  true,
+	"comment":            true,
+	"agent":              true,
+}
+
+// planToolBatches splits a step's calls (by index) into the batches parallelExec
+// runs one after another: each maximal run of consecutive concurrent tools is
+// one batch whose calls run together, and every other call is a batch of its
+// own. A mutating call therefore always sees the effects of every call the
+// model placed before it, and never races one placed after it.
+func planToolBatches(calls []toolCall, indices []int) [][]int {
+	var batches [][]int
+	var group []int
+	for _, idx := range indices {
+		if concurrentTools[calls[idx].Tool] {
+			group = append(group, idx)
+			continue
+		}
+		if len(group) > 0 {
+			batches = append(batches, group)
+			group = nil
+		}
+		batches = append(batches, []int{idx})
+	}
+	if len(group) > 0 {
+		batches = append(batches, group)
+	}
+	return batches
+}
+
+// parallelExec executes one step's tool calls and returns their results in
+// call order. Consecutive read-only calls (and sub-agent spawns) run
+// concurrently; mutating calls run serially in the order the model emitted
+// them — see planToolBatches.
 //
 // It enforces two limits:
 //   - r.maxToolCallsPerStep caps the total batch size; calls beyond the limit
@@ -922,7 +982,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	}
 	toolCap := r.maxToolCallsPerStep
 	agentCalls := 0
-	var wg sync.WaitGroup
+	runnable := make([]int, 0, len(calls))
 	for i, call := range calls {
 		if toolCap > 0 && i >= toolCap {
 			results[i] = parallelResult{
@@ -947,45 +1007,70 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				continue
 			}
 		}
-		wg.Add(1)
-		go func(idx int, c toolCall) {
-			defer wg.Done()
-			callArgs := singleLine(string(c.Args))
-			if callback != nil && isMajorOperationTool(c.Tool) {
-				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
-				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
-			}
-			if callback != nil {
-				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
-			}
-			cctx, sink := withImageSink(ctx)
-			output, err := r.executeWithTimeout(cctx, c, allowed)
-			status := "success"
-			if err != nil {
-				status = "error"
-				output = toolErrorOutput(output, err)
-			}
+		runnable = append(runnable, i)
+	}
+	run := func(idx int, c toolCall) {
+		callArgs := singleLine(string(c.Args))
+		if err := ctx.Err(); err != nil {
+			// The run was interrupted by an earlier call in this step; the
+			// rest still need a result each, but must not start.
 			results[idx] = parallelResult{
 				agentID: r.traceID(),
 				name:    c.Tool,
 				args:    callArgs,
-				output:  output,
-				status:  status,
-				images:  sink.list(),
+				output:  "error: not executed: " + err.Error(),
+				status:  "error",
 			}
-			if callback != nil {
-				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
-				if isMajorOperationTool(c.Tool) {
-					msg := fmt.Sprintf("Completed %s.", c.Tool)
-					if err != nil {
-						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
-					}
-					callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+			return
+		}
+		if callback != nil && isMajorOperationTool(c.Tool) {
+			msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
+			callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+		}
+		if callback != nil {
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
+		}
+		cctx, sink := withImageSink(ctx)
+		output, err := r.executeWithTimeout(cctx, c, allowed)
+		status := "success"
+		if err != nil {
+			status = "error"
+			output = toolErrorOutput(output, err)
+		}
+		results[idx] = parallelResult{
+			agentID: r.traceID(),
+			name:    c.Tool,
+			args:    callArgs,
+			output:  output,
+			status:  status,
+			images:  sink.list(),
+		}
+		if callback != nil {
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
+			if isMajorOperationTool(c.Tool) {
+				msg := fmt.Sprintf("Completed %s.", c.Tool)
+				if err != nil {
+					msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
 				}
+				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 			}
-		}(i, call)
+		}
 	}
-	wg.Wait()
+	for _, batch := range planToolBatches(calls, runnable) {
+		if len(batch) == 1 {
+			run(batch[0], calls[batch[0]])
+			continue
+		}
+		var wg sync.WaitGroup
+		for _, idx := range batch {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				run(idx, calls[idx])
+			}(idx)
+		}
+		wg.Wait()
+	}
 	return results
 }
 
@@ -1147,6 +1232,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return r.spoolResult("file-read", content), nil
 	case "file-write":
+		defer r.lockFileForMutation(call.Args)()
 		var args struct {
 			Path    string `json:"path"`
 			Content string `json:"content"`
@@ -1376,8 +1462,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":
+		defer r.lockFileForMutation(call.Args)()
 		return r.runFileEdit(ctx, call.Args)
 	case "multi-edit":
+		defer r.lockFileForMutation(call.Args)()
 		return r.runMultiEdit(ctx, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
@@ -1562,6 +1650,39 @@ func isMutatingTool(tool string) bool {
 		return true
 	}
 	return false
+}
+
+// fileMutationLocks holds one mutex per file (keyed by resolved absolute path)
+// serializing the in-process read-modify-write tools on it. It is process-wide
+// rather than per runtime so sibling sub-agents editing the same checkout are
+// covered too. parallelExec already runs mutating calls of one step serially;
+// this is the backstop for everything that step ordering cannot see.
+var fileMutationLocks sync.Map // string -> *sync.Mutex
+
+// lockFileForMutation locks the file named by a tool call's path argument (or
+// its file_path alias) and returns the unlock function. Arguments without a
+// resolvable path lock nothing: the tool reports that error itself.
+func (r *toolRuntime) lockFileForMutation(rawArgs []byte) (unlock func()) {
+	var probe struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
+	}
+	_ = json.Unmarshal(rawArgs, &probe)
+	p := firstNonEmpty(probe.Path, probe.FilePath)
+	if p == "" {
+		return func() {}
+	}
+	abs, _, err := r.resolvePath(p)
+	if err != nil {
+		return func() {}
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	v, _ := fileMutationLocks.LoadOrStore(abs, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // skipDirs are directories to skip when walking the workspace.
