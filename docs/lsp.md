@@ -5,9 +5,12 @@ diagnostics after every file edit and precise symbol navigation
 (references / go-to-definition), instead of relying on grep alone.
 
 **It works with zero configuration.** On first use of a supported file type,
-Spettro looks for the matching language server on your `PATH` and starts it
-automatically. If a server is not installed, LSP silently degrades for that
-language — nothing breaks, you just don't get diagnostics.
+Spettro looks for the matching language server and starts it automatically:
+first on your `PATH`, then in the places toolchains install servers without
+putting them on `PATH` — the project's `node_modules/.bin`, `$GOBIN`,
+`$GOPATH/bin`, `~/go/bin`, `~/.local/bin` and `~/.cargo/bin`. If a server is
+not installed, LSP silently degrades for that language — nothing breaks, you
+just don't get diagnostics.
 
 ## Supported languages
 
@@ -22,16 +25,36 @@ language — nothing breaks, you just don't get diagnostics.
 | `csharp` | `.cs` | `csharp-ls`, then `OmniSharp -lsp` / `omnisharp -lsp` | `dotnet tool install -g csharp-ls` |
 | `swift` | `.swift` | `sourcekit-lsp` | ships with the Swift toolchain / Xcode |
 
-Servers start lazily (only when a matching file is touched) and are cached per
-workspace. A server that fails to start is not retried on every edit; the
+Servers start lazily (only when a matching file is read or edited), in the
+background, once per session, and are cached per workspace. Reading a file is
+enough to start its server, so it is usually up by the time the file is
+edited. A server that fails to start is not retried on every edit; the
 `lsp-restart` tool clears the failure mark.
 
 ## What the agent gets
 
-- **Post-edit diagnostics** — after `file-write` / `file-edit` / `multi-edit`,
-  fresh diagnostics for the changed file are appended to the tool result
-  (bounded to ~3s so edits never feel slow), so the agent sees its own type
-  errors immediately instead of at build time.
+- **Post-edit diagnostics** — after `file-write` / `file-edit` / `multi-edit`
+  (and `rename-symbol`), the written file is synced to its server
+  (`didOpen`/`didChange`, plus `didSave` for servers that check on save) and
+  the errors it reports are appended to the tool result, so the agent fixes
+  its own type errors in the next step instead of at build time:
+
+  ```
+  edited internal/api/handler.go (1 replacements)
+
+  Diagnostics (errors) in internal/api/handler.go:
+  internal/api/handler.go:42:9: undefined: reqID (compiler)
+  Also 2 errors in 1 other file: internal/api/routes.go (2) — use the diagnostics tool to list them.
+  ```
+
+  Only errors are listed (warnings and hints are left to the `diagnostics`
+  tool), at most 20 for the edited file, and other files get a one-line count
+  — which is how a signature change that breaks callers shows up. A clean
+  edit adds nothing. The wait is bounded to ~3s, server start included: the
+  server's first publish after the change is awaited, then a short quiet
+  window catches servers that publish in stages. The edit itself never fails
+  because of the server; when it is still starting or does not answer in
+  time, a one-line note says the file was not checked.
 - **`diagnostics` tool** — diagnostics for one file, or everything published
   so far across the workspace when called without a path.
 - **`references` tool** — references or definition for a symbol

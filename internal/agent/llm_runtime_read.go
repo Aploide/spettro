@@ -110,6 +110,7 @@ func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Unlock()
 	r.recordReadStampSum(rel, pg.sum)
 	unlock()
+	r.warmLSP(abs)
 
 	total := pg.total
 	if total == 0 {

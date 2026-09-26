@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,14 +12,13 @@ import (
 
 // TestGoplsDiagnosticsAndReferences drives a real gopls against a scratch
 // module: a type error must surface via DiagnosticsForFile without running
-// go build, and Lookup must resolve references. Skipped when gopls is not on
-// PATH so CI without language servers stays green (the degrade-silently rule).
+// go build, and Lookup must resolve references. Skipped when gopls is not
+// installed so CI without language servers stays green (the degrade-silently
+// rule).
 func TestGoplsDiagnosticsAndReferences(t *testing.T) {
-	gopls, err := exec.LookPath("gopls")
-	if err != nil {
-		t.Skip("gopls not installed")
-	}
+	gopls := findGopls(t)
 	root := t.TempDir()
+	var err error
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
@@ -131,5 +129,77 @@ func TestGoplsDiagnosticsAndReferences(t *testing.T) {
 	}
 	if !strings.Contains(out, "[error]") {
 		t.Fatalf("expected diagnostic after restart, got: %s", out)
+	}
+}
+
+// findGopls returns gopls the way zero-config detection finds it (PATH, then
+// the Go install directories), skipping the test when it is not installed.
+func findGopls(t *testing.T) string {
+	t.Helper()
+	gopls, ok := FindServerBinary("gopls", t.TempDir())
+	if !ok {
+		t.Skip("gopls not installed")
+	}
+	return gopls
+}
+
+// TestGoplsPostEditDiagnostics is the post-edit flow against a real gopls:
+// the edit's own type error is listed, a signature change that breaks a
+// caller in another file is counted there, and undoing it clears the block.
+func TestGoplsPostEditDiagnostics(t *testing.T) {
+	gopls := findGopls(t)
+	root := realPath(t.TempDir())
+	write := func(rel, content string) string {
+		p := filepath.Join(root, rel)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	write("go.mod", "module scratch\n\ngo 1.22\n")
+	lib := write("lib.go", "package main\n\nfunc greet() string { return \"hi\" }\n")
+	write("main.go", "package main\n\nfunc main() {\n\tprintln(greet())\n}\n")
+	m := newManager(root, Config{Servers: map[string]ServerConfig{
+		"go": {Command: gopls, Filetypes: []string{".go"}},
+	}})
+	t.Cleanup(m.Shutdown)
+
+	// warm like a file-read would, then give the cold start its time once
+	m.Warm(lib)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, _, err := m.clientFor(ctx, lib); err != nil {
+		t.Fatal(err)
+	}
+	pass := func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return m.PostEditDiagnostics(ctx, lib)
+	}
+	if out := pass(); out != "" {
+		t.Fatalf("clean workspace should add nothing, got:\n%s", out)
+	}
+
+	write("lib.go", "package main\n\nfunc greet() string { return 42 }\n")
+	out := pass()
+	if !strings.HasPrefix(out, "Diagnostics (errors) in lib.go:\nlib.go:3:") {
+		t.Fatalf("expected lib.go's own type error, got:\n%s", out)
+	}
+
+	write("lib.go", "package main\n\nfunc greet(name string) string { return name }\n")
+	out = pass()
+	if !strings.Contains(out, "main.go (1)") {
+		// gopls may publish the dependent file a beat after the edited one
+		t.Logf("first pass after the signature change:\n%s", out)
+		time.Sleep(time.Second)
+		out = pass()
+	}
+	if !strings.HasPrefix(out, "No errors in lib.go; 1 error in 1 other file: main.go (1)") {
+		t.Fatalf("expected the broken caller in main.go to be counted, got:\n%s", out)
+	}
+
+	write("lib.go", "package main\n\nfunc greet() string { return \"hi\" }\n")
+	if out := pass(); out != "" {
+		t.Fatalf("restoring the signature should clear everything, got:\n%s", out)
 	}
 }

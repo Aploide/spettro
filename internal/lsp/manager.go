@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,14 +37,18 @@ type Config struct {
 
 // builtinServer lists candidate commands for a server key; the first one found
 // on PATH wins, so e.g. python works with either pyright or pylsp installed.
+// settle overrides defaultSettle for servers known to publish in stages.
 type builtinServer struct {
 	candidates []ServerConfig
 	filetypes  []string
+	settle     time.Duration
 }
 
 var builtinServers = map[string]builtinServer{
-	"go":         {candidates: []ServerConfig{{Command: "gopls"}}, filetypes: []string{".go"}},
-	"typescript": {candidates: []ServerConfig{{Command: "typescript-language-server", Args: []string{"--stdio"}}}, filetypes: []string{".ts", ".tsx", ".js", ".jsx"}},
+	"go": {candidates: []ServerConfig{{Command: "gopls"}}, filetypes: []string{".go"}},
+	// typescript-language-server publishes syntactic diagnostics first and
+	// the semantic (type) errors in a later publish, so listen for longer.
+	"typescript": {candidates: []ServerConfig{{Command: "typescript-language-server", Args: []string{"--stdio"}}}, filetypes: []string{".ts", ".tsx", ".js", ".jsx"}, settle: time.Second},
 	"python":     {candidates: []ServerConfig{{Command: "pyright-langserver", Args: []string{"--stdio"}}, {Command: "pylsp"}}, filetypes: []string{".py"}},
 	"rust":       {candidates: []ServerConfig{{Command: "rust-analyzer"}}, filetypes: []string{".rs"}},
 	"c":          {candidates: []ServerConfig{{Command: "clangd"}}, filetypes: []string{".c", ".h"}},
@@ -90,12 +95,60 @@ func languageIDForPath(path, serverKey string) string {
 // lookPath is exec.LookPath, swappable in tests.
 var lookPath = exec.LookPath
 
-// detectBuiltinServers returns the built-in servers whose binary is on PATH.
-func detectBuiltinServers() map[string]ServerConfig {
+// extraBinDirs lists the well-known install locations searched after PATH.
+// Toolchains install language servers into directories many users never put
+// on PATH — `go install` into $GOBIN, $GOPATH/bin or ~/go/bin, `pip --user`
+// and pipx into ~/.local/bin, cargo into ~/.cargo/bin — and JS projects keep
+// theirs in node_modules/.bin. (The workspace's .spettro/lsp.json can already
+// name any command to run, so looking in the workspace grants it nothing new.)
+// Swappable in tests.
+var extraBinDirs = func(root string) []string {
+	dirs := []string{filepath.Join(root, "node_modules", ".bin")}
+	if gobin := os.Getenv("GOBIN"); gobin != "" {
+		dirs = append(dirs, gobin)
+	}
+	for _, gp := range filepath.SplitList(os.Getenv("GOPATH")) {
+		if gp != "" {
+			dirs = append(dirs, filepath.Join(gp, "bin"))
+		}
+	}
+	if home, err := homedir.Dir(); err == nil {
+		dirs = append(dirs,
+			filepath.Join(home, "go", "bin"),
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, ".cargo", "bin"),
+		)
+	}
+	return dirs
+}
+
+// FindServerBinary resolves a server command: PATH first, then the
+// extraBinDirs install locations. A PATH hit keeps the bare command name; a
+// fallback hit returns the absolute path, since the spawn would not find it.
+func FindServerBinary(command, root string) (string, bool) {
+	if _, err := lookPath(command); err == nil {
+		return command, true
+	}
+	if strings.ContainsAny(command, `/\`) {
+		return "", false // an explicit path either exists or it does not
+	}
+	for _, dir := range extraBinDirs(root) {
+		// LookPath on a path with a separator checks just that file (and, on
+		// Windows, tries the PATHEXT extensions).
+		if p, err := lookPath(filepath.Join(dir, command)); err == nil {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// detectBuiltinServers returns the built-in servers whose binary is installed.
+func detectBuiltinServers(root string) map[string]ServerConfig {
 	servers := map[string]ServerConfig{}
 	for key, b := range builtinServers {
 		for _, cand := range b.candidates {
-			if _, err := lookPath(cand.Command); err == nil {
+			if cmd, ok := FindServerBinary(cand.Command, root); ok {
+				cand.Command = cmd
 				cand.Filetypes = b.filetypes
 				servers[key] = cand
 				break
@@ -110,7 +163,7 @@ func detectBuiltinServers() map[string]ServerConfig {
 // the project's .spettro/lsp.json, so the project wins per server key). false
 // means no usable server, and LSP silently degrades for the workspace.
 func loadConfig(root string) (Config, bool) {
-	cfg := Config{Servers: detectBuiltinServers()}
+	cfg := Config{Servers: detectBuiltinServers(root)}
 	var paths []string
 	if home, err := homedir.Dir(); err == nil {
 		paths = append(paths, filepath.Join(home, ".spettro", "lsp.json"))
@@ -153,14 +206,28 @@ func loadConfig(root string) (Config, bool) {
 	return cfg, enabled
 }
 
+// serverStartTimeout bounds a server's spawn plus initialize handshake. The
+// start runs in the background, so this is not what a tool call waits for:
+// callers wait only as long as their own context allows.
+const serverStartTimeout = 30 * time.Second
+
+// ErrServerStarting is returned when the caller's context ran out while the
+// server was still starting. The start carries on in the background, so a
+// later call finds it ready.
+var ErrServerStarting = errors.New("lsp server still starting")
+
 // Manager owns the lazily started language servers for one workspace root.
 type Manager struct {
 	root string
 	cfg  Config
 
-	mu      sync.Mutex
-	clients map[string]*Client // server key → running client
-	broken  map[string]string  // server key → start failure (until lsp-restart)
+	mu       sync.Mutex
+	clients  map[string]*Client       // server key → running client
+	broken   map[string]string        // server key → start failure (until lsp-restart)
+	starting map[string]chan struct{} // server key → closed when its start ends
+	// epoch invalidates starts begun before a Restart or Shutdown: they
+	// close the server they started instead of registering it.
+	epoch int
 }
 
 var (
@@ -187,9 +254,19 @@ func ForWorkspace(root string) *Manager {
 		registry[root] = nil
 		return nil
 	}
-	m := &Manager{root: root, cfg: cfg, clients: map[string]*Client{}, broken: map[string]string{}}
+	m := newManager(root, cfg)
 	registry[root] = m
 	return m
+}
+
+func newManager(root string, cfg Config) *Manager {
+	return &Manager{
+		root:     root,
+		cfg:      cfg,
+		clients:  map[string]*Client{},
+		broken:   map[string]string{},
+		starting: map[string]chan struct{}{},
+	}
 }
 
 // serverKeyFor returns the enabled server key matching the file's extension.
@@ -216,33 +293,104 @@ func (m *Manager) serverKeyFor(path string) (string, bool) {
 	return "", false
 }
 
-// clientFor lazily starts (and caches) the server responsible for path. A
-// failed start is remembered so a missing binary is not retried on every edit;
+// clientFor returns the server responsible for path, starting it on first use.
+// The start runs in the background and is shared by every caller, so a
+// server is paid for once per session; each caller waits for it only as
+// long as its own ctx allows (ErrServerStarting otherwise). A failed start
+// is remembered so a missing binary is not retried on every edit;
 // lsp-restart clears the mark.
 func (m *Manager) clientFor(ctx context.Context, path string) (*Client, string, error) {
 	key, ok := m.serverKeyFor(path)
 	if !ok {
 		return nil, "", fmt.Errorf("no lsp server configured for %s files", filepath.Ext(path))
 	}
+	for {
+		c, done, err := m.ensureStarted(key)
+		if c != nil || err != nil {
+			return c, key, err
+		}
+		select {
+		case <-done:
+			// loop: pick up the client, the failure, or (when a restart
+			// raced the start) begin a fresh one
+		case <-ctx.Done():
+			return nil, key, fmt.Errorf("%w: %s", ErrServerStarting, m.serverName(key))
+		}
+	}
+}
+
+// Warm starts the server for path's file type in the background, if there is
+// one and it is not already running, without waiting for it. Call it when a
+// file is first looked at, so the server is up by the time it is edited.
+func (m *Manager) Warm(path string) {
+	if key, ok := m.serverKeyFor(path); ok {
+		_, _, _ = m.ensureStarted(key)
+	}
+}
+
+// ensureStarted returns the running client for key, or the channel that closes
+// when its (possibly just begun) start finishes, or the remembered failure.
+func (m *Manager) ensureStarted(key string) (*Client, <-chan struct{}, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if c, ok := m.clients[key]; ok && c.alive() {
-		return c, key, nil
+		return c, nil, nil
 	}
 	if reason, bad := m.broken[key]; bad {
-		return nil, key, fmt.Errorf("lsp server %q unavailable: %s (use lsp-restart to retry)", key, reason)
+		return nil, nil, fmt.Errorf("lsp server %q unavailable: %s (use lsp-restart to retry)", key, reason)
 	}
-	sc := m.cfg.Servers[key]
-	initCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	_ = ctx // startup deliberately uses its own budget: the server outlives the call
-	c, err := startClient(initCtx, m.root, sc.Command, sc.Args)
-	if err != nil {
-		m.broken[key] = err.Error()
-		return nil, key, err
+	if done, ok := m.starting[key]; ok {
+		return nil, done, nil
 	}
-	m.clients[key] = c
-	return c, key, nil
+	done := make(chan struct{})
+	m.starting[key] = done
+	go m.start(key, m.cfg.Servers[key], m.epoch, done)
+	return nil, done, nil
+}
+
+// start spawns one server and registers the outcome, unless a Restart or
+// Shutdown happened meanwhile: then the new server is closed before done is,
+// so whoever waits on done knows it is gone.
+func (m *Manager) start(key string, sc ServerConfig, epoch int, done chan struct{}) {
+	defer close(done)
+	// A user-configured command gets the same install-location fallback as
+	// the auto-detected ones.
+	command := sc.Command
+	if found, ok := FindServerBinary(command, m.root); ok {
+		command = found
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
+	c, err := startClient(ctx, m.root, command, sc.Args)
+	cancel()
+	m.mu.Lock()
+	stale := m.epoch != epoch
+	if !stale {
+		if err != nil {
+			m.broken[key] = err.Error()
+		} else {
+			m.clients[key] = c
+		}
+	}
+	if m.starting[key] == done {
+		delete(m.starting, key)
+	}
+	m.mu.Unlock()
+	if stale && c != nil {
+		c.Close()
+	}
+}
+
+// serverName is the human name of a server key: its command's base name
+// ("gopls"), which is what users recognise, falling back to the key.
+func (m *Manager) serverName(key string) string {
+	m.mu.Lock()
+	cmd := m.cfg.Servers[key].Command
+	m.mu.Unlock()
+	if cmd == "" {
+		return key
+	}
+	base := filepath.Base(cmd)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 func (m *Manager) relPath(path string) string {
@@ -569,6 +717,7 @@ func (m *Manager) Restart(name string) string {
 	m.mu.Lock()
 	var stopped []string
 	var closing []*Client
+	pending := m.abandonStartsLocked()
 	for key, c := range m.clients {
 		if name != "" && key != name {
 			continue
@@ -588,6 +737,7 @@ func (m *Manager) Restart(name string) string {
 	// to its full timeout. The clients are already unregistered, so do that
 	// waiting outside the lock rather than stalling every other LSP call.
 	closeAll(closing)
+	waitAll(pending)
 	sort.Strings(stopped)
 	if len(stopped) == 0 {
 		return "no matching running lsp server; it will start on next use"
@@ -605,6 +755,7 @@ func (m *Manager) Shutdown() {
 		closing = append(closing, c)
 		delete(m.clients, key)
 	}
+	pending := m.abandonStartsLocked()
 	root := m.root
 	m.mu.Unlock()
 
@@ -615,6 +766,28 @@ func (m *Manager) Shutdown() {
 	regMu.Unlock()
 
 	closeAll(closing)
+	// A start still in flight would leave a live server behind (holding the
+	// workspace open on Windows); it closes its own server once it notices
+	// the epoch moved, so wait for that.
+	waitAll(pending)
+}
+
+// abandonStartsLocked invalidates every in-flight start (each will close the
+// server it spawns) and returns their done channels. Callers hold m.mu.
+func (m *Manager) abandonStartsLocked() []chan struct{} {
+	m.epoch++
+	pending := make([]chan struct{}, 0, len(m.starting))
+	for key, done := range m.starting {
+		pending = append(pending, done)
+		delete(m.starting, key)
+	}
+	return pending
+}
+
+func waitAll(chans []chan struct{}) {
+	for _, ch := range chans {
+		<-ch
+	}
 }
 
 // ShutdownAll stops every server started in this process. Call it on session

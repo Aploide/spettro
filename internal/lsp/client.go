@@ -102,6 +102,11 @@ type Client struct {
 	openMu   sync.Mutex
 	openDocs map[string]int // uri → version
 
+	// save is the server's textDocumentSync.save option: whether it wants
+	// didSave at all, and whether with the full text. Servers such as
+	// rust-analyzer and pylsp run their heavier checks only on save.
+	save saveOptions
+
 	closed   chan struct{}
 	closeErr error
 }
@@ -245,6 +250,7 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 		c.Close()
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
+	c.save = parseSaveOptions(initResult)
 	if err := c.notify("initialized", map[string]any{}); err != nil {
 		c.Close()
 		return nil, err
@@ -260,7 +266,18 @@ func (c *Client) Close() {
 	select {
 	case <-c.closed:
 	default:
-		_ = c.notify("exit", nil)
+		// A courtesy only, and bounded: a server that stopped reading its
+		// input blocks this write — and it queues behind any write already
+		// blocked — until stdin is closed below.
+		sent := make(chan struct{})
+		go func() {
+			_ = c.notify("exit", nil)
+			close(sent)
+		}()
+		select {
+		case <-sent:
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	_ = c.stdin.Close()
 	if c.cmd.Process != nil {
@@ -483,24 +500,113 @@ func (c *Client) syncFile(path, languageID, content string) (doc, error) {
 	return d, err
 }
 
+// saveOptions is the part of the server's textDocumentSync capability that
+// governs didSave.
+type saveOptions struct {
+	enabled     bool
+	includeText bool
+}
+
+// parseSaveOptions reads textDocumentSync.save out of an initialize result.
+// The capability is either a bare TextDocumentSyncKind number (no save
+// notifications) or an object whose save field is a bool or {includeText}.
+func parseSaveOptions(initResult json.RawMessage) saveOptions {
+	var res struct {
+		Capabilities struct {
+			TextDocumentSync json.RawMessage `json:"textDocumentSync"`
+		} `json:"capabilities"`
+	}
+	if json.Unmarshal(initResult, &res) != nil {
+		return saveOptions{}
+	}
+	var tds struct {
+		Save json.RawMessage `json:"save"`
+	}
+	if json.Unmarshal(res.Capabilities.TextDocumentSync, &tds) != nil || len(tds.Save) == 0 {
+		return saveOptions{}
+	}
+	var b bool
+	if json.Unmarshal(tds.Save, &b) == nil {
+		return saveOptions{enabled: b}
+	}
+	var opts struct {
+		IncludeText bool `json:"includeText"`
+	}
+	if json.Unmarshal(tds.Save, &opts) == nil {
+		return saveOptions{enabled: true, includeText: opts.IncludeText}
+	}
+	return saveOptions{}
+}
+
+// didSave tells the server the synced document now matches the disk, for
+// servers that asked for save notifications. The file really was just
+// written, so this is the truth, and it is what triggers on-save checkers.
+func (c *Client) didSave(d doc, content string) error {
+	if !c.save.enabled {
+		return nil
+	}
+	params := map[string]any{"textDocument": map[string]any{"uri": d.uri}}
+	if c.save.includeText {
+		params["text"] = content
+	}
+	return c.notify("textDocument/didSave", params)
+}
+
 // waitDiagnostics blocks until a publishDiagnostics newer than sinceGen lands
 // for the document, or the context expires; either way it returns the current
 // set.
 func (c *Client) waitDiagnostics(ctx context.Context, key string, sinceGen int) []Diagnostic {
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			c.diagCond.Broadcast()
-		case <-stop:
+	c.waitGen(ctx, key, sinceGen)
+	return c.diagnosticsFor(key)
+}
+
+// waitSettled waits for the first publish newer than sinceGen and then keeps
+// listening until the server has been quiet for the quiet window, because
+// several servers publish in stages (typescript-language-server sends
+// syntactic errors before semantic ones; gopls follows type errors with
+// analyzer results). fresh reports whether any new publish landed before ctx
+// expired; without one the returned set predates the edit.
+func (c *Client) waitSettled(ctx context.Context, key string, sinceGen int, quiet time.Duration) (ds []Diagnostic, fresh bool) {
+	gen := c.waitGen(ctx, key, sinceGen)
+	if gen <= sinceGen {
+		return c.diagnosticsFor(key), false
+	}
+	for ctx.Err() == nil {
+		qctx, cancel := context.WithTimeout(ctx, quiet)
+		next := c.waitGen(qctx, key, gen)
+		cancel()
+		if next <= gen {
+			break
 		}
-	}()
+		gen = next
+	}
+	return c.diagnosticsFor(key), true
+}
+
+// waitGen blocks until the document's publish generation exceeds sinceGen,
+// the context expires or the server exits, and returns the generation then.
+func (c *Client) waitGen(ctx context.Context, key string, sinceGen int) int {
+	// Taking the lock before broadcasting closes the gap between the loop's
+	// ctx check and Wait: without it the wake-up could land in that gap and
+	// be lost, leaving the waiter asleep until some unrelated publish.
+	stop := context.AfterFunc(ctx, func() {
+		c.diagMu.Lock()
+		defer c.diagMu.Unlock()
+		c.diagCond.Broadcast()
+	})
+	defer stop()
 	c.diagMu.Lock()
 	defer c.diagMu.Unlock()
 	for c.diagGen[key] <= sinceGen && ctx.Err() == nil && c.closeErr == nil {
 		c.diagCond.Wait()
 	}
+	return c.diagGen[key]
+}
+
+// diagnosticsFor returns a copy of the document's latest published set.
+func (c *Client) diagnosticsFor(key string) []Diagnostic {
+	c.diagMu.Lock()
+	defer c.diagMu.Unlock()
 	list := c.diags[key].list
 	out := make([]Diagnostic, len(list))
 	copy(out, list)

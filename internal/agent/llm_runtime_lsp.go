@@ -13,13 +13,18 @@ import (
 )
 
 // lspDiagnosticsWait bounds how long a file-write/file-edit result waits for
-// fresh diagnostics. Short on purpose: post-edit diagnostics are a bonus and
-// must never make edits feel slow or block the run when a server is wedged.
+// fresh diagnostics, server start included. Short on purpose: post-edit
+// diagnostics are a bonus and must never make edits feel slow or block the
+// run when a server is wedged. The server itself starts once per session in
+// the background (warmed when a file is first read), so only the first edit
+// of a session can find it still starting.
 const lspDiagnosticsWait = 3 * time.Second
 
-// withLSPDiagnostics appends fresh diagnostics for the just-written file to a
-// mutating tool's result. Every failure path returns the result unchanged —
-// no configured server, dead server, timeout — per the degrade-silently rule.
+// withLSPDiagnostics appends the errors a language server reports for the
+// just-written file to a mutating tool's result (see lsp.PostEditDiagnostics
+// for the block's shape). The edit has already landed: no server for the file
+// type, a crashed or slow server all leave the result as it was, bar a
+// one-line note when the server could not answer in time.
 func (r *toolRuntime) withLSPDiagnostics(ctx context.Context, absPath, result string) string {
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
@@ -27,11 +32,19 @@ func (r *toolRuntime) withLSPDiagnostics(ctx context.Context, absPath, result st
 	}
 	dctx, cancel := context.WithTimeout(ctx, lspDiagnosticsWait)
 	defer cancel()
-	diags, err := m.DiagnosticsForFile(dctx, absPath)
-	if err != nil || strings.TrimSpace(diags) == "" {
-		return result
+	if block := m.PostEditDiagnostics(dctx, absPath); block != "" {
+		return result + "\n\n" + block
 	}
-	return result + "\n\nlsp diagnostics:\n" + diags
+	return result
+}
+
+// warmLSP starts, in the background, the language server for a file the model
+// is looking at, so it is running by the time the file is edited and the
+// first edit's diagnostics do not pay for the server's start.
+func (r *toolRuntime) warmLSP(absPath string) {
+	if m := lsp.ForWorkspace(r.cwd); m != nil {
+		m.Warm(absPath)
+	}
 }
 
 func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (string, error) {
