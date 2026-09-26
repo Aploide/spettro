@@ -13,7 +13,7 @@ import (
 	"unicode/utf8"
 )
 
-// Match tiers for file-edit/multi-edit old_string lookup, tried in order.
+// Match tiers for file-edit old_string lookup, tried in order.
 // The chain is modelled on OpenCode's edit replacers, ordered from the most to
 // the least precise. Every tier must find exactly one location (unless
 // replace_all is set), and the first tier that finds anything decides: a tier

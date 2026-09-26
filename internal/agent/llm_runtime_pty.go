@@ -17,7 +17,7 @@ import (
 const ptyDefaultWait = 700 * time.Millisecond
 
 // runPtyStart allocates an interactive pseudo-terminal session. The command
-// goes through the same approval path as shell-exec; that single approval
+// goes through the same approval path as bash; that single approval
 // covers subsequent pty-write input into the session (stated in the approval
 // reason), so under ask-first the user decides once, at start.
 func (r *toolRuntime) runPtyStart(ctx context.Context, toolID string, rawArgs []byte) (string, error) {

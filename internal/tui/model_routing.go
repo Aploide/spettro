@@ -385,7 +385,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			switch t.Name {
-			case "todo-write", "task-create", "task-update", "task-delete":
+			case "todo-write":
 				if t.Status != "running" {
 					m.syncTodosFromSession()
 				}
@@ -393,7 +393,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.trackSessionEditFromTrace(t)
 			if t.Status != "running" {
 				switch t.Name {
-				case "file-write", "shell-exec", "bash", "agent":
+				case "file-write", "bash", "agent":
 					// Refresh the side-panel file list off the Update
 					// goroutine, throttled so a burst of traces does not
 					// spawn git serially on the hot path.

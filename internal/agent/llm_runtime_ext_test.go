@@ -183,95 +183,171 @@ func taskTestRuntime(t *testing.T) *toolRuntime {
 	return &toolRuntime{sessionDir: filepath.Join(globalDir, "sessions", "sess-1")}
 }
 
-func mustTaskCreate(t *testing.T, rt *toolRuntime, args map[string]any) {
+func todoWrite(t *testing.T, rt *toolRuntime, args map[string]any) (string, error) {
 	t.Helper()
 	raw, _ := json.Marshal(args)
-	if _, err := rt.runTaskCreate(raw); err != nil {
-		t.Fatalf("task-create %v: %v", args, err)
+	return rt.runTodoWrite(raw)
+}
+
+func mustTodoMerge(t *testing.T, rt *toolRuntime, items ...map[string]any) {
+	t.Helper()
+	if _, err := todoWrite(t, rt, map[string]any{"merge": true, "todos": items}); err != nil {
+		t.Fatalf("todo-write merge %v: %v", items, err)
 	}
+}
+
+type todoListOut struct {
+	Tasks []struct {
+		ID           string   `json:"id"`
+		Content      string   `json:"content"`
+		Status       string   `json:"status"`
+		Dependencies []string `json:"dependencies"`
+		BlockedBy    []string `json:"blocked_by"`
+		Ready        bool     `json:"ready"`
+	} `json:"tasks"`
+	Notes []string `json:"notes"`
+}
+
+func decodeTodoList(t *testing.T, out string) todoListOut {
+	t.Helper()
+	var list todoListOut
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatalf("decode todo list: %v (%s)", err, out)
+	}
+	return list
 }
 
 func TestTaskGraphDependencyEnforcement(t *testing.T) {
 	rt := taskTestRuntime(t)
-	mustTaskCreate(t, rt, map[string]any{"id": "a", "content": "first"})
-	mustTaskCreate(t, rt, map[string]any{"id": "b", "content": "second", "dependencies": []string{"a"}})
+	mustTodoMerge(t, rt, map[string]any{"id": "a", "content": "first"})
+	mustTodoMerge(t, rt, map[string]any{"id": "b", "content": "second", "dependencies": []string{"a"}})
 
-	// Unknown dependency rejected.
-	raw, _ := json.Marshal(map[string]any{"id": "x", "content": "broken", "dependencies": []string{"ghost"}})
-	if _, err := rt.runTaskCreate(raw); err == nil || !strings.Contains(err.Error(), "unknown") {
-		t.Fatalf("expected unknown-dependency error, got %v", err)
+	// An unknown dependency is dropped with a note, not stored.
+	out, err := todoWrite(t, rt, map[string]any{"merge": true, "todos": []map[string]any{{"id": "x", "content": "broken", "dependencies": []string{"ghost"}}}})
+	if err != nil {
+		t.Fatalf("unknown dependency: %v", err)
+	}
+	list := decodeTodoList(t, out)
+	if len(list.Notes) != 1 || !strings.Contains(list.Notes[0], "ghost") {
+		t.Fatalf("expected a note about the unknown dependency, got %s", out)
+	}
+	for _, task := range list.Tasks {
+		if task.ID == "x" && len(task.Dependencies) != 0 {
+			t.Fatalf("unknown dependency kept: %s", out)
+		}
 	}
 	// Cycle rejected: a cannot depend on b.
-	raw, _ = json.Marshal(map[string]any{"id": "a", "dependencies": []string{"b"}})
-	if _, err := rt.runTaskUpdate(raw); err == nil || !strings.Contains(err.Error(), "cycle") {
+	if _, err := todoWrite(t, rt, map[string]any{"merge": true, "todos": []map[string]any{{"id": "a", "dependencies": []string{"b"}}}}); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("expected cycle error, got %v", err)
 	}
 	// Invalid status rejected.
-	raw, _ = json.Marshal(map[string]any{"id": "b", "status": "bogus"})
-	if _, err := rt.runTaskUpdate(raw); err == nil || !strings.Contains(err.Error(), "invalid task status") {
+	if _, err := todoWrite(t, rt, map[string]any{"merge": true, "todos": []map[string]any{{"id": "b", "status": "bogus"}}}); err == nil || !strings.Contains(err.Error(), "invalid task status") {
 		t.Fatalf("expected status error, got %v", err)
 	}
 	// Completing b while a is pending is refused.
-	raw, _ = json.Marshal(map[string]any{"id": "b", "status": "completed"})
-	if _, err := rt.runTaskUpdate(raw); err == nil || !strings.Contains(err.Error(), "unmet dependencies") {
+	if _, err := todoWrite(t, rt, map[string]any{"merge": true, "todos": []map[string]any{{"id": "b", "status": "completed"}}}); err == nil || !strings.Contains(err.Error(), "unmet dependencies") {
 		t.Fatalf("expected unmet-dependencies error, got %v", err)
 	}
 	// Complete a, then b becomes ready and completable.
-	raw, _ = json.Marshal(map[string]any{"id": "a", "status": "done"})
-	if _, err := rt.runTaskUpdate(raw); err != nil {
-		t.Fatalf("complete a: %v", err)
-	}
-	raw, _ = json.Marshal(map[string]any{"status": "ready"})
-	out, err := rt.runTaskList(raw)
+	mustTodoMerge(t, rt, map[string]any{"id": "a", "status": "done"})
+	out, err = todoWrite(t, rt, map[string]any{})
 	if err != nil {
-		t.Fatalf("task-list ready: %v", err)
+		t.Fatalf("read: %v", err)
 	}
-	var ready []struct {
-		ID string `json:"id"`
+	var ready []string
+	for _, task := range decodeTodoList(t, out).Tasks {
+		if task.Ready {
+			ready = append(ready, task.ID)
+		}
 	}
-	if err := json.Unmarshal([]byte(out), &ready); err != nil {
-		t.Fatalf("decode ready list: %v (%s)", err, out)
+	if strings.Join(ready, ",") != "b,x" {
+		t.Fatalf("expected b and x ready, got %s", out)
 	}
-	if len(ready) != 1 || ready[0].ID != "b" {
-		t.Fatalf("expected only b ready, got %s", out)
-	}
-	raw, _ = json.Marshal(map[string]any{"id": "b", "status": "completed"})
-	if _, err := rt.runTaskUpdate(raw); err != nil {
-		t.Fatalf("complete b after deps met: %v", err)
-	}
+	mustTodoMerge(t, rt, map[string]any{"id": "b", "status": "completed"})
 }
 
 func TestTaskListBlockedByAndOrder(t *testing.T) {
 	rt := taskTestRuntime(t)
-	mustTaskCreate(t, rt, map[string]any{"id": "c", "content": "third", "dependencies": []string{}})
-	mustTaskCreate(t, rt, map[string]any{"id": "a", "content": "first"})
-	raw, _ := json.Marshal(map[string]any{"id": "c", "dependencies": []string{"a"}})
-	if _, err := rt.runTaskUpdate(raw); err != nil {
+	mustTodoMerge(t, rt, map[string]any{"id": "c", "content": "third", "dependencies": []string{}})
+	mustTodoMerge(t, rt, map[string]any{"id": "a", "content": "first"})
+	out, err := todoWrite(t, rt, map[string]any{"merge": true, "todos": []map[string]any{{"id": "c", "dependencies": []string{"a"}}}})
+	if err != nil {
 		t.Fatalf("add dep: %v", err)
 	}
-	out, err := rt.runTaskList([]byte(`{}`))
-	if err != nil {
-		t.Fatalf("task-list: %v", err)
-	}
-	var rows []struct {
-		ID        string   `json:"id"`
-		BlockedBy []string `json:"blocked_by"`
-	}
-	if err := json.Unmarshal([]byte(out), &rows); err != nil {
-		t.Fatalf("decode list: %v (%s)", err, out)
-	}
-	if len(rows) != 2 || rows[0].ID != "a" || rows[1].ID != "c" {
+	list := decodeTodoList(t, out)
+	if len(list.Tasks) != 2 || list.Tasks[0].ID != "a" || list.Tasks[1].ID != "c" {
 		t.Fatalf("expected dependency order a,c; got %s", out)
 	}
-	if len(rows[1].BlockedBy) != 1 || rows[1].BlockedBy[0] != "a" {
-		t.Fatalf("expected c blocked_by [a], got %s", out)
+	if len(list.Tasks[1].BlockedBy) != 1 || list.Tasks[1].BlockedBy[0] != "a" || list.Tasks[1].Ready {
+		t.Fatalf("expected c blocked_by [a] and not ready, got %s", out)
 	}
-	// blocked pseudo-filter returns only c.
-	out, err = rt.runTaskList([]byte(`{"status":"blocked"}`))
+	if list.Tasks[1].Content != "third" {
+		t.Fatalf("merge without content dropped the stored content: %s", out)
+	}
+}
+
+func TestTodoWriteReplaceMergeAndDelete(t *testing.T) {
+	rt := taskTestRuntime(t)
+	// A replace mints task-N for tasks without an ID, around the explicit ones.
+	out, err := todoWrite(t, rt, map[string]any{"todos": []map[string]any{
+		{"content": "plan"}, {"id": "task-1", "content": "named"}, {"content": "build", "status": "in_progress"},
+	}})
 	if err != nil {
-		t.Fatalf("task-list blocked: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, `"id":"c"`) || strings.Contains(out, `"id":"a"`) {
-		t.Fatalf("unexpected blocked filter result: %s", out)
+	var ids []string
+	for _, task := range decodeTodoList(t, out).Tasks {
+		ids = append(ids, task.ID)
+	}
+	if strings.Join(ids, ",") != "task-2,task-1,task-3" {
+		t.Fatalf("minted ids = %v (%s)", ids, out)
+	}
+	// Merge touches only the named task.
+	out, err = todoWrite(t, rt, map[string]any{"merge": true, "todos": []map[string]any{{"id": "task-3", "status": "completed"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := decodeTodoList(t, out)
+	if len(list.Tasks) != 3 || list.Tasks[2].Status != "completed" || list.Tasks[2].Content != "build" {
+		t.Fatalf("merge result: %s", out)
+	}
+	// delete and clear_completed.
+	out, err = todoWrite(t, rt, map[string]any{"delete": []string{"task-1", "nope"}, "clear_completed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list = decodeTodoList(t, out)
+	if len(list.Tasks) != 1 || list.Tasks[0].ID != "task-2" {
+		t.Fatalf("after delete: %s", out)
+	}
+	if len(list.Notes) != 1 || !strings.Contains(list.Notes[0], "nope") {
+		t.Fatalf("expected a note for the unknown delete, got %s", out)
+	}
+	// An empty replace clears the list.
+	out, err = todoWrite(t, rt, map[string]any{"todos": []map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list := decodeTodoList(t, out); len(list.Tasks) != 0 {
+		t.Fatalf("empty replace kept tasks: %s", out)
+	}
+}
+
+// Sub-agents share the parent's session folder: a worker's replace must not
+// wipe the orchestrator's list, so below the top level todos always merge.
+func TestTodoWriteSubAgentAlwaysMerges(t *testing.T) {
+	parent := taskTestRuntime(t)
+	mustTodoMerge(t, parent, map[string]any{"id": "orchestrate", "content": "the parent's task"})
+	worker := &toolRuntime{sessionDir: parent.sessionDir, delegationDepth: 1}
+	out, err := todoWrite(t, worker, map[string]any{"todos": []map[string]any{{"id": "slice", "content": "the worker's task"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := decodeTodoList(t, out)
+	if len(list.Tasks) != 2 || list.Tasks[0].ID != "orchestrate" {
+		t.Fatalf("worker replace wiped the parent's list: %s", out)
+	}
+	if len(list.Notes) == 0 || !strings.Contains(list.Notes[0], "merged") {
+		t.Fatalf("expected a note that the replace merged, got %s", out)
 	}
 }

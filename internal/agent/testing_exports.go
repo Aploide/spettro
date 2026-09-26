@@ -35,7 +35,7 @@ func SplitShellCommandSegmentsForTesting(command string) []string {
 }
 
 func AuthorizeShellCommandForTesting(r *toolRuntime, ctx context.Context, command string) error {
-	return r.authorizeShellCommand(ctx, "shell-exec", command)
+	return r.authorizeShellCommand(ctx, "bash", command)
 }
 
 // BuildLoopPromptForTesting concatenates the system string and the initial user

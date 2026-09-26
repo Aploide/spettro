@@ -20,7 +20,7 @@ func decodeJSONStrict(data []byte, target any) error {
 }
 
 // decodeJSONExact is decodeJSONStrict that also rejects unknown fields. The
-// write tools (file-write, file-edit, multi-edit) use it: there a misspelled
+// write tools (file-write, file-edit) use it: there a misspelled
 // key is not harmless noise but a required value silently decoding as "" —
 // `file_text` for content would truncate the file and still report success.
 // Those tools map the common spellings from other harnesses explicitly and
@@ -150,7 +150,7 @@ func decodeFileWriteArgs(raw []byte) (fileWriteArgs, error) {
 	}, nil
 }
 
-// fileEditPair is one find/replace of file-edit or multi-edit.
+// fileEditPair is one find/replace of file-edit (old_string or an edits[] item).
 type fileEditPair struct {
 	OldString  string
 	NewString  string
@@ -231,25 +231,4 @@ func decodeFileEditArgs(raw []byte) (fileEditArgs, error) {
 		out.Edits = append(out.Edits, pair)
 	}
 	return out, nil
-}
-
-// decodeMultiEditArgs decodes multi-edit's arguments exactly, with the same
-// aliases as file-edit. Every edit must carry new_string.
-func decodeMultiEditArgs(raw []byte) (path string, edits []fileEditPair, err error) {
-	var in struct {
-		Path     string            `json:"path"`
-		FilePath string            `json:"file_path"`
-		Edits    []rawFileEditPair `json:"edits"`
-	}
-	if err := decodeJSONExact(raw, &in); err != nil {
-		return "", nil, fmt.Errorf("multi-edit args: %w", err)
-	}
-	for i, e := range in.Edits {
-		pair := e.resolve()
-		if err := pair.requireNew(fmt.Sprintf("multi-edit: edit %d", i+1)); err != nil {
-			return "", nil, fmt.Errorf("%w (file untouched)", err)
-		}
-		edits = append(edits, pair)
-	}
-	return firstNonEmpty(in.Path, in.FilePath), edits, nil
 }

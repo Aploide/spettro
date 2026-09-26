@@ -46,7 +46,7 @@ func TestBuiltinToolSchemasAreValidObjects(t *testing.T) {
 // search and shell tools to carry a description, and pins grep path and the
 // shell timeout in seconds (tool_path_timeout_test.go covers their behavior).
 func TestCoreToolParamsDocumented(t *testing.T) {
-	core := []string{"file-read", "file-write", "file-edit", "glob", "grep", "repo-search", "shell-exec", "bash", "ls"}
+	core := []string{"file-read", "file-write", "file-edit", "glob", "grep", "bash", "todo-write"}
 	for _, name := range core {
 		for prop, def := range decodeToolSchema(t, name).Properties {
 			if d, _ := def["description"].(string); strings.TrimSpace(d) == "" {
@@ -57,11 +57,8 @@ func TestCoreToolParamsDocumented(t *testing.T) {
 	if _, ok := decodeToolSchema(t, "grep").Properties["path"]; !ok {
 		t.Error("grep schema must declare path")
 	}
-	for _, name := range []string{"shell-exec", "bash", "bash-output"} {
-		p, ok := decodeToolSchema(t, name).Properties["timeout"]
-		if !ok || p["type"] != "integer" {
-			t.Errorf("%s schema must declare an integer timeout, got %v", name, p)
-		}
+	if p, ok := decodeToolSchema(t, "bash").Properties["timeout"]; !ok || p["type"] != "integer" {
+		t.Errorf("bash schema must declare an integer timeout, got %v", p)
 	}
 }
 
@@ -70,9 +67,10 @@ func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 		"file-edit":  {"read the file first", "exactly one location", "replace_all", "line-number prefix"},
 		"file-write": {"read it", "prefer file-edit"},
 		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "40,000"},
-		"grep":       {"RE2", "path", "max_results"},
-		"glob":       {"**/*.go"},
-		"shell-exec": {"timeout", "run_in_background", "fresh process", "file-read"},
+		"grep":       {"RE2", "path", "max_results", "symbol"},
+		"glob":       {"**/*.go", "Without a pattern"},
+		"bash":       {"timeout", "run_in_background", "fresh process", "file-read"},
+		"todo-write": {"merge=true", "delete", "clear_completed", "no arguments"},
 	}
 	for name, needles := range cases {
 		desc := builtinNativeToolDescs[name]
@@ -81,9 +79,6 @@ func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 				t.Errorf("%s description should mention %q", name, n)
 			}
 		}
-	}
-	if builtinNativeToolDescs["bash"] != builtinNativeToolDescs["shell-exec"] {
-		t.Error("bash and shell-exec are the same tool and should share a description")
 	}
 	if !strings.HasPrefix(builtinNativeToolDescs["comment"], "Optional") {
 		t.Error("comment must read as optional so models don't spend steps narrating")

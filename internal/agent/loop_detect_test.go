@@ -192,7 +192,7 @@ func TestLoopDetectorSpooledOutputStillMatches(t *testing.T) {
 	var got []loopAction
 	for i := range 20 {
 		out := spoolTruncate(big, 4000, true, fmt.Sprintf("spool:%d", 100+i))
-		a := d.observe(call("shell-exec", `{"command":"go test ./..."}`), res(out), "")
+		a := d.observe(call("bash", `{"command":"go test ./..."}`), res(out), "")
 		got = append(got, a)
 		if a == loopAbort {
 			break
@@ -218,7 +218,7 @@ func TestLoopDetectorSpoolFilePathStillMatches(t *testing.T) {
 		if !strings.Contains(out, jobs.Spool().Path(id)) {
 			t.Fatalf("footer should name the spool file: %q", out[len(out)-600:])
 		}
-		a := d.observe(call("shell-exec", `{"command":"go test ./..."}`), res(out), "")
+		a := d.observe(call("bash", `{"command":"go test ./..."}`), res(out), "")
 		got = append(got, a)
 		if a == loopAbort {
 			break

@@ -154,7 +154,7 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 // render the agent's live task list.
 func (t *turnState) publishPlanIfTaskTool(toolName string) {
 	switch toolName {
-	case "todo-write", "task-create", "task-update", "task-delete":
+	case "todo-write":
 	default:
 		return
 	}

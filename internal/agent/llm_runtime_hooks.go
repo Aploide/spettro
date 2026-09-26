@@ -41,7 +41,7 @@ func (r *toolRuntime) runSessionStartHooks(ctx context.Context) error {
 func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args json.RawMessage) (json.RawMessage, string, error) {
 	updated := args
 	for _, rule := range r.hooksConfig.Rules {
-		if !rule.Enabled || rule.Event != hooks.EventPreToolUse || !hooks.Match(rule, toolID) {
+		if !rule.Enabled || rule.Event != hooks.EventPreToolUse || !hooks.MatchAny(rule, hookToolNames(toolID)...) {
 			continue
 		}
 		res, err := hooks.Run(ctx, rule, hooks.RunInput{Event: hooks.EventPreToolUse, ToolID: toolID, ToolArgs: updated})
@@ -60,7 +60,7 @@ func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args j
 			r.emitApprovalTrace("denied", "hook", toolID, "", reason)
 			return nil, reason, nil
 		case "allow":
-			if len(res.UpdatedArgs) > 0 && (toolID == "shell-exec" || toolID == "bash" || toolID == "bash-output") {
+			if len(res.UpdatedArgs) > 0 && toolID == "bash" {
 				updated = res.UpdatedArgs
 			}
 		}
@@ -70,7 +70,7 @@ func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args j
 
 func (r *toolRuntime) runPostToolHooks(ctx context.Context, toolID string, args json.RawMessage, output string) error {
 	for _, rule := range r.hooksConfig.Rules {
-		if !rule.Enabled || rule.Event != hooks.EventPostToolUse || !hooks.Match(rule, toolID) {
+		if !rule.Enabled || rule.Event != hooks.EventPostToolUse || !hooks.MatchAny(rule, hookToolNames(toolID)...) {
 			continue
 		}
 		_, err := hooks.Run(ctx, rule, hooks.RunInput{Event: hooks.EventPostToolUse, ToolID: toolID, ToolArgs: args, ToolOutput: truncate(output, 2000)})
@@ -84,16 +84,23 @@ func (r *toolRuntime) runPostToolHooks(ctx context.Context, toolID string, args 
 // hasPostToolHooks reports whether any enabled PostToolUse hook matches toolID.
 func (r *toolRuntime) hasPostToolHooks(toolID string) bool {
 	for _, rule := range r.hooksConfig.Rules {
-		if rule.Enabled && rule.Event == hooks.EventPostToolUse && hooks.Match(rule, toolID) {
+		if rule.Enabled && rule.Event == hooks.EventPostToolUse && hooks.MatchAny(rule, hookToolNames(toolID)...) {
 			return true
 		}
 	}
 	return false
 }
 
+// hookToolNames is what a hook matcher is tested against for a tool: its
+// canonical name plus the retired names that route to it, so a hook written
+// for "shell-exec" still fires on bash. The tool_id a hook script receives is
+// the canonical name.
+func hookToolNames(toolID string) []string {
+	return append([]string{toolID}, LegacyToolNames(toolID)...)
+}
+
 // finishToolCall runs the PostToolUse hooks for a finished call and returns
-// the output to hand the model. After a successful file-edit, multi-edit or
-// file-write, a hook that rewrites the file (gofmt -w, prettier --write) is
+// the output to hand the model. After a successful file-edit or file-write, a hook that rewrites the file (gofmt -w, prettier --write) is
 // part of the agent's own write: the file is re-stamped so the stale-read
 // guard doesn't refuse the next edit, and the model is told the file changed.
 func (r *toolRuntime) finishToolCall(ctx context.Context, call toolCall, out string, err error) string {
@@ -124,7 +131,7 @@ func (r *toolRuntime) finishToolCall(ctx context.Context, call toolCall, out str
 // writtenFile returns the file a successful write tool call changed.
 func (r *toolRuntime) writtenFile(call toolCall) (abs, rel string, ok bool) {
 	switch call.Tool {
-	case "file-edit", "multi-edit", "file-write":
+	case "file-edit", "file-write":
 	default:
 		return "", "", false
 	}
@@ -145,7 +152,7 @@ func (r *toolRuntime) writtenFile(call toolCall) (abs, rel string, ok bool) {
 
 func (r *toolRuntime) runPermissionRequestHooks(ctx context.Context, toolID, command string) (string, string, error) {
 	for _, rule := range r.hooksConfig.Rules {
-		if !rule.Enabled || rule.Event != hooks.EventPermissionRequest || !hooks.Match(rule, toolID) {
+		if !rule.Enabled || rule.Event != hooks.EventPermissionRequest || !hooks.MatchAny(rule, hookToolNames(toolID)...) {
 			continue
 		}
 		res, err := hooks.Run(ctx, rule, hooks.RunInput{Event: hooks.EventPermissionRequest, ToolID: toolID, Command: command})

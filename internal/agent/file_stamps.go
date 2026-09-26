@@ -17,7 +17,7 @@ import (
 
 // File stamps back the stale-read guard. A stamp is the SHA-256 of a file's
 // content the last time the agent saw all of it: a file-read (ranged or not)
-// or one of its own writes. Search hits (grep, repo-search) only put a path in
+// or one of its own writes. Search hits (grep, including its symbol form) only put a path in
 // readSet and never stamp it, so they don't license overwriting the file.
 // A hash rather than an mtime, so a touch or a same-content rewrite doesn't
 // force a pointless re-read.

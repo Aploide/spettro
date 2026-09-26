@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -237,6 +238,228 @@ func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
 	return t, nil
 }
 
+// TodoPatch is one task in a TodoChange. In merge mode an empty field keeps
+// the stored value and nil Dependencies keeps the stored list (an empty,
+// non-nil list clears it); in replace mode every field is taken as given.
+type TodoPatch struct {
+	ID           string
+	Content      string
+	Status       string
+	Owner        string
+	Source       string
+	Priority     string
+	Dependencies *[]string
+}
+
+// TodoChange is one atomic edit of the session task list: Todos are applied
+// first (replacing the whole list unless Merge), then Delete, then
+// ClearCompleted.
+type TodoChange struct {
+	Todos []TodoPatch
+	// Replace makes Todos the whole new list; otherwise each one is inserted
+	// or updated by ID.
+	Replace        bool
+	Delete         []string
+	ClearCompleted bool
+}
+
+// ApplyTodos applies a TodoChange under the task lock and returns the stored
+// list, plus notes about anything it adjusted rather than rejected:
+// dependencies on unknown tasks are dropped (the model usually meant a task
+// it has not written yet), and deleting an unknown ID is a no-op. Invalid
+// statuses, duplicate IDs, a new task without content and dependency cycles
+// are errors, and nothing is saved. Starting or completing a merged task
+// whose dependencies are incomplete is refused, as UpsertTodo does; a full
+// replace carries the statuses the caller wrote. Tasks without an ID get the
+// next free "task-N".
+func ApplyTodos(globalDir, sessionID string, change TodoChange) ([]Todo, []string, error) {
+	if sessionID == "" {
+		return nil, nil, fmt.Errorf("session id is required")
+	}
+	todoMu.Lock()
+	defer todoMu.Unlock()
+	stored, err := LoadTodos(globalDir, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now()
+	prev := make(map[string]Todo, len(stored))
+	for _, t := range stored {
+		prev[t.ID] = t
+	}
+	var todos []Todo
+	if !change.Replace {
+		todos = append(todos, stored...)
+	}
+	index := make(map[string]int, len(todos))
+	for i, t := range todos {
+		index[t.ID] = i
+	}
+	var notes []string
+	touched := map[string]struct{}{}
+	var unnamed []int // positions of new tasks still waiting for an ID
+	for n, p := range change.Todos {
+		id := strings.TrimSpace(p.ID)
+		status := ""
+		if strings.TrimSpace(p.Status) != "" || change.Replace {
+			if status, err = NormalizeTaskStatus(p.Status); err != nil {
+				return nil, nil, fmt.Errorf("task %s: %w", todoLabel(id, n), err)
+			}
+		}
+		var deps []string
+		if p.Dependencies != nil {
+			deps = compactDependencies(*p.Dependencies)
+		}
+		if i, ok := index[id]; ok && id != "" {
+			if change.Replace {
+				return nil, nil, fmt.Errorf("duplicate task id %q", id)
+			}
+			t := todos[i]
+			if c := strings.TrimSpace(p.Content); c != "" {
+				t.Content = c
+			}
+			if status != "" {
+				t.Status = status
+			}
+			if v := strings.TrimSpace(p.Owner); v != "" {
+				t.Owner = v
+			}
+			if v := strings.TrimSpace(p.Source); v != "" {
+				t.Source = v
+			}
+			if v := strings.TrimSpace(p.Priority); v != "" {
+				t.Priority = v
+			}
+			if p.Dependencies != nil {
+				t.Dependencies = deps
+			}
+			t.UpdatedAt = now
+			todos[i] = t
+			touched[id] = struct{}{}
+			continue
+		}
+		content := strings.TrimSpace(p.Content)
+		if content == "" {
+			return nil, nil, fmt.Errorf("task %s: content is required for a new task", todoLabel(id, n))
+		}
+		if status == "" {
+			status = TaskStatusPending
+		}
+		priority := strings.TrimSpace(p.Priority)
+		if priority == "" {
+			priority = "normal"
+		}
+		t := Todo{
+			ID:           id,
+			Content:      content,
+			Status:       status,
+			Owner:        strings.TrimSpace(p.Owner),
+			Source:       strings.TrimSpace(p.Source),
+			Priority:     priority,
+			Dependencies: deps,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if old, ok := prev[id]; ok && id != "" {
+			t.CreatedAt = old.CreatedAt
+		}
+		todos = append(todos, t)
+		if id == "" {
+			unnamed = append(unnamed, len(todos)-1)
+			continue
+		}
+		index[id] = len(todos) - 1
+		touched[id] = struct{}{}
+	}
+	// IDs are minted once every explicit ID is known, so a minted "task-2"
+	// never collides with one the caller wrote later in the same list.
+	for _, i := range unnamed {
+		todos[i].ID = nextTaskID(todos)
+		touched[todos[i].ID] = struct{}{}
+	}
+	for _, id := range change.Delete {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !slices.ContainsFunc(todos, func(t Todo) bool { return t.ID == id }) {
+			notes = append(notes, fmt.Sprintf("delete: no task %q", id))
+			continue
+		}
+		todos = removeTodos(todos, func(t Todo) bool { return t.ID == id })
+		delete(touched, id)
+	}
+	if change.ClearCompleted {
+		todos = removeTodos(todos, func(t Todo) bool { return taskDone(t.Status) })
+	}
+	known := make(map[string]struct{}, len(todos))
+	for _, t := range todos {
+		known[t.ID] = struct{}{}
+	}
+	for i := range todos {
+		kept := todos[i].Dependencies[:0:0]
+		for _, dep := range todos[i].Dependencies {
+			if _, ok := known[dep]; !ok {
+				notes = append(notes, fmt.Sprintf("task %q: dropped dependency on unknown task %q", todos[i].ID, dep))
+				continue
+			}
+			kept = append(kept, dep)
+		}
+		todos[i].Dependencies = kept
+	}
+	if err := ValidateTaskGraph(todos); err != nil {
+		return nil, nil, err
+	}
+	if !change.Replace {
+		for _, t := range todos {
+			if _, ok := touched[t.ID]; !ok {
+				continue
+			}
+			if t.Status == TaskStatusInProgress || t.Status == TaskStatusCompleted {
+				if gating := IncompleteDeps(t, todos); len(gating) > 0 {
+					return nil, nil, fmt.Errorf("task %q cannot be %s: unmet dependencies: %s", t.ID, t.Status, strings.Join(gating, ", "))
+				}
+			}
+		}
+	}
+	if err := saveTodosLocked(globalDir, sessionID, todos); err != nil {
+		return nil, nil, err
+	}
+	return todos, notes, nil
+}
+
+// todoLabel names the n-th (0-based) task of a change in an error message.
+func todoLabel(id string, n int) string {
+	if id != "" {
+		return fmt.Sprintf("%q", id)
+	}
+	return fmt.Sprintf("#%d", n+1)
+}
+
+// removeTodos drops the tasks drop matches and strips them from the others'
+// dependencies: a removed task no longer gates anything.
+func removeTodos(todos []Todo, drop func(Todo) bool) []Todo {
+	removed := map[string]struct{}{}
+	kept := make([]Todo, 0, len(todos))
+	for _, t := range todos {
+		if drop(t) {
+			removed[t.ID] = struct{}{}
+			continue
+		}
+		kept = append(kept, t)
+	}
+	for i := range kept {
+		deps := kept[i].Dependencies[:0:0]
+		for _, dep := range kept[i].Dependencies {
+			if _, gone := removed[dep]; !gone {
+				deps = append(deps, dep)
+			}
+		}
+		kept[i].Dependencies = deps
+	}
+	return kept
+}
+
 // DeleteTodo removes a task by ID and strips it from every other task's
 // dependency list (a deleted task no longer gates anything). It reports
 // whether the task existed.
@@ -254,26 +477,10 @@ func DeleteTodo(globalDir, sessionID, id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	out := make([]Todo, 0, len(todos))
-	found := false
-	for _, t := range todos {
-		if t.ID == id {
-			found = true
-			continue
-		}
-		deps := t.Dependencies[:0:0]
-		for _, dep := range t.Dependencies {
-			if dep != id {
-				deps = append(deps, dep)
-			}
-		}
-		t.Dependencies = deps
-		out = append(out, t)
-	}
-	if !found {
+	if !slices.ContainsFunc(todos, func(t Todo) bool { return t.ID == id }) {
 		return false, nil
 	}
-	return true, saveTodosLocked(globalDir, sessionID, out)
+	return true, saveTodosLocked(globalDir, sessionID, removeTodos(todos, func(t Todo) bool { return t.ID == id }))
 }
 
 // ClearCompletedTodos removes every completed and cancelled task, keeping the
@@ -289,28 +496,12 @@ func ClearCompletedTodos(globalDir, sessionID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	removed := map[string]struct{}{}
-	kept := make([]Todo, 0, len(todos))
-	for _, t := range todos {
-		if taskDone(t.Status) {
-			removed[t.ID] = struct{}{}
-			continue
-		}
-		kept = append(kept, t)
-	}
-	if len(removed) == 0 {
+	kept := removeTodos(todos, func(t Todo) bool { return taskDone(t.Status) })
+	removed := len(todos) - len(kept)
+	if removed == 0 {
 		return 0, nil
 	}
-	for i := range kept {
-		deps := kept[i].Dependencies[:0:0]
-		for _, dep := range kept[i].Dependencies {
-			if _, gone := removed[dep]; !gone {
-				deps = append(deps, dep)
-			}
-		}
-		kept[i].Dependencies = deps
-	}
-	return len(removed), saveTodosLocked(globalDir, sessionID, kept)
+	return removed, saveTodosLocked(globalDir, sessionID, kept)
 }
 
 // nextTaskID returns the smallest unused "task-N" identifier.

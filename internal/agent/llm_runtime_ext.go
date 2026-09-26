@@ -25,226 +25,129 @@ import (
 	"spettro/internal/session"
 )
 
-func (r *toolRuntime) runTaskCreate(rawArgs []byte) (string, error) {
+// todoWriteItem is one task in a todo-write call. dependencies is a pointer
+// so a merge can tell "keep the stored list" (absent) from "clear it" ([]).
+type todoWriteItem struct {
+	ID           string    `json:"id"`
+	Content      string    `json:"content"`
+	Status       string    `json:"status"`
+	Owner        string    `json:"owner"`
+	Source       string    `json:"source"`
+	Priority     string    `json:"priority"`
+	Dependencies *[]string `json:"dependencies"`
+}
+
+// todoRow is one task as todo-write reports it: the stored fields without
+// timestamps, plus the scheduling state derived from the graph.
+type todoRow struct {
+	ID           string   `json:"id"`
+	Content      string   `json:"content"`
+	Status       string   `json:"status"`
+	Owner        string   `json:"owner,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Priority     string   `json:"priority,omitempty"`
+	Dependencies []string `json:"dependencies,omitempty"`
+	BlockedBy    []string `json:"blocked_by,omitempty"`
+	Ready        bool     `json:"ready,omitempty"`
+}
+
+// runTodoWrite reads and edits the session task list: the one tool behind
+// what used to be todo-write plus task-create/get/update/list/delete. todos
+// replaces the whole list, or with merge inserts/updates tasks by ID (empty
+// fields keep their stored value); delete and clear_completed remove tasks. A
+// call with none of those only reads. Every call returns the full list in
+// dependency order, so the model never needs a separate read.
+//
+// Sub-agents share the parent's session folder, so a worker's full replace
+// would wipe the orchestrator's list: below the top level, todos always
+// merge.
+func (r *toolRuntime) runTodoWrite(rawArgs []byte) (string, error) {
 	var args struct {
-		ID           string   `json:"id"`
-		Content      string   `json:"content"`
-		Status       string   `json:"status"`
-		Owner        string   `json:"owner"`
-		Source       string   `json:"source"`
-		Priority     string   `json:"priority"`
-		Dependencies []string `json:"dependencies"`
+		Todos          *[]todoWriteItem `json:"todos"`
+		Merge          flexBool         `json:"merge"`
+		Delete         []string         `json:"delete"`
+		ClearCompleted flexBool         `json:"clear_completed"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-create args: %w", err)
+		return "", fmt.Errorf("todo-write args: %w", err)
 	}
 	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-create requires an active session")
-	}
-	// An empty ID is minted by UpsertTodo under its lock; deriving one here
-	// from the wall clock collided when creates landed in the same millisecond.
-	id := strings.TrimSpace(args.ID)
-	status, err := session.NormalizeTaskStatus(args.Status)
-	if err != nil {
-		return "", fmt.Errorf("task-create: %w", err)
-	}
-	item := session.Todo{
-		ID:           id,
-		Content:      strings.TrimSpace(args.Content),
-		Status:       status,
-		Owner:        strings.TrimSpace(args.Owner),
-		Source:       strings.TrimSpace(args.Source),
-		Priority:     strings.TrimSpace(args.Priority),
-		Dependencies: append([]string(nil), args.Dependencies...),
+		return "", fmt.Errorf("todo-write requires an active session")
 	}
 	sid := filepath.Base(r.sessionDir)
 	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
-	// Graph validation (unknown deps, cycles, unmet-dependency status rules)
-	// happens inside UpsertTodo, atomically with the load-merge-save.
-	out, err := session.UpsertTodo(globalDir, sid, item)
-	if err != nil {
-		return "", fmt.Errorf("task-create: %w", err)
-	}
-	raw, _ := json.Marshal(out)
-	return string(raw), nil
-}
-
-func (r *toolRuntime) runTaskGet(rawArgs []byte) (string, error) {
-	var args struct {
-		ID string `json:"id"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-get args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-get requires an active session")
-	}
-	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		return "", fmt.Errorf("task-get: id is required")
-	}
-	sid := filepath.Base(r.sessionDir)
-	item, ok, err := session.GetTodo(filepath.Dir(filepath.Dir(r.sessionDir)), sid, id)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", fmt.Errorf("task-get: task %q not found", id)
-	}
-	raw, _ := json.Marshal(item)
-	return string(raw), nil
-}
-
-func (r *toolRuntime) runTaskUpdate(rawArgs []byte) (string, error) {
-	var args struct {
-		ID           string   `json:"id"`
-		Content      string   `json:"content"`
-		Status       string   `json:"status"`
-		Owner        string   `json:"owner"`
-		Source       string   `json:"source"`
-		Priority     string   `json:"priority"`
-		Dependencies []string `json:"dependencies"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-update args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-update requires an active session")
-	}
-	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		return "", fmt.Errorf("task-update: id is required")
-	}
-	sid := filepath.Base(r.sessionDir)
-	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
-	prev, ok, err := session.GetTodo(globalDir, sid, id)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", fmt.Errorf("task-update: task %q not found", id)
-	}
-	if strings.TrimSpace(args.Content) != "" {
-		prev.Content = strings.TrimSpace(args.Content)
-	}
-	if strings.TrimSpace(args.Status) != "" {
-		status, err := session.NormalizeTaskStatus(args.Status)
+	var todos []session.Todo
+	var notes []string
+	if args.Todos == nil && len(args.Delete) == 0 && !args.ClearCompleted {
+		loaded, err := session.LoadTodos(globalDir, sid)
 		if err != nil {
-			return "", fmt.Errorf("task-update: %w", err)
+			return "", fmt.Errorf("todo-write: %w", err)
 		}
-		prev.Status = status
-	}
-	if strings.TrimSpace(args.Owner) != "" {
-		prev.Owner = strings.TrimSpace(args.Owner)
-	}
-	if strings.TrimSpace(args.Source) != "" {
-		prev.Source = strings.TrimSpace(args.Source)
-	}
-	if strings.TrimSpace(args.Priority) != "" {
-		prev.Priority = strings.TrimSpace(args.Priority)
-	}
-	if len(args.Dependencies) > 0 {
-		prev.Dependencies = append([]string(nil), args.Dependencies...)
-	}
-	out, err := session.UpsertTodo(globalDir, sid, prev)
-	if err != nil {
-		return "", fmt.Errorf("task-update: %w", err)
-	}
-	raw, _ := json.Marshal(out)
-	return string(raw), nil
-}
-
-func (r *toolRuntime) runTaskDelete(rawArgs []byte) (string, error) {
-	var args struct {
-		ID             string `json:"id"`
-		ClearCompleted bool   `json:"clear_completed"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-delete args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-delete requires an active session")
-	}
-	sid := filepath.Base(r.sessionDir)
-	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
-	if args.ClearCompleted {
-		n, err := session.ClearCompletedTodos(globalDir, sid)
-		if err != nil {
-			return "", fmt.Errorf("task-delete: %w", err)
-		}
-		return fmt.Sprintf("removed %d completed/cancelled tasks", n), nil
-	}
-	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		return "", fmt.Errorf("task-delete: id is required (or set clear_completed)")
-	}
-	found, err := session.DeleteTodo(globalDir, sid, id)
-	if err != nil {
-		return "", fmt.Errorf("task-delete: %w", err)
-	}
-	if !found {
-		return "", fmt.Errorf("task-delete: task %q not found", id)
-	}
-	return fmt.Sprintf("deleted task %s", id), nil
-}
-
-func (r *toolRuntime) runTaskList(rawArgs []byte) (string, error) {
-	var args struct {
-		Status string `json:"status"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-list args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-list requires an active session")
-	}
-	sid := filepath.Base(r.sessionDir)
-	items, err := session.LoadTodos(filepath.Dir(filepath.Dir(r.sessionDir)), sid)
-	if err != nil {
-		return "", err
-	}
-	all := append([]session.Todo(nil), items...)
-	filter := strings.ToLower(strings.TrimSpace(args.Status))
-	blocked := session.BlockedIDs(items)
-	switch filter {
-	case "":
-	case "ready":
-		items = session.ReadyTasks(items)
-	case "blocked":
-		out := make([]session.Todo, 0, len(items))
-		for _, t := range items {
-			if _, ok := blocked[t.ID]; ok {
-				out = append(out, t)
+		todos = loaded
+	} else {
+		change := session.TodoChange{Delete: args.Delete, ClearCompleted: bool(args.ClearCompleted)}
+		if args.Todos != nil {
+			change.Replace = !bool(args.Merge)
+			if change.Replace && r.delegationDepth > 0 {
+				change.Replace = false
+				notes = append(notes, "merged instead of replacing: sub-agents share the parent's task list")
+			}
+			for _, it := range *args.Todos {
+				change.Todos = append(change.Todos, session.TodoPatch{
+					ID:           it.ID,
+					Content:      it.Content,
+					Status:       it.Status,
+					Owner:        it.Owner,
+					Source:       it.Source,
+					Priority:     it.Priority,
+					Dependencies: it.Dependencies,
+				})
 			}
 		}
-		items = out
-	default:
-		out := make([]session.Todo, 0, len(items))
-		for _, t := range items {
-			if t.Status == filter {
-				out = append(out, t)
-			}
+		saved, applyNotes, err := session.ApplyTodos(globalDir, sid, change)
+		if err != nil {
+			return "", fmt.Errorf("todo-write: %w", err)
 		}
-		items = out
+		todos = saved
+		notes = append(notes, applyNotes...)
 	}
-	// Return tasks in dependency order, annotated with the incomplete
-	// dependencies currently gating each one, so the agent can pick the next
-	// ready task without re-deriving the graph.
-	type taskRow struct {
-		session.Todo
-		BlockedBy []string `json:"blocked_by,omitempty"`
-	}
+	return formatTodoList(todos, notes), nil
+}
+
+// formatTodoList renders the task list todo-write returns: tasks in
+// dependency order, each with the incomplete dependencies gating it and
+// whether it can start now.
+func formatTodoList(todos []session.Todo, notes []string) string {
 	pos := map[string]int{}
-	for i, id := range session.TopoOrder(items) {
+	for i, id := range session.TopoOrder(todos) {
 		pos[id] = i
 	}
-	sort.SliceStable(items, func(i, j int) bool { return pos[items[i].ID] < pos[items[j].ID] })
-	rows := make([]taskRow, 0, len(items))
-	for _, t := range items {
-		rows = append(rows, taskRow{Todo: t, BlockedBy: session.IncompleteDeps(t, all)})
+	ordered := append([]session.Todo(nil), todos...)
+	sort.SliceStable(ordered, func(i, j int) bool { return pos[ordered[i].ID] < pos[ordered[j].ID] })
+	ready := map[string]struct{}{}
+	for _, t := range session.ReadyTasks(todos) {
+		ready[t.ID] = struct{}{}
 	}
-	raw, _ := json.Marshal(rows)
-	return string(raw), nil
+	out := struct {
+		Tasks []todoRow `json:"tasks"`
+		Notes []string  `json:"notes,omitempty"`
+	}{Tasks: make([]todoRow, 0, len(ordered)), Notes: notes}
+	for _, t := range ordered {
+		_, isReady := ready[t.ID]
+		out.Tasks = append(out.Tasks, todoRow{
+			ID:           t.ID,
+			Content:      t.Content,
+			Status:       t.Status,
+			Owner:        t.Owner,
+			Source:       t.Source,
+			Priority:     t.Priority,
+			Dependencies: t.Dependencies,
+			BlockedBy:    session.IncompleteDeps(t, todos),
+			Ready:        isReady,
+		})
+	}
+	raw, _ := json.Marshal(out)
+	return string(raw)
 }
 
 func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte) (string, error) {
@@ -263,6 +166,14 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		}
 		seen[id] = struct{}{}
 		spec, hasSpec := r.toolPolicies[id]
+		// Aliases (a retired name, or a manifest alias) are callable but not
+		// advertised: listing them would offer the model the same tool twice.
+		if hasSpec && spec.ID != "" && spec.ID != id {
+			continue
+		}
+		if _, retired := legacyTools[id]; retired && (!hasSpec || spec.Kind == "" || spec.Kind == "builtin") {
+			continue
+		}
 		label := id
 		risk := "unknown"
 		acts := ""
@@ -623,73 +534,6 @@ func editNotesSuffix(notes []string) string {
 		return ""
 	}
 	return " — " + strings.Join(notes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
-}
-
-// runMultiEdit applies an ordered list of find/replace edits to one file
-// atomically: every edit runs against the in-memory result of the previous
-// one, and if any edit fails to match (or matches ambiguously without
-// replace_all) the whole call errors and the file is left untouched.
-func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string, error) {
-	path, edits, err := decodeMultiEditArgs(rawArgs)
-	if err != nil {
-		return "", err
-	}
-	abs, rel, err := r.resolvePath(path)
-	if err != nil {
-		return "", err
-	}
-	if len(edits) == 0 {
-		return "", fmt.Errorf("multi-edit: edits is required")
-	}
-	defer r.lockFile(abs)()
-	raw, err := os.ReadFile(abs)
-	if err != nil {
-		return "", err
-	}
-	if err := r.checkFileStamp("multi-edit", rel, raw); err != nil {
-		return "", err
-	}
-	trustLines := r.unchangedSinceRead(rel, raw)
-	content := string(raw)
-	updated := content
-	totalReplacements := 0
-	var notes []string
-	for i, e := range edits {
-		if e.OldString == "" {
-			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
-		}
-		if e.OldString == e.NewString {
-			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
-		}
-		res, err := applyEdit(updated, editRequest{Old: e.OldString, New: e.NewString, ReplaceAll: e.ReplaceAll,
-			TrustLineNumbers: i == 0 && trustLines})
-		if err != nil {
-			return "", fmt.Errorf("multi-edit: edit %d: %w (file untouched)", i+1, err)
-		}
-		updated = res.Content
-		totalReplacements += res.Count
-		for _, n := range res.Notes {
-			notes = append(notes, fmt.Sprintf("edit %d %s", i+1, n))
-		}
-	}
-	// Approval comes after all edits are computed so the user is shown the
-	// combined diff exactly as it would be applied.
-	if err := r.authorizeWriteAccess(ctx, "multi-edit", rel, diff.Unified(rel, content, updated)); err != nil {
-		return "", err
-	}
-	if err := r.recheckBeforeWrite("multi-edit", rel, abs, true, raw); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
-		return "", err
-	}
-	r.mu.Lock()
-	r.readSet[rel] = struct{}{}
-	r.mu.Unlock()
-	r.recordFileStamp(rel, []byte(updated))
-	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(edits), totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
-	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {

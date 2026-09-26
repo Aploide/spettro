@@ -8,7 +8,7 @@ import (
 )
 
 // runJobOutput fetches accumulated output for a background job started via the
-// bash/shell-exec run_in_background parameter. offset lets repeated polls read
+// bash tool's run_in_background parameter. offset lets repeated polls read
 // incrementally: pass the next_offset from the previous call.
 func (r *toolRuntime) runJobOutput(rawArgs []byte) (string, error) {
 	var args struct {
@@ -21,6 +21,8 @@ func (r *toolRuntime) runJobOutput(rawArgs []byte) (string, error) {
 	if strings.TrimSpace(args.JobID) == "" {
 		return "", fmt.Errorf("job-output: job_id is required")
 	}
+	// Spooled tool results are documented as tool-output's to page; job-output
+	// still accepts their spool:N ids so calls made before that keep working.
 	if strings.HasPrefix(strings.TrimSpace(args.JobID), "spool:") {
 		return r.readSpoolOutput(strings.TrimSpace(args.JobID), args.Offset)
 	}

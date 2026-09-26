@@ -671,7 +671,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	m.lastRepoScanAt = time.Now()
 	m.startupCmds = append(m.startupCmds, scanRepoFilesCmd(cwd))
 	// Warm the repo symbol index off the UI thread so the first symbol-aware
-	// repo-search answers from cache instead of paying the initial scan.
+	// grep's symbol search answers from cache instead of paying the initial scan.
 	if rs, ok := m.searcher.(agent.RepoSearcher); ok && rs.Index != nil {
 		idx := rs.Index
 		m.startupCmds = append(m.startupCmds, func() tea.Msg {

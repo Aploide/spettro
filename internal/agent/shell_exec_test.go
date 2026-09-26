@@ -206,13 +206,13 @@ func TestForegroundShellCallClassification(t *testing.T) {
 	if r.isForegroundShellCall(toolCall{Tool: "bash", Args: []byte(`{"command":"make","run_in_background":true}`)}) {
 		t.Fatal("background job treated as foreground")
 	}
-	if r.isForegroundShellCall(toolCall{Tool: "bash-output", Args: []byte(`{"job_id":"job-1"}`)}) {
+	if r.isForegroundShellCall(toolCall{Tool: "bash", Args: []byte(`{"job_id":"job-1"}`)}) {
 		t.Fatal("job polling treated as foreground")
 	}
 	if r.isForegroundShellCall(toolCall{Tool: "file-read", Args: []byte(`{"path":"x"}`)}) {
 		t.Fatal("non-shell tool treated as shell")
 	}
-	if !r.isForegroundShellCall(toolCall{Tool: "shell-exec", Args: []byte(`{"command":"go test ./...","timeout":300}`)}) {
+	if !r.isForegroundShellCall(toolCall{Tool: "bash", Args: []byte(`{"command":"go test ./...","timeout":300}`)}) {
 		t.Fatal("foreground command not recognised")
 	}
 }

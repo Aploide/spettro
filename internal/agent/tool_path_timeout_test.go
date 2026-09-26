@@ -61,7 +61,7 @@ func TestShellTimeoutArgumentIsHonored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := r.runShellTool(context.Background(), "shell-exec", args, "shell-exec"); err != nil || !strings.Contains(out, "fast") {
+	if out, err := r.runShellTool(context.Background(), "bash", args, "bash"); err != nil || !strings.Contains(out, "fast") {
 		t.Fatalf("a timeout argument must be accepted: %v %q", err, out)
 	}
 
@@ -88,10 +88,10 @@ func TestShellCallTimeoutArgument(t *testing.T) {
 		tool, args string
 		want       bool
 	}{
-		{"shell-exec", `{"command":"go test ./...","timeout":300}`, true},
-		{"shell-exec", `{"command":"x"}`, true},
-		{"shell-exec", `{"command":"x","timeout":60,"run_in_background":true}`, false},
-		{"bash-output", `{"job_id":"job-1","timeout":60}`, false},
+		{"bash", `{"command":"go test ./...","timeout":300}`, true},
+		{"bash", `{"command":"x"}`, true},
+		{"bash", `{"command":"x","timeout":60,"run_in_background":true}`, false},
+		{"bash", `{"job_id":"job-1","timeout":60}`, false},
 		{"file-read", `{"path":"x","timeout":60}`, false},
 	}
 	for _, c := range foreground {
@@ -99,10 +99,11 @@ func TestShellCallTimeoutArgument(t *testing.T) {
 			t.Errorf("isForegroundShellCall(%s %s) = %v, want %v", c.tool, c.args, got, c.want)
 		}
 	}
-	if got := r.shellTimeout("shell-exec", 300); got != 300*time.Second {
+	plain := &toolRuntime{}
+	if got := plain.shellTimeout("bash", 300); got != 300*time.Second {
 		t.Errorf("timeout 300 = %s, want 300s", got)
 	}
-	if got := r.shellTimeout("shell-exec", 1000); got != maxShellTimeoutSec*time.Second {
+	if got := plain.shellTimeout("bash", 1000); got != maxShellTimeoutSec*time.Second {
 		t.Errorf("timeout 1000 = %s, want the %ds cap", got, maxShellTimeoutSec)
 	}
 	if got := r.shellTimeout("bash", 900); got != 900*time.Second {
@@ -114,12 +115,12 @@ func TestShellCallTimeoutArgument(t *testing.T) {
 // per-tool limit is not cut short by executeWithTimeout's own deadline.
 func TestShellTimeoutRaisesToolDeadline(t *testing.T) {
 	r := &toolRuntime{cwd: t.TempDir(), permission: config.PermissionYOLO, readSet: map[string]struct{}{},
-		toolPolicies: map[string]config.ToolSpec{"shell-exec": {TimeoutSec: 1}}}
+		toolPolicies: map[string]config.ToolSpec{"bash": {TimeoutSec: 1}}}
 	args, err := json.Marshal(map[string]any{"command": shelltest.Join(shelltest.Sleep(1500*time.Millisecond), shelltest.Echo("finished")), "timeout": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := r.executeWithTimeout(context.Background(), toolCall{Tool: "shell-exec", Args: args}, map[string]struct{}{"shell-exec": {}})
+	out, err := r.executeWithTimeout(context.Background(), toolCall{Tool: "bash", Args: args}, map[string]struct{}{"bash": {}})
 	if err != nil || !strings.Contains(out, "finished") {
 		t.Fatalf("timeout=10 must outlast the 1s tool default: %v %q", err, out)
 	}
