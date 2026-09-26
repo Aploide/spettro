@@ -44,14 +44,21 @@ This file lets you define, in one place:
   | `glob` | `ls` (`glob` without a pattern lists one directory) |
   | `todo-write` | `task-create`, `task-update`, `task-delete`, `task-get`, `task-list` |
 
-  A retired definition's settings merge into the canonical tool (approval if
-  either required it, the longer timeout, the higher risk, both rule sets;
-  `permitted_actions` stay the canonical tool's), or it becomes the canonical
-  tool in place when that is missing. Allow-lists and tool-level rules
-  (`permission = "tool"` or `"*"`) naming a retired ID exactly are rewritten
-  to the canonical ID. An agent that could only read tasks
-  (`task-get`/`task-list`) loses them instead of gaining `todo-write`; an
-  agent left with no tools keeps `comment` and is disabled. Tools of another
+  No agent gains access. For each agent, the migration first works out
+  which retired tools it could actually call under the v11 manifest
+  (enabled, an action the agent may take, no permission rule denying it);
+  only those become the canonical ID in its `allowed_tools`, and one it
+  could not call is dropped. A retired definition's settings merge into the
+  canonical tool toward the stricter side (approval if either required it,
+  the longer timeout, the higher risk, its command/path rules that deny or
+  ask), or it becomes the canonical tool in place when that is missing. The
+  canonical tool keeps its own `enabled` flag and `permitted_actions`, so a
+  canonical tool you switched off stays off. The retired tool's allow rules,
+  and the rules that switched it off, are not merged. Permission rules that
+  name a retired ID are left as written: they only ever decided whether that
+  tool could be called, which the allow-lists now carry. An agent that could
+  only read tasks (`task-get`/`task-list`) loses them instead of gaining
+  `todo-write`; an agent left with no tools keeps `comment` and is disabled. Tools of another
   kind that share a retired name are left alone. The retired names stay
   callable, but are never advertised to the model and cannot be listed in
   `allowed_tools`.

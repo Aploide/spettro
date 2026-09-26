@@ -68,26 +68,40 @@ func canonicalOf(id string) (string, bool) {
 // built-ins into their canonical tools and removes the grok media tools,
 // without giving any agent access it did not have.
 //
+//   - Access is settled first, against the v11 manifest as it stands: for
+//     each agent, which retired tools it could actually call (enabled, an
+//     action it may take, no permission rule denying it). Only those carry
+//     over.
 //   - Definitions: only built-in tools are touched; a user's own script or
 //     MCP tool that shares a name is left alone. A retired tool whose
 //     canonical tool is missing becomes it in place (the ID, name and
 //     description change, the operator's settings stay). Otherwise its
-//     settings merge into the canonical tool, each toward the stricter or
-//     more generous side the operator already chose: approval if either
-//     required it, the longer timeout, the higher risk, enabled if either
-//     was, both rule sets. permitted_actions are not merged: todo-write
-//     would inherit task-get's "read" and reach agents that may only read.
-//     Either way the retired ID becomes an alias of the canonical tool.
-//   - Allow-lists: each retired ID becomes its canonical ID, duplicates
-//     collapse, order is kept. An agent that could only read tasks
-//     (task-get/task-list without a task tool that writes) loses them
-//     rather than gaining todo-write. A list left empty holds just comment,
-//     with the agent disabled, since Validate rejects an empty list.
-//   - Rules: a tool-level rule (permission "tool" or "*") naming a retired ID
-//     exactly now names the canonical ID, so a deny on shell-exec keeps
-//     denying bash.
+//     settings merge into the canonical tool toward the stricter side:
+//     approval if either required it, the longer timeout, the higher risk,
+//     and its command/path rules that deny or ask. The canonical tool keeps
+//     its own enabled flag and permitted_actions: a disabled canonical tool
+//     stays off rather than reaching every agent that listed it, and
+//     todo-write never inherits task-get's "read". The retired tool's allow
+//     rules and the rules that switched it off are not merged: they would
+//     loosen, or switch off, the canonical tool for agents that never had
+//     the retired one. Either way the retired ID becomes an alias of the
+//     canonical tool.
+//   - Allow-lists: each retired ID the agent could call becomes its
+//     canonical ID; one it could not call (disabled, or denied by a rule) is
+//     dropped rather than turned into a grant, as is a canonical ID listed
+//     before the tool was defined. Duplicates collapse, order is
+//     kept. An agent that could only read tasks (task-get/task-list without a
+//     task tool that writes) loses them rather than gaining todo-write. A
+//     list left empty holds just comment, with the agent disabled, since
+//     Validate rejects an empty list.
+//   - Rules are left as written. One naming a retired ID only ever decided
+//     whether that tool could be called, which the allow-lists now carry;
+//     rewriting it to the canonical ID would deny or allow a tool it never
+//     covered.
 func (m *AgentManifest) consolidateBuiltinTools() {
+	usable := m.retiredToolsUsable()
 	folded := map[string]string{} // retired ID -> canonical ID, for folded definitions
+	created := map[string]bool{}  // canonical IDs that had no definition before
 	for _, g := range consolidatedTools {
 		ci := m.toolIndex(g.canonical)
 		if ci >= 0 && m.Tools[ci].Kind != "builtin" {
@@ -95,24 +109,20 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 			// folding a built-in into it would change what it is.
 			continue
 		}
+		if ci < 0 {
+			ci = m.renameInPlace(g.canonical, g.retired, folded)
+			created[g.canonical] = ci >= 0
+		}
 		for _, id := range g.retired {
 			ri := m.toolIndex(id)
-			if ri < 0 || m.Tools[ri].Kind != "builtin" {
+			if ri < 0 || ri == ci || m.Tools[ri].Kind != "builtin" {
 				continue
 			}
 			folded[id] = g.canonical
 			if ci < 0 {
-				if readOnlyRetiredTools[id] {
-					// Never promote a read-only tool into one that writes.
-					m.Tools = slices.Delete(m.Tools, ri, ri+1)
-					continue
-				}
-				t := &m.Tools[ri]
-				t.ID = g.canonical
-				if spec, ok := defaultToolSpec(g.canonical); ok {
-					t.Name, t.Description = spec.Name, spec.Description
-				}
-				ci = ri
+				// Only read-only task tools, and no todo-write to fold them
+				// into: never promote one into a tool that writes.
+				m.Tools = slices.Delete(m.Tools, ri, ri+1)
 				continue
 			}
 			mergeToolInto(&m.Tools[ci], m.Tools[ri])
@@ -145,9 +155,9 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 
 	for i := range m.Agents {
 		a := &m.Agents[i]
-		canWriteTasks := false
+		canWriteTasks := slices.Contains(a.AllowedTools, "todo-write") && !created["todo-write"]
 		for _, id := range a.AllowedTools {
-			if canon, ok := folded[id]; (ok && canon == "todo-write" && !readOnlyRetiredTools[id]) || id == "todo-write" {
+			if folded[id] == "todo-write" && !readOnlyRetiredTools[id] && usable[i][id] {
 				canWriteTasks = true
 			}
 		}
@@ -157,10 +167,15 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 				continue
 			}
 			if canon, ok := folded[id]; ok {
-				if readOnlyRetiredTools[id] && !canWriteTasks {
+				if !usable[i][id] || (readOnlyRetiredTools[id] && !canWriteTasks) {
 					continue
 				}
 				id = canon
+			} else if created[id] {
+				// The agent listed a tool that did not exist, so it could
+				// not call it; the definition made from a retired tool is
+				// not a grant.
+				continue
 			}
 			if !slices.Contains(tools, id) {
 				tools = append(tools, id)
@@ -174,12 +189,67 @@ func (m *AgentManifest) consolidateBuiltinTools() {
 			}
 		}
 		a.AllowedTools = tools
-		a.PermissionRules = renameToolRules(a.PermissionRules, folded)
 	}
-	m.Runtime.PermissionRules = renameToolRules(m.Runtime.PermissionRules, folded)
-	for i := range m.Tools {
-		m.Tools[i].PermissionRules = renameToolRules(m.Tools[i].PermissionRules, folded)
+}
+
+// retiredToolsUsable reports, per agent (by index), which retired built-ins
+// on its allow-list it could call under the manifest as it stands.
+func (m *AgentManifest) retiredToolsUsable() []map[string]bool {
+	out := make([]map[string]bool, len(m.Agents))
+	for i, a := range m.Agents {
+		out[i] = map[string]bool{}
+		for _, id := range a.AllowedTools {
+			if _, retired := canonicalOf(id); !retired {
+				continue
+			}
+			if t, ok := m.toolNamed(id); ok && m.ToolUsableBy(a, t) {
+				out[i][id] = true
+			}
+		}
 	}
+	return out
+}
+
+// toolNamed returns the tool definition with this ID, or else the one that
+// has it as an alias.
+func (m *AgentManifest) toolNamed(name string) (ToolSpec, bool) {
+	if i := m.toolIndex(name); i >= 0 {
+		return m.Tools[i], true
+	}
+	for _, t := range m.Tools {
+		if slices.Contains(t.Aliases, name) {
+			return t, true
+		}
+	}
+	return ToolSpec{}, false
+}
+
+// renameInPlace turns one of the retired built-ins into the missing
+// canonical tool and returns its index, or -1 when there is none to turn.
+// An enabled one is preferred, so the canonical tool is not switched off
+// because the first retired tool in table order happened to be. Read-only
+// task tools are never turned into todo-write.
+func (m *AgentManifest) renameInPlace(canonical string, retired []string, folded map[string]string) int {
+	pick := -1
+	for _, id := range retired {
+		ri := m.toolIndex(id)
+		if ri < 0 || m.Tools[ri].Kind != "builtin" || readOnlyRetiredTools[id] {
+			continue
+		}
+		if pick < 0 || (m.Tools[ri].Enabled && !m.Tools[pick].Enabled) {
+			pick = ri
+		}
+	}
+	if pick < 0 {
+		return -1
+	}
+	t := &m.Tools[pick]
+	folded[t.ID] = canonical
+	t.ID = canonical
+	if spec, ok := defaultToolSpec(canonical); ok {
+		t.Name, t.Description = spec.Name, spec.Description
+	}
+	return pick
 }
 
 // toolIndex returns the position of the tool definition with this ID, or -1.
@@ -199,15 +269,17 @@ func (m *AgentManifest) nameTaken(name string, except int) bool {
 }
 
 // mergeToolInto folds a retired tool's settings into its canonical tool
-// (see consolidateBuiltinTools for why permitted_actions are not merged).
+// (see consolidateBuiltinTools for what merges and why).
 func mergeToolInto(dst *ToolSpec, src ToolSpec) {
 	dst.RequiresApproval = dst.RequiresApproval || src.RequiresApproval
 	dst.TimeoutSec = max(dst.TimeoutSec, src.TimeoutSec)
 	if riskRank(src.RiskLevel) > riskRank(dst.RiskLevel) {
 		dst.RiskLevel = src.RiskLevel
 	}
-	dst.Enabled = dst.Enabled || src.Enabled
 	for _, r := range src.PermissionRules {
+		if r.Action == RuleAllow || (r.Action == RuleDeny && WildcardMatch(r.Pattern, src.ID)) {
+			continue
+		}
 		if !slices.Contains(dst.PermissionRules, r) {
 			dst.PermissionRules = append(dst.PermissionRules, r)
 		}
@@ -229,28 +301,6 @@ func riskRank(level string) int {
 		return 3
 	}
 	return 0
-}
-
-// renameToolRules points tool-level rules (permission "tool" or "*") whose
-// pattern is exactly a folded ID at its canonical ID, dropping rules that
-// become duplicates.
-func renameToolRules(rules []PermissionRule, folded map[string]string) []PermissionRule {
-	if len(rules) == 0 {
-		return rules
-	}
-	out := make([]PermissionRule, 0, len(rules))
-	for _, r := range rules {
-		perm := strings.TrimSpace(r.Permission)
-		if perm == "tool" || perm == "*" {
-			if canon, ok := folded[strings.TrimSpace(r.Pattern)]; ok {
-				r.Pattern = canon
-			}
-		}
-		if !slices.Contains(out, r) {
-			out = append(out, r)
-		}
-	}
-	return out
 }
 
 // defaultToolSpec returns the built-in definition of a tool as the default

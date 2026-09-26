@@ -199,17 +199,18 @@ permission = "ask-first"
 enabled = true
 `
 
-// A retired tool's settings merge into the canonical tool toward what the
-// operator already chose: approval if either asked for it, the longer
-// timeout, the higher risk, enabled if either was, both rule sets. The
-// canonical tool's own permitted_actions stay as they were.
+// A retired tool's settings merge into the canonical tool toward the
+// stricter side: approval if either asked for it, the longer timeout, the
+// higher risk, its command rules. The canonical tool's own enabled flag and
+// permitted_actions stay as they were: the operator switched bash off, and
+// shell-exec being on must not switch it back on.
 func TestV12MergesRetiredToolIntoCanonical(t *testing.T) {
 	m := decodeV12(t, v11MergeManifest)
 	if hasTool(m, "shell-exec") {
 		t.Fatal("shell-exec definition should be folded into bash")
 	}
 	bash := toolByID(t, m, "bash")
-	if !bash.RequiresApproval || bash.TimeoutSec != 300 || bash.RiskLevel != "high" || !bash.Enabled {
+	if !bash.RequiresApproval || bash.TimeoutSec != 300 || bash.RiskLevel != "high" || bash.Enabled {
 		t.Fatalf("merged bash = approval %v, timeout %d, risk %s, enabled %v", bash.RequiresApproval, bash.TimeoutSec, bash.RiskLevel, bash.Enabled)
 	}
 	if !slices.Equal(bash.PermittedActions, []string{"execute"}) {
@@ -301,20 +302,17 @@ permitted_actions = ["read", "search"]
 	}
 }
 
-// Tool-level rules follow the rename, so a deny on shell-exec keeps denying
-// the tool; command rules (execute) are patterns over commands and stay.
-func TestV12RewritesToolRules(t *testing.T) {
+// Rules stay as written: one naming a retired tool decided only whether that
+// tool could be called, which the allow-lists now carry.
+func TestV12KeepsRulesAsWritten(t *testing.T) {
 	m := decodeV12(t, v11MergeManifest)
 	rt := m.Runtime.PermissionRules
-	if rt[0].Pattern != "bash" || rt[0].Action != RuleDeny {
-		t.Fatalf("runtime tool rule = %+v, want deny on bash", rt[0])
-	}
-	if rt[1].Pattern != "shell-exec" {
-		t.Fatalf("execute rule rewritten: %+v", rt[1])
+	if len(rt) != 2 || rt[0].Pattern != "shell-exec" || rt[1].Pattern != "shell-exec" {
+		t.Fatalf("runtime rules rewritten: %+v", rt)
 	}
 	coder, _ := m.AgentByID("coder")
-	if coder.PermissionRules[0].Pattern != "bash" {
-		t.Fatalf("agent * rule = %+v, want pattern bash", coder.PermissionRules[0])
+	if coder.PermissionRules[0].Pattern != "shell-exec" {
+		t.Fatalf("agent rule rewritten: %+v", coder.PermissionRules[0])
 	}
 }
 
