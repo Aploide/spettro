@@ -1026,8 +1026,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		// block until the user actually answers (or declines). The manifest's
 		// timeout_sec bounds tool execution, not human attention.
 		out, err := r.execute(ctx, call, allowed)
-		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
-		return out, err
+		return r.finishToolCall(ctx, call, out, err), err
 	}
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
@@ -1052,8 +1051,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	out, err := r.execute(tctx, call, allowed)
-	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
-	return out, err
+	return r.finishToolCall(tctx, call, out, err), err
 }
 
 // blocksOnUserInput reports whether a tool's execution is a wait on the human,

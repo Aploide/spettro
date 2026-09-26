@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"spettro/internal/hooks"
 )
 
 // Typographic characters, spelled by code point so the source stays ASCII.
@@ -285,6 +287,17 @@ func TestEditDiffSummary(t *testing.T) {
 	}
 	if strings.Contains(got, "\r") || strings.Contains(got, "+++") {
 		t.Fatalf("summary has CR or file headers:\n%s", got)
+	}
+	// Only the file header is dropped, not content lines that look like it.
+	sql := editDiffSummary("a.sql", "SELECT 1;\n-- old comment\nSELECT 2;\n", "SELECT 1;\nSELECT 2;\n++ y\n")
+	for _, want := range []string{"diff (+1 -1 lines):", "\n--- old comment", "\n+++ y"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("sql summary lacks %q:\n%s", want, sql)
+		}
+	}
+	huge := strings.Repeat("x", 1<<20+1)
+	if got := editDiffSummary("h.txt", huge, huge+"y"); !strings.HasPrefix(got, "diff not shown: diff too large") {
+		t.Fatalf("oversized summary: %q", got)
 	}
 	var before, after strings.Builder
 	for i := range 200 {
@@ -664,5 +677,54 @@ func TestBlockAnchorScalesOnCommonAnchors(t *testing.T) {
 	blockAnchorBudget = 1000
 	if spans := findBlockAnchor(newEditMatcher(content, 0), newEditQuery(q.String(), "x")); spans != nil {
 		t.Fatalf("over budget still matched: %+v", spans)
+	}
+}
+
+func TestPostToolHookRewriteRestampsFile(t *testing.T) {
+	ctx := context.Background()
+	rt, dir := newEditTestRuntime(t)
+	path := writeTestFile(t, dir, "f.go", "a := 1\nb := 2\n")
+	// A formatter-like hook that rewrites the file after every write tool.
+	rt.hooksConfig = hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
+		hookRule("fmt", hooks.EventPostToolUse, "re:^(file-edit|multi-edit|file-write)$", "echo '// formatted' >> '"+path+"'"),
+	}}
+	allowed := map[string]struct{}{"file-read": {}, "file-edit": {}, "multi-edit": {}}
+	call := func(tool string, args map[string]any) (string, error) {
+		raw, _ := json.Marshal(args)
+		return rt.executeWithTimeout(ctx, toolCall{Tool: tool, Args: raw}, allowed)
+	}
+	if _, err := call("file-read", map[string]any{"path": "f.go"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := call("file-edit", map[string]any{"path": "f.go", "old_string": "a := 1", "new_string": "a := 10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "PostToolUse hook rewrote f.go") {
+		t.Fatalf("no hook note:\n%s", out)
+	}
+	// The hook's rewrite is the agent's own; the next edits pass the guard.
+	if _, err := call("file-edit", map[string]any{"path": "f.go", "old_string": "b := 2", "new_string": "b := 20"}); err != nil {
+		t.Fatalf("edit after hook: %v", err)
+	}
+	if _, err := call("multi-edit", map[string]any{"path": "f.go", "edits": []map[string]any{{"old_string": "a := 10", "new_string": "a := 11"}}}); err != nil {
+		t.Fatalf("multi-edit after hook: %v", err)
+	}
+	if got := readTestFile(t, path); !strings.HasPrefix(got, "a := 11\nb := 20\n// formatted\n") {
+		t.Fatalf("file: %q", got)
+	}
+
+	// A change by someone else before the hook ran is not absorbed.
+	raw, _ := json.Marshal(map[string]any{"path": "f.go", "old_string": "a := 11", "new_string": "a := 12"})
+	out, err = rt.execute(ctx, toolCall{Tool: "file-edit", Args: raw}, allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, "f.go", "user rewrote it\n")
+	if got := rt.finishToolCall(ctx, toolCall{Tool: "file-edit", Args: raw}, out, nil); strings.Contains(got, "hook rewrote") {
+		t.Fatalf("outside change reported as a hook rewrite:\n%s", got)
+	}
+	if _, err := call("file-edit", map[string]any{"path": "f.go", "old_string": "user", "new_string": "agent"}); err == nil || !strings.Contains(err.Error(), "modified on disk") {
+		t.Fatalf("outside change slipped past the guard: %v", err)
 	}
 }

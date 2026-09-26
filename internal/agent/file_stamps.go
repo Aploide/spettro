@@ -61,6 +61,14 @@ func (r *toolRuntime) stampFromDisk(rel, abs string) {
 	}
 }
 
+// stampMatches reports whether rel is stamped with exactly content.
+func (r *toolRuntime) stampMatches(rel string, content []byte) bool {
+	r.mu.Lock()
+	sum, ok := r.fileStamps[rel]
+	r.mu.Unlock()
+	return ok && sum == sha256.Sum256(content)
+}
+
 // hasFileStamp reports whether the agent has seen rel in full.
 func (r *toolRuntime) hasFileStamp(rel string) bool {
 	r.mu.Lock()
@@ -114,13 +122,18 @@ func editDiffSummary(rel, before, after string) string {
 	if d == "" {
 		return "no changes (new_string produced identical content)"
 	}
+	// Drop the "--- a/..." and "+++ b/..." header, and only it: a removed
+	// "-- comment" line (SQL, Lua) also renders as "--- comment".
 	lines := strings.Split(strings.TrimRight(d, "\n"), "\n")
+	lines = lines[min(2, len(lines)):]
+	if len(lines) > 0 && !strings.HasPrefix(lines[0], "@@") {
+		// diff.Unified's one-line summary for oversized files.
+		return "diff not shown: " + strings.Trim(lines[0], "()")
+	}
 	var body []string
 	adds, dels := 0, 0
 	for _, l := range lines {
 		switch {
-		case strings.HasPrefix(l, "--- ") || strings.HasPrefix(l, "+++ "):
-			continue
 		case strings.HasPrefix(l, "+"):
 			adds++
 		case strings.HasPrefix(l, "-"):
