@@ -25,7 +25,13 @@ snapshot: `ls`, `cat`, `head`, `grep`/`rg`, `find` without `-delete`/`-exec`,
 pipelines of those. The classifier is deliberately narrow: anything else —
 build and test runners (`go test` can write golden files), interpreters,
 redirections into files, command substitution, background jobs — still
-snapshots first.
+snapshots first. So does a command prefixed with an environment assignment
+other than a locale or display setting (`GIT_EXTERNAL_DIFF=… git diff`,
+`GOFLAGS=… go vet`), `go vet`/`list` with any `-mod`/`-modfile` flag (which
+can rewrite `go.mod` and `go.sum`), and `git`/`go` when the inherited
+environment sets `GIT_EXTERNAL_DIFF`, `GIT_CONFIG_COUNT`,
+`GIT_CONFIG_PARAMETERS`, or a `GOFLAGS` (from the environment or `go env -w`)
+with `-mod`, `-modfile`, `-toolexec` or `-vettool`.
 
 Sub-agents running in their own git worktree (`isolation: "worktree"`) do not
 snapshot the main checkout, since their edits land outside it; instead a

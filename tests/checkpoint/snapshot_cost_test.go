@@ -214,3 +214,47 @@ func TestFilesChangedCountsDelta(t *testing.T) {
 		t.Fatalf("file added after the checkpoint survived restore")
 	}
 }
+
+// Two sessions on one project share the checkpoint list but each remembers
+// its own last conversation. When a session returns to a conversation it
+// stored earlier on an unchanged tree, the new entry must name a blob that
+// exists, not a fresh key that was never written.
+func TestSharedConversationKeyExistsAcrossSessions(t *testing.T) {
+	global := t.TempDir()
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "a.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s1, err := checkpoint.Open(global, project)
+	if err != nil {
+		t.Fatalf("open s1: %v", err)
+	}
+	s2, err := checkpoint.Open(global, project)
+	if err != nil {
+		t.Fatalf("open s2: %v", err)
+	}
+	conv1, conv2 := []byte("conversation one"), []byte("conversation two")
+	steps := []struct {
+		cp   *checkpoint.Checkpointer
+		conv []byte
+	}{{s1, conv1}, {s2, conv2}, {s1, conv1}, {s2, conv2}}
+	for i, step := range steps {
+		got, err := step.cp.Snapshot("bash", "p", step.conv)
+		if err != nil {
+			t.Fatalf("snapshot %d: %v", i, err)
+		}
+		data, err := step.cp.Conversation(got.ConvKey())
+		if err != nil || string(data) != string(step.conv) {
+			t.Fatalf("snapshot %d: conversation %q = %q, %v; want %q", i, got.ConvKey(), data, err, step.conv)
+		}
+	}
+	list, err := s1.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, entry := range list {
+		if data, err := s1.Conversation(entry.ConvKey()); err != nil || data == nil {
+			t.Errorf("list entry %d names conversation %q with no blob (%v)", i, entry.ConvKey(), err)
+		}
+	}
+}

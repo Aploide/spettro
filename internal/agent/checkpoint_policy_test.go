@@ -9,7 +9,18 @@ import (
 	"testing"
 )
 
+// isolateClassifierEnv clears the inherited settings the classifier reads,
+// so the verdicts below do not depend on the developer's environment.
+func isolateClassifierEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GOFLAGS", "")
+	for _, name := range []string{"GIT_EXTERNAL_DIFF", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		t.Setenv(name, "")
+	}
+}
+
 func TestReadOnlyShellCommandClassifier(t *testing.T) {
+	isolateClassifierEnv(t)
 	readOnly := []string{
 		"ls -la",
 		"pwd",
@@ -33,6 +44,7 @@ func TestReadOnlyShellCommandClassifier(t *testing.T) {
 		"wc -l *.go 2>/dev/null",
 		"ls missing 2>&1 | head",
 		"LC_ALL=C sort -u names.txt",
+		"LANG=C TZ=UTC git log -1",
 		"echo done",
 		"tree -L 2",
 	}
@@ -83,6 +95,23 @@ func TestReadOnlyShellCommandClassifier(t *testing.T) {
 		"(cd sub; ls)",
 		"env -i rm x",
 		"FOO=1 rm x",
+		// Env prefixes are the environment form of flags the classifier
+		// refuses (git -c, go -toolexec): they run programs or write files.
+		"GIT_EXTERNAL_DIFF=./x.sh git diff",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=./x git diff",
+		"GIT_CONFIG_PARAMETERS=\"'diff.external'='./x'\" git diff",
+		"GOFLAGS=-toolexec=./x go vet ./...",
+		"GOFLAGS=-mod=mod go list ./...",
+		"LC_ALL=C GIT_EXTERNAL_DIFF=./x git diff",
+		"env git status",
+		"env GIT_EXTERNAL_DIFF=./x git diff",
+		"LC_ALL=C",
+		// -mod=mod and -modfile rewrite go.mod/go.sum.
+		"go vet -mod=mod ./...",
+		"go list -mod mod ./...",
+		"go list --mod=mod -m all",
+		"go vet -modfile=alt.mod ./...",
+		"go vet -mod=readonly ./...",
 	}
 	for _, cmd := range mutating {
 		if isReadOnlyShellCommand(cmd) {
@@ -91,7 +120,62 @@ func TestReadOnlyShellCommandClassifier(t *testing.T) {
 	}
 }
 
+// Inherited settings that make read-only git and go commands run programs or
+// rewrite go.mod turn them mutating too.
+func TestReadOnlyClassifierInheritedEnv(t *testing.T) {
+	isolateClassifierEnv(t)
+	t.Setenv("GOENV", filepath.Join(t.TempDir(), "missing"))
+	if !isReadOnlyShellCommand("git diff") || !isReadOnlyShellCommand("go vet ./...") {
+		t.Fatal("baseline: git diff / go vet should be read-only in a clean environment")
+	}
+
+	for _, name := range []string{"GIT_EXTERNAL_DIFF", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "1")
+			if isReadOnlyShellCommand("git diff") {
+				t.Errorf("git diff with %s set: classified read-only", name)
+			}
+		})
+	}
+	for _, flags := range []string{"-mod=mod", "-modfile=x.mod", "-trimpath -toolexec=./x"} {
+		t.Run("GOFLAGS "+flags, func(t *testing.T) {
+			t.Setenv("GOFLAGS", flags)
+			for _, cmd := range []string{"go vet ./...", "go list ./..."} {
+				if isReadOnlyShellCommand(cmd) {
+					t.Errorf("%q with GOFLAGS=%q: classified read-only", cmd, flags)
+				}
+			}
+		})
+	}
+	t.Run("GOFLAGS harmless", func(t *testing.T) {
+		t.Setenv("GOFLAGS", "-trimpath")
+		if !isReadOnlyShellCommand("go vet ./...") {
+			t.Error("go vet with GOFLAGS=-trimpath: classified mutating")
+		}
+	})
+
+	// `go env -w GOFLAGS=-mod=mod` persists in the go env file, which
+	// applies when the variable is not set in the environment.
+	t.Run("go env file", func(t *testing.T) {
+		envFile := filepath.Join(t.TempDir(), "env")
+		if err := os.WriteFile(envFile, []byte("GOPROXY=direct\nGOFLAGS=-mod=mod\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GOENV", envFile)
+		t.Setenv("GOFLAGS", "") // registers the restore for the Unsetenv below
+		os.Unsetenv("GOFLAGS")
+		if isReadOnlyShellCommand("go vet ./...") {
+			t.Error("go vet with GOFLAGS=-mod=mod in the go env file: classified read-only")
+		}
+		t.Setenv("GOFLAGS", "")
+		if !isReadOnlyShellCommand("go vet ./...") {
+			t.Error("an explicit empty GOFLAGS overrides the go env file")
+		}
+	})
+}
+
 func TestNeedsCheckpoint(t *testing.T) {
+	isolateClassifierEnv(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("the read-only classifier covers POSIX shells only")
 	}

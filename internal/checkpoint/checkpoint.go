@@ -394,8 +394,12 @@ func (c *Checkpointer) storeConversation(cp *Checkpoint, conversation []byte) er
 	sum := sha256.Sum256(conversation)
 	if c.lastConv.key != "" && c.lastConv.sum == sum {
 		if _, err := os.Stat(c.convPath(c.lastConv.key)); err == nil {
-			if c.lastConv.key != cp.ID {
-				cp.Conv = c.lastConv.key
+			// Always overwrite cp.Conv: an unchanged-tree entry arrives with
+			// a fresh "<id>-N" key that is never written on this path, so
+			// leaving it would name a blob that does not exist.
+			cp.Conv = c.lastConv.key
+			if cp.Conv == cp.ID {
+				cp.Conv = ""
 			}
 			return nil
 		}

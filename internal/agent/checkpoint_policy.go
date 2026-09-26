@@ -2,7 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -126,12 +128,40 @@ func isReadOnlyShellCommand(command string) bool {
 		if segmentHasUnsafeShellFeatures(seg) {
 			return false
 		}
-		tokens := commandTokens(seg)
-		if len(tokens) == 0 || !readOnlyCommand(tokens) {
+		tokens := slices.DeleteFunc(lexShellTokens(seg), func(t string) bool { return t == "" })
+		if len(tokens) == 0 {
+			return false
+		}
+		// A leading VAR=value or `env` can change what the command does
+		// (GIT_EXTERNAL_DIFF, GIT_CONFIG_*, GOFLAGS=-toolexec=… run programs
+		// or rewrite files), and the classifier only reads argv: only
+		// locale and display settings pass.
+		for len(tokens) > 0 && looksLikeEnvAssignment(tokens[0]) {
+			if !harmlessEnvAssignment(tokens[0]) {
+				return false
+			}
+			tokens = tokens[1:]
+		}
+		if len(tokens) == 0 || tokens[0] == "env" {
+			return false
+		}
+		if !readOnlyCommand(tokens) {
 			return false
 		}
 	}
 	return true
+}
+
+// harmlessEnvAssignment reports whether a leading VAR=value only affects
+// formatting (locale, time zone, colour, width), never which programs run or
+// which files are written.
+func harmlessEnvAssignment(t string) bool {
+	name, _, _ := strings.Cut(t, "=")
+	switch name {
+	case "LANG", "LANGUAGE", "TZ", "NO_COLOR", "COLUMNS":
+		return true
+	}
+	return strings.HasPrefix(name, "LC_")
 }
 
 // readOnlyCommands never write files, whatever their arguments (output only
@@ -156,8 +186,8 @@ var readOnlyGitCommands = map[string]bool{
 // "1p;$p"): the form the prompt recommends for reading part of a file.
 var sedPrintScript = regexp.MustCompile(`^((\d+|\$)(,(\d+|\$))?p;?)+$`)
 
-// readOnlyCommand classifies one command's tokens (leading env assignments
-// already stripped).
+// readOnlyCommand classifies one command's tokens (the caller has rejected
+// leading env assignments).
 func readOnlyCommand(tokens []string) bool {
 	name := path.Base(tokens[0])
 	args := tokens[1:]
@@ -221,6 +251,9 @@ func readOnlySed(args []string) bool {
 // global options. `-c` is refused: it can point diff.external or a pager at
 // an arbitrary program.
 func readOnlyGit(args []string) bool {
+	if gitEnvRunsPrograms() {
+		return false
+	}
 	i := 0
 	for i < len(args) && strings.HasPrefix(args[i], "-") {
 		switch args[i] {
@@ -265,6 +298,59 @@ func readOnlyGit(args []string) bool {
 	return false
 }
 
+// gitEnvRunsPrograms reports whether the inherited environment configures
+// git to run an external program on read-only commands (the environment
+// forms of the `-c` readOnlyGit refuses).
+func gitEnvRunsPrograms() bool {
+	for _, name := range []string{"GIT_EXTERNAL_DIFF", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// unsafeGoFlag reports whether a go flag can run a program (-toolexec,
+// -vettool) or write the module files: -mod=mod rewrites go.mod and go.sum,
+// -modfile points them elsewhere. Every -mod* spelling is refused, including
+// the harmless -mod=readonly, to keep the check simple.
+func unsafeGoFlag(a string) bool {
+	if !strings.HasPrefix(a, "-") {
+		return false
+	}
+	a = strings.TrimLeft(a, "-")
+	return strings.HasPrefix(a, "toolexec") || strings.HasPrefix(a, "vettool") || strings.HasPrefix(a, "mod")
+}
+
+// goEnvFlags returns GOFLAGS as the go command would see it from the
+// environment or, when unset there, from the `go env -w` config file.
+func goEnvFlags() string {
+	if v, ok := os.LookupEnv("GOFLAGS"); ok {
+		return v
+	}
+	file := os.Getenv("GOENV")
+	if file == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
+		file = filepath.Join(dir, "go", "env")
+	}
+	if file == "off" {
+		return ""
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return ""
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "GOFLAGS="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // readOnlyGo accepts go subcommands that only read the module. go build and
 // go test are out: build drops a binary in the package directory and tests
 // may write fixtures and golden files.
@@ -272,11 +358,12 @@ func readOnlyGo(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	// -toolexec and -vettool run an arbitrary program.
-	if slices.ContainsFunc(args, func(a string) bool {
-		a = strings.TrimLeft(a, "-")
-		return strings.HasPrefix(a, "toolexec") || strings.HasPrefix(a, "vettool")
-	}) {
+	if slices.ContainsFunc(args, unsafeGoFlag) {
+		return false
+	}
+	// GOFLAGS applies its flags as if typed on the command line
+	// (GOFLAGS=-mod=mod makes go list and go vet rewrite go.mod).
+	if slices.ContainsFunc(strings.Fields(goEnvFlags()), unsafeGoFlag) {
 		return false
 	}
 	switch args[0] {
