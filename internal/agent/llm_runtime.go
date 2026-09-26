@@ -768,15 +768,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			for i, tc := range resp.ToolCalls {
 				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
 			}
-			// Loop check before execution: an abort skips the repeated calls
-			// entirely (the assistant turn is not yet in the history, so the
-			// carried prefix stays valid); a nudge lets the step run and is
-			// injected alongside the tool results below.
-			loopAct := runtime.loopDetect.observe(internalCalls, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
 			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			// Loop check after execution: the signature includes each result,
+			// so re-running a command whose output changes (edit → test) is
+			// progress; only the same call with the same result repeats. On
+			// abort the results are still recorded below, keeping the
+			// history a valid prefix.
+			loopAct := runtime.loopDetect.observe(internalCalls, results, main)
 			convMsgs = append(convMsgs, provider.Message{
 				Role:      provider.RoleAssistant,
 				Content:   main,
@@ -805,6 +803,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				}
 			}
 			convMsgs = append(convMsgs, resultsMsg)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			if runtime.shouldStop() {
 				return finish(runtime.stopMessage(), false, "")
 			}
