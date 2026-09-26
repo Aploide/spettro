@@ -36,6 +36,7 @@ The pack is split along the orchestrator vs worker contract:
 ## Usage
 
 - Set `prompt_file = "agents/<name>.md"` in each `[[agents]]` block.
+- These files are embedded into the binary (`embed.go`), so every agent gets its full prompt in any project. A project can override one by shipping its own file at the same `prompt_file` path relative to its working directory; the one-line `description` is used only when neither exists.
 - Keep `system_prompt` empty when using `prompt_file` as source of truth.
 - Prompts define mission/scope, tool contracts, execution protocol, output contract, and escalation/safety rules.
 - The contract that `plan` cannot read files directly (no `glob`/`grep`/`file-read`) is enforced both in the manifest (allowed_tools) AND in `tests/config/manifest_test.go`; don't reintroduce read tools to `plan` without updating both.

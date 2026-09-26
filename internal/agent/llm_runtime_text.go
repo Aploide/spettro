@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	agentprompts "spettro/agents"
 )
 
 func stripThinkTags(content string) (main, thinking string) {
@@ -45,14 +47,37 @@ func stripFrontmatter(content string) string {
 	return strings.TrimSpace(after)
 }
 
+// loadPromptOrFallback resolves an agent's system prompt from its manifest
+// prompt_file, in order of precedence:
+//
+//  1. a project override at <cwd>/<relative> (or the absolute path itself),
+//  2. the built-in prompt embedded in the binary (agents/*.md),
+//  3. fallback (typically the agent's one-line description).
+//
+// Before the embedded pack existed only step 1 ran, so outside the Spettro
+// repo every agent's whole system prompt was its description.
 func loadPromptOrFallback(cwd, relative, fallback string) string {
-	if strings.TrimSpace(cwd) != "" && strings.TrimSpace(relative) != "" {
-		p := filepath.Join(cwd, relative)
+	relative = strings.TrimSpace(relative)
+	if relative == "" {
+		return fallback
+	}
+	p := relative
+	if !filepath.IsAbs(p) {
+		p = ""
+		if strings.TrimSpace(cwd) != "" {
+			p = filepath.Join(cwd, relative)
+		}
+	}
+	if p != "" {
 		if data, err := os.ReadFile(p); err == nil {
-			text := strings.TrimSpace(string(data))
-			if text != "" {
+			if text := strings.TrimSpace(string(data)); text != "" {
 				return stripFrontmatter(text)
 			}
+		}
+	}
+	if text, ok := agentprompts.Prompt(relative); ok {
+		if text = strings.TrimSpace(text); text != "" {
+			return stripFrontmatter(text)
 		}
 	}
 	return fallback
