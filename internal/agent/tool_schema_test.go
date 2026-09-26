@@ -64,13 +64,13 @@ func TestCoreToolParamsDocumented(t *testing.T) {
 
 func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 	cases := map[string][]string{
-		"file-edit":  {"read the file first", "refused if it changed", "byte for byte", "exactly one location", "replace_all", "line-number prefix", "edits[]", "Cannot create files"},
+		"file-edit":  {"read the file first", "refused if it changed", "your own shell commands", "byte for byte", "exactly one location", "replace_all", "line-number prefix", "edits[]", "Cannot create files"},
 		"file-write": {"refused unless you read it", "prefer file-edit"},
 		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "60,000", "before editing or overwriting"},
-		"grep":       {"RE2", "path", "max_results", "default 200", "symbol"},
-		"glob":       {"**/*.go", "at most 1000", "Without a pattern"},
+		"grep":       {"RE2", "path", "max_results", "default 200", "symbol", "case-insensitive literal", "don't apply", "file names at any depth"},
+		"glob":       {"**/*.go", "only top-level files", "at most 1000", "Without a pattern"},
 		"bash":       {"timeout", "max 600", "run_in_background", "fresh process", "file-read", "[exit status N]", "30,000", "tool-output", "pty-start"},
-		"todo-write": {"merge=true", "delete", "clear_completed", "no arguments"},
+		"todo-write": {"merge=true", "delete", "clear_completed", "no arguments", "unknown ids are dropped", "cannot start or complete before"},
 	}
 	for name, needles := range cases {
 		desc := builtinNativeToolDescs[name]
