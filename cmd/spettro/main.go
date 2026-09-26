@@ -17,6 +17,7 @@ import (
 	"spettro/internal/provider"
 	"spettro/internal/pty"
 	"spettro/internal/sandbox"
+	"spettro/internal/shell"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
 	"spettro/internal/update"
@@ -27,6 +28,11 @@ func main() {
 	// (see internal/sandbox); it must run before any flag parsing. No-op
 	// otherwise.
 	sandbox.RunChildIfRequested()
+
+	// Foreground shell commands run in their own process groups, so the
+	// SIGHUP a closing terminal sends spettro's group never reaches them;
+	// kill them on the way out instead of leaving them orphaned.
+	shell.KillProcessTreesOnHangup()
 
 	// Subcommands run before flag parsing (the flag set below is for the
 	// TUI/headless modes). `spettro clean` works entirely without the TUI.
@@ -161,6 +167,9 @@ func main() {
 	// Background shell jobs are detached into their own process groups, so
 	// they would outlive spettro unless killed explicitly on session exit.
 	jobs.Default().KillAll()
+	// So do foreground commands still running when the TUI quits (SIGTERM,
+	// or a quit while a tool call is in flight).
+	shell.KillAllProcessTrees()
 	// Interactive PTY sessions are session state for the same reason.
 	pty.Default().KillAll()
 	// Spooled tool outputs are session state too; delete them with the session.

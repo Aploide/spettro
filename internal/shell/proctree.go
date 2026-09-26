@@ -1,7 +1,9 @@
 package shell
 
 import (
+	"bytes"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -39,4 +41,37 @@ func KillProcessTree(cmd *exec.Cmd) error {
 		return nil
 	}
 	return killProcessTree(cmd)
+}
+
+// liveTrees holds the commands started by CombinedOutput that are still
+// running. Each runs in its own process group, out of reach of signals aimed at
+// spettro's own job, so they are killed explicitly when spettro goes away
+// (KillAllProcessTrees, KillProcessTreesOnHangup).
+var liveTrees sync.Map // *exec.Cmd -> struct{}
+
+// CombinedOutput is cmd.CombinedOutput for a command configured with
+// ConfigureProcessTree, recording the command's tree as live while it runs so
+// KillAllProcessTrees can reach it.
+func CombinedOutput(cmd *exec.Cmd) ([]byte, error) {
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	liveTrees.Store(cmd, struct{}{})
+	err := cmd.Wait()
+	liveTrees.Delete(cmd)
+	return buf.Bytes(), err
+}
+
+// KillAllProcessTrees kills every command tree CombinedOutput is still
+// running. spettro calls it on the way out: without it a foreground command
+// in its own process group (a hung test run, a dev server) would outlive the
+// session.
+func KillAllProcessTrees() {
+	liveTrees.Range(func(key, _ any) bool {
+		_ = KillProcessTree(key.(*exec.Cmd))
+		return true
+	})
 }

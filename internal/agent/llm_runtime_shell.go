@@ -103,7 +103,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// the output pipes: a grandchild holding stdout (go test's test binaries,
 	// a server started with &) can no longer hang the call past its deadline.
 	shell.ConfigureProcessTree(cmd)
-	out, err := cmd.CombinedOutput()
+	out, err := shell.CombinedOutput(cmd)
 	text := r.spoolResult(toolID, string(out))
 	status := shellFailureStatus(runCtx, cmd, err, timeout)
 	if status == "" {
