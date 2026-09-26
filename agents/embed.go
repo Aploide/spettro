@@ -1,7 +1,8 @@
 // Package agents embeds the built-in agent prompt pack (the *.md files in this
 // directory) into the binary, so every agent gets its full system prompt no
 // matter which directory Spettro is started in. A project can still override a
-// prompt by shipping its own copy at the manifest's prompt_file path.
+// prompt with .spettro/<prompt_file>, or with the plain prompt_file path when it
+// ships its own spettro.agents.toml (see loadPromptOrFallback).
 package agents
 
 import (
