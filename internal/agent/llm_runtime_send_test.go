@@ -458,3 +458,21 @@ func TestUsageCalibration(t *testing.T) {
 		t.Fatalf("after empty report = %d", got)
 	}
 }
+
+// An overflow on a short history (nothing to compact) whose error states a
+// smaller window than the request was sized for is resent once with that
+// window, instead of failing the run.
+func TestRunToolLoopOverflowWithNothingToCompactResendsWithLearnedWindow(t *testing.T) {
+	fastRetries(t)
+	pm, url, ls := newLoopServer(t,
+		loopReply{status: http.StatusBadRequest, errMsg: "input length and max_tokens exceed context limit: 188240 + 32000 > 200000"},
+		loopReply{content: "done"},
+	)
+	res, err := runToolLoop(context.Background(), loopCfg(t, pm, url))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.content != "done" || len(ls.requests()) != 2 {
+		t.Fatalf("content = %q after %d requests", res.content, len(ls.requests()))
+	}
+}

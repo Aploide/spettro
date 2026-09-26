@@ -169,6 +169,10 @@ type NativeTool struct {
 	// valid history entry; the tool runtime must not execute the call and
 	// instead feeds ArgsError back to the model as the tool's error result.
 	ArgsError string `json:"args_error,omitempty"`
+	// RawArgs keeps the model's argument text when ArgsError is set, so a
+	// caller can still tell two failed calls apart (Args is "{}" for both).
+	// It is not persisted or sent back to a provider.
+	RawArgs string `json:"-"`
 }
 
 // ToolResult is the executed output of a NativeTool, fed back in the next turn.
@@ -230,6 +234,12 @@ type Message struct {
 	// so a later run carrying this history keeps enforcing it. Never sent to
 	// a provider.
 	FileStamps []FileStamp `json:",omitempty"`
+	// SessionContext, on a conversation's first message, is the environment
+	// and project-instructions snapshot taken when the conversation started
+	// (the tail of its system prompt). Carrying it with the conversation keeps
+	// the system prompt byte-stable across turns without sharing it between
+	// conversations. Never sent to a provider as message content.
+	SessionContext string `json:",omitempty"`
 }
 
 // FileStamp is one file's stale-read guard state: the SHA-256 (hex) of the

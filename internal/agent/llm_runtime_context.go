@@ -5,11 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
 	"spettro/internal/homedir"
+	"spettro/internal/provider"
 )
 
 // Project instruction files, loaded from every directory between the git root
@@ -33,11 +33,6 @@ const (
 	envListingMaxEntries = 40
 )
 
-var (
-	sessionContextMu    sync.Mutex
-	sessionContextCache = map[string]string{}
-)
-
 // sessionContextFor returns the environment and project-instructions sections
 // appended to cfg's system prompt. They are a snapshot taken when a
 // conversation starts and reused for the rest of it: the system prompt must
@@ -45,44 +40,48 @@ var (
 // on it), so the date, branch, listing and instruction files are not
 // refreshed mid-conversation.
 //
-//   - A top-level run with no carried messages starts a conversation (a new
-//     session, /clear, an ACP session/new): it takes a fresh snapshot, so
-//     instruction files written since (e.g. by /init), a branch switch or a
-//     new day show up without restarting a long-lived process.
-//   - A top-level run continuing a conversation reuses the snapshot its first
-//     turn took.
-//   - Sub-agents reuse their parent's snapshot for the same directory (keeping
-//     sibling prompts identical) and never store one of their own, so
-//     per-worktree sub-agents don't grow the cache.
+//   - A top-level run continuing a conversation reuses the snapshot carried
+//     on its messages (provider.Message.SessionContext, attached by the run
+//     that started it). Each conversation carries its own, so several
+//     conversations in one directory (ACP sessions) never disturb each other.
+//   - A top-level run with no carried snapshot — a new session, /clear, an
+//     ACP session/new, or a history from before snapshots were carried —
+//     takes a fresh one, so instruction files written since (e.g. by /init),
+//     a branch switch or a new day show up without restarting the process.
+//   - Sub-agents reuse their parent's snapshot when they run in the parent's
+//     directory (keeping sibling prompts identical), and build their own for
+//     another directory (a worktree).
 func sessionContextFor(cfg toolLoopConfig) string {
-	switch {
-	case cfg.DelegationDepth > 0:
-		return sessionContext(cfg.CWD, false, false)
-	case len(cfg.Messages) == 0:
-		return sessionContext(cfg.CWD, true, true)
-	default:
-		return sessionContext(cfg.CWD, false, true)
+	if cfg.DelegationDepth > 0 {
+		if cfg.parentSnapshot != "" && filepath.Clean(cfg.CWD) == filepath.Clean(cfg.parentCWD) {
+			return cfg.parentSnapshot
+		}
+		return freshSessionContext(cfg.CWD)
 	}
+	if snap := carriedSessionContext(cfg.Messages); snap != "" {
+		return snap
+	}
+	return freshSessionContext(cfg.CWD)
 }
 
-// sessionContext returns the snapshot for cwd: rebuilt when refresh is set or
-// none is cached, and cached for later runs when store is set.
-func sessionContext(cwd string, refresh, store bool) string {
+// carriedSessionContext returns the snapshot a conversation carries, if any.
+func carriedSessionContext(msgs []provider.Message) string {
+	for _, m := range msgs {
+		if m.SessionContext != "" {
+			return m.SessionContext
+		}
+	}
+	return ""
+}
+
+// freshSessionContext builds a new snapshot for cwd.
+func freshSessionContext(cwd string) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return ""
 	}
-	sessionContextMu.Lock()
-	defer sessionContextMu.Unlock()
-	if v, ok := sessionContextCache[cwd]; ok && !refresh {
-		return v
-	}
 	home, _ := homedir.Dir()
-	v := buildSessionContext(cwd, home, time.Now())
-	if store {
-		sessionContextCache[cwd] = v
-	}
-	return v
+	return buildSessionContext(cwd, home, time.Now())
 }
 
 func buildSessionContext(cwd, home string, now time.Time) string {
@@ -367,11 +366,4 @@ func capInstructionText(text string, max int, hint string) string {
 		cut = cut[:i]
 	}
 	return cut + fmt.Sprintf("\n[... truncated: %d more bytes; %s]", len(text)-len(cut), hint)
-}
-
-// resetSessionContextForTesting clears the per-process snapshot.
-func resetSessionContextForTesting() {
-	sessionContextMu.Lock()
-	defer sessionContextMu.Unlock()
-	sessionContextCache = map[string]string{}
 }

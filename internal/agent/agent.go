@@ -224,6 +224,11 @@ type LLMAgent struct {
 	// (typically cfg.CompactConfig()). Zero value → defaults (enabled, 85%).
 	Compact compactpkg.Config
 
+	// parentSnapshot and parentCWD carry a parent run's environment
+	// snapshot to a sub-agent (set by the delegating runtime, never by hosts).
+	parentSnapshot string
+	parentCWD      string
+
 	// Steering, when set, lets the host inject user guidance while the run is
 	// executing: the tool loop drains it at every step boundary and appends
 	// each message as a user turn (append-only, so prompt caching still hits).
@@ -311,6 +316,8 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ModelName:           a.ModelName,
 		MaxTokens:           a.MaxTokens,
 		MaxOutputTokens:     a.MaxOutputTokens,
+		parentSnapshot:      a.parentSnapshot,
+		parentCWD:           a.parentCWD,
 		Thinking:            a.Thinking,
 		RequiredReads:       a.RequiredReads,
 		Images:              a.Images,

@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 
 	"spettro/internal/config"
+	"spettro/internal/provider"
 )
 
 // loopAction is the detector's verdict after observing one LLM step.
@@ -127,6 +129,24 @@ func callSignature(name string, args json.RawMessage, status, output string) str
 	return name + "\x00" + hex.EncodeToString(ah[:8]) + "\x00" + hex.EncodeToString(rh[:8])
 }
 
+// loopCalls converts a step's native tool calls to the calls the detector
+// signs. A call whose arguments could not be decoded carries "{}" and a fixed
+// error text, so it is signed by its raw argument text instead: truncated
+// writes to different files are different calls.
+func loopCalls(tcs []provider.NativeTool) []toolCall {
+	out := make([]toolCall, len(tcs))
+	for i, tc := range tcs {
+		args := tc.Args
+		if tc.ArgsError != "" && tc.RawArgs != "" {
+			if raw, err := json.Marshal(map[string]string{"unparsed_args": tc.RawArgs}); err == nil {
+				args = raw
+			}
+		}
+		out[i] = toolCall{Tool: tc.Name, Args: args}
+	}
+	return out
+}
+
 // observe records one executed LLM step — its tool calls with their results
 // (results[i] belongs to calls[i]; missing results hash as empty) and the
 // assistant text — and returns the action to take. Trips nudge (resetting
@@ -137,14 +157,30 @@ func (d *loopDetector) observe(calls []toolCall, results []parallelResult, text 
 	if d == nil || !d.enabled {
 		return loopOK
 	}
-	tripped := d.recordText(text)
-	hard := false
+	sigs := make([]string, len(calls))
+	progress := false
 	for i, c := range calls {
 		var status, output string
 		if i < len(results) {
 			status, output = results[i].status, results[i].output
 		}
-		if d.recordCall(callSignature(c.Tool, c.Args, status, output)) {
+		sigs[i] = callSignature(c.Tool, c.Args, status, output)
+		if sigs[i] != d.lastSig && !slices.Contains(d.window, sigs[i]) {
+			progress = true
+		}
+	}
+	// Repeated narration ("Let me run the tests again.") only signals a loop
+	// when the step made no progress either: a text-only step, or calls
+	// whose (call, result) pairs were all seen already.
+	tripped := false
+	if progress {
+		d.lastText, d.textRepeats = strings.TrimSpace(text), 0
+	} else {
+		tripped = d.recordText(text)
+	}
+	hard := false
+	for _, sig := range sigs {
+		if d.recordCall(sig) {
 			tripped = true
 		}
 		if d.identicalRun >= hardLoopRepeats {

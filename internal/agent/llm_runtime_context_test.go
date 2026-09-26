@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -239,27 +240,28 @@ func TestCapInstructionTextKeepsValidUTF8(t *testing.T) {
 
 // TestSystemStringCarriesFrozenSessionContext pins the cache contract: the
 // environment/instructions land in the system prompt, and editing an
-// instruction file mid-session does not change it.
+// instruction file mid-conversation does not change it — the snapshot rides
+// on the conversation's messages.
 func TestSystemStringCarriesFrozenSessionContext(t *testing.T) {
-	resetSessionContextForTesting()
-	t.Cleanup(resetSessionContextForTesting)
 	t.Setenv("HOME", t.TempDir())
 	cwd := t.TempDir()
 	writeFileAt(t, filepath.Join(cwd, "AGENTS.md"), "Run make check before finishing.")
 	cfg := toolLoopConfig{SystemPrompt: "You are a coder.", UserTask: "fix it", CWD: cwd}
 
-	first := buildSystemString(cfg)
+	snap := sessionContextFor(cfg)
+	first := buildSystemStringWith(cfg, snap)
 	if !strings.HasPrefix(first, "You are a coder.") || !strings.Contains(first, "Run make check before finishing.") || !strings.Contains(first, "- Working directory: "+cwd) {
 		t.Fatalf("system prompt missing session context:\n%s", first)
 	}
 	writeFileAt(t, filepath.Join(cwd, "AGENTS.md"), "CHANGED")
 	cont := cfg
-	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn"}}
+	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn", SessionContext: snap}}
 	if again := buildSystemString(cont); again != first {
 		t.Fatalf("system prompt must stay byte-stable within a conversation")
 	}
 	sub := cfg
 	sub.DelegationDepth = 1
+	sub.parentSnapshot, sub.parentCWD = snap, cwd
 	if got := buildSystemString(sub); got != first {
 		t.Fatalf("a sub-agent in the same directory must reuse its parent's snapshot")
 	}
@@ -277,51 +279,52 @@ func TestBuildSystemStringNoCommentNudge(t *testing.T) {
 	}
 }
 
-// TestSessionContextRefreshesOnNewConversation covers long-lived hosts (ACP,
-// the TUI after /clear or /init): a new conversation must see instruction
-// files written since the process started, while a continuing one keeps its
-// snapshot.
-func TestSessionContextRefreshesOnNewConversation(t *testing.T) {
-	resetSessionContextForTesting()
-	t.Cleanup(resetSessionContextForTesting)
+// TestSessionContextIsPerConversation covers long-lived hosts running
+// several conversations in one directory (ACP sessions): a new conversation
+// takes a fresh snapshot (instruction files written since, a new file), and
+// that must not leak into another conversation that is still going — its
+// system prompt, and so its provider prompt cache, stays as it began.
+func TestSessionContextIsPerConversation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cwd := t.TempDir()
-	cfg := toolLoopConfig{SystemPrompt: "base", CWD: cwd}
-	first := buildSystemString(cfg)
-	if strings.Contains(first, "# Project instructions") {
-		t.Fatalf("no instruction files yet:\n%s", first)
+	pm, url, ls := newLoopServer(t, loopReply{content: "a1"}, loopReply{content: "b1"}, loopReply{content: "a2"})
+	cfg := loopCfg(t, pm, url)
+	writeFileAt(t, filepath.Join(cfg.CWD, "a.txt"), "a")
+	resA, err := runToolLoop(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	writeFileAt(t, filepath.Join(cwd, "SPETTRO.md"), "Written by /init.")
-	cont := cfg
-	cont.Messages = []provider.Message{{Role: provider.RoleUser, Content: "earlier turn"}}
-	if got := buildSystemString(cont); got != first {
-		t.Fatalf("a continuing conversation must keep its snapshot")
+	writeFileAt(t, filepath.Join(cfg.CWD, "b.txt"), "b")
+	writeFileAt(t, filepath.Join(cfg.CWD, "SPETTRO.md"), "Written by /init.")
+	if _, err := runToolLoop(context.Background(), cfg); err != nil { // session B starts
+		t.Fatal(err)
 	}
-	sub := cfg
-	sub.DelegationDepth = 1
-	if got := buildSystemString(sub); got != first {
-		t.Fatalf("a sub-agent must reuse the stored snapshot")
+	contA := cfg
+	contA.Messages = resA.messages
+	contA.UserTask = "next"
+	if _, err := runToolLoop(context.Background(), contA); err != nil {
+		t.Fatal(err)
 	}
-
-	fresh := buildSystemString(cfg)
-	if !strings.Contains(fresh, "Written by /init.") {
-		t.Fatalf("a new conversation must take a fresh snapshot:\n%s", fresh)
+	reqs := ls.requests()
+	system := func(i int) string {
+		msgs, _ := reqs[i]["messages"].([]any)
+		first, _ := msgs[0].(map[string]any)
+		s, _ := first["content"].(string)
+		return s
 	}
-	if got := buildSystemString(cont); got != fresh {
-		t.Fatalf("later turns must reuse the newest conversation's snapshot")
+	if !strings.Contains(system(1), "Written by /init.") || !strings.Contains(system(1), "b.txt") {
+		t.Fatalf("a new conversation must take a fresh snapshot:\n%s", system(1))
+	}
+	if system(2) != system(0) {
+		t.Fatalf("conversation A's system prompt changed after B started:\n--- A1\n%s\n--- A2\n%s", system(0), system(2))
 	}
 }
 
-func TestSubAgentSnapshotIsNotCached(t *testing.T) {
-	resetSessionContextForTesting()
-	t.Cleanup(resetSessionContextForTesting)
-	worktree := t.TempDir()
-	buildSystemString(toolLoopConfig{SystemPrompt: "base", CWD: worktree, DelegationDepth: 1})
-	sessionContextMu.Lock()
-	n := len(sessionContextCache)
-	sessionContextMu.Unlock()
-	if n != 0 {
-		t.Fatalf("sub-agent runs must not grow the snapshot cache, have %d entries", n)
+// A sub-agent in another directory (a worktree) builds its own snapshot.
+func TestSubAgentInOtherDirectoryBuildsItsOwnSnapshot(t *testing.T) {
+	parent, worktree := t.TempDir(), t.TempDir()
+	cfg := toolLoopConfig{SystemPrompt: "base", CWD: worktree, DelegationDepth: 1}
+	cfg.parentSnapshot, cfg.parentCWD = sessionContextFor(toolLoopConfig{CWD: parent}), parent
+	if got := sessionContextFor(cfg); !strings.Contains(got, "- Working directory: "+worktree) {
+		t.Fatalf("worktree sub-agent snapshot:\n%s", got)
 	}
 }

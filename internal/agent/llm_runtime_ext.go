@@ -19,6 +19,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/mcp"
+	"spettro/internal/provider"
 	"spettro/internal/safeio"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
@@ -839,6 +840,22 @@ func (r *toolRuntime) runTaskStop(rawArgs []byte) (string, error) {
 	}
 	r.requestStop(reason)
 	return reason, nil
+}
+
+// setSubAgentThinking records the thinking level the model last accepted:
+// when the manager had to step a rejected level down, sub-agents start from
+// the accepted one instead of re-sending (and re-failing) the original.
+func (r *toolRuntime) setSubAgentThinking(level provider.ThinkingLevel) {
+	r.mu.Lock()
+	r.thinkingLevel = level
+	r.mu.Unlock()
+}
+
+// subAgentThinking is the thinking level a sub-agent starts from.
+func (r *toolRuntime) subAgentThinking() provider.ThinkingLevel {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.thinkingLevel
 }
 
 // requestStop ends the turn after the current batch of tool results is

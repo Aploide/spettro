@@ -120,6 +120,12 @@ func summarizeLoopToolArgs(name, args string) string {
 // the environment and project-instruction sections come from sessionContextFor,
 // which freezes them per conversation for exactly this reason.
 func buildSystemString(cfg toolLoopConfig) string {
+	return buildSystemStringWith(cfg, sessionContextFor(cfg))
+}
+
+// buildSystemStringWith is buildSystemString with the session snapshot
+// already taken.
+func buildSystemStringWith(cfg toolLoopConfig, sessionCtx string) string {
 	base := strings.TrimSpace(cfg.SystemPrompt)
 	if base == "" {
 		base = "You are an assistant."
@@ -127,7 +133,7 @@ func buildSystemString(cfg toolLoopConfig) string {
 	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
 		base = base + catalog
 	}
-	return base + sessionContextFor(cfg)
+	return base + sessionCtx
 }
 
 // buildInitialUserMessage returns the first user turn: optional prior-conversation

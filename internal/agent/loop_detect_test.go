@@ -8,6 +8,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/jobs"
+	"spettro/internal/provider"
 )
 
 func call(tool, args string) []toolCall {
@@ -243,5 +244,42 @@ func TestLoopDetectorIdenticalParallelBatchNudgesFirst(t *testing.T) {
 	}
 	if got := d.observe(call("file-read", `{"path":"a.go"}`), res("package a"), ""); got != loopAbort {
 		t.Fatalf("repeat after the nudge: got %v, want loopAbort", got)
+	}
+}
+
+// Identical narration over steps that make progress (different commands,
+// changing results) is not a loop: it must neither nudge nor abort.
+func TestLoopDetectorRepeatedNarrationWithProgressIsNotALoop(t *testing.T) {
+	d := newLoopDetector(config.LoopDetectionPolicy{})
+	for i := range 20 {
+		got := d.observe(call("shell", fmt.Sprintf(`{"cmd":"go test ./pkg%d"}`, i)), res(fmt.Sprintf("FAIL: %d failing", 20-i)), "Let me run the tests again.")
+		if got != loopOK {
+			t.Fatalf("step %d: got %v, want loopOK", i+1, got)
+		}
+	}
+	// The same narration with the same call and result is still a loop.
+	d = newLoopDetector(config.LoopDetectionPolicy{})
+	var acts []loopAction
+	for range 3 {
+		acts = append(acts, d.observe(call("shell", `{"cmd":"go test"}`), res("FAIL"), "Let me run the tests again."))
+	}
+	if acts[2] != loopNudge {
+		t.Fatalf("repeated call+result+text: %v", acts)
+	}
+}
+
+// Truncated calls all come back with "{}" args and the same error text;
+// calls whose raw arguments differ (writes to different files) must not
+// collapse into one repeated signature.
+func TestLoopDetectorDistinguishesTruncatedCallsByRawArgs(t *testing.T) {
+	d := newLoopDetector(config.LoopDetectionPolicy{})
+	errText := provider.TruncatedArgsError(8192)
+	for i := range 8 {
+		tcs := []provider.NativeTool{{ID: "c", Name: "file-write", Args: json.RawMessage(`{}`), ArgsError: errText,
+			RawArgs: fmt.Sprintf(`{"path":"f%d.go","content":"package f%d ...`, i, i)}}
+		got := d.observe(loopCalls(tcs), []parallelResult{{status: "error", output: errText}}, "")
+		if got != loopOK {
+			t.Fatalf("truncated write %d: got %v", i+1, got)
+		}
 	}
 }

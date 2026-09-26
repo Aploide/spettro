@@ -441,7 +441,11 @@ func finalizeToolCalls(raw []rawToolCall, finish FinishReason, maxOut, outputTok
 			continue
 		}
 		args, argsErr := normalizeToolArgs(tc.input, finish == FinishLength, maxOut)
-		out = append(out, NativeTool{ID: tc.id, Name: tc.name, Args: args, ArgsError: argsErr})
+		nt := NativeTool{ID: tc.id, Name: tc.name, Args: args, ArgsError: argsErr}
+		if argsErr != "" {
+			nt.RawArgs = tc.input
+		}
+		out = append(out, nt)
 	}
 	return out, finish
 }

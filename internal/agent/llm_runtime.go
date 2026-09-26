@@ -165,10 +165,14 @@ type toolLoopConfig struct {
 	// MaxOutputTokens caps each reply (max_tokens on the wire); 0 = auto, the
 	// provider manager's per-model default (see provider.Manager.MaxOutputTokens).
 	MaxOutputTokens int
-	Thinking        provider.ThinkingLevel // forwarded to provider.Request.Thinking
-	RequiredReads   []string
-	Images          []string        // attached to this turn's user message (re-sent every step)
-	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
+	// parentSnapshot and parentCWD are a parent run's snapshot and
+	// directory, for a sub-agent's system prompt (see sessionContextFor).
+	parentSnapshot string
+	parentCWD      string
+	Thinking       provider.ThinkingLevel // forwarded to provider.Request.Thinking
+	RequiredReads  []string
+	Images         []string        // attached to this turn's user message (re-sent every step)
+	ToolCallback   func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
 	StreamCallback StreamCallback
@@ -249,11 +253,19 @@ type toolRuntime struct {
 	agentRules    []config.PermissionRule
 	sandboxState  *SandboxState
 	// sub-agent support
-	manifest      *config.AgentManifest
-	providerMgr   *provider.Manager
-	providerName  func() string
-	modelName     func() string
-	maxTokens     int
+	manifest     *config.AgentManifest
+	providerMgr  *provider.Manager
+	providerName func() string
+	modelName    func() string
+	maxTokens    int
+	// sessionCtx is this run's environment/instructions snapshot, handed
+	// to sub-agents working in the same directory.
+	sessionCtx string
+	// maxOutputTokens is the user's output cap (config max_output_tokens),
+	// handed on to sub-agents; 0 = the provider manager's default.
+	maxOutputTokens int
+	// thinkingLevel is the level sub-agents start from: the configured one,
+	// then whatever level the model last accepted (see subAgentThinking).
 	thinkingLevel provider.ThinkingLevel
 	toolCallback  func(ToolTrace)
 	checkpoint    func(tool string)
@@ -467,6 +479,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		providerName:    cfg.ProviderName,
 		modelName:       cfg.ModelName,
 		maxTokens:       cfg.MaxTokens,
+		maxOutputTokens: cfg.MaxOutputTokens,
 		thinkingLevel:   cfg.Thinking,
 		toolCallback:    cfg.ToolCallback,
 		checkpoint:      cfg.Checkpoint,
@@ -616,8 +629,15 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 
 	// The system prompt is intentionally built once: it must not vary between
-	// steps or the provider-side prompt cache misses on every call.
-	system := buildSystemString(cfg)
+	// steps or the provider-side prompt cache misses on every call. The
+	// session snapshot in it travels with the conversation (on its first
+	// message) so later turns rebuild the exact same prompt.
+	sessionCtx := sessionContextFor(cfg)
+	system := buildSystemStringWith(cfg, sessionCtx)
+	runtime.sessionCtx = sessionCtx
+	if cfg.DelegationDepth == 0 && sessionCtx != "" && len(convMsgs) > 0 && carriedSessionContext(convMsgs) == "" {
+		convMsgs[0].SessionContext = sessionCtx
+	}
 
 	// Resilience state. Provider failures are classified
 	// (provider.ClassifyRetry): transient ones (rate limit, overload, 5xx,
@@ -630,6 +650,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	sendFailures := 0
 	budgetCompacted := false
 	overflowCompacted := false
+	// overflowResent is set once an overflow was retried with a newly learned
+	// window and no compaction (see the overflow branch below).
+	overflowResent := false
 	// learnedWindow is the context window a provider stated in an overflow
 	// error. It overrides a missing (URL/local endpoints) or larger window.
 	learnedWindow := 0
@@ -775,6 +798,15 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 						continue
 					}
 				}
+				// Nothing to compact (a short history), but the error named a
+				// smaller window than the request was sized for: resend once,
+				// so the output cap is fitted to the real window. Often the
+				// prompt fit and only max_tokens overflowed.
+				if w := contextWindow(); w > 0 && w != req.ContextWindow && !overflowResent {
+					overflowResent = true
+					notify(fmt.Sprintf("the request exceeded the model's context window (%s tokens) — retrying with the output cap fitted to it", formatTokens(w)))
+					continue
+				}
 				return fail(fmt.Errorf("agent call failed: the conversation exceeds the model's context window and compaction could not shrink it enough: %w", err))
 			}
 			// Transient (rate limit / overload / 5xx / network / stalled
@@ -804,7 +836,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		sendFailures = 0
 		overflowCompacted = false
+		overflowResent = false
 		thinking = resp.Thinking
+		runtime.setSubAgentThinking(thinking)
 		calibration.observe(resp.Usage.TotalInput(), sentEstimate)
 		steps++
 		totalTokens += resp.EstimatedTokens
@@ -864,10 +898,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		if len(resp.ToolCalls) > 0 {
 			truncatedText = nil
 			emitNarration(cfg, main)
-			internalCalls := make([]toolCall, len(resp.ToolCalls))
-			for i, tc := range resp.ToolCalls {
-				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
-			}
+			internalCalls := loopCalls(resp.ToolCalls)
 			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
 			// Loop check after execution: the signature includes each result,
 			// so re-running a command whose output changes (edit → test) is
@@ -1771,7 +1802,11 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			ModelName:       r.modelName,
 			CWD:             subCWD,
 			MaxTokens:       r.maxTokens,
-			Thinking:        r.thinkingLevel,
+			MaxOutputTokens: r.maxOutputTokens,
+			Thinking:        r.subAgentThinking(),
+			Compact:         r.compactCfg,
+			parentSnapshot:  r.sessionCtx,
+			parentCWD:       r.cwd,
 			ToolCallback:    r.toolCallback,
 			Checkpoint:      r.checkpoint,
 			ShellApproval:   r.shellApproval,
