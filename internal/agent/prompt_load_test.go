@@ -153,3 +153,54 @@ func TestPromptsDoNotMandateCommentNarration(t *testing.T) {
 		}
 	}
 }
+
+// TestCodingPromptNamesOnlyGrantedTools keeps the coding prompt from steering
+// the model to a tool its agent doesn't have (a wasted, failing step): every
+// built-in tool it names in backticks must be allowed for the coding agent in
+// both the built-in manifest and the repo's own spettro.agents.toml.
+func TestCodingPromptNamesOnlyGrantedTools(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	repoManifest, err := config.LoadAgentManifest(filepath.Join("..", "..", config.AgentManifestFilename))
+	if err != nil {
+		t.Fatalf("load repo manifest: %v", err)
+	}
+	manifests := map[string]config.AgentManifest{"built-in": config.DefaultAgentManifest(), "spettro.agents.toml": repoManifest}
+	for label, m := range manifests {
+		spec, ok := m.AgentByID("coding")
+		if !ok {
+			t.Fatalf("%s: no coding agent", label)
+		}
+		allowed, _ := resolveToolPolicies(spec, &m)
+		granted := map[string]bool{}
+		for _, id := range allowed {
+			granted[id] = true
+		}
+		for tool := range builtinNativeToolDescs {
+			if strings.Contains(body, "`"+tool+"`") && !granted[tool] {
+				t.Errorf("%s: coding prompt names `%s`, which the coding agent is not allowed to use", label, tool)
+			}
+		}
+	}
+}
+
+// TestGitPromptFollowsTheRepoConventions: the git worker's prompt now ships in
+// every project, so it must defer to the repository's own commit style and
+// must not carry Spettro's scope table or issue refs.
+func TestGitPromptFollowsTheRepoConventions(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/git.md")
+	if !ok {
+		t.Fatal("agents/git.md is not embedded")
+	}
+	if !strings.Contains(raw, "Match the repository's existing convention") {
+		t.Error("git prompt must tell the worker to match the repository's commit style")
+	}
+	for _, banned := range []string{"Every commit Spettro produces follows", "project conventions for Spettro", "`internal/agent/*`", "aploide/spettro"} {
+		if strings.Contains(raw, banned) {
+			t.Errorf("git prompt still carries Spettro-specific convention %q", banned)
+		}
+	}
+}
