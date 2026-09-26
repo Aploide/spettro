@@ -43,3 +43,15 @@ func TestValidate(t *testing.T) {
 		t.Error("estimate equal to max must fail")
 	}
 }
+
+func TestCheckTokens(t *testing.T) {
+	if err := CheckTokens(0, 1_000_000); err != nil {
+		t.Errorf("zero limit must disable the check: %v", err)
+	}
+	if err := CheckTokens(100, 99); err != nil {
+		t.Errorf("under the limit must pass: %v", err)
+	}
+	if err := CheckTokens(100, 100); err == nil {
+		t.Error("an estimate equal to the limit must fail")
+	}
+}

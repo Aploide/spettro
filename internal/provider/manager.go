@@ -36,6 +36,9 @@ type Manager struct {
 	providerAPIs  map[string]string
 	providerKinds map[string]string // provider id -> models.APIOpenAI | models.APIAnthropic
 	usageRec      usageRecorder
+	// streamAll routes every request through the streaming path, even when
+	// the caller wants no live tokens (see SetStreamAll).
+	streamAll bool
 }
 
 func NewManager() *Manager {
@@ -44,6 +47,19 @@ func NewManager() *Manager {
 		providerAPIs:  map[string]string{},
 		providerKinds: map[string]string{},
 	}
+}
+
+// SetStreamAll makes every request stream, including those of callers that
+// set no OnStream (sub-agents, headless runs, compaction). Streaming is what
+// lets the idle watchdog turn a stalled connection into a retryable
+// ErrStreamIdle instead of an indefinite hang, and what recovers tool calls
+// cut off at the output limit on OpenAI-compatible backends. Production
+// hosts turn it on; it is off by default so plain JSON test servers keep
+// working. Anthropic-protocol requests always stream regardless.
+func (m *Manager) SetStreamAll(on bool) {
+	m.mu.Lock()
+	m.streamAll = on
+	m.mu.Unlock()
 }
 
 func (m *Manager) SetAPIKeys(keys map[string]string) {
@@ -334,6 +350,7 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		resp, err := m.sendOnce(ctx, providerName, modelName, req)
 		if err == nil {
 			m.usageRec.record(providerName, modelName, resp.Usage)
+			resp.Thinking = req.Thinking
 			return resp, nil
 		}
 		// A model may reject the requested thinking level (e.g. an effort enum
@@ -424,6 +441,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	apiKey := m.apiKeys[providerName]
 	baseURL := m.providerAPIs[providerName]
 	apiKind := m.providerKinds[providerName]
+	streamAll := m.streamAll
 	m.mu.RUnlock()
 	if providerName == "anthropic" {
 		apiKind = models.APIAnthropic
@@ -459,25 +477,41 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	} else {
 		allParts = append(allParts, req.Prompt)
 	}
-	allParts = append(allParts, req.Images...)
-	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
-		return Response{}, err
+	// The input budget (config token_budget) caps the PROMPT: estimate the
+	// whole request, tool results and tool schemas included — they are most
+	// of a coding session's context. The output cap is a separate field.
+	if req.InputBudget > 0 {
+		if err := budget.CheckTokens(req.InputBudget, EstimateRequestTokens(req)); err != nil {
+			return Response{}, err
+		}
 	}
+	req.MaxTokens = m.resolveMaxOutput(providerName, apiKind, modelName, req.MaxTokens)
 
 	// The fantasy path handles images natively (FilePart on user messages), so
 	// vision requests take the same primary path as everything else — the
 	// legacy adapters below are only the fallback, and they drop native tool
 	// definitions, so detouring there would break tool use mid-run.
-	if req.OnStream != nil {
+	//
+	// Anthropic-protocol requests always stream, even when the caller wants
+	// no live tokens: the SDK refuses non-streaming requests whose max_tokens
+	// could take over 10 minutes (anything above ~21k), and the stream path
+	// carries the idle watchdog that turns a stalled connection into a
+	// retryable error instead of a hang. With streamAll every request does.
+	anthropicAPI := isAnthropicAPI(providerName, apiKind)
+	if req.OnStream != nil || anthropicAPI || streamAll {
 		resp, err := sendWithFantasyStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
 			return finalizeResponse(resp, providerName, modelName, allParts), nil
 		}
 		if !shouldFallbackToLegacy(err) {
-			// Streaming failed for a non-fallback reason (e.g. the provider
-			// does not support the stream endpoint). Retry once without
-			// streaming before surfacing the error so a run never dies just
-			// because live tokens were unavailable.
+			// Streaming failed. Only a failure that could be specific to the
+			// stream endpoint (an unclassified error, or a 4xx that is not
+			// auth, rate limit or context overflow) earns one non-streaming
+			// attempt; transient, auth and overflow failures would fail the
+			// same way and belong to the caller's retry/compaction policy.
+			if anthropicAPI || !worthNonStreamingRetry(err) {
+				return Response{}, err
+			}
 			noStream := req
 			noStream.OnStream = nil
 			if resp, rerr := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, noStream); rerr == nil {
@@ -504,6 +538,19 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		return Response{}, err
 	}
 	return finalizeResponse(resp, providerName, modelName, allParts), nil
+}
+
+// worthNonStreamingRetry reports whether a failed streaming request should
+// be retried once without streaming (see sendOnce).
+func worthNonStreamingRetry(err error) bool {
+	switch ClassifyRetry(err) {
+	case RetryTransient, RetryContextOverflow:
+		return false
+	}
+	if status, _, ok := httpErrorDetails(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		return false
+	}
+	return !isThinkingLevelError(err)
 }
 
 // downgradedThinking decides whether err is worth retrying at a lower

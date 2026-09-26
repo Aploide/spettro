@@ -27,3 +27,15 @@ func Validate(maxTokens int, parts ...string) error {
 	}
 	return nil
 }
+
+// CheckTokens returns an error if an already-computed token estimate is at or
+// above limit. Pass 0 (or a negative number) to disable the check.
+func CheckTokens(limit, estimated int) error {
+	if limit <= 0 {
+		return nil
+	}
+	if estimated >= limit {
+		return fmt.Errorf("token budget exceeded: estimated=%d max=%d", estimated, limit)
+	}
+	return nil
+}

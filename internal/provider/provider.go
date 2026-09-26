@@ -116,6 +116,9 @@ type Model struct {
 	Status        string
 	EnvKey        string
 	Local         bool
+	// MaxOutput is the model's maximum output tokens (0 = unknown; see
+	// Manager.MaxOutputTokens for the built-in fallback table).
+	MaxOutput int
 }
 
 type ProviderInfo struct {
@@ -160,6 +163,12 @@ type NativeTool struct {
 	ID   string // provider-assigned call ID
 	Name string
 	Args json.RawMessage
+	// ArgsError is set when the model's raw arguments could not be decoded
+	// (cut off at the output token limit, or malformed JSON that the repair
+	// pass could not fix). Args is then "{}" so the call still replays as a
+	// valid history entry; the tool runtime must not execute the call and
+	// instead feeds ArgsError back to the model as the tool's error result.
+	ArgsError string `json:"args_error,omitempty"`
 }
 
 // ToolResult is the executed output of a NativeTool, fed back in the next turn.
@@ -183,10 +192,30 @@ type ToolResult struct {
 	SpoolID string `json:"spool_id,omitempty"`
 }
 
+// ReasoningBlock is one reasoning/thinking segment produced by a model turn.
+// It is stored on the assistant message so it can be replayed on the next
+// request where the provider requires (Anthropic extended thinking with tool
+// use needs the signed thinking block of the in-progress turn) or benefits
+// from it (OpenAI-compatible reasoning_content round-trip). Provider/Model
+// record who produced it: signatures are only valid for the model that
+// signed them, so adapters replay a block only to that same model.
+type ReasoningBlock struct {
+	Text string `json:"text,omitempty"`
+	// Signature is Anthropic's opaque thinking signature.
+	Signature string `json:"signature,omitempty"`
+	// RedactedData is Anthropic's encrypted redacted_thinking payload.
+	RedactedData string `json:"redacted_data,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model,omitempty"`
+}
+
 // Message is one turn in a structured conversation.
 type Message struct {
 	Role    Role
 	Content string
+	// Reasoning is set on assistant turns whose response carried reasoning /
+	// thinking content (see ReasoningBlock).
+	Reasoning []ReasoningBlock `json:",omitempty"`
 	// ToolCalls is set on assistant turns that issued native tool calls.
 	ToolCalls []NativeTool
 	// ToolResults is set on user turns that return native tool results.
@@ -209,7 +238,17 @@ type Request struct {
 	Prompt      string
 	Images      []string
 	RequireFast bool
-	MaxTokens   int
+	// MaxTokens caps the OUTPUT of this request (max_tokens /
+	// max_output_tokens on the wire). 0 means "auto": the manager sends a
+	// sensible per-model default (see DefaultMaxOutputTokens) so providers
+	// with a tiny implicit default (Anthropic: 4096) don't truncate tool calls.
+	MaxTokens int
+	// InputBudget is the user's per-request INPUT token budget
+	// (config token_budget). Requests whose estimated prompt is at or above
+	// it are refused locally before any network call. 0 disables the check.
+	// It is deliberately separate from MaxTokens: one number cannot be both
+	// an output cap and a prompt-size limit.
+	InputBudget int
 	// Thinking selects extended-thinking compute. Empty == ThinkingOff.
 	Thinking ThinkingLevel
 	// Tools, when non-empty, enables native tool calling for capable backends.
@@ -224,7 +263,26 @@ type Request struct {
 	// honour a provider-issued rate limit (currently: the Spettro Subscription
 	// overflow tier's 429/Retry-After) instead of surfacing it as an error.
 	OnRateLimit func(time.Duration)
+	// StreamIdleTimeout bounds the silence between two streamed chunks; a
+	// stream that goes quiet longer fails with ErrStreamIdle (retryable) so a
+	// stalled connection cannot hang the run forever. 0 → default
+	// (DefaultStreamIdleTimeout, longer before the first chunk and for high
+	// thinking levels, where the model may legitimately think silently).
+	StreamIdleTimeout time.Duration
 }
+
+// FinishReason is why the model stopped generating, normalized across
+// providers. The zero value means the backend did not report one.
+type FinishReason string
+
+const (
+	FinishStop          FinishReason = "stop"
+	FinishLength        FinishReason = "length" // hit the output token limit
+	FinishToolCalls     FinishReason = "tool-calls"
+	FinishContentFilter FinishReason = "content-filter"
+	FinishError         FinishReason = "error"
+	FinishOther         FinishReason = "other"
+)
 
 type Response struct {
 	Content         string
@@ -237,7 +295,25 @@ type Response struct {
 	Model    string
 	// ToolCalls is populated on the native tool-calling path.
 	ToolCalls []NativeTool
+	// FinishReason is why generation stopped. FinishLength means the reply
+	// was cut at the output token limit: text is incomplete and any tool call
+	// whose arguments were still streaming carries an ArgsError.
+	FinishReason FinishReason
+	// Reasoning holds the reasoning/thinking blocks of this reply (with
+	// Anthropic signatures), stamped with the producing provider/model.
+	// Callers store it on the assistant message so it is replayed next step.
+	Reasoning []ReasoningBlock
+	// Thinking is the thinking level the request finally succeeded with. It
+	// differs from Request.Thinking when the manager stepped the level down
+	// because the model rejected it; callers should reuse it for later
+	// requests instead of paying the rejected attempt again every step.
+	Thinking ThinkingLevel
+	// MaxOutputTokens is the output cap actually sent (0 when none was).
+	MaxOutputTokens int
 }
+
+// Truncated reports whether the reply was cut at the output token limit.
+func (r Response) Truncated() bool { return r.FinishReason == FinishLength }
 
 type Adapter interface {
 	Send(context.Context, string, Request) (Response, error)

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
@@ -28,7 +30,8 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		return Response{}, err
 	}
 
-	resp, err := model.Generate(ctx, buildFantasyCall(providerName, apiKind, modelName, req))
+	call := buildFantasyCall(providerName, apiKind, modelName, req)
+	resp, err := model.Generate(ctx, call)
 	if err != nil {
 		return Response{}, err
 	}
@@ -38,26 +41,68 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		totalTokens = int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
 	}
 
-	var toolCalls []NativeTool
+	maxOut := sentMaxOutput(call)
+	var raw []rawToolCall
 	for _, tc := range resp.Content.ToolCalls() {
-		args := json.RawMessage(tc.Input)
-		if !json.Valid(args) {
-			args = json.RawMessage(`{}`)
-		}
-		toolCalls = append(toolCalls, NativeTool{ID: tc.ToolCallID, Name: tc.ToolName, Args: args})
+		// A non-streamed reply has no "arguments finished" event; arguments
+		// that are not valid JSON count as unfinished so a call cut off at
+		// the output limit is recognized (see finalizeToolCalls).
+		complete := strings.TrimSpace(tc.Input) == "" || json.Valid([]byte(tc.Input))
+		raw = append(raw, rawToolCall{id: tc.ToolCallID, name: tc.ToolName, input: tc.Input, complete: complete})
 	}
+	var reasoning []ReasoningBlock
+	for _, rc := range resp.Content.Reasoning() {
+		sig, redacted := reasoningMetadata(rc.ProviderMetadata)
+		reasoning = appendReasoning(reasoning, rc.Text, sig, redacted, providerName, modelName)
+	}
+	finish := detectTruncation(mapFinishReason(resp.FinishReason), resp.Usage, maxOut)
+	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut)
 	return Response{
 		Content:         fantasyText(resp),
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 		Usage:           usageFromFantasy(resp.Usage),
+		FinishReason:    finish,
+		Reasoning:       reasoning,
+		MaxOutputTokens: maxOut,
 	}, nil
+}
+
+// ErrStreamIdle is returned when a streaming response goes silent for longer
+// than the idle timeout. It is a transient failure (see ClassifyRetry): the
+// connection most likely stalled in a proxy or a local server, and the
+// request is safe to resend.
+var ErrStreamIdle = errors.New("stream idle timeout: the provider sent no data")
+
+// DefaultStreamIdleTimeout is the longest silence tolerated between two
+// streamed chunks. streamFirstChunkTimeout applies before the first chunk
+// and, for high thinking levels, between chunks too: a reasoning model may
+// think for minutes without emitting anything on some APIs.
+const (
+	DefaultStreamIdleTimeout = 120 * time.Second
+	streamFirstChunkTimeout  = 300 * time.Second
+)
+
+// streamTimeouts returns the (first-chunk, between-chunk) silence limits for
+// req. An explicit Request.StreamIdleTimeout applies to both.
+func streamTimeouts(req Request) (first, idle time.Duration) {
+	if req.StreamIdleTimeout > 0 {
+		return req.StreamIdleTimeout, req.StreamIdleTimeout
+	}
+	idle = DefaultStreamIdleTimeout
+	switch req.Thinking {
+	case ThinkingHigh, ThinkingXHigh, ThinkingMax:
+		idle = streamFirstChunkTimeout
+	}
+	return streamFirstChunkTimeout, idle
 }
 
 // sendWithFantasyStream is the streaming counterpart of sendWithFantasy. It
 // forwards text and reasoning deltas to req.OnStream as they arrive while still
 // accumulating the full answer text (reasoning is delivered live but not folded
-// into Response.Content, matching the non-streaming path).
+// into Response.Content, matching the non-streaming path). A watchdog cancels
+// the stream with ErrStreamIdle when the provider goes silent (see
+// streamTimeouts).
 func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
 	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
 	if err != nil {
@@ -69,44 +114,113 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		return Response{}, err
 	}
 
-	stream, err := model.Stream(ctx, buildFantasyCall(providerName, apiKind, modelName, req))
+	firstTimeout, idleTimeout := streamTimeouts(req)
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	watchdog := time.AfterFunc(firstTimeout, func() { cancel(ErrStreamIdle) })
+	defer watchdog.Stop()
+	idleErr := func(err error) error {
+		if ctx.Err() == nil && errors.Is(context.Cause(streamCtx), ErrStreamIdle) {
+			return ErrStreamIdle
+		}
+		return err
+	}
+
+	call := buildFantasyCall(providerName, apiKind, modelName, req)
+	stream, err := model.Stream(streamCtx, call)
 	if err != nil {
-		return Response{}, err
+		return Response{}, idleErr(err)
 	}
 
 	var (
 		textSB    strings.Builder
 		usage     fantasy.Usage
+		finish    FinishReason
 		streamErr error
-		toolCalls []NativeTool
+		// Tool calls in first-seen order. Inputs are accumulated from the
+		// delta events too: the OpenAI-compatible stream only emits a
+		// ToolCall part once the arguments parse as JSON, so a call cut off
+		// at the output limit (or malformed) would otherwise vanish.
+		calls     []*rawToolCall
+		callsByID = map[string]*rawToolCall{}
+		// Reasoning blocks in first-seen order, keyed by stream part ID.
+		thoughts     []*streamReasoning
+		thoughtsByID = map[string]*streamReasoning{}
 	)
+	toolCall := func(id, name string) *rawToolCall {
+		if tc, ok := callsByID[id]; ok {
+			if tc.name == "" {
+				tc.name = name
+			}
+			return tc
+		}
+		tc := &rawToolCall{id: id, name: name}
+		callsByID[id] = tc
+		calls = append(calls, tc)
+		return tc
+	}
+	thought := func(id string) *streamReasoning {
+		if r, ok := thoughtsByID[id]; ok {
+			return r
+		}
+		r := &streamReasoning{}
+		thoughtsByID[id] = r
+		thoughts = append(thoughts, r)
+		return r
+	}
 	for part := range stream {
+		watchdog.Reset(idleTimeout)
 		switch part.Type {
 		case fantasy.StreamPartTypeTextDelta:
 			textSB.WriteString(part.Delta)
 			if req.OnStream != nil && part.Delta != "" {
 				req.OnStream(StreamEvent{Kind: StreamText, Delta: part.Delta})
 			}
-		case fantasy.StreamPartTypeReasoningDelta:
-			if req.OnStream != nil && part.Delta != "" {
+		case fantasy.StreamPartTypeReasoningStart, fantasy.StreamPartTypeReasoningDelta, fantasy.StreamPartTypeReasoningEnd:
+			r := thought(part.ID)
+			r.text.WriteString(part.Delta)
+			if sig, redacted := reasoningMetadata(part.ProviderMetadata); sig != "" || redacted != "" {
+				if sig != "" {
+					r.signature = sig
+				}
+				if redacted != "" {
+					r.redacted = redacted
+				}
+			}
+			if part.Type == fantasy.StreamPartTypeReasoningDelta && req.OnStream != nil && part.Delta != "" {
 				req.OnStream(StreamEvent{Kind: StreamReasoning, Delta: part.Delta})
 			}
-		case fantasy.StreamPartTypeToolCall:
-			args := json.RawMessage(part.ToolCallInput)
-			if !json.Valid(args) {
-				args = json.RawMessage(`{}`)
+		case fantasy.StreamPartTypeToolInputStart:
+			if !part.ProviderExecuted {
+				toolCall(part.ID, part.ToolCallName)
 			}
-			toolCalls = append(toolCalls, NativeTool{ID: part.ID, Name: part.ToolCallName, Args: args})
+		case fantasy.StreamPartTypeToolInputDelta:
+			if tc, ok := callsByID[part.ID]; ok && !tc.complete {
+				tc.input += part.Delta
+			}
+		case fantasy.StreamPartTypeToolCall:
+			if part.ProviderExecuted {
+				continue
+			}
+			tc := toolCall(part.ID, part.ToolCallName)
+			tc.input = part.ToolCallInput
+			tc.complete = true
 		case fantasy.StreamPartTypeFinish:
 			usage = part.Usage
+			finish = mapFinishReason(part.FinishReason)
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
 				streamErr = part.Error
 			}
 		}
 	}
+	watchdog.Stop()
 	if streamErr != nil {
-		return Response{}, streamErr
+		return Response{}, idleErr(streamErr)
+	}
+	if err := context.Cause(streamCtx); err != nil && errors.Is(err, ErrStreamIdle) && ctx.Err() == nil {
+		// The watchdog fired but the iterator ended without an error part.
+		return Response{}, ErrStreamIdle
 	}
 
 	totalTokens := int(usage.TotalTokens)
@@ -114,12 +228,176 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		totalTokens = int(usage.InputTokens + usage.OutputTokens)
 	}
 
+	maxOut := sentMaxOutput(call)
+	raw := make([]rawToolCall, 0, len(calls))
+	for _, tc := range calls {
+		raw = append(raw, *tc)
+	}
+	finish = detectTruncation(finish, usage, maxOut)
+	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut)
+	var reasoning []ReasoningBlock
+	for _, r := range thoughts {
+		reasoning = appendReasoning(reasoning, r.text.String(), r.signature, r.redacted, providerName, modelName)
+	}
+
 	return Response{
 		Content:         textSB.String(),
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 		Usage:           usageFromFantasy(usage),
+		FinishReason:    finish,
+		Reasoning:       reasoning,
+		MaxOutputTokens: maxOut,
 	}, nil
+}
+
+// rawToolCall is one tool call as the model produced it, before argument
+// normalization. complete is false when the stream ended before the provider
+// considered the arguments finished.
+type rawToolCall struct {
+	id, name, input string
+	complete        bool
+}
+
+type streamReasoning struct {
+	text                strings.Builder
+	signature, redacted string
+}
+
+// finalizeToolCalls normalizes every call's arguments (see
+// normalizeToolArgs) and returns the finish reason, upgraded to FinishLength
+// when the reply evidently ended mid-call: the last call never finished
+// streaming and its arguments stop in the middle of a JSON value. (The
+// OpenAI-style adapters report "tool-calls" in that case, hiding the length
+// stop, and no output cap may have been sent to compare usage against.)
+// Unnamed fragments — an argument delta for a call the stream never
+// introduced — are dropped: there is nothing to route them to.
+func finalizeToolCalls(raw []rawToolCall, finish FinishReason, maxOut int) ([]NativeTool, FinishReason) {
+	if n := len(raw); n > 0 && finish != FinishLength {
+		if last := raw[n-1]; !last.complete && endsMidJSON(last.input) {
+			finish = FinishLength
+		}
+	}
+	var out []NativeTool
+	for _, tc := range raw {
+		if tc.name == "" {
+			continue
+		}
+		args, argsErr := normalizeToolArgs(tc.input, finish == FinishLength, maxOut)
+		out = append(out, NativeTool{ID: tc.id, Name: tc.name, Args: args, ArgsError: argsErr})
+	}
+	return out, finish
+}
+
+// detectTruncation reports FinishLength when the provider said so, and also
+// when it did not but the reply demonstrably hit the cap: the OpenAI-style
+// adapters rewrite the finish reason to "tool-calls" whenever the reply
+// contains any tool call, hiding a length stop. A reply that used every
+// output token it was allowed is therefore treated as truncated. (A tool
+// call that never finished streaming below the cap is malformed, not
+// truncated: it goes through the repair pass instead.)
+func detectTruncation(finish FinishReason, usage fantasy.Usage, maxOut int) FinishReason {
+	if finish == FinishLength {
+		return finish
+	}
+	if maxOut > 0 && usage.OutputTokens >= int64(maxOut) {
+		return FinishLength
+	}
+	return finish
+}
+
+func mapFinishReason(r fantasy.FinishReason) FinishReason {
+	switch r {
+	case fantasy.FinishReasonStop:
+		return FinishStop
+	case fantasy.FinishReasonLength:
+		return FinishLength
+	case fantasy.FinishReasonToolCalls:
+		return FinishToolCalls
+	case fantasy.FinishReasonContentFilter:
+		return FinishContentFilter
+	case fantasy.FinishReasonError:
+		return FinishError
+	case fantasy.FinishReasonOther:
+		return FinishOther
+	}
+	return ""
+}
+
+// sentMaxOutput is the output cap the call carries (0 when none is sent).
+func sentMaxOutput(call fantasy.Call) int {
+	if call.MaxOutputTokens == nil {
+		return 0
+	}
+	return int(*call.MaxOutputTokens)
+}
+
+// reasoningMetadata extracts Anthropic's thinking signature / redacted
+// payload from a reasoning part's provider metadata.
+func reasoningMetadata(md fantasy.ProviderMetadata) (signature, redacted string) {
+	if md == nil {
+		return "", ""
+	}
+	if meta := fantasyanthropic.GetReasoningMetadata(fantasy.ProviderOptions(md)); meta != nil {
+		return meta.Signature, meta.RedactedData
+	}
+	return "", ""
+}
+
+func appendReasoning(out []ReasoningBlock, text, signature, redacted, providerName, modelName string) []ReasoningBlock {
+	if text == "" && signature == "" && redacted == "" {
+		return out
+	}
+	return append(out, ReasoningBlock{
+		Text:         text,
+		Signature:    signature,
+		RedactedData: redacted,
+		Provider:     providerName,
+		Model:        modelName,
+	})
+}
+
+// replayReasoning builds the reasoning parts to send back on an assistant
+// turn. Blocks are replayed only to the model that produced them (a thinking
+// signature is not valid for any other model), and only where the wire
+// format carries them:
+//   - Anthropic: signed thinking / redacted_thinking blocks, while extended
+//     thinking is enabled — required on the in-progress tool-use turn.
+//   - OpenAI-compatible chat: reasoning_content, which reasoning models such
+//     as DeepSeek and Kimi expect back during a tool loop.
+//   - OpenAI Responses: not replayable inline (fantasy drops reasoning items
+//     on replay; the IDs are ephemeral without server-side storage), so
+//     nothing is sent.
+func replayReasoning(providerName, apiKind, modelName string, req Request, blocks []ReasoningBlock) []fantasy.MessagePart {
+	if len(blocks) == 0 || providerName == "openai" {
+		return nil
+	}
+	anthropicAPI := isAnthropicAPI(providerName, apiKind)
+	if anthropicAPI && ThinkingBudgetTokens(req.Thinking) <= 0 {
+		return nil
+	}
+	var parts []fantasy.MessagePart
+	for _, b := range blocks {
+		if b.Provider != providerName || b.Model != modelName {
+			continue
+		}
+		if anthropicAPI {
+			if b.Signature == "" && b.RedactedData == "" {
+				continue
+			}
+			parts = append(parts, fantasy.ReasoningPart{
+				Text: b.Text,
+				ProviderOptions: fantasy.ProviderOptions{
+					fantasyanthropic.Name: &fantasyanthropic.ReasoningOptionMetadata{Signature: b.Signature, RedactedData: b.RedactedData},
+				},
+			})
+			continue
+		}
+		if b.Text != "" {
+			parts = append(parts, fantasy.ReasoningPart{Text: b.Text})
+		}
+	}
+	return parts
 }
 
 // usageFromFantasy maps fantasy's usage block onto Spettro's Usage type.
@@ -195,7 +473,10 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 					prompt = append(prompt, fantasy.NewUserMessage(m.Content, fantasyImageParts(imgs)...))
 				}
 			case RoleAssistant:
-				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls))
+				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls)+len(m.Reasoning))
+				// Reasoning goes first: Anthropic requires the thinking block
+				// to open the assistant turn it belongs to.
+				parts = append(parts, replayReasoning(providerName, apiKind, modelName, req, m.Reasoning)...)
 				if m.Content != "" {
 					parts = append(parts, fantasy.TextPart{Text: m.Content})
 				}

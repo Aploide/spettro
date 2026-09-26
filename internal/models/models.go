@@ -33,6 +33,9 @@ type CatalogModel struct {
 	Vision    bool   `json:"vision,omitempty"`
 	Context   int    `json:"context,omitempty"`
 	Status    string `json:"status,omitempty"` // "alpha" | "beta"
+	// Output is the model's maximum output tokens (models.dev limit.output),
+	// when the catalog carries it; 0 = unknown.
+	Output int `json:"output,omitempty"`
 }
 
 // CatalogProvider is one provider entry from the Spettro catalog.
