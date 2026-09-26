@@ -106,6 +106,9 @@ func (a *App) handleCommand(line string) error {
 		if err != nil {
 			return err
 		}
+		if err := a.store.EnsureProjectDir(); err != nil {
+			return err
+		}
 		if err := indexer.WriteJSON(snapshot, filepath.Join(a.store.ProjectDir, "index.json")); err != nil {
 			return err
 		}

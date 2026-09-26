@@ -110,6 +110,11 @@ func environmentSection(cwd, gitRoot, branch string, isGit bool, now time.Time) 
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// hiddenTopLevelEntries are left out of the Environment listing: git's own
+// metadata, and Spettro's per-project state dir, which says nothing about the
+// task and only invites the model to probe it.
+var hiddenTopLevelEntries = map[string]bool{".git": true, ".spettro": true}
+
 // topLevelListing renders the working directory's entries on one line,
 // directories marked with a trailing slash, capped at max entries.
 func topLevelListing(cwd string, max int) string {
@@ -119,7 +124,7 @@ func topLevelListing(cwd string, max int) string {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.Name() == ".git" {
+		if hiddenTopLevelEntries[e.Name()] {
 			continue
 		}
 		name := e.Name()
