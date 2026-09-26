@@ -1204,13 +1204,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runFileRead(call.Args)
 	case "file-write":
 		defer r.lockFileForMutation(call.Args)()
-		var args struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-			Append  bool   `json:"append"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("file-write args: %w", err)
+		args, err := decodeFileWriteArgs(call.Args)
+		if err != nil {
+			return "", err
 		}
 		abs, rel, err := r.resolvePath(args.Path)
 		if err != nil {

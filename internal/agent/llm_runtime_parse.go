@@ -16,7 +16,24 @@ import (
 // `timeout` where none is declared), and rejecting the whole call for an extra
 // key costs a round trip while telling the model nothing it can use.
 func decodeJSONStrict(data []byte, target any) error {
+	return decodeJSON(data, target, false)
+}
+
+// decodeJSONExact is decodeJSONStrict that also rejects unknown fields. The
+// write tools (file-write, file-edit, multi-edit) use it: there a misspelled
+// key is not harmless noise but a required value silently decoding as "" —
+// `file_text` for content would truncate the file and still report success.
+// Those tools map the common spellings from other harnesses explicitly and
+// reject anything else.
+func decodeJSONExact(data []byte, target any) error {
+	return decodeJSON(data, target, true)
+}
+
+func decodeJSON(data []byte, target any, exact bool) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
+	if exact {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(target); err != nil {
 		return err
 	}
@@ -85,4 +102,154 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// firstPresent returns the first non-nil string among aliases of one argument,
+// and whether any was sent. Unlike firstNonEmpty it tells "absent" from "empty":
+// a write tool must be able to write "" on purpose, but never by omission.
+func firstPresent(values ...*string) (string, bool) {
+	for _, v := range values {
+		if v != nil {
+			return *v, true
+		}
+	}
+	return "", false
+}
+
+// fileWriteArgs are file-write's arguments after alias resolution.
+type fileWriteArgs struct {
+	Path    string
+	Content string
+	Append  bool
+}
+
+// decodeFileWriteArgs decodes file-write's arguments exactly. file_path, and
+// file_text/contents (the create spellings of other editors' tools), are
+// accepted as aliases; any other key is rejected, and content must be sent —
+// an absent content would otherwise truncate the file to "".
+func decodeFileWriteArgs(raw []byte) (fileWriteArgs, error) {
+	var in struct {
+		Path     string   `json:"path"`
+		FilePath string   `json:"file_path"`
+		Content  *string  `json:"content"`
+		FileText *string  `json:"file_text"`
+		Contents *string  `json:"contents"`
+		Append   flexBool `json:"append"`
+	}
+	if err := decodeJSONExact(raw, &in); err != nil {
+		return fileWriteArgs{}, fmt.Errorf("file-write args: %w", err)
+	}
+	content, ok := firstPresent(in.Content, in.FileText, in.Contents)
+	if !ok {
+		return fileWriteArgs{}, fmt.Errorf(`file-write: content is required (send "content": "" to write an empty file)`)
+	}
+	return fileWriteArgs{
+		Path:    firstNonEmpty(in.Path, in.FilePath),
+		Content: content,
+		Append:  bool(in.Append),
+	}, nil
+}
+
+// fileEditPair is one find/replace of file-edit or multi-edit.
+type fileEditPair struct {
+	OldString  string
+	NewString  string
+	ReplaceAll bool
+	// hasNew records whether new_string was sent at all; see requireNew.
+	hasNew bool
+}
+
+// rawFileEditPair is the wire form of a fileEditPair: old_str/new_str (the
+// str_replace spelling) are accepted beside old_string/new_string.
+type rawFileEditPair struct {
+	OldString  *string  `json:"old_string"`
+	OldStr     *string  `json:"old_str"`
+	NewString  *string  `json:"new_string"`
+	NewStr     *string  `json:"new_str"`
+	ReplaceAll flexBool `json:"replace_all"`
+}
+
+func (p rawFileEditPair) resolve() fileEditPair {
+	oldText, _ := firstPresent(p.OldString, p.OldStr)
+	newText, hasNew := firstPresent(p.NewString, p.NewStr)
+	return fileEditPair{OldString: oldText, NewString: newText, ReplaceAll: bool(p.ReplaceAll), hasNew: hasNew}
+}
+
+// requireNew rejects an edit whose new_string was never sent: decoding it as
+// "" would delete the matched text and report a successful edit.
+func (p fileEditPair) requireNew(label string) error {
+	if p.hasNew {
+		return nil
+	}
+	return fmt.Errorf(`%s: new_string is required (send "new_string": "" to delete the matched text)`, label)
+}
+
+// fileEditArgs are file-edit's arguments after alias resolution.
+type fileEditArgs struct {
+	Path      string
+	Single    fileEditPair
+	StartLine int
+	EndLine   int
+	Expected  int
+	Edits     []fileEditPair
+}
+
+// decodeFileEditArgs decodes file-edit's arguments exactly (see
+// decodeJSONExact), accepting file_path and old_str/new_str as aliases.
+func decodeFileEditArgs(raw []byte) (fileEditArgs, error) {
+	var in struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
+		rawFileEditPair
+		StartLine flexInt           `json:"start_line"`
+		EndLine   flexInt           `json:"end_line"`
+		Expected  flexInt           `json:"expected_replacements"`
+		Edits     []rawFileEditPair `json:"edits"`
+	}
+	if err := decodeJSONExact(raw, &in); err != nil {
+		return fileEditArgs{}, fmt.Errorf("file-edit args: %w", err)
+	}
+	out := fileEditArgs{
+		Path:      firstNonEmpty(in.Path, in.FilePath),
+		Single:    in.rawFileEditPair.resolve(),
+		StartLine: int(in.StartLine),
+		EndLine:   int(in.EndLine),
+		Expected:  int(in.Expected),
+	}
+	if strings.TrimSpace(out.Single.OldString) != "" {
+		if err := out.Single.requireNew("file-edit"); err != nil {
+			return fileEditArgs{}, err
+		}
+	}
+	for i, e := range in.Edits {
+		pair := e.resolve()
+		if strings.TrimSpace(pair.OldString) != "" {
+			if err := pair.requireNew(fmt.Sprintf("file-edit: edit %d", i+1)); err != nil {
+				return fileEditArgs{}, err
+			}
+		}
+		out.Edits = append(out.Edits, pair)
+	}
+	return out, nil
+}
+
+// decodeMultiEditArgs decodes multi-edit's arguments exactly, with the same
+// aliases as file-edit. Every edit must carry new_string.
+func decodeMultiEditArgs(raw []byte) (path string, edits []fileEditPair, err error) {
+	var in struct {
+		Path     string            `json:"path"`
+		FilePath string            `json:"file_path"`
+		Edits    []rawFileEditPair `json:"edits"`
+	}
+	if err := decodeJSONExact(raw, &in); err != nil {
+		return "", nil, fmt.Errorf("multi-edit args: %w", err)
+	}
+	for i, e := range in.Edits {
+		pair := e.resolve()
+		if err := pair.requireNew(fmt.Sprintf("multi-edit: edit %d", i+1)); err != nil {
+			return "", nil, fmt.Errorf("%w (file untouched)", err)
+		}
+		edits = append(edits, pair)
+	}
+	return firstNonEmpty(in.Path, in.FilePath), edits, nil
 }
