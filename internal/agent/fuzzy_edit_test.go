@@ -214,8 +214,8 @@ func TestStripLineNumberPrefixes(t *testing.T) {
 			t.Errorf("strip(%q) = %q,%d,%v want %q,%d,%v", tc.in, got, first, ok, tc.want, tc.first, tc.ok)
 		}
 	}
-	if got := stripPrefixesWithSep("2. bar\n    new\n3: kept\n4. qux", "."); got != "bar\n    new\n3: kept\nqux" {
-		t.Errorf("stripPrefixesWithSep = %q", got)
+	if got := stripPrefixesLike("2. bar\n    new\n3: kept\n4. qux", prefixShape{sep: ".", first: 2, last: 4}); got != "bar\n    new\n3: kept\nqux" {
+		t.Errorf("stripPrefixesLike = %q", got)
 	}
 }
 

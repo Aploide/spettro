@@ -222,8 +222,10 @@ func (q editQuery) blank() bool {
 type editStrategy struct {
 	tier int
 	find func(m *editMatcher, q editQuery) []editSpan
-	// unique marks similarity-based tiers, which never honour replace_all:
-	// they must find exactly one block.
+	// unique marks tiers that never honour replace_all and must find exactly
+	// one location: the similarity tiers, and boundary trimming, which drops
+	// the padding the model used to narrow the match (" n " must not become
+	// every bare n in the file).
 	unique bool
 }
 
@@ -236,7 +238,7 @@ var editStrategies = []editStrategy{
 	{tier: editTierWhitespace, find: findWhitespaceNormalized},
 	{tier: editTierUnicode, find: findUnicodeNormalized},
 	{tier: editTierEscape, find: findEscapeNormalized},
-	{tier: editTierTrimmedBoundary, find: findTrimmedBoundary},
+	{tier: editTierTrimmedBoundary, find: findTrimmedBoundary, unique: true},
 	{tier: editTierBlockAnchor, find: findBlockAnchor, unique: true},
 	{tier: editTierContextAware, find: findContextAware, unique: true},
 }
@@ -265,7 +267,7 @@ func (m *editMatcher) run(oldStr, newStr string, replaceAll, trustLines bool) (e
 	if trustLines {
 		hint = first
 	}
-	notes := []string{"stripped line-number prefixes copied from file-read output"}
+	notes := []string{"stripped the line-number prefixes old_string was copied with"}
 	if res, ok, err := m.runChain(sq, replaceAll, hint, strippedMaxTier, notes); ok {
 		return res, err
 	}
@@ -290,15 +292,17 @@ func (m *editMatcher) runChain(q editQuery, replaceAll bool, hint, maxTier int, 
 }
 
 // stripQueryPrefixes strips line-number prefixes from old_string (every line
-// must carry one) and, with the same separator, from whichever new_string
-// lines carry one: an edit built from a read deletes or inserts lines, so
-// new_string's numbering is rarely complete or consecutive.
+// must carry one) and, in the same form, from whichever new_string lines carry
+// one: an edit built from a read deletes or inserts lines, so new_string's
+// numbering is rarely complete or consecutive. See stripPrefixesLike for what
+// counts as the same form.
 func stripQueryPrefixes(oldStr, newStr string) (editQuery, int, bool) {
 	stripped, first, sep, ok := stripLineNumberPrefixes(oldStr)
 	if !ok {
 		return editQuery{}, 0, false
 	}
-	return newEditQuery(stripped, stripPrefixesWithSep(newStr, sep)), first, true
+	shape := prefixShapeOf(oldStr, first, sep)
+	return newEditQuery(stripped, stripPrefixesLike(newStr, shape)), first, true
 }
 
 // apply writes spans (sorted, non-overlapping) into the content. hint is the
@@ -334,6 +338,16 @@ func (m *editMatcher) apply(spans []editSpan, tier int, replaceAll bool, hint in
 	return editResult{Content: b.String(), Count: len(spans), Tier: tier, Notes: notes}, nil
 }
 
+// tierIsUnique reports whether tier never honours replace_all.
+func tierIsUnique(tier int) bool {
+	for _, s := range editStrategies {
+		if s.tier == tier {
+			return s.unique
+		}
+	}
+	return false
+}
+
 func (m *editMatcher) ambiguityError(spans []editSpan, tier int) error {
 	nums := make([]string, 0, len(spans))
 	for i, s := range spans {
@@ -346,6 +360,11 @@ func (m *editMatcher) ambiguityError(spans []editSpan, tier int) error {
 	where := fmt.Sprintf("%d locations (lines %s)", len(spans), strings.Join(nums, ", "))
 	if tier == editTierExact {
 		return fmt.Errorf("old_string matches %s; add more surrounding context lines to make it unique, or set replace_all to change every occurrence", where)
+	}
+	if tierIsUnique(tier) {
+		// replace_all is ignored at this tier, so suggesting it would only
+		// send the model round the same failure again.
+		return fmt.Errorf("old_string is not an exact match, and %s matching finds %s; quote the file verbatim and add more surrounding context lines to make it unique; a match this loose only ever changes one location", editTierLabels[tier], where)
 	}
 	return fmt.Errorf("old_string is not an exact match, and %s matching finds %s; quote the file verbatim and add more surrounding context lines to make it unique, or set replace_all", editTierLabels[tier], where)
 }
@@ -505,6 +524,11 @@ func findWhitespaceNormalized(m *editMatcher, q editQuery) []editSpan {
 // "max := 1". Bytes of multi-byte runes count as word characters.
 func (m *editMatcher) atWordBoundaries(start, end int) bool {
 	c := m.content
+	// A fragment right after a backslash starts inside an escape sequence:
+	// the n of "\n" is not a token.
+	if start > 0 && c[start-1] == '\\' {
+		return false
+	}
 	if start > 0 && start < len(c) && isWordByte(c[start-1]) && isWordByte(c[start]) {
 		return false
 	}
@@ -524,6 +548,10 @@ func findUnicodeNormalized(m *editMatcher, q editQuery) []editSpan {
 	}
 	normContent, offs := normalizeTypographicMap(m.content)
 	needle := normalizeTypographic(q.old)
+	// A position inside a one-to-many expansion ("…" read as "...") maps back
+	// to the start of the character; a match beginning or ending there would
+	// cut the character off and leave it behind, so it is skipped.
+	inside := func(p int) bool { return p > 0 && offs[p] == offs[p-1] }
 	var spans []editSpan
 	for off := 0; needle != ""; {
 		i := strings.Index(normContent[off:], needle)
@@ -532,6 +560,10 @@ func findUnicodeNormalized(m *editMatcher, q editQuery) []editSpan {
 		}
 		s := off + i
 		e := s + len(needle)
+		if inside(s) || inside(e) {
+			off = s + 1
+			continue
+		}
 		spans = append(spans, editSpan{start: offs[s], end: offs[e], repl: q.new})
 		off = e
 	}
@@ -623,6 +655,18 @@ func anchorsUsable(q editQuery) (first, last string, ok bool) {
 	return first, last, true
 }
 
+// anchorIndentAgrees reports whether a candidate block's last anchor sits at
+// the same depth relative to its first anchor as old_string's does, counted
+// in levels of each side's own indentation unit. Anchors are compared
+// trimmed, so without this a lone "}" would match the first nested closing
+// brace and the edit would end the block early.
+func anchorIndentAgrees(q editQuery, qUnit, fUnit indentUnit, fFirst, fLast string) bool {
+	qc, fc := qUnit.cols(), fUnit.cols()
+	dq := indentCols(leadingWS(q.lines[len(q.lines)-1]), qc) - indentCols(leadingWS(q.lines[0]), qc)
+	df := indentCols(leadingWS(fLast), fc) - indentCols(leadingWS(fFirst), fc)
+	return dq*fc == df*qc
+}
+
 // findBlockAnchor matches a block (3+ lines) by its first and last lines,
 // letting its size differ from old_string's by up to a quarter, and scores
 // the lines between by similarity. Every block above the threshold counts,
@@ -640,6 +684,7 @@ func findBlockAnchor(m *editMatcher, q editQuery) []editSpan {
 	}
 	k := len(q.lines)
 	tol := max(1, k/4)
+	qUnit, fUnit := detectIndentUnit(q.lines), m.fileUnit()
 	sc := newLineScorer(m, q.lines[1:k-1], blockAnchorBudget)
 	var spans []editSpan
 	var sims []float64
@@ -652,7 +697,7 @@ func findBlockAnchor(m *editMatcher, q editQuery) []editSpan {
 		}
 		var sizes []int
 		for size := max(3, k-tol); size <= k+tol && i+size-1 < len(m.lines); size++ {
-			if strings.TrimSpace(m.lines[i+size-1]) == last {
+			if strings.TrimSpace(m.lines[i+size-1]) == last && anchorIndentAgrees(q, qUnit, fUnit, m.lines[i], m.lines[i+size-1]) {
 				sizes = append(sizes, size)
 			}
 		}
@@ -880,20 +925,34 @@ func alignPrefixes(na, nb, band int, score func(a, b int) float64) []float64 {
 }
 
 // findContextAware matches a same-sized block whose first and last lines
-// agree and at least half of whose non-blank middle lines are equal after
-// trimming, for edits where a few lines are badly misquoted.
+// agree (at the quote's relative indentation) and at least half of whose
+// non-blank middle lines are equal after trimming, for edits where a few lines
+// are badly misquoted. Such a block is only trusted when no other block with
+// the same anchors resembles old_string more closely: otherwise the model
+// most likely meant that one, and both are reported as ambiguous rather than
+// rewriting the wrong one.
 func findContextAware(m *editMatcher, q editQuery) []editSpan {
 	first, last, ok := anchorsUsable(q)
 	if !ok {
 		return nil
 	}
 	k := len(q.lines)
-	var spans []editSpan
+	qUnit, fUnit := detectIndentUnit(q.lines), m.fileUnit()
+	sc := newLineScorer(m, q.lines[1:k-1], blockAnchorBudget)
+	type candidate struct {
+		span     editSpan
+		accepted bool
+		sim      float64
+	}
+	var cands []candidate
+	best := -1
 	for i := 0; i+k <= len(m.lines); i++ {
-		if strings.TrimSpace(m.lines[i]) != first || strings.TrimSpace(m.lines[i+k-1]) != last {
+		if strings.TrimSpace(m.lines[i]) != first || strings.TrimSpace(m.lines[i+k-1]) != last ||
+			!anchorIndentAgrees(q, qUnit, fUnit, m.lines[i], m.lines[i+k-1]) {
 			continue
 		}
 		total, equal := 0, 0
+		simSum := 0.0
 		for j := 1; j < k-1; j++ {
 			want := strings.TrimSpace(q.lines[j])
 			if want == "" {
@@ -902,15 +961,37 @@ func findContextAware(m *editMatcher, q editQuery) []editSpan {
 			total++
 			if strings.TrimSpace(m.lines[i+j]) == want {
 				equal++
+				simSum++
+			} else {
+				simSum += sc.similarity(j-1, i+j)
 			}
 		}
-		if total == 0 || equal*2 < total {
-			continue
+		if sc.budget < 0 {
+			return nil
+		}
+		c := candidate{sim: 1, accepted: total > 0 && equal*2 >= total}
+		if total > 0 {
+			c.sim = simSum / float64(total)
 		}
 		repl := reindentForFile(q.new, q.lines, m.lines[i:i+k], m.fileUnit())
-		span := m.lineSpan(q, i, k, repl)
-		span.detail = fmt.Sprintf("lines %d-%d, %d of %d inner lines equal", m.lineNo(i), m.lineNo(i+k-1), equal, total)
-		spans = append(spans, span)
+		c.span = m.lineSpan(q, i, k, repl)
+		c.span.detail = fmt.Sprintf("lines %d-%d, %d of %d inner lines equal", m.lineNo(i), m.lineNo(i+k-1), equal, total)
+		cands = append(cands, c)
+		if best < 0 || c.sim > cands[best].sim {
+			best = len(cands) - 1
+		}
+	}
+	var spans []editSpan
+	for _, c := range cands {
+		if c.accepted {
+			spans = append(spans, c.span)
+		}
+	}
+	if len(spans) > 0 && !cands[best].accepted {
+		// A closer block fails the equal-lines rule only because every
+		// line of it was misquoted a little: report both.
+		spans = append(spans, cands[best].span)
+		slices.SortFunc(spans, func(a, b editSpan) int { return a.start - b.start })
 	}
 	return spans
 }
@@ -1170,12 +1251,50 @@ func stripLineNumberPrefixes(s string) (stripped string, first int, sep string, 
 
 // stripPrefixesWithSep removes a line-number prefix using separator sep from
 // every line of s that has one, leaving the other lines as written.
-func stripPrefixesWithSep(s, sep string) string {
+// prefixShape describes the line-number prefixes old_string was copied with:
+// the separator, the numbers' range, and whether they were padded (file-read's
+// right-aligned "     7\t") and to which width.
+type prefixShape struct {
+	sep         string
+	first, last int
+	padded      bool
+	numEnd      int // offset where a padded number ends
+}
+
+func prefixShapeOf(oldStr string, first int, sep string) prefixShape {
+	sh := prefixShape{sep: sep, first: first, last: first}
+	for i, l := range strings.Split(strings.TrimSuffix(oldStr, "\n"), "\n") {
+		sh.last = first + i
+		if i == 0 {
+			sh.numEnd = prefixNumEnd(strings.TrimSuffix(l, "\r"))
+			sh.padded = strings.HasPrefix(l, " ")
+		}
+	}
+	return sh
+}
+
+// prefixNumEnd is the offset where l's line-number prefix's number ends.
+func prefixNumEnd(l string) int {
+	return len(l) - len(strings.TrimLeft(strings.TrimLeft(l, " "), "0123456789"))
+}
+
+// stripPrefixesLike strips from new_string the line-number prefixes that have
+// old_string's form: the same separator and padding, and a number in or just
+// past old_string's range (lines copied from the read keep their numbers; a
+// few new ones may be numbered on). Anything else — "1. Install" in a
+// Markdown list, "1\tAlice" in a TSV — is content the model wrote.
+func stripPrefixesLike(s string, sh prefixShape) string {
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		if _, lsep, end, ok := matchLineNumberPrefix(strings.TrimSuffix(l, "\r")); ok && lsep == sep {
-			lines[i] = l[end:]
+		t := strings.TrimSuffix(l, "\r")
+		n, lsep, end, ok := matchLineNumberPrefix(t)
+		if !ok || lsep != sh.sep || n < sh.first || n > sh.last+len(lines) {
+			continue
 		}
+		if padded := strings.HasPrefix(t, " "); padded != sh.padded || (padded && prefixNumEnd(t) != sh.numEnd) {
+			continue
+		}
+		lines[i] = l[end:]
 	}
 	return strings.Join(lines, "\n")
 }

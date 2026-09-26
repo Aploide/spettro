@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -158,6 +159,13 @@ func reindentForFile(newStr string, quoted, file []string, fileUnit indentUnit) 
 		}
 	case fits(level):
 		mapLead = level
+	default:
+		// No single mapping reproduces the file's indentation: the quote's
+		// relative indentation is wrong somewhere, and new_string most likely
+		// repeats the mistake. Map line by line instead.
+		if out, ok := reindentPerLine(newLines, quoted, file, quoteUnit, fileUnit); ok {
+			return out
+		}
 	}
 	for i, l := range newLines {
 		if strings.TrimSpace(l) == "" {
@@ -166,7 +174,112 @@ func reindentForFile(newStr string, quoted, file []string, fileUnit indentUnit) 
 		lead := leadingWS(l)
 		if nl, ok := mapLead(lead); ok {
 			newLines[i] = nl + l[len(lead):]
+		} else if nl, ok := level(lead); ok {
+			// shift cannot place a line shallower than old_string's base
+			// (a dedented "def" or closing brace); measure it in levels.
+			newLines[i] = nl + l[len(lead):]
 		}
 	}
 	return strings.Join(newLines, "\n")
+}
+
+// reindentPerLine re-indents new_string when no uniform mapping fits: a
+// new_string line that repeats a quoted line (compared trimmed, aligned in
+// order) takes the indentation of the file line that quoted line matched, so
+// unchanged lines keep the file's own indentation; any other line keeps its
+// depth relative to the nearest aligned line. ok is false when nothing aligns
+// or the block is too large to align.
+func reindentPerLine(newLines, quoted, file []string, quoteUnit, fileUnit indentUnit) (string, bool) {
+	var nIdx, qIdx []int
+	for i, l := range newLines {
+		if strings.TrimSpace(l) != "" {
+			nIdx = append(nIdx, i)
+		}
+	}
+	for j, l := range quoted {
+		if j < len(file) && strings.TrimSpace(l) != "" && strings.TrimSpace(file[j]) != "" {
+			qIdx = append(qIdx, j)
+		}
+	}
+	a, b := len(nIdx), len(qIdx)
+	if a == 0 || b == 0 || a*b > 4_000_000 {
+		return "", false
+	}
+	// Longest common subsequence of the trimmed lines.
+	dp := make([][]int32, a+1)
+	for i := range dp {
+		dp[i] = make([]int32, b+1)
+	}
+	for i := a - 1; i >= 0; i-- {
+		for j := b - 1; j >= 0; j-- {
+			if strings.TrimSpace(newLines[nIdx[i]]) == strings.TrimSpace(quoted[qIdx[j]]) {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else {
+				dp[i][j] = max(dp[i+1][j], dp[i][j+1])
+			}
+		}
+	}
+	match := map[int]int{} // new line -> file line
+	for i, j := 0, 0; i < a && j < b; {
+		switch {
+		case strings.TrimSpace(newLines[nIdx[i]]) == strings.TrimSpace(quoted[qIdx[j]]):
+			match[nIdx[i]] = qIdx[j]
+			i++
+			j++
+		case dp[i+1][j] >= dp[i][j+1]:
+			i++
+		default:
+			j++
+		}
+	}
+	if len(match) == 0 {
+		return "", false
+	}
+	unit := fileUnit
+	if !unit.known() {
+		unit = quoteUnit
+	}
+	qc := quoteUnit.cols()
+	out := slices.Clone(newLines)
+	for _, i := range nIdx {
+		l := newLines[i]
+		lead := leadingWS(l)
+		if j, ok := match[i]; ok {
+			out[i] = leadingWS(file[j]) + l[len(lead):]
+			continue
+		}
+		anchor := -1
+		for p := i - 1; p >= 0 && anchor < 0; p-- {
+			if _, ok := match[p]; ok {
+				anchor = p
+			}
+		}
+		for p := i + 1; p < len(newLines) && anchor < 0; p++ {
+			if _, ok := match[p]; ok {
+				anchor = p
+			}
+		}
+		delta := indentCols(lead, qc) - indentCols(leadingWS(newLines[anchor]), qc)
+		out[i] = shiftIndent(leadingWS(file[match[anchor]]), delta, qc, unit) + l[len(lead):]
+	}
+	return strings.Join(out, "\n"), true
+}
+
+// shiftIndent moves lead by delta columns (qc columns to a level) in unit.
+func shiftIndent(lead string, delta, qc int, unit indentUnit) string {
+	if delta >= 0 {
+		if !unit.known() {
+			return lead + strings.Repeat(" ", delta)
+		}
+		return lead + strings.Repeat(unit.str(), delta/qc) + strings.Repeat(" ", delta%qc)
+	}
+	us := unit.str()
+	if !unit.known() {
+		us = " "
+		qc = 1
+	}
+	for n := (-delta + qc - 1) / qc; n > 0 && strings.HasSuffix(lead, us); n-- {
+		lead = strings.TrimSuffix(lead, us)
+	}
+	return lead
 }
