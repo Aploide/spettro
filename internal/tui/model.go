@@ -131,7 +131,13 @@ type quitWarningMsg struct{}
 
 type compactDoneMsg struct {
 	summary string
-	err     error
+	// messages is the compacted structured history, when the carried one
+	// was compacted (nil after summarizing the flat transcript: the history
+	// is then reseeded from the summary).
+	messages []provider.Message
+	// noop reports that the history was too short to shrink.
+	noop bool
+	err  error
 }
 
 type toolProgressMsg struct {

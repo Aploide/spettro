@@ -1035,14 +1035,13 @@ func dropEmptyNudges(msgs []provider.Message, n int) []provider.Message {
 	return out
 }
 
-// compactConv summarizes the older portion of convMsgs into a single
-// synthetic message when the measured request size approaches the context
-// window (or unconditionally when force is set — used to recover from an
-// over-budget or overflowing context instead of failing the run). measure
-// sizes the would-be request (nil → plain history estimate). The cut/summarize core
-// lives in compactpkg.CompactHistory (shared with the ACP bridge's
-// between-turn compaction); this wrapper supplies the runtime's summarizer
-// routing.
+// compactConv compacts convMsgs when the measured request size approaches
+// the context window (or unconditionally when force is set — used to recover
+// from an over-budget or overflowing context instead of failing the run):
+// old tool outputs are pruned first, and only if that is not enough are the
+// older turns summarized (see compactpkg.Compact, shared with the ACP bridge
+// and the TUI's /compact). measure sizes the would-be request (nil → plain
+// history estimate); this wrapper supplies the runtime's summarizer routing.
 func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []provider.Message, window int, force bool, measure compactpkg.MeasureFunc) ([]provider.Message, bool, error) {
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
@@ -1066,8 +1065,23 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			},
 			primary, chain, req, nil)
 	}
-	out, did, err := compactpkg.CompactHistoryMeasured(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures, measure)
-	if did && err == nil && len(out) > 0 {
+	// A forced pass here is recovery from an over-budget or overflowing
+	// context: when the summarizer fails, a summary extracted from the
+	// transcript beats failing the run.
+	res, err := compactpkg.Compact(ctx, send, msgs, compactpkg.Params{
+		System:             system,
+		Window:             window,
+		Force:              force,
+		Policy:             r.compactCfg,
+		Failures:           r.compactFailures,
+		Measure:            measure,
+		ExtractiveFallback: force,
+	})
+	out, did := res.Messages, res.Compacted()
+	if err != nil {
+		out, did = msgs, false
+	}
+	if did && len(out) > 0 {
 		// The summarized messages carried stamp deltas; the summary carries
 		// all of them instead, so a later turn still restores every stamp.
 		out[0].FileStamps = r.stampSnapshot()

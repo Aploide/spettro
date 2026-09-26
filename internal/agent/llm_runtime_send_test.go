@@ -376,7 +376,7 @@ func TestRunToolLoopContextOverflowCompactsAndRetries(t *testing.T) {
 		if i%2 == 1 {
 			role = provider.RoleAssistant
 		}
-		cfg.Messages = append(cfg.Messages, provider.Message{Role: role, Content: fmt.Sprintf("earlier turn %d", i)})
+		cfg.Messages = append(cfg.Messages, provider.Message{Role: role, Content: fmt.Sprintf("earlier turn %d: %s", i, strings.Repeat("context ", 100))})
 	}
 	res, err := runToolLoop(context.Background(), cfg)
 	if err != nil {

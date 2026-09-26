@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
+	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/session"
@@ -367,6 +368,24 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
+	if len(m.convHistory) > 0 {
+		// The structured history the model actually sees is compacted with
+		// the same core as in-run compaction: the original task, the latest
+		// user messages and the most recent tool calls stay verbatim, old
+		// tool outputs are stubbed, and the rest becomes a structured summary.
+		history := m.convHistory
+		window := resolveGoalContextWindow(m)
+		return m, tea.Batch(
+			m.spin.Tick,
+			func() tea.Msg {
+				return runStructuredCompact(ctx, pm, providerName, modelName, history, window, focus)
+			},
+		)
+	}
+	// No structured history yet (the first turn after resuming a session):
+	// summarize the visible transcript.
 	var sb strings.Builder
 	for _, msg := range m.messages {
 		if msg.Role == RoleSystem {
@@ -378,8 +397,6 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 		sb.WriteString("\n\n")
 	}
 	transcript := sb.String()
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
@@ -396,6 +413,27 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 			return compactDoneMsg{summary: resp.Content}
 		},
 	)
+}
+
+// runStructuredCompact compacts the carried structured history (forced, so
+// an explicit /compact always summarizes) and reports the result. A history
+// too short to shrink is reported as a no-op, not a failure.
+func runStructuredCompact(ctx context.Context, pm *provider.Manager, providerName, modelName string, history []provider.Message, window int, focus string) compactDoneMsg {
+	send := func(ctx context.Context, req provider.Request) (provider.Response, error) {
+		return pm.Send(ctx, providerName, modelName, req)
+	}
+	res, err := compact.Compact(ctx, send, history, compact.Params{Window: window, Force: true, Focus: focus})
+	if err != nil {
+		return compactDoneMsg{err: err}
+	}
+	if !res.Compacted() {
+		return compactDoneMsg{noop: true}
+	}
+	summary := res.Summary
+	if summary == "" {
+		summary = fmt.Sprintf("%d old tool outputs were replaced by re-readable stubs.", res.Pruned)
+	}
+	return compactDoneMsg{summary: summary, messages: res.Messages}
 }
 
 func (m Model) runInit() (tea.Model, tea.Cmd) {

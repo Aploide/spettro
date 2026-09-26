@@ -119,7 +119,7 @@
 - Pressing `Enter` on a highlighted command suggestion inserts it first; pressing `Enter` again executes it.
 - `/goal` runs the **coding** orchestrator autonomously. Interrupt with `Esc` or `/goal stop`. Permission `yolo` is required for fully unattended operation; otherwise approval prompts pause the loop. See [Goal Mode](goal.md).
 - `/clear` **saves** the session first, then starts fresh. The saved session is available via `/resume`. See [Session Lifecycle](session.md).
-- `/compact` compacts the transcript in two stages: oversized tool results are first replaced with `[offloaded: …]` stubs the agent can re-read via `tool-output` (lossless), then the remainder is summarized. Auto-compact triggers at 85 % context window by default and skips the summary entirely when offloading alone frees enough space. See [Session Lifecycle](session.md).
+- `/compact` compacts the conversation in two stages: old oversized tool outputs are first replaced with `[output elided: …]` stubs the agent can re-read via `tool-output`, then the older turns are replaced by a structured summary. The original task, the latest user messages and the most recent tool calls are always kept verbatim. Auto-compact triggers at 85 % context window by default and skips the summary entirely when pruning alone frees enough space. See [Session Lifecycle](session.md).
 - `/login` and `/logout` manage your Spettro Subscription. See [Subscription](subscription.md).
 - Clipboard pasting (`Ctrl+V`), file attachments (`Ctrl+F`), and text-select mode (`Ctrl+T`) are described in [Clipboard and Attachments](clipboard.md).
 - The first-launch onboarding wizard is documented in [Onboarding](onboarding.md).
