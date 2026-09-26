@@ -19,7 +19,7 @@ func toolOutputHistoryLimit(name string) int {
 	switch name {
 	case "file-read":
 		return 40000
-	case "grep", "glob", "diagnostics", "references", "hover":
+	case "grep", "glob", "lsp":
 		return 16000
 	case "bash":
 		// Build and test logs are what the model iterates on; the failures
@@ -262,11 +262,8 @@ var builtinNativeToolDescs = map[string]string{
 	"skill-list":         "List available skills.",
 	"skill-read":         "Read a skill definition.",
 	"config":             "Get or set configuration values.",
-	"diagnostics":        "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
-	"references":         "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
-	"hover":              "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
+	"lsp":                "Query the language server (read-only; to rename a symbol use rename-symbol). op picks the operation:\n- diagnostics: current errors and warnings for path, or for every file seen so far this session when path is omitted.\n- references: every reference to a symbol (declaration included), as path:line:col.\n- definition: where a symbol is defined, as path:line:col.\n- hover: a symbol's type signature and documentation.\n- restart: restart a wedged language server (server names one; all of them when omitted) and reload .spettro/lsp.json.\nreferences, definition and hover need path plus the position: a symbol name (its first occurrence in the file) or a 1-based line (and optional character).",
 	"rename-symbol":      "Language-server rename: rename a symbol across the workspace and apply the edits. Position by symbol name or 1-based line/character; reports the files changed.",
-	"lsp-restart":        "Restart a wedged language server (all servers when none named).",
 	"enter-plan-mode":    "Enter plan mode.",
 	"exit-plan-mode":     "Exit plan mode.",
 	"enter-worktree":     "Enter an isolated git worktree.",
@@ -307,11 +304,8 @@ var builtinNativeToolSchemas = map[string]json.RawMessage{
 	"skill-list":         json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
 	"skill-read":         json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"skill":{"type":"string"},"location":{"type":"string"}}}`),
 	"config":             json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get","set"]},"key":{"type":"string"},"value":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}`),
-	"diagnostics":        json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
-	"references":         json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
-	"hover":              json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	"lsp":                json.RawMessage(`{"type":"object","properties":{"op":{"type":"string","enum":["diagnostics","references","definition","hover","restart"],"description":"the operation"},"path":{"type":"string","description":"file path, relative to the working directory; required for references, definition and hover, optional for diagnostics (omit for every file seen so far)"},"symbol":{"type":"string","description":"references/definition/hover: identifier whose first occurrence in path is the position (instead of line)"},"line":{"type":"integer","description":"references/definition/hover: 1-based line of the position"},"character":{"type":"integer","description":"references/definition/hover: 1-based column on line"},"server":{"type":"string","description":"restart: the server to restart (omit for all)"}},"required":["op"]}`),
 	"rename-symbol":      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"new_name":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path","new_name"]}`),
-	"lsp-restart":        json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
 	"enter-plan-mode":    json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"exit-plan-mode":     json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}}}`),
 	"enter-worktree":     json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"branch":{"type":"string"},"allow_dirty":{"type":"boolean"}}}`),

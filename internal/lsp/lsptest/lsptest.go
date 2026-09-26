@@ -7,6 +7,8 @@
 // Diagnostics follow the document text: every line containing "ERR" gets an
 // error, every line containing "WARN" a warning, and a line
 // "BREAK <relpath>" publishes two errors for that other workspace file.
+// Hover, references and definition get canned answers naming the position
+// asked about (see lookup).
 package lsptest
 
 import (
@@ -164,6 +166,8 @@ func Serve(in io.Reader, out io.Writer, opts Options) {
 			text := s.docs[p.TextDocument.URI]
 			s.mu.Unlock()
 			s.changed(p.TextDocument.URI, text, true)
+		case "textDocument/hover", "textDocument/references", "textDocument/definition":
+			s.lookup(msg)
 		case "shutdown":
 			s.reply(msg.ID, nil)
 		case "exit":
@@ -173,6 +177,35 @@ func Serve(in io.Reader, out io.Writer, opts Options) {
 				s.reply(msg.ID, nil)
 			}
 		}
+	}
+}
+
+// lookup answers the position requests with canned results that name the
+// (zero-based) position asked about: hover text "hover L:C", a definition
+// at the top of the document, and references at the top and at the position.
+func (s *server) lookup(msg message) {
+	var p struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+		Position struct {
+			Line      int `json:"line"`
+			Character int `json:"character"`
+		} `json:"position"`
+	}
+	_ = json.Unmarshal(msg.Params, &p)
+	loc := func(line, char int) map[string]any {
+		pos := map[string]any{"line": line, "character": char}
+		return map[string]any{"uri": p.TextDocument.URI, "range": map[string]any{"start": pos, "end": pos}}
+	}
+	switch msg.Method {
+	case "textDocument/hover":
+		s.reply(msg.ID, map[string]any{"contents": map[string]any{"kind": "plaintext",
+			"value": fmt.Sprintf("hover %d:%d", p.Position.Line, p.Position.Character)}})
+	case "textDocument/definition":
+		s.reply(msg.ID, []any{loc(0, 0)})
+	default:
+		s.reply(msg.ID, []any{loc(0, 0), loc(p.Position.Line, p.Position.Character)})
 	}
 }
 

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,7 +43,7 @@ func (r *toolRuntime) withLSPDiagnostics(ctx context.Context, absPath, result st
 
 // lspTools are the tools that use a language server: the edits get post-edit
 // diagnostics, the rest query it.
-var lspTools = []string{"file-write", "file-edit", "multi-edit", "rename-symbol", "diagnostics", "references", "hover"}
+var lspTools = []string{"file-write", "file-edit", "multi-edit", "rename-symbol", "lsp"}
 
 // usesLanguageServer reports whether an agent with these tools would ever use
 // a language server. A read-only agent would not, and a server started for it
@@ -68,23 +70,85 @@ func (r *toolRuntime) warmLSP(absPath string) {
 	}
 }
 
-func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (string, error) {
+// noLSPServer is the error an lsp call gets when no language server is
+// configured or installed for the workspace.
+const noLSPServer = "no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)"
+
+// lspArgs are the lsp tool's arguments. Each op takes the arguments of the
+// tool it replaced (diagnostics, references, hover, lsp-restart) and, like
+// those tools, ignores the others.
+type lspArgs struct {
+	Op        string `json:"op"`
+	Path      string `json:"path"`
+	Symbol    string `json:"symbol"`
+	Line      int    `json:"line"`
+	Character int    `json:"character"`
+	// Kind is the references tool's lookup mode, still honoured by op
+	// references: "definition" makes it op definition.
+	Kind   string `json:"kind"`
+	Server string `json:"server"`
+}
+
+// lspOps lists the lsp tool's operations, in the order errors name them.
+const lspOps = "diagnostics, references, definition, hover or restart"
+
+// lspCallOp returns the op an lsp call asks for, normalized; "" when the
+// arguments do not name one.
+func lspCallOp(raw []byte) string {
 	var args struct {
-		Path string `json:"path"`
+		Op string `json:"op"`
 	}
+	if json.Unmarshal(raw, &args) != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(args.Op))
+}
+
+// runLSP is the lsp tool: the read-only language-server operations. Writing
+// (rename-symbol) is a tool of its own, with its own approval.
+func (r *toolRuntime) runLSP(ctx context.Context, rawArgs []byte) (string, error) {
+	var args lspArgs
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("diagnostics args: %w", err)
+		return "", fmt.Errorf("lsp args: %w", err)
 	}
+	switch op := strings.ToLower(strings.TrimSpace(args.Op)); op {
+	case "diagnostics":
+		return r.lspDiagnostics(ctx, args)
+	case "references", "definition":
+		if op == "references" {
+			switch args.Kind {
+			case "", "references":
+			case "definition":
+				op = "definition"
+			default:
+				return "", fmt.Errorf("lsp references: kind must be \"references\" or \"definition\" (or use op \"definition\")")
+			}
+		}
+		return r.lspLookup(ctx, op, args)
+	case "hover":
+		return r.lspHover(ctx, args)
+	case "restart":
+		return r.lspRestart(args)
+	case "":
+		return "", fmt.Errorf("lsp: op is required (%s)", lspOps)
+	default:
+		return "", fmt.Errorf("lsp: unknown op %q (want %s)", args.Op, lspOps)
+	}
+}
+
+// lspDiagnostics is op diagnostics (the former diagnostics tool): one file's
+// diagnostics, or with no path everything published so far this session.
+func (r *toolRuntime) lspDiagnostics(ctx context.Context, args lspArgs) (string, error) {
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
+		return "", errors.New(noLSPServer)
 	}
 	if strings.TrimSpace(args.Path) == "" {
 		out := m.WorkspaceDiagnostics()
 		if strings.TrimSpace(out) == "" {
 			return "no diagnostics (across files opened so far this session)", nil
 		}
-		return truncate(out, r.historyLimit("diagnostics")), nil
+		return truncate(out, r.historyLimit("lsp")), nil
 	}
 	abs, rel, err := r.resolvePath(args.Path)
 	if err != nil {
@@ -97,61 +161,40 @@ func (r *toolRuntime) runLSPDiagnostics(ctx context.Context, rawArgs []byte) (st
 	if strings.TrimSpace(out) == "" {
 		return fmt.Sprintf("no diagnostics for %s", rel), nil
 	}
-	return truncate(out, r.historyLimit("diagnostics")), nil
+	return truncate(out, r.historyLimit("lsp")), nil
 }
 
-func (r *toolRuntime) runLSPReferences(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path      string `json:"path"`
-		Symbol    string `json:"symbol"`
-		Kind      string `json:"kind"`
-		Line      int    `json:"line"`
-		Character int    `json:"character"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("references args: %w", err)
-	}
+// lspLookup is ops references and definition (the former references tool,
+// kind "references" or "definition").
+func (r *toolRuntime) lspLookup(ctx context.Context, op string, args lspArgs) (string, error) {
 	if strings.TrimSpace(args.Path) == "" {
-		return "", fmt.Errorf("references: path is required")
+		return "", fmt.Errorf("lsp %s: path is required", op)
 	}
 	if strings.TrimSpace(args.Symbol) == "" && args.Line <= 0 {
-		return "", fmt.Errorf("references: symbol or line is required")
-	}
-	switch args.Kind {
-	case "", "references", "definition":
-	default:
-		return "", fmt.Errorf("references: kind must be \"references\" or \"definition\"")
+		return "", fmt.Errorf("lsp %s: symbol or line is required", op)
 	}
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
-		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
+		return "", errors.New(noLSPServer)
 	}
 	abs, _, err := r.resolvePath(args.Path)
 	if err != nil {
 		return "", err
 	}
-	out, err := m.Lookup(ctx, abs, strings.TrimSpace(args.Symbol), args.Kind, args.Line, args.Character)
+	out, err := m.Lookup(ctx, abs, strings.TrimSpace(args.Symbol), op, args.Line, args.Character)
 	if err != nil {
 		return "", err
 	}
-	return truncate(out, r.historyLimit("references")), nil
+	return truncate(out, r.historyLimit("lsp")), nil
 }
 
-func (r *toolRuntime) runLSPHover(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path      string `json:"path"`
-		Symbol    string `json:"symbol"`
-		Line      int    `json:"line"`
-		Character int    `json:"character"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("hover args: %w", err)
-	}
+// lspHover is op hover (the former hover tool): type signature and docs.
+func (r *toolRuntime) lspHover(ctx context.Context, args lspArgs) (string, error) {
 	if strings.TrimSpace(args.Path) == "" {
-		return "", fmt.Errorf("hover: path is required")
+		return "", fmt.Errorf("lsp hover: path is required")
 	}
 	if strings.TrimSpace(args.Symbol) == "" && args.Line <= 0 {
-		return "", fmt.Errorf("hover: symbol or line is required")
+		return "", fmt.Errorf("lsp hover: symbol or line is required")
 	}
 	m := lsp.ForWorkspace(r.cwd)
 	if m == nil {
@@ -168,7 +211,17 @@ func (r *toolRuntime) runLSPHover(ctx context.Context, rawArgs []byte) (string, 
 	if out == "" {
 		return fmt.Sprintf("no hover info for that position in %s", rel), nil
 	}
-	return truncate(out, r.historyLimit("hover")), nil
+	return truncate(out, r.historyLimit("lsp")), nil
+}
+
+// lspRestart is op restart (the former lsp-restart tool): restart one server,
+// or all of them, and reload .spettro/lsp.json.
+func (r *toolRuntime) lspRestart(args lspArgs) (string, error) {
+	m := lsp.ForWorkspace(r.cwd)
+	if m == nil {
+		return "", errors.New(noLSPServer)
+	}
+	return m.Restart(strings.TrimSpace(args.Server)), nil
 }
 
 func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string, error) {
@@ -238,18 +291,4 @@ func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string,
 	}
 	msg := fmt.Sprintf("renamed to %q in %d file(s):\n- %s", newName, len(applied), strings.Join(applied, "\n- "))
 	return r.withLSPDiagnostics(ctx, abs, msg, written...), nil
-}
-
-func (r *toolRuntime) runLSPRestart(rawArgs []byte) (string, error) {
-	var args struct {
-		Server string `json:"server"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("lsp-restart args: %w", err)
-	}
-	m := lsp.ForWorkspace(r.cwd)
-	if m == nil {
-		return "", fmt.Errorf("no lsp server available (install one on PATH, e.g. gopls or typescript-language-server, or configure .spettro/lsp.json)")
-	}
-	return m.Restart(strings.TrimSpace(args.Server)), nil
 }

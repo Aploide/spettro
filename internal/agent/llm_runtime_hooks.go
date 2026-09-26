@@ -88,7 +88,9 @@ func (r *toolRuntime) hasPostToolHooks(ctx context.Context, toolID string) bool 
 //     on the tool it runs;
 //   - the retired name the model called the tool by, if any (withCalledAs),
 //     so a hook written for "task-delete" fires on task-delete calls, as it
-//     always did, but not on every todo-write;
+//     always did, but not on every todo-write; an lsp call counts as called
+//     by the retired tool its op replaced (hookAlias), so a hook written for
+//     "diagnostics" fires on lsp {op: "diagnostics"};
 //   - the retired names that were the very same tool (sameTool: shell-exec
 //     is bash), so a hook written for "shell-exec" keeps guarding the shell
 //     now that the model only sees bash.
@@ -142,8 +144,9 @@ func (r *toolRuntime) toolHookRules(ctx context.Context, event hooks.Event, tool
 type calledAsKey struct{}
 
 // withCalledAs records, for the hooks of one tool call, the retired name the
-// model called the tool by ("" when it used the canonical name). It is set
-// for every call, so a sub-agent's calls never inherit the parent's.
+// call answers to (toolRuntime.hookAlias: the name the model called the tool
+// by, "" when it used the canonical name, or an lsp op's former tool). It is
+// set for every call, so a sub-agent's calls never inherit the parent's.
 func withCalledAs(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, calledAsKey{}, name)
 }

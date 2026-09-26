@@ -252,9 +252,9 @@ var askUserToolSpec = ToolSpec{ID: "ask-user", Name: "Ask User", Description: "P
 // spans several of them had nowhere to go and had to be split by hand. Its
 // tool list is spelled out in full rather than relying on the v5-v10
 // retrofits, which run before this one and would skip an agent that does not
-// exist yet. It names the v12 canonical tools; a manifest still older than
-// v12 gets the retired name it holds instead (ensureGeneralPurposeAgent), and
-// v12 then folds it.
+// exist yet. It names the canonical tools (v12's, and v13's lsp); a manifest
+// older than those gets the retired name it holds instead
+// (ensureGeneralPurposeAgent), and v12 or v13 then folds it.
 //
 // Role is subagent so both orchestrators and workers can hand off to it, and
 // the agent tool (primary_only) stays out of reach: it does the work itself
@@ -269,7 +269,7 @@ var generalPurposeAgentSpec = AgentSpec{
 	Color:       "magenta",
 	AllowedTools: []string{
 		"glob", "grep", "file-read", "file-write", "file-edit",
-		"diagnostics", "references", "hover", "rename-symbol", "lsp-restart",
+		"lsp", "rename-symbol",
 		"bash", "job-output", "job-kill",
 		"pty-start", "pty-write", "pty-kill",
 		"web-search", "web-fetch", "download",
@@ -292,8 +292,8 @@ var commentToolSpec = ToolSpec{ID: "comment", Name: "Comment", Description: "Emi
 
 // defaultToolSpecs is the default manifest's tool registry before the
 // version upgrades DefaultAgentManifest runs (which append the v6 and v8
-// tools). Each tool that absorbed duplicates in v12 lists the retired names
-// as aliases, exactly as the migration leaves them.
+// tools). Each tool that absorbed others in v12 or v13 lists the retired
+// names as aliases, exactly as the migration leaves them.
 func defaultToolSpecs() []ToolSpec {
 	return []ToolSpec{
 		{ID: "glob", Name: "Glob", Description: "Find files by name pattern, or list one directory.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, Aliases: retiredToolNames("glob"), RiskLevel: "low"},
@@ -301,9 +301,7 @@ func defaultToolSpecs() []ToolSpec {
 		{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 		{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
 		{ID: "file-edit", Name: "File Edit", Description: "Apply targeted edits to existing files.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, Aliases: retiredToolNames("file-edit"), RiskLevel: "high"},
-		{ID: "diagnostics", Name: "LSP Diagnostics", Description: "Fetch language-server diagnostics for a file or the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-		{ID: "references", Name: "LSP References", Description: "Find references or the definition of a symbol via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-		{ID: "lsp-restart", Name: "LSP Restart", Description: "Restart a wedged language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
+		{ID: "lsp", Name: "LSP", Description: "Query the language server: diagnostics, references, definition, hover, or restart a server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, Aliases: retiredToolNames("lsp"), RiskLevel: "low"},
 		{ID: "tool-search", Name: "Tool Search", Description: "Search available tools for current agent.", Kind: "builtin", Enabled: true, TimeoutSec: 20, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
 		{ID: "save-memory", Name: "Save Memory", Description: "Save one short durable fact or preference to persistent cross-session memory.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write", "ask"}, RiskLevel: "low"},
 		{ID: "todo-write", Name: "Todo Write", Description: "Read and update the session task list.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}, Aliases: retiredToolNames("todo-write"), RiskLevel: "medium"},
@@ -359,10 +357,10 @@ func DefaultAgentManifest() AgentManifest {
 		Tools: defaultToolSpecs(),
 		Agents: []AgentSpec{
 			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "todo-write", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs", "general-purpose"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "diagnostics", "references", "lsp-restart", "bash", "job-output", "job-kill", "tool-search", "todo-write", "task-stop", "config", "ask-user", "send-message", "comment", "skill-read", "skill-list", "save-memory", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore", "general-purpose"}, PromptFile: "agents/coding.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "lsp", "bash", "job-output", "job-kill", "tool-search", "todo-write", "task-stop", "config", "ask-user", "send-message", "comment", "skill-read", "skill-list", "save-memory", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore", "general-purpose"}, PromptFile: "agents/coding.md"},
 			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs", "general-purpose"}, PromptFile: "agents/chat.md"},
 			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
-			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "diagnostics", "references", "lsp-restart", "bash", "job-output", "job-kill", "todo-write", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "skill-read", "skill-list", "save-memory", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
+			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "lsp", "bash", "job-output", "job-kill", "todo-write", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "skill-read", "skill-list", "save-memory", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
 			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "bash", "job-output", "job-kill", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
 			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "bash", "job-output", "job-kill", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
 			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "bash", "job-output", "job-kill", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
@@ -553,7 +551,9 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		// v6 introduces the deeper LSP tools (hover, rename-symbol). Existing
 		// manifests get the definitions; agents already trusted with the
 		// references tool get hover, and those also holding file-edit get
-		// rename-symbol.
+		// rename-symbol. (v13 folds references and hover into lsp; an agent
+		// holding lsp already has hover and counts as trusted with
+		// references.)
 		m.ensureLSPDeepTools()
 		m.Version = 6
 		changed = true
@@ -605,8 +605,17 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		// v12 folds duplicate built-ins into one canonical tool each (bash,
 		// file-edit, grep, glob, todo-write; the old names stay callable as
 		// hidden aliases) and removes the grok image/video generators.
-		m.consolidateBuiltinTools()
+		m.consolidateBuiltinTools(consolidatedTools, removedTools)
 		m.Version = 12
+		changed = true
+	}
+	if m.Version < 13 {
+		// v13 folds the read-only language-server tools (diagnostics,
+		// references, hover, lsp-restart) into one lsp tool with an op
+		// argument; the old names stay callable as hidden aliases.
+		// rename-symbol, which writes, stays separate.
+		m.consolidateBuiltinTools(lspConsolidatedTools, nil)
+		m.Version = 13
 		changed = true
 	}
 	return changed
@@ -640,8 +649,8 @@ func (m *AgentManifest) ensureGeneralPurposeAgent() {
 			tools = append(tools, id)
 			continue
 		}
-		// A pre-v12 manifest may hold the tool under a name v12 retires;
-		// grant that one and let v12 fold it.
+		// A pre-v12 manifest may hold the tool under a name v12 or v13
+		// retires; grant that one and let the migration fold it.
 		for _, old := range retiredToolNames(id) {
 			if builtin[old] && !readOnlyRetiredTools[old] && !slices.Contains(tools, old) {
 				tools = append(tools, old)
@@ -784,13 +793,14 @@ func (m *AgentManifest) ensureRepoSearchTool() {
 // absent, and allow-lists grow only for agents whose existing tools show the
 // same level of trust (references for hover; references + file-edit for
 // rename-symbol) so deliberate restrictions are preserved.
+//
+// The default manifest runs this too, and it already has v13's lsp tool,
+// which answers to hover (an alias) and does what references did: no hover
+// definition is added next to it, and an agent holding lsp counts as holding
+// references for rename-symbol.
 func (m *AgentManifest) ensureLSPDeepTools() {
-	have := map[string]bool{}
-	for _, t := range m.Tools {
-		have[t.ID] = true
-	}
 	for _, t := range lspDeepTools {
-		if !have[t.ID] {
+		if _, ok := m.toolNamed(t.ID); !ok {
 			m.Tools = append(m.Tools, t)
 		}
 	}
@@ -802,7 +812,7 @@ func (m *AgentManifest) ensureLSPDeepTools() {
 		if allowed["references"] && !allowed["hover"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "hover")
 		}
-		if allowed["references"] && allowed["file-edit"] && !allowed["rename-symbol"] {
+		if (allowed["references"] || allowed["lsp"]) && allowed["file-edit"] && !allowed["rename-symbol"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "rename-symbol")
 		}
 	}

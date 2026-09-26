@@ -187,7 +187,7 @@ func TestUsesLanguageServer(t *testing.T) {
 	}{
 		{[]string{"file-read", "grep", "glob", "shell-exec"}, false},
 		{[]string{"file-read", "file-edit"}, true},
-		{[]string{"file-read", "references"}, true},
+		{[]string{"file-read", "lsp"}, true},
 		{nil, false},
 	}
 	for _, c := range cases {

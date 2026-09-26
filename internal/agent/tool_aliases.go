@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"spettro/internal/config"
 )
 
 // Retired tool names. Several built-in tools did the same job under
 // different names (shell-exec and bash, multi-edit and file-edit, the task-*
 // family and todo-write, ...), which cost prompt tokens on every request and
-// left the model choosing between equivalents. Each group now has one
+// left the model choosing between equivalents; the read-only language-server
+// tools (diagnostics, references, hover, lsp-restart) were four schemas for
+// what is one tool with an operation. Each group now has one
 // canonical tool; the old names stay callable as hidden aliases so a model
 // trained on them, a carried conversation, or a hand-written hook keeps
 // working, but only the canonical tool is advertised.
@@ -43,6 +47,10 @@ var legacyTools = map[string]legacyTool{
 	"task-delete":    {canonical: "todo-write", args: taskDeleteArgs},
 	"activate-skill": {canonical: "skill-read", sameTool: true},
 	"skill-activate": {canonical: "skill-read", sameTool: true},
+	"diagnostics":    {canonical: "lsp", args: lspOpArgs("diagnostics")},
+	"references":     {canonical: "lsp", args: lspReferencesArgs},
+	"hover":          {canonical: "lsp", args: lspOpArgs("hover")},
+	"lsp-restart":    {canonical: "lsp", args: lspOpArgs("restart")},
 }
 
 // LegacyToolNames returns the retired names that now route to canonical,
@@ -94,6 +102,101 @@ func (r *toolRuntime) canonicalCall(call toolCall) (toolCall, error) {
 		return call, nil
 	}
 	return canonicalToolCall(call)
+}
+
+// hookAlias is the retired name the hooks of this (canonical) call also
+// match (see toolRuntime.toolHookRules): the name the model called the tool
+// by, or, for an lsp call made under its own name, the retired tool its op
+// replaced. Each op is exactly one of the old tools, so a hook written for
+// "diagnostics" keeps firing on lsp {op: "diagnostics"} and on nothing else.
+func (r *toolRuntime) hookAlias(call toolCall) string {
+	if call.CalledAs != "" || call.Tool != "lsp" {
+		return call.CalledAs
+	}
+	if spec, ok := r.toolPolicies["lsp"]; ok && spec.Kind != "" && spec.Kind != "builtin" {
+		return ""
+	}
+	return lspOpTools[lspCallOp(call.Args)]
+}
+
+// lspOpDenied applies, to a call of the built-in lsp tool, the permission
+// rules that name the retired tool its op replaced: a rule denying
+// "lsp-restart" still denies lsp {op: "restart"}. The v13 manifest migration
+// writes such a rule for each op an agent could not call before (it held
+// diagnostics but not lsp-restart, say), so folding the tools into one never
+// hands an agent an operation it did not have.
+func (r *toolRuntime) lspOpDenied(call toolCall, spec config.ToolSpec) error {
+	if call.Tool != "lsp" || (spec.Kind != "" && spec.Kind != "builtin") {
+		return nil
+	}
+	op := lspCallOp(call.Args)
+	name, ok := lspOpTools[op]
+	if !ok {
+		return nil
+	}
+	if evaluatePermissionRule("tool", name, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
+		return fmt.Errorf("lsp op %q denied by policy (a rule denies %s)", op, name)
+	}
+	for _, fam := range toolPermissionFamilies(spec) {
+		if evaluatePermissionRule(fam, name, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
+			return fmt.Errorf("lsp op %q denied by policy for permission %q (a rule denies %s)", op, fam, name)
+		}
+	}
+	return nil
+}
+
+// lspOpTools maps each lsp op to the retired tool that did it.
+var lspOpTools = map[string]string{
+	"diagnostics": "diagnostics",
+	"references":  "references",
+	"definition":  "references",
+	"hover":       "hover",
+	"restart":     "lsp-restart",
+}
+
+// lspOpArgs maps a retired language-server tool onto the lsp op that does
+// the same thing. The old tools' arguments are the op's arguments, and an
+// "op" the old tool would have ignored does not change which op runs.
+func lspOpArgs(op string) func(json.RawMessage) (json.RawMessage, error) {
+	return func(raw json.RawMessage) (json.RawMessage, error) {
+		var in map[string]json.RawMessage
+		if err := decodeJSONStrict(raw, &in); err != nil {
+			return nil, err
+		}
+		if in == nil {
+			in = map[string]json.RawMessage{}
+		}
+		in["op"], _ = json.Marshal(op)
+		return json.Marshal(in)
+	}
+}
+
+// lspReferencesArgs maps references {kind} onto lsp: kind "definition" is
+// op definition, "references" or none is op references, and any other kind
+// stays the error it was.
+func lspReferencesArgs(raw json.RawMessage) (json.RawMessage, error) {
+	var in map[string]json.RawMessage
+	if err := decodeJSONStrict(raw, &in); err != nil {
+		return nil, err
+	}
+	if in == nil {
+		in = map[string]json.RawMessage{}
+	}
+	var kind string
+	if k, ok := in["kind"]; ok && json.Unmarshal(k, &kind) != nil {
+		return nil, fmt.Errorf("kind must be a string")
+	}
+	op := "references"
+	switch kind {
+	case "", "references":
+	case "definition":
+		op = "definition"
+	default:
+		return nil, fmt.Errorf("kind must be \"references\" or \"definition\"")
+	}
+	delete(in, "kind")
+	in["op"], _ = json.Marshal(op)
+	return json.Marshal(in)
 }
 
 // repoSearchArgs maps repo-search {query} onto grep's symbol search, which

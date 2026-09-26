@@ -1,9 +1,9 @@
-version = 13
+version = 12
 default_agent = 'plan'
 
 [metadata]
-name = 'Spettro workspace agents'
-description = 'Lean orchestrator/worker setup for Spettro.'
+name = 'Spettro default agents'
+description = 'Built-in fallback manifest when no spettro.agents.toml is present.'
 
 [runtime]
 default_permission = 'ask-first'
@@ -14,12 +14,9 @@ permission_rules = []
 allow_network_tools = false
 
 [runtime.delegation]
-max_parallel_workers = 4
+max_parallel_workers = 2
 max_depth = 2
 max_tool_calls_per_step = 32
-
-[runtime.fallback]
-mode = 'prompt'
 
 [[tools]]
 id = 'glob'
@@ -54,7 +51,7 @@ permission_rules = []
 [[tools]]
 id = 'file-read'
 name = 'File Reader'
-description = 'Read file contents in the workspace.'
+description = 'Reads file contents in the workspace.'
 kind = 'builtin'
 enabled = true
 entry_point = ''
@@ -69,7 +66,7 @@ permission_rules = []
 [[tools]]
 id = 'file-write'
 name = 'File Writer'
-description = 'Create, update, or append files in the workspace.'
+description = 'Creates and edits files in the workspace.'
 kind = 'builtin'
 enabled = true
 entry_point = ''
@@ -77,6 +74,171 @@ timeout_sec = 60
 requires_approval = true
 permitted_actions = ['write']
 aliases = []
+risk_level = 'high'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'file-edit'
+name = 'File Edit'
+description = 'Apply targeted edits to existing files.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 60
+requires_approval = true
+permitted_actions = ['write']
+aliases = ['multi-edit']
+risk_level = 'high'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'diagnostics'
+name = 'LSP Diagnostics'
+description = 'Fetch language-server diagnostics for a file or the workspace.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read', 'search']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'references'
+name = 'LSP References'
+description = 'Find references or the definition of a symbol via the language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read', 'search']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'lsp-restart'
+name = 'LSP Restart'
+description = 'Restart a wedged language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'tool-search'
+name = 'Tool Search'
+description = 'Search available tools for current agent.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 20
+requires_approval = false
+permitted_actions = ['read', 'search']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'save-memory'
+name = 'Save Memory'
+description = 'Save one short durable fact or preference to persistent cross-session memory.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 10
+requires_approval = false
+permitted_actions = ['write', 'ask']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'todo-write'
+name = 'Todo Write'
+description = 'Read and update the session task list.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 10
+requires_approval = false
+permitted_actions = ['write']
+aliases = ['task-create', 'task-update', 'task-delete', 'task-get', 'task-list']
+risk_level = 'medium'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'task-stop'
+name = 'Task Stop'
+description = 'Request stopping the current agent run.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 5
+requires_approval = false
+permitted_actions = ['plan', 'ask']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'goal-complete'
+name = 'Goal Complete'
+description = 'Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 5
+requires_approval = false
+permitted_actions = ['plan', 'ask']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'config'
+name = 'Config'
+description = 'Read or update selected runtime settings.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 10
+requires_approval = false
+permitted_actions = ['read', 'write', 'plan']
+aliases = []
+risk_level = 'medium'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'bash'
+name = 'Bash'
+description = 'Execute a command with the host shell and return its output.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 120
+requires_approval = true
+permitted_actions = ['execute', 'git']
+aliases = ['bash-output', 'shell-exec']
 risk_level = 'high'
 primary_only = false
 permission_rules = []
@@ -112,32 +274,17 @@ primary_only = false
 permission_rules = []
 
 [[tools]]
-id = 'todo-write'
-name = 'Todo Write'
-description = 'Read and update the session task list.'
+id = 'tool-output'
+name = 'Tool Output'
+description = 'Re-read the full output of an earlier tool call that was offloaded to the session spool.'
 kind = 'builtin'
 enabled = true
 entry_point = ''
 timeout_sec = 10
 requires_approval = false
-permitted_actions = ['write']
-aliases = ['task-create', 'task-update', 'task-delete', 'task-get', 'task-list']
-risk_level = 'medium'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'bash'
-name = 'Bash'
-description = 'Execute a command with the host shell and return its output.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 120
-requires_approval = true
-permitted_actions = ['execute', 'git']
-aliases = ['bash-output', 'shell-exec']
-risk_level = 'high'
+permitted_actions = ['read']
+aliases = []
+risk_level = 'low'
 primary_only = false
 permission_rules = []
 
@@ -151,66 +298,6 @@ entry_point = ''
 timeout_sec = 5
 requires_approval = false
 permitted_actions = ['read']
-aliases = []
-risk_level = 'low'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'agent'
-name = 'Agent'
-description = 'Delegate to another agent with a structured contract.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 300
-requires_approval = false
-permitted_actions = ['read', 'write', 'execute', 'git', 'search', 'plan', 'ask']
-aliases = []
-risk_level = 'medium'
-primary_only = true
-permission_rules = []
-
-[[tools]]
-id = 'file-edit'
-name = 'File Edit'
-description = 'Apply targeted edits to existing files.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 60
-requires_approval = true
-permitted_actions = ['write']
-aliases = ['multi-edit']
-risk_level = 'high'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'lsp'
-name = 'LSP'
-description = 'Query the language server: diagnostics, references, definition, hover, or restart a server.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 30
-requires_approval = false
-permitted_actions = ['read', 'search']
-aliases = ['diagnostics', 'references', 'hover', 'lsp-restart']
-risk_level = 'low'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'tool-search'
-name = 'Tool Search'
-description = 'Search available tools for current agent.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 20
-requires_approval = false
-permitted_actions = ['read', 'search']
 aliases = []
 risk_level = 'low'
 primary_only = false
@@ -262,51 +349,6 @@ primary_only = false
 permission_rules = []
 
 [[tools]]
-id = 'task-stop'
-name = 'Task Stop'
-description = 'Request stopping the current agent run.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 5
-requires_approval = false
-permitted_actions = ['plan', 'ask']
-aliases = []
-risk_level = 'low'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'goal-complete'
-name = 'Goal Complete'
-description = 'Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 5
-requires_approval = false
-permitted_actions = ['plan', 'ask']
-aliases = []
-risk_level = 'low'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'config'
-name = 'Config'
-description = 'Read or update selected runtime settings.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 10
-requires_approval = false
-permitted_actions = ['read', 'write', 'plan']
-aliases = []
-risk_level = 'medium'
-primary_only = false
-permission_rules = []
-
-[[tools]]
 id = 'web-search'
 name = 'Web Search'
 description = 'Search the web and return result links.'
@@ -318,21 +360,6 @@ requires_approval = true
 permitted_actions = ['search', 'network']
 aliases = []
 risk_level = 'medium'
-primary_only = false
-permission_rules = []
-
-[[tools]]
-id = 'save-memory'
-name = 'Save Memory'
-description = 'Save one short durable fact or preference to persistent cross-session memory.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 10
-requires_approval = false
-permitted_actions = ['write', 'ask']
-aliases = []
-risk_level = 'low'
 primary_only = false
 permission_rules = []
 
@@ -472,6 +499,21 @@ primary_only = false
 permission_rules = []
 
 [[tools]]
+id = 'agent'
+name = 'Agent'
+description = 'Spawn a sub-agent to handle a subtask.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 300
+requires_approval = false
+permitted_actions = ['read', 'write', 'execute', 'git', 'search', 'plan', 'ask']
+aliases = []
+risk_level = 'medium'
+primary_only = true
+permission_rules = []
+
+[[tools]]
 id = 'skill-read'
 name = 'Skill Read'
 description = 'Activate an installed Agent Skill and load its SKILL.md instructions.'
@@ -496,6 +538,21 @@ entry_point = ''
 timeout_sec = 10
 requires_approval = false
 permitted_actions = ['read']
+aliases = []
+risk_level = 'low'
+primary_only = false
+permission_rules = []
+
+[[tools]]
+id = 'hover'
+name = 'LSP Hover'
+description = 'Type signature and documentation for a symbol via the language server.'
+kind = 'builtin'
+enabled = true
+entry_point = ''
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ['read', 'search']
 aliases = []
 risk_level = 'low'
 primary_only = false
@@ -561,29 +618,14 @@ risk_level = 'low'
 primary_only = false
 permission_rules = []
 
-[[tools]]
-id = 'tool-output'
-name = 'Tool Output'
-description = 'Re-read the full output of an earlier tool call that was offloaded to the session spool.'
-kind = 'builtin'
-enabled = true
-entry_point = ''
-timeout_sec = 10
-requires_approval = false
-permitted_actions = ['read']
-aliases = []
-risk_level = 'low'
-primary_only = false
-permission_rules = []
-
 [[agents]]
 id = 'plan'
 name = 'Plan'
-description = 'Planning orchestrator that coordinates workers and todo state. Pure orchestrator: cannot read files directly — must delegate all discovery to the explore worker.'
+description = 'Planning orchestrator (delegates all discovery to explore worker)'
 skill = 'planning'
 mode = 'orchestrator'
 role = 'orchestrator'
-color = 'purple'
+color = 'blue'
 model_provider = ''
 model = ''
 system_prompt = ''
@@ -592,8 +634,8 @@ allowed_tools = ['agent', 'tool-search', 'todo-write', 'task-stop', 'config', 'a
 permitted_actions = ['read', 'search', 'plan', 'write', 'ask']
 permission = 'ask-first'
 permission_rules = []
-temperature = 0.2
-max_tokens = 4096
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['explore', 'review', 'docs', 'general-purpose']
 enabled = true
@@ -601,7 +643,7 @@ enabled = true
 [[agents]]
 id = 'coding'
 name = 'Coding'
-description = 'Coding orchestrator that delegates implementation and verification.'
+description = 'Coding orchestrator'
 skill = 'implementation'
 mode = 'orchestrator'
 role = 'primary'
@@ -610,12 +652,12 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/coding.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'lsp', 'bash', 'job-output', 'job-kill', 'tool-search', 'todo-write', 'task-stop', 'config', 'send-message', 'comment', 'skill-read', 'skill-list', 'save-memory', 'web-fetch', 'download', 'view-image', 'rename-symbol', 'pty-start', 'pty-write', 'pty-kill', 'tool-output', 'ask-user']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'bash', 'job-output', 'job-kill', 'tool-search', 'todo-write', 'task-stop', 'config', 'ask-user', 'send-message', 'comment', 'skill-read', 'skill-list', 'save-memory', 'web-fetch', 'download', 'view-image', 'hover', 'rename-symbol', 'pty-start', 'pty-write', 'pty-kill', 'tool-output']
 permitted_actions = ['read', 'search', 'plan', 'write', 'execute', 'git', 'network', 'ask']
 permission = 'restricted'
 permission_rules = []
-temperature = 0.1
-max_tokens = 8192
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['code', 'git', 'test', 'review', 'docs', 'explore', 'general-purpose']
 enabled = true
@@ -623,21 +665,21 @@ enabled = true
 [[agents]]
 id = 'ask'
 name = 'Ask'
-description = 'Read-only orchestrator for Q&A and repository questions.'
+description = 'Read-only orchestrator for Q&A'
 skill = 'conversation'
-mode = 'ask'
+mode = 'orchestrator'
 role = 'primary'
 color = 'cyan'
 model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/chat.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'tool-search', 'web-search', 'web-fetch', 'mcp-list-resources', 'mcp-read-resource', 'comment', 'skill-read', 'skill-list', 'save-memory', 'view-image', 'tool-output', 'ask-user']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'tool-search', 'web-search', 'web-fetch', 'mcp-list-resources', 'mcp-read-resource', 'ask-user', 'comment', 'skill-read', 'skill-list', 'save-memory', 'view-image', 'tool-output']
 permitted_actions = ['ask', 'read', 'search']
 permission = 'ask-first'
 permission_rules = []
-temperature = 0.4
-max_tokens = 8192
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['explore', 'docs', 'general-purpose']
 enabled = true
@@ -645,7 +687,7 @@ enabled = true
 [[agents]]
 id = 'explore'
 name = 'Explore'
-description = 'Read-only codebase exploration worker.'
+description = 'Read-only code exploration worker'
 skill = 'analysis'
 mode = 'worker'
 role = 'worker'
@@ -658,8 +700,8 @@ allowed_tools = ['glob', 'grep', 'file-read', 'comment', 'skill-read', 'skill-li
 permitted_actions = ['read', 'search']
 permission = 'ask-first'
 permission_rules = []
-temperature = 0.2
-max_tokens = 4096
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['explore', 'review', 'docs']
 enabled = true
@@ -667,7 +709,7 @@ enabled = true
 [[agents]]
 id = 'code'
 name = 'Code'
-description = 'Implementation worker that can edit files and run checks. Receives a focused task from the coding orchestrator and executes it end-to-end (read, write, verify).'
+description = 'Implementation worker'
 skill = 'implementation'
 mode = 'worker'
 role = 'worker'
@@ -676,12 +718,12 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/code.md'
-allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'lsp', 'bash', 'job-output', 'job-kill', 'todo-write', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'comment', 'skill-read', 'skill-list', 'save-memory', 'web-fetch', 'download', 'view-image', 'rename-symbol', 'pty-start', 'pty-write', 'pty-kill', 'tool-output']
+allowed_tools = ['agent', 'glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'lsp-restart', 'bash', 'job-output', 'job-kill', 'todo-write', 'task-stop', 'config', 'enter-worktree', 'exit-worktree', 'comment', 'skill-read', 'skill-list', 'save-memory', 'web-fetch', 'download', 'view-image', 'hover', 'rename-symbol', 'pty-start', 'pty-write', 'pty-kill', 'tool-output']
 permitted_actions = ['read', 'search', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []
-temperature = 0.1
-max_tokens = 8192
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['explore', 'review', 'test', 'docs']
 enabled = true
@@ -689,7 +731,7 @@ enabled = true
 [[agents]]
 id = 'git'
 name = 'Git'
-description = 'Git workflow worker.'
+description = 'Git operations worker'
 skill = 'git'
 mode = 'worker'
 role = 'worker'
@@ -702,8 +744,8 @@ allowed_tools = ['glob', 'grep', 'file-read', 'bash', 'job-output', 'job-kill', 
 permitted_actions = ['read', 'search', 'execute', 'git']
 permission = 'restricted'
 permission_rules = []
-temperature = 0.1
-max_tokens = 4096
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['review', 'docs']
 enabled = true
@@ -711,7 +753,7 @@ enabled = true
 [[agents]]
 id = 'test'
 name = 'Test'
-description = 'Testing worker for verification commands.'
+description = 'Test execution worker'
 skill = 'testing'
 mode = 'worker'
 role = 'worker'
@@ -724,8 +766,8 @@ allowed_tools = ['glob', 'grep', 'file-read', 'bash', 'job-output', 'job-kill', 
 permitted_actions = ['read', 'search', 'execute']
 permission = 'restricted'
 permission_rules = []
-temperature = 0.1
-max_tokens = 4096
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['review', 'explore']
 enabled = true
@@ -733,7 +775,7 @@ enabled = true
 [[agents]]
 id = 'review'
 name = 'Review'
-description = 'Review worker for sanity checks and risk analysis.'
+description = 'Code review worker'
 skill = 'review'
 mode = 'worker'
 role = 'subagent'
@@ -746,8 +788,8 @@ allowed_tools = ['glob', 'grep', 'file-read', 'bash', 'job-output', 'job-kill', 
 permitted_actions = ['read', 'search', 'execute', 'plan']
 permission = 'ask-first'
 permission_rules = []
-temperature = 0.2
-max_tokens = 4096
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['explore', 'docs']
 enabled = true
@@ -755,7 +797,7 @@ enabled = true
 [[agents]]
 id = 'docs'
 name = 'Docs'
-description = 'Read-only docs worker for extracting and summarizing docs.'
+description = 'Read-only documentation worker'
 skill = 'documentation'
 mode = 'worker'
 role = 'subagent'
@@ -768,8 +810,8 @@ allowed_tools = ['glob', 'grep', 'file-read', 'comment', 'skill-read', 'skill-li
 permitted_actions = ['read', 'search', 'ask']
 permission = 'ask-first'
 permission_rules = []
-temperature = 0.2
-max_tokens = 4096
+temperature = 0.0
+max_tokens = 0
 max_steps = 0
 handoffs = ['explore']
 enabled = true
@@ -786,7 +828,7 @@ model_provider = ''
 model = ''
 system_prompt = ''
 prompt_file = 'agents/general-purpose.md'
-allowed_tools = ['glob', 'grep', 'file-read', 'file-write', 'file-edit', 'lsp', 'rename-symbol', 'bash', 'job-output', 'job-kill', 'pty-start', 'pty-write', 'pty-kill', 'web-search', 'web-fetch', 'download', 'todo-write', 'comment', 'skill-read', 'skill-list', 'view-image', 'tool-output']
+allowed_tools = ['glob', 'grep', 'file-read', 'file-write', 'file-edit', 'diagnostics', 'references', 'hover', 'rename-symbol', 'lsp-restart', 'bash', 'job-output', 'job-kill', 'pty-start', 'pty-write', 'pty-kill', 'web-search', 'web-fetch', 'download', 'todo-write', 'comment', 'skill-read', 'skill-list', 'view-image', 'tool-output']
 permitted_actions = ['read', 'search', 'write', 'execute', 'git', 'network']
 permission = 'restricted'
 permission_rules = []

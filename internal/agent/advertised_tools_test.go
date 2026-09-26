@@ -13,10 +13,10 @@ import (
 // retired name creeping back into a manifest, shows up as a diff here.
 var codingAgentAdvertisedTools = []string{
 	"agent", "glob", "grep", "file-read", "file-write", "file-edit",
-	"diagnostics", "references", "lsp-restart", "bash", "job-output", "job-kill",
+	"lsp", "bash", "job-output", "job-kill",
 	"tool-search", "todo-write", "task-stop", "config", "send-message", "comment",
 	"skill-read", "skill-list", "save-memory", "web-fetch", "download", "view-image",
-	"hover", "rename-symbol", "pty-start", "pty-write", "pty-kill", "tool-output",
+	"rename-symbol", "pty-start", "pty-write", "pty-kill", "tool-output",
 	"ask-user",
 }
 

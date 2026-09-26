@@ -210,7 +210,7 @@ func (r postEditReport) format() string {
 		if len(r.errors) == 0 {
 			lead = fmt.Sprintf("No errors in %s;", r.rel)
 		}
-		fmt.Fprintf(&sb, "%s %s in %s: %s — use the diagnostics tool to list them.\n",
+		fmt.Fprintf(&sb, "%s %s in %s: %s — use the lsp tool (op: diagnostics) to list them.\n",
 			lead, plural(total, "error"), plural(len(r.others), "other file"), strings.Join(names, ", "))
 	}
 	return strings.TrimRight(sb.String(), "\n")
