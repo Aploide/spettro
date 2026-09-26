@@ -151,7 +151,12 @@ type LLMAgent struct {
 	ProviderName    func() string
 	ModelName       func() string
 	CWD             string
-	MaxTokens       int
+	// MaxTokens is the per-request input token budget (config token_budget);
+	// 0 = unlimited.
+	MaxTokens int
+	// MaxOutputTokens caps each reply (config max_output_tokens); 0 = the
+	// provider manager's per-model default.
+	MaxOutputTokens int
 	Thinking        provider.ThinkingLevel
 	// Ultra, when true on a top-level run, injects the ultra fan-out tool and
 	// swarm guidance so the agent decomposes hard tasks across many parallel
@@ -305,6 +310,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ProviderName:        a.ProviderName,
 		ModelName:           a.ModelName,
 		MaxTokens:           a.MaxTokens,
+		MaxOutputTokens:     a.MaxOutputTokens,
 		Thinking:            a.Thinking,
 		RequiredReads:       a.RequiredReads,
 		Images:              a.Images,
