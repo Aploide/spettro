@@ -240,6 +240,12 @@ type Message struct {
 	// the system prompt byte-stable across turns without sharing it between
 	// conversations. Never sent to a provider as message content.
 	SessionContext string `json:",omitempty"`
+	// LoadedTools, on a conversation's first message, lists the deferred
+	// tools the conversation has loaded (through tool-search or a call by
+	// name), so a later turn advertises the same tool list even after
+	// compaction summarized away the calls that loaded them. Never sent to
+	// a provider.
+	LoadedTools []string `json:",omitempty"`
 }
 
 // FileStamp is one file's stale-read guard state: the SHA-256 (hex) of the

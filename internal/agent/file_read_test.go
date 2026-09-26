@@ -95,12 +95,13 @@ func TestFileReadCapsAtCharBudgetOnLineBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) > r.historyLimit("file-read") {
-		t.Fatalf("output %d chars exceeds budget %d", len(out), r.historyLimit("file-read"))
-	}
 	m := continueRe.FindStringSubmatch(out)
 	if m == nil {
 		t.Fatalf("missing continuation footer: %q", out[len(out)-200:])
+	}
+	// The budget counts file content, not the line-number prefixes.
+	if content := numberedContentChars(strings.TrimSuffix(out, m[0])); content > r.historyLimit("file-read") {
+		t.Fatalf("content %d chars exceeds budget %d", content, r.historyLimit("file-read"))
 	}
 	var last, next int
 	fmt.Sscan(m[2], &last)
@@ -111,6 +112,47 @@ func TestFileReadCapsAtCharBudgetOnLineBoundary(t *testing.T) {
 	body := strings.TrimSuffix(out, m[0])
 	if body != numberedLines(1, last, func(int) string { return line }) {
 		t.Fatal("body does not end on a whole line")
+	}
+}
+
+// numberedContentChars counts the file content in numbered file-read
+// output: each row's text and newline, without its number prefix.
+func numberedContentChars(out string) int {
+	n := 0
+	for row := range strings.Lines(out) {
+		_, text, _ := strings.Cut(row, "\t")
+		n += len(text)
+	}
+	return n
+}
+
+// A mid-size source file (1790 lines, about 34 KB) comes back in one read:
+// the numbering does not eat into the budget.
+func TestFileReadMidSizeFileInOneCall(t *testing.T) {
+	var b strings.Builder
+	for i := range 1790 {
+		fmt.Fprintf(&b, "\tx = fn(%05d, ab)\n", i)
+	}
+	src := b.String()
+	if len(src) < 34000 {
+		t.Fatalf("fixture is %d bytes", len(src))
+	}
+	r := newReadRuntime(t, map[string]string{"exec.go": src})
+	out, err := r.runFileRead(context.Background(), []byte(`{"path":"exec.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "showing lines") || lastNumberedLine(out) != 1790 {
+		t.Fatalf("mid-size file truncated: %q", out[len(out)-200:])
+	}
+	// 2000 short lines stop at the line cap, not the character budget.
+	r = newReadRuntime(t, map[string]string{"long.txt": strings.Repeat("0123456789012345678901234\n", 2500)})
+	out, err = r.runFileRead(context.Background(), []byte(`{"path":"long.txt"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := continueRe.FindStringSubmatch(out); m == nil || m[2] != "2000" {
+		t.Fatalf("want lines 1-2000: %q", out[len(out)-200:])
 	}
 }
 

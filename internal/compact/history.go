@@ -327,6 +327,7 @@ func liftUserMessages(middle []provider.Message, keep, budget int) []provider.Me
 		used += len(m.Content)
 		m.FileStamps = nil
 		m.SessionContext = ""
+		m.LoadedTools = nil
 		picked = append(picked, m)
 	}
 	slices.Reverse(picked)

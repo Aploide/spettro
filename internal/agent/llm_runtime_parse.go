@@ -155,24 +155,30 @@ type fileEditPair struct {
 	OldString  string
 	NewString  string
 	ReplaceAll bool
+	// Expected is an edits[] item's expected_replacements (0: not given).
+	Expected int
 	// hasNew records whether new_string was sent at all; see requireNew.
 	hasNew bool
 }
 
 // rawFileEditPair is the wire form of a fileEditPair: old_str/new_str (the
-// str_replace spelling) are accepted beside old_string/new_string.
+// str_replace spelling) are accepted beside old_string/new_string. An
+// edits[] item may carry its own expected_replacements, as models trained on
+// other multi-edit tools send it; at the top level the field is the whole
+// call's.
 type rawFileEditPair struct {
 	OldString  *string  `json:"old_string"`
 	OldStr     *string  `json:"old_str"`
 	NewString  *string  `json:"new_string"`
 	NewStr     *string  `json:"new_str"`
 	ReplaceAll flexBool `json:"replace_all"`
+	Expected   flexInt  `json:"expected_replacements"`
 }
 
 func (p rawFileEditPair) resolve() fileEditPair {
 	oldText, _ := firstPresent(p.OldString, p.OldStr)
 	newText, hasNew := firstPresent(p.NewString, p.NewStr)
-	return fileEditPair{OldString: oldText, NewString: newText, ReplaceAll: bool(p.ReplaceAll), hasNew: hasNew}
+	return fileEditPair{OldString: oldText, NewString: newText, ReplaceAll: bool(p.ReplaceAll), Expected: max(int(p.Expected), 0), hasNew: hasNew}
 }
 
 // requireNew rejects an edit whose new_string was never sent: decoding it as
@@ -203,7 +209,6 @@ func decodeFileEditArgs(raw []byte) (fileEditArgs, error) {
 		rawFileEditPair
 		StartLine flexInt           `json:"start_line"`
 		EndLine   flexInt           `json:"end_line"`
-		Expected  flexInt           `json:"expected_replacements"`
 		Edits     []rawFileEditPair `json:"edits"`
 	}
 	if err := decodeJSONExact(raw, &in); err != nil {
@@ -214,8 +219,10 @@ func decodeFileEditArgs(raw []byte) (fileEditArgs, error) {
 		Single:    in.rawFileEditPair.resolve(),
 		StartLine: int(in.StartLine),
 		EndLine:   int(in.EndLine),
-		Expected:  int(in.Expected),
 	}
+	// The top-level expected_replacements counts the whole call's
+	// replacements, edits[] included.
+	out.Expected, out.Single.Expected = out.Single.Expected, 0
 	if out.Single.OldString != "" {
 		if err := out.Single.requireNew("file-edit"); err != nil {
 			return fileEditArgs{}, err

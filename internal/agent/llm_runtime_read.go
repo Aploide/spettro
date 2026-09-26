@@ -16,6 +16,11 @@ const (
 	// fileReadDefaultLines is how many lines a file-read without an explicit
 	// range returns; the footer tells the model where to continue.
 	fileReadDefaultLines = 2000
+	// fileReadDefaultChars is the default budget of file content one
+	// file-read returns (config limits.file_read_chars overrides it). Only
+	// the file's own text counts: the line-number prefixes come on top, so a
+	// 2000-line file costs no more of the budget than its bytes.
+	fileReadDefaultChars = 60000
 	// fileReadMaxLineChars clips a single line so one minified line cannot
 	// consume the read budget.
 	fileReadMaxLineChars = 2000
@@ -40,7 +45,8 @@ type fileReadArgs struct {
 // and a tab (cat -n style, "     7\tcode"), the numbers file-edit's
 // start_line/end_line refer to. Output is capped at fileReadDefaultLines lines
 // (unless the call asked for a range) and at the history budget, with a footer
-// naming the offset to continue from. Binary files are refused.
+// naming the offset to continue from. The history budget counts the file's
+// content only, not the line-number prefixes. Binary files are refused.
 //
 // The file is streamed: only the page being returned is held in memory, so a
 // ranged read of a multi-GB log costs a pass over it, not several copies, and
@@ -83,8 +89,9 @@ func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, 
 	if end < start {
 		return "", fmt.Errorf("file-read: end line %d is before start line %d", end, start)
 	}
+	// The budget is of file content: the numbering and the footer come on
+	// top of it.
 	budget := r.historyLimit("file-read")
-	budget = max(budget-fileReadFooterReserve, budget/2)
 
 	// The lock keeps a concurrent edit in the same batch from landing
 	// between the read and the stamp, which would stamp stale content.
@@ -187,7 +194,7 @@ func readFilePage(ctx context.Context, rd io.Reader, start, end, budget int) (fi
 			if chunk[len(chunk)-1] == '\n' {
 				if collecting() {
 					pg.lines = append(pg.lines, pageLine{text: string(cur), size: curSize})
-					kept += len(cur) + 8
+					kept += len(cur)
 				}
 				pg.total++
 				lineNum++
@@ -233,11 +240,13 @@ func formatNumberedLine(num int, text string) string {
 }
 
 // renderNumberedLines renders lines start..end numbered — page holds the
-// lines from start on — stopping before the output would exceed budget (at
-// least one line is always rendered). It returns the text, the number of the
-// last line rendered, and whether any line was clipped to fileReadMaxLineChars.
+// lines from start on — stopping before their content would exceed budget
+// (at least one line is always rendered; the numbering does not count). It
+// returns the text, the number of the last line rendered, and whether any
+// line was clipped to fileReadMaxLineChars.
 func renderNumberedLines(page []pageLine, start, end, budget int) (text string, last int, clipped bool) {
 	var b strings.Builder
+	content := 0
 	last = start - 1
 	for i := start; i <= end && i-start < len(page); i++ {
 		pl := page[i-start]
@@ -246,11 +255,11 @@ func renderNumberedLines(page []pageLine, start, end, budget int) (text string, 
 			line = clipUTF8(line, fileReadMaxLineChars) + fmt.Sprintf(" …(line truncated, %d chars)", pl.size)
 			clipped = true
 		}
-		row := formatNumberedLine(i, line)
-		if budget > 0 && b.Len()+len(row) > budget && i > start {
+		if budget > 0 && content+len(line)+1 > budget && i > start {
 			break
 		}
-		b.WriteString(row)
+		content += len(line) + 1
+		b.WriteString(formatNumberedLine(i, line))
 		last = i
 	}
 	return b.String(), last, clipped

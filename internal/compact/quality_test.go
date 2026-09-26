@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,6 +32,7 @@ func session(turns, exchangesPerTurn int) []provider.Message {
 		Role:           provider.RoleUser,
 		Content:        "Task:\nAdd retry support to the HTTP client and make sure `go test ./...` passes.",
 		SessionContext: "env: darwin, cwd /repo",
+		LoadedTools:    []string{"save-memory"},
 	}}
 	id := 0
 	for t := range turns {
@@ -124,6 +126,9 @@ func TestCompactPreservesTaskUserMessagesAndRecentExchanges(t *testing.T) {
 
 	if out[0].Content != msgs[0].Content || out[0].SessionContext != msgs[0].SessionContext {
 		t.Fatal("original task changed")
+	}
+	if !slices.Equal(out[0].LoadedTools, msgs[0].LoadedTools) {
+		t.Fatalf("loaded tools record lost: %v", out[0].LoadedTools)
 	}
 	if !strings.HasPrefix(out[1].Content, SummaryHeader) || !strings.Contains(out[1].Content, "retry support") {
 		t.Fatalf("summary turn missing: %q", out[1].Content)

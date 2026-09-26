@@ -66,7 +66,7 @@ func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 	cases := map[string][]string{
 		"file-edit":  {"read the file first", "exactly one location", "replace_all", "line-number prefix"},
 		"file-write": {"read it", "prefer file-edit"},
-		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "40,000"},
+		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "60,000"},
 		"grep":       {"RE2", "path", "max_results", "symbol"},
 		"glob":       {"**/*.go", "Without a pattern"},
 		"bash":       {"timeout", "run_in_background", "fresh process", "file-read"},

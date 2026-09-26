@@ -104,6 +104,12 @@ func TestRetryPolicyNextDelay(t *testing.T) {
 	if d, ok := p.NextDelay(limited, 1); !ok || d != 30*time.Second {
 		t.Errorf("Retry-After: got %v/%v, want 30s", d, ok)
 	}
+	// With jitter, never earlier than asked and not all at the same moment.
+	for range 50 {
+		if d, _ := pj.NextDelay(limited, 1); d < 30*time.Second || d > 37500*time.Millisecond {
+			t.Fatalf("jittered Retry-After %v outside [30s, 37.5s]", d)
+		}
+	}
 	ms := &fantasy.ProviderError{StatusCode: 429, ResponseHeaders: map[string]string{"retry-after-ms": "1500"}}
 	if d, ok := p.NextDelay(ms, 1); !ok || d != 1500*time.Millisecond {
 		t.Errorf("retry-after-ms: got %v/%v, want 1.5s", d, ok)
