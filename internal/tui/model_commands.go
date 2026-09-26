@@ -331,7 +331,7 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 	m.publishRemoteState("user_message")
 	// Persist the user turn immediately so a crash mid-run never loses it.
 	m.autoSave()
-	m.refreshViewport()
+	m.scrollToBottom()
 
 	spec, ok := m.manifest.AgentByID(m.mode)
 	if !ok {

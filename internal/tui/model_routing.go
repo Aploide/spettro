@@ -386,8 +386,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.toolCh != nil {
 					cmds = append(cmds, waitForTool(m.toolCh))
 				}
-				m.vp.SetContent(m.renderMessages())
-				m.vp.GotoBottom()
+				m.refreshViewport()
 				break
 			}
 			switch t.Name {
@@ -444,8 +443,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.toolCh != nil {
 				cmds = append(cmds, waitForTool(m.toolCh))
 			}
-			m.vp.SetContent(m.renderMessages())
-			m.vp.GotoBottom()
+			m.refreshViewport()
 		}
 	case streamChunkMsg:
 		if m.thinking {
@@ -453,8 +451,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.streamCh != nil {
 				cmds = append(cmds, waitForStream(m.streamCh))
 			}
-			m.vp.SetContent(m.renderMessages())
-			m.vp.GotoBottom()
+			m.refreshViewport()
 		}
 	case usageEventMsg:
 		if m.thinking {

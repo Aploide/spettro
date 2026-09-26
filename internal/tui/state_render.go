@@ -101,12 +101,32 @@ func (m *Model) autoSave() {
 // longer persists the session: saving is decoupled (see autoSaveDebounced /
 // autoSave) so that scroll, tick, and banner-only refreshes do not trigger a
 // full session rewrite.
+//
+// The viewport only follows new output while it is already pinned to the
+// bottom: a user who scrolled up to read earlier output keeps their position
+// while tokens and tool traces stream in, and following resumes once they
+// scroll back down (or send a new prompt, see scrollToBottom).
 func (m *Model) refreshViewport() {
+	follow := m.vp.AtBottom()
 	m.vp.SetContent(m.renderMessages())
 	if len(m.messages) == 0 {
 		// A fresh session is nothing but the logo and the hint; scrolling to
 		// the bottom of that would crop the art from the top on a short
 		// terminal, which is exactly the screen that should look welcoming.
+		m.vp.GotoTop()
+		return
+	}
+	if follow {
+		m.vp.GotoBottom()
+	}
+}
+
+// scrollToBottom re-renders and unconditionally jumps to the latest output.
+// Used when the user submits input, which should always bring the
+// conversation back into view.
+func (m *Model) scrollToBottom() {
+	m.vp.SetContent(m.renderMessages())
+	if len(m.messages) == 0 {
 		m.vp.GotoTop()
 		return
 	}

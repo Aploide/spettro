@@ -104,7 +104,7 @@ func (m Model) updateSteerChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.pushSystemMsg("steering message will be delivered at the agent's next step")
 			m.showBanner("steering queued — delivered at the next step boundary", "info")
 			m.autoSave()
-			m.refreshViewport()
+			m.scrollToBottom()
 			return m, nil
 		case 1: // queue for after the run
 			return m.handlePrompt(text)
