@@ -65,7 +65,9 @@ func (rc runCheckpoints) snapshot(tool string) {
 // prepare stages and commits the tree ahead of the step's first mutating
 // call; nil when that failed (the runtime then snapshots synchronously).
 func (rc runCheckpoints) prepare() agent.PreparedCheckpoint {
-	p, err := rc.cp.Prepare("step")
+	// The commit is minted before the tool is known; the checkpoint entry
+	// that claims it records the tool.
+	p, err := rc.cp.Prepare("the next tool call")
 	if err != nil {
 		return nil
 	}

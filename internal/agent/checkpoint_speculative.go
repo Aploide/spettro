@@ -17,32 +17,47 @@ import (
 // model generates a step, so the runtime asks the host to prepare the
 // snapshot as soon as the step's request is sent (prepareStepCheckpoint),
 // and the step's first mutating call claims it (claimSpeculativeLocked):
-// recording a checkpoint entry, no git process. The claim falls back to
-// the synchronous snapshot whenever the preparation cannot be trusted:
+// recording a checkpoint entry, no git process.
+//
+// A run prepares ahead only once it has taken its first checkpoint: until
+// then it may never edit anything (a question, a review), and preparing
+// would stage and copy the tree for nothing. So the first mutating step of
+// a run snapshots synchronously, as it always did, and the later ones claim.
+// The step that ends a run still prepares a snapshot nobody claims: one
+// discarded preparation per editing run, run while the model writes its
+// answer.
+//
+// The claim falls back to the synchronous snapshot whenever the
+// preparation cannot be trusted:
 //
 //   - a background job or pty session is running: it can change any file
 //     at any time, so nothing is prepared and nothing is claimed;
 //   - hooks are configured: a tool hook can change files right before the
 //     mutating call, so the run never prepares ahead;
+//   - a call that may write the tree without a checkpoint of its own (a
+//     download, an MCP tool, a delegated agent) ran since the preparation
+//     started, in this step or an earlier one (noteTreeUse);
+//   - the preparation started speculativeMaxAge or longer ago (a slow
+//     generation, an approval or ask-user wait before the mutating call);
 //   - preparing failed, or the host snapshotted or restored something in
 //     between (a sub-agent sharing the checkout): the host's Claim reports
-//     false;
-//   - a file the agent knows (one it holds a stamp for: it read or wrote
-//     it) changed after preparation started: the tracked files are then
-//     re-staged on top of the preparation (ClaimRefreshed), which picks up
-//     every change to a tracked file.
+//     false.
+//
+// A file the agent knows (one it holds a stamp for: it read or wrote it)
+// that changed after the preparation started does not force the fallback:
+// the claim re-stages the tracked files on top of the preparation
+// (ClaimRefreshed), which picks up every change to a tracked file.
 //
 // A preparation nobody claimed is kept for the next step when that step
 // only ran tools that cannot change the tree (treeReadOnlyCall) and it is
-// younger than speculativeReuseMaxAge; otherwise the next step prepares
-// anew and the host unpins the unclaimed one.
+// younger than speculativeMaxAge; otherwise the next step prepares anew and
+// the host unpins the unclaimed one.
 //
 // Residual risk, accepted and documented in docs/checkpointing.md: a file
-// the agent never touched that someone else creates or edits during that
-// window is captured by the next checkpoint instead of this one, so
-// rewinding to this checkpoint reverts that edit (or deletes that new
-// file). The window is one step's generation time, at most
-// speculativeReuseMaxAge when a preparation is reused.
+// the agent never touched that someone else creates or edits after the
+// preparation started is captured by the next checkpoint instead of this
+// one, so rewinding to this checkpoint reverts that edit (or deletes that
+// new file). The window is at most speculativeMaxAge.
 
 // PreparedCheckpoint is a working-tree snapshot the host prepared ahead of
 // a step's first mutating tool call (see LLMAgent.CheckpointPrepare).
@@ -56,22 +71,25 @@ type PreparedCheckpoint interface {
 	ClaimRefreshed(tool string) bool
 }
 
-// speculativeReuseMaxAge bounds how long an unclaimed preparation is
-// reused across read-only steps, and with it the window in which an
-// outside edit to a file the agent never touched can be missed. Long
-// enough to span a few quick read-only steps, short against the time a
-// user takes to switch to an editor and change something.
-const speculativeReuseMaxAge = 30 * time.Second
+// speculativeMaxAge bounds how long after a preparation started it can be
+// claimed or reused, and with it the window in which an outside edit to a
+// file the agent never touched can be missed. Long enough to cover a
+// typical step's generation and a few quick read-only steps, short against
+// the time a user takes to switch to an editor and change something. The
+// TUI's host enforces the same bound (checkpoint.PreparedMaxAge).
+const speculativeMaxAge = 30 * time.Second
 
 // speculativeCheckpoint is one prepared (or preparing) snapshot.
 //
 // Ordering: prepareStepCheckpoint runs on the run-loop goroutine before the
-// step's request is sent and starts the host's preparation on a goroutine
-// of its own, which stores prepared and then closes done. A claim runs on
-// the goroutine of the step's first mutating call, holding
-// stepCheckpointMu, and reads prepared only after done is closed. The run
-// loop sends a request only after the previous step's tools returned, so a
-// claim never overlaps a newer preparation of the same runtime.
+// step's request is sent and starts a goroutine that stats the known files
+// into known, then calls the host's preparation, stores prepared and closes
+// done. So known always describes the files from before staging began. A
+// claim runs on the goroutine of the step's first mutating call, holding
+// stepCheckpointMu, and reads known and prepared only after done is closed.
+// The run loop sends a request only after the previous step's tools
+// returned, so a claim never overlaps a newer preparation of the same
+// runtime.
 type speculativeCheckpoint struct {
 	started time.Time
 	done    chan struct{}
@@ -97,18 +115,19 @@ func (r *toolRuntime) prepareStepCheckpoint() {
 		return
 	}
 	r.stepCheckpointMu.Lock()
-	reusable := r.speculative != nil && !r.speculativeDirty && r.speculative.reusable()
+	skip := !r.runCheckpointed ||
+		(r.speculative != nil && !r.speculativeDirty && r.speculative.reusable())
 	r.stepCheckpointMu.Unlock()
-	if reusable {
+	if skip {
 		return
 	}
 	var sc *speculativeCheckpoint
 	if !backgroundWorkRunning() {
 		sc = &speculativeCheckpoint{started: time.Now(), done: make(chan struct{})}
-		sc.known, sc.knownIncomplete = r.knownFileStates()
 		prepare := r.checkpointPrepare
 		go func() {
 			defer close(sc.done)
+			sc.known, sc.knownIncomplete = r.knownFileStates()
 			sc.prepared = prepare()
 		}()
 	}
@@ -121,7 +140,7 @@ func (r *toolRuntime) prepareStepCheckpoint() {
 // reusable reports whether an unclaimed preparation may serve a later step:
 // it is young enough and did not fail.
 func (sc *speculativeCheckpoint) reusable() bool {
-	if time.Since(sc.started) >= speculativeReuseMaxAge {
+	if time.Since(sc.started) >= speculativeMaxAge {
 		return false
 	}
 	select {
@@ -142,18 +161,26 @@ func (r *toolRuntime) claimSpeculativeLocked(tool string) bool {
 		return false
 	}
 	r.speculative = nil
-	<-sc.done
-	if sc.prepared == nil || backgroundWorkRunning() {
+	if r.speculativeDirty {
+		// Something that may have written the tree ran since the
+		// preparation started; it is not in the prepared tree.
 		return false
 	}
-	if !sc.knownIncomplete && r.knownFilesUnchanged(sc.known) {
+	<-sc.done
+	if sc.prepared == nil || time.Since(sc.started) >= speculativeMaxAge || backgroundWorkRunning() {
+		return false
+	}
+	if r.knownFilesUnchanged(sc) {
 		return sc.prepared.Claim(tool)
 	}
 	return sc.prepared.ClaimRefreshed(tool)
 }
 
-// noteTreeUse records that call is about to run: any call that might change
-// the working tree makes an unclaimed preparation unusable for later steps.
+// noteTreeUse records that call is about to run. Any call that might change
+// the working tree makes the pending preparation unusable: for a claim
+// later in this step (the change is not in the prepared tree) and for reuse
+// by a later step. execute calls it after the call's own checkpoint, so a
+// mutating call can still claim the preparation it is about to change.
 func (r *toolRuntime) noteTreeUse(call toolCall) {
 	if r.checkpointPrepare == nil || treeReadOnlyCall(call) {
 		return
@@ -186,19 +213,10 @@ func treeReadOnlyCall(call toolCall) bool {
 	return false
 }
 
-// knownFileStates stats every file the agent holds a stamp for.
+// knownFileStates stats every file the agent holds a stamp for. It runs on
+// the preparation's goroutine, before staging, off the step's path.
 func (r *toolRuntime) knownFileStates() (map[string]knownFileState, bool) {
-	r.mu.Lock()
-	keys := make([]string, 0, min(len(r.fileStamps), maxShellStampFiles))
-	incomplete := false
-	for key := range r.fileStamps {
-		if len(keys) == maxShellStampFiles {
-			incomplete = true
-			break
-		}
-		keys = append(keys, key)
-	}
-	r.mu.Unlock()
+	keys, incomplete := r.stampedKeys()
 	states := make(map[string]knownFileState, len(keys))
 	for _, key := range keys {
 		id, ok := statIdentity(key)
@@ -207,18 +225,66 @@ func (r *toolRuntime) knownFileStates() (map[string]knownFileState, bool) {
 	return states, incomplete
 }
 
-// knownFilesUnchanged reports whether every file in known still has the
-// recorded identity (size, mtime, ctime, inode). A file first stamped after
-// known was taken is not covered: like any file the agent had not touched,
-// its state before preparation is unknown (see the residual risk above).
-func (r *toolRuntime) knownFilesUnchanged(known map[string]knownFileState) bool {
-	for key, before := range known {
+// stampedKeys returns the keys of the files the agent holds a stamp for, at
+// most maxShellStampFiles of them, and whether there were more.
+func (r *toolRuntime) stampedKeys() ([]string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keys := make([]string, 0, min(len(r.fileStamps), maxShellStampFiles))
+	for key := range r.fileStamps {
+		if len(keys) == maxShellStampFiles {
+			return keys, true
+		}
+		keys = append(keys, key)
+	}
+	return keys, false
+}
+
+// knownFilesUnchanged reports whether every file the agent knows is, as far
+// as a stat can tell, as it was when sc's staging began, so the prepared
+// tree holds its current content. That is every file stamped before the
+// preparation started (the same identity: size, mtime, ctime, inode) and
+// every file stamped since, such as one read in this step or a reused
+// preparation's later steps (last changed well before the preparation
+// started). It costs one stat per stamped file on the claim's path, about
+// 2.5 µs each on macOS: 0.3 ms for 128 stamps, 2.6 ms for the cap of 1024
+// (BenchmarkKnownFilesUnchanged). Spreading the stats over 4 or 8
+// goroutines measured no faster, so they stay sequential. Past the cap it
+// reports false, and the claim re-stages.
+func (r *toolRuntime) knownFilesUnchanged(sc *speculativeCheckpoint) bool {
+	if sc.knownIncomplete {
+		return false
+	}
+	for key, before := range sc.known {
 		id, ok := statIdentity(key)
 		if ok != before.exists || id != before.id {
 			return false
 		}
 	}
+	keys, incomplete := r.stampedKeys()
+	if incomplete {
+		return false
+	}
+	startedAt := sc.started.UnixNano()
+	for _, key := range keys {
+		if _, checked := sc.known[key]; checked {
+			continue
+		}
+		id, ok := statIdentity(key)
+		if !ok || !lastChangedBefore(id, startedAt) {
+			return false
+		}
+	}
 	return true
+}
+
+// lastChangedBefore reports whether a file with identity id last changed
+// (content or metadata) at least stampRacyWindow before t (UnixNano), so
+// the change predates t even on a filesystem with coarse timestamps. It
+// needs a ctime, which a program cannot set back the way it can an mtime;
+// without one (Windows) it reports false.
+func lastChangedBefore(id fileIdentity, t int64) bool {
+	return id.ctime != 0 && max(id.mtime, id.ctime) <= t-stampRacyWindow
 }
 
 // backgroundWorkRunning reports whether a background shell job or a pty

@@ -321,12 +321,15 @@ type toolRuntime struct {
 	// working tree (checkpoint_policy.go); parallelExec clears it per step.
 	stepCheckpointMu sync.Mutex
 	stepCheckpointed bool
-	// checkpointPrepare, speculative and speculativeDirty implement the
-	// snapshot prepared while the model generates
-	// (checkpoint_speculative.go). speculative is the pending preparation;
-	// speculativeDirty records that a call that may write the tree ran
-	// since it started. Both are guarded by stepCheckpointMu.
+	// checkpointPrepare, runCheckpointed, speculative and speculativeDirty
+	// implement the snapshot prepared while the model generates
+	// (checkpoint_speculative.go). runCheckpointed records that this run
+	// took a checkpoint, which turns preparing ahead on; speculative is the
+	// pending preparation; speculativeDirty records that a call that may
+	// write the tree ran since it started. The last three are guarded by
+	// stepCheckpointMu.
 	checkpointPrepare func() PreparedCheckpoint
+	runCheckpointed   bool
 	speculative       *speculativeCheckpoint
 	speculativeDirty  bool
 
@@ -1664,10 +1667,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
-	r.noteTreeUse(call)
 	if r.checkpoint != nil && needsCheckpoint(call) {
 		r.checkpointStep(id)
 	}
+	r.noteTreeUse(call)
 	switch call.Tool {
 	case "file-read":
 		return r.runFileRead(ctx, call.Args)
