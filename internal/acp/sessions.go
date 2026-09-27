@@ -180,6 +180,7 @@ func (b *bridge) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 		}
 	}
 
+	b.awaitModels(ctx)
 	cfg := b.opts.Cfg
 	if fresh, err := config.LoadFull(); err == nil {
 		cfg = fresh
@@ -202,11 +203,12 @@ func (b *bridge) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 
 // ResumeSession reattaches to a stored session without transcript replay:
 // the client declares it already holds the conversation view.
-func (b *bridge) ResumeSession(_ context.Context, params acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
+func (b *bridge) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
 	s, _, err := b.restoreSession(params.SessionId, params.Cwd)
 	if err != nil {
 		return acpsdk.ResumeSessionResponse{}, err
 	}
+	b.awaitModels(ctx)
 
 	cfg := b.opts.Cfg
 	if fresh, err := config.LoadFull(); err == nil {

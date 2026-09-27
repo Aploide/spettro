@@ -45,6 +45,11 @@ type bridge struct {
 	// any. It is connection-scoped rather than session-scoped: signing in is
 	// an account-level act that every session on this bridge observes.
 	logins loginRegistry
+
+	// lateModels starts, at most once, the goroutine that re-sends config
+	// options when model discovery finishes after a session response gave
+	// up waiting for it (see awaitModels).
+	lateModels sync.Once
 }
 
 // acpSession is the per-conversation state. Mutable fields are guarded by the
@@ -228,7 +233,9 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 
 	// Config options describe the mode, model, permission, and thinking
 	// selectors the editor draws in its toolbar. Load fresh config so those
-	// selectors reflect the current model/permission (mirrors Prompt).
+	// selectors reflect the current model/permission (mirrors Prompt), and
+	// give the background model discovery a bounded chance to finish.
+	b.awaitModels(ctx)
 	cfg := b.opts.Cfg
 	if fresh, err := config.LoadFull(); err == nil {
 		cfg = fresh

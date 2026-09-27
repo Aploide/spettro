@@ -1,0 +1,182 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"spettro/internal/config"
+	"spettro/internal/models"
+	"spettro/internal/provider"
+	"spettro/internal/sandbox"
+	"spettro/internal/spettro"
+	"spettro/internal/storage"
+)
+
+// sessionModelsWait bounds how long a front-end that must answer with a model
+// list (ACP session/new, the first headless submission) waits for the
+// background model discovery. A slower endpoint's models arrive later
+// through the front-end's own update path.
+const sessionModelsWait = 2 * time.Second
+
+// bootstrap is the process state every front-end (TUI, ACP, headless, goal)
+// builds before it starts serving.
+type bootstrap struct {
+	store         *storage.Store
+	manifest      config.AgentManifest
+	sandboxPolicy sandbox.Policy
+	cfg           config.UserConfig
+	providers     *provider.Manager
+}
+
+// bootstrapSession runs the startup steps the front-ends share, in the order
+// that keeps them off the network and does the least work twice:
+//
+//  1. Storage and the project manifest: local files only.
+//  2. The sandbox policy and the parent confinement. On macOS confinement
+//     re-execs the process under sandbox-exec, so everything before it runs
+//     twice; it therefore comes before loading config and keys.
+//  3. Config and the decrypted API keys.
+//  4. The provider manager with the cached or embedded model catalog, and
+//     the background catalog refresh. Local endpoints and the subscription
+//     model list are left to startModelDiscovery.
+//
+// Errors carry the same prefixes the entry points printed before.
+func bootstrapSession(cwd string, overrides sandbox.Overrides) (*bootstrap, error) {
+	store, err := storage.New(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("storage error: %w", err)
+	}
+	manifest, err := config.LoadAgentManifestForProject(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("agent manifest error: %w", err)
+	}
+	policy, err := resolveSandboxPolicy(overrides, manifest)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox error: %w", err)
+	}
+	confineParentProcess(policy, store, cwd)
+
+	cfg, err := config.LoadFull()
+	if err != nil {
+		return nil, fmt.Errorf("config error: %w", err)
+	}
+	pm := provider.NewManager()
+	pm.SetStreamAll(true)
+	pm.SetAPIKeys(cfg.APIKeys)
+	if cat, err := models.Load(); err == nil {
+		pm.SetCatalog(cat)
+	}
+	models.RefreshBackground(pm.SetCatalog)
+	return &bootstrap{
+		store:         store,
+		manifest:      manifest,
+		sandboxPolicy: policy,
+		cfg:           cfg,
+		providers:     pm,
+	}, nil
+}
+
+// confineParentProcess write-confines the spettro process itself (and its
+// in-process file tools) as defense-in-depth when the sandbox is enabled. On
+// macOS this re-execs under sandbox-exec and does not return; on Linux it
+// applies Landlock in place. Best-effort: the model's surface is already
+// confined at the shell and file-tool layers, so a failure is a warning.
+func confineParentProcess(policy sandbox.Policy, store *storage.Store, cwd string) {
+	if !policy.Enabled() {
+		return
+	}
+	writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, policy.ExtraWritable...)
+	if err := sandbox.ConfineParent(writable); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
+	}
+}
+
+// modelDiscovery fetches the model lists that need the network, local
+// endpoint probes and the Spettro Subscription plan, in the background, so
+// no front-end waits for them before its first frame or its initialize
+// response.
+//
+// Ordering guarantee: every result is applied to the provider manager (which
+// has its own lock) before Done is closed, so a reader that has seen Done
+// closed sees all of them. Probes run concurrently and apply their models as
+// each one answers; once all have finished the local endpoints are applied
+// once more in config order, so the model picker's order does not depend on
+// which server answered first.
+type modelDiscovery struct {
+	done chan struct{}
+}
+
+// startModelDiscovery starts the background discovery for cfg's local
+// endpoints and, when discoverSubscription is set and the user is signed in,
+// the Spettro Subscription models. The subscription endpoint is registered
+// immediately (no network), so inference with a subscription model resolves
+// before its model list arrives.
+func startModelDiscovery(ctx context.Context, cfg config.UserConfig, pm *provider.Manager, discoverSubscription bool) *modelDiscovery {
+	d := &modelDiscovery{done: make(chan struct{})}
+	subscriptionKey := strings.TrimSpace(cfg.APIKeys[spettro.ProviderID])
+	discoverSubscription = discoverSubscription && subscriptionKey != ""
+	if discoverSubscription {
+		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
+	}
+
+	go func() {
+		defer close(d.done)
+		var wg sync.WaitGroup
+		probed := make([][]provider.Model, len(cfg.LocalEndpoints))
+		for i, endpoint := range cfg.LocalEndpoints {
+			wg.Go(func() {
+				localModels, err := provider.ProbeLocalServer(ctx, endpoint, cfg.APIKeys[endpoint])
+				if err != nil {
+					return
+				}
+				probed[i] = localModels
+				pm.AddLocalModels(localModels)
+			})
+		}
+		if discoverSubscription {
+			wg.Go(func() {
+				if infos, err := spettro.ListModels(ctx, subscriptionKey); err == nil {
+					pm.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
+				}
+			})
+		}
+		wg.Wait()
+		for _, localModels := range probed {
+			pm.AddLocalModels(localModels)
+		}
+	}()
+	return d
+}
+
+// Done is closed once every discovery request has finished and its models
+// are in the provider manager.
+func (d *modelDiscovery) Done() <-chan struct{} { return d.done }
+
+// Wait blocks until discovery finishes or timeout passes, and reports
+// whether it finished.
+func (d *modelDiscovery) Wait(timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-d.done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// resolveActiveModel replaces a configured model whose provider has no
+// credentials (fresh install, removed key) with the best connected model.
+// The preferred model can come from a discovered list (a subscription or
+// local model), so in that case it waits up to sessionModelsWait for
+// discovery first; a configured model that is usable needs no wait.
+func resolveActiveModel(cfg *config.UserConfig, pm *provider.Manager, discovery *modelDiscovery) {
+	if !provider.HasCredentials(cfg.APIKeys, cfg.ActiveProvider) {
+		discovery.Wait(sessionModelsWait)
+	}
+	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
+}
