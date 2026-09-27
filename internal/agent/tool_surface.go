@@ -347,11 +347,14 @@ func toolSurfacePrompt(deferred []string, lspHidden bool) string {
 	return "\n\n" + strings.Join(parts, "\n\n")
 }
 
-// toolCallNames returns the names of calls.
-func toolCallNames(calls []provider.NativeTool) []string {
-	names := make([]string, len(calls))
-	for i, tc := range calls {
-		names[i] = tc.Name
+// resultToolNames returns the tool each of a step's calls reached, as
+// parallelExec named its result: a retired name as its canonical tool, and a
+// misspelt name routed to an allowed tool (tool_near_miss.go) as that tool,
+// so calling web_search activates the deferred web-search.
+func resultToolNames(results []parallelResult) []string {
+	names := make([]string, len(results))
+	for i, res := range results {
+		names[i] = res.name
 	}
 	return names
 }

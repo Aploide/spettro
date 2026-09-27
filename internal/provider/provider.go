@@ -254,11 +254,16 @@ type Message struct {
 
 // FileStamp is one file's stale-read guard state: the SHA-256 (hex) of the
 // content the agent last saw in full (Seen) and last saw through file-read,
-// with line numbers (Read). Path is the file's real absolute path.
+// with line numbers (Read). Shell says Seen was set by the agent's own
+// shell command rather than shown to the model, so overwriting the file
+// needs a file-read first; a record with Seen set is the path's whole
+// state, so a false Shell there clears an earlier mark. Path is the file's
+// real absolute path.
 type FileStamp struct {
-	Path string `json:"path"`
-	Seen string `json:"seen,omitempty"`
-	Read string `json:"read,omitempty"`
+	Path  string `json:"path"`
+	Seen  string `json:"seen,omitempty"`
+	Read  string `json:"read,omitempty"`
+	Shell bool   `json:"shell,omitempty"`
 }
 
 type Request struct {

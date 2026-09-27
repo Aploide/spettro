@@ -64,7 +64,7 @@ func TestCoreToolParamsDocumented(t *testing.T) {
 
 func TestCoreToolDescriptionsStateTheirContracts(t *testing.T) {
 	cases := map[string][]string{
-		"file-edit":  {"read the file first", "refused if it changed", "your own shell commands", "byte for byte", "exactly one location", "replace_all", "line-number prefix", "edits[]", "Cannot create files"},
+		"file-edit":  {"read the file first", "refused if the file changed", "except by your own foreground bash commands", "byte for byte", "exactly one location", "replace_all", "line-number prefix", "edits[]", "Cannot create files"},
 		"file-write": {"refused unless you read it", "prefer file-edit"},
 		"file-read":  {"line number", "cat -n", "offset", "2000 lines", "60,000", "before editing or overwriting"},
 		"grep":       {"RE2", "path", "max_results", "default 200", "symbol", "case-insensitive literal", "don't apply", "file names at any depth"},

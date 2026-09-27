@@ -18,6 +18,21 @@ only carries the schemas of the tools that agent may use.
 | Skills and tools | `skill` (load a skill by `name`, or list them; see [skills](skills.md)), `tool-search` |
 | MCP | `mcp-list-resources`, `mcp-read-resource`, `mcp-auth` |
 
+## Workspace scope
+
+The tools that take a path (`file-read`, `file-write`, `file-edit`,
+`view-image`, `grep`, `glob`, `download`, `lsp`, a `bash` `cwd`) only reach
+files under the workspace, in every permission mode, `yolo` included. A path
+that leaves it (`../x`, `/tmp/x`) is refused before anything is read,
+written or approved, with an error that says to use `bash` for a scratch
+file elsewhere; the coding prompt says the same, so scratch scripts are
+piped to the interpreter through `bash` or written to the system temp
+directory from the shell. A `bash` `cwd` outside the workspace gets its own
+error instead, saying to `cd` there in the command itself. Commands run through `bash` are governed by the
+shell's approval rules and the [sandbox](sandbox.md), not by this check.
+Under an active sandbox, a path whose real target leaves the workspace
+through a symlink is refused too.
+
 ## Deferred tools
 
 An agent holding `tool-search` gets only its core tools advertised up front:
@@ -60,6 +75,54 @@ The login shell runs in its own process group, as `bash` tool commands do,
 and is given 5 seconds: on timeout the whole group is killed and no line is
 added. Like the language-server check it runs once per process: the Environment
 section is part of the cached system prompt and never changes mid-session.
+
+## Stale-read guard
+
+`file-edit` and an overwriting `file-write` are refused when the file changed
+on disk since the agent last saw all of it (its last `file-read`, or its own
+write): "modified on disk since you last read it". The agent must read it
+again, so it never writes over an edit the user, another process or another
+agent made in between. What the agent saw is a hash of the content, so a
+touch or a same-content rewrite does not count, and it is carried in the
+conversation, so a file read in an earlier turn still counts as read.
+
+Changes the agent's own foreground `bash` commands make (a formatter, a code
+generator, `sed -i`) do not trip the guard for `file-edit`. Just before such a
+command runs, Spettro checks which files it holds a hash for still hold
+exactly that content; right after, it re-hashes those whose size,
+modification time, change time (ctime) or inode the command changed, and the
+command's output ends with a note naming them (`note: this command changed
+files you had read (...)`), since their line numbers moved. A file that had
+already changed from outside before the command started is left alone, so
+that change is still caught.
+
+The check before the command is a `stat` when the file's identity can vouch
+for its content: the platform records a ctime (Linux and macOS; no user
+program can set it back, so an edit that restores the old mtime, as
+`touch -r`, `rsync -t --inplace` or `tar -x` do, still moves it), and the
+file last changed at least 2 seconds before its content was last confirmed,
+so a second change within the same timestamp tick (1 s on HFS+, 2 s on FAT)
+cannot hide behind an unchanged identity. Otherwise (a file written or read
+moments ago, a hash carried from an earlier turn, a file whose identity
+moved, or Windows, where Spettro reads no ctime) the file is re-read and its
+hash compared, and once confirmed long enough after its last change it needs
+only a `stat` from then on.
+
+The model has not seen what its command wrote, so a file re-hashed this way
+cannot be overwritten whole with `file-write` until it is read again
+(`changed by one of your bash commands since you last read it`): writing a
+file computed from the old read would revert the command's output. An
+append or a `file-edit` (whose `old_string` must match the current text)
+still works, and the mark is carried in the conversation like the hashes.
+
+The work is bounded (a stat of at most 1024 files per command, never a
+directory walk, at most 32 files and 8 MiB hashed before it and 32 MiB
+re-read after it), and a file past a bound keeps its old hash, which errs on
+the side of the guard. Two cases are not told apart: a change another
+process makes to such a file while the agent's command runs counts as the
+command's (though the `file-write` rule above keeps it from being
+overwritten unseen), and changes made by background jobs
+(`run_in_background`) are never treated as the agent's own.
 
 ## Retired names
 
@@ -113,6 +176,25 @@ permission rules are left as written. v14 folds `skill-read` and
 SKILL.md files the catalog exposes). No migration folds anything into a
 canonical name a tool of your own holds (see below). See the v12, v13 and
 v14 notes in [AGENTS.md](../AGENTS.md#root-fields).
+
+## Misspelt tool names
+
+Models trained on other harnesses often call a tool by a near spelling:
+`web_fetch`, `file_read`, `todo_write`, `Bash`. A call under a name Spettro
+does not know at all (not a built-in, a retired name, or a manifest tool or
+alias) is compared with the agent's tools ignoring case and reading `_` and
+spaces as `-`. When exactly one tool on the agent's `allowed_tools` matches,
+the call runs as that tool; a retired name that matches counts as its
+canonical tool (`task_create` is a `todo-write` call). Permission rules,
+approvals, the trace and the clients see the tool's real name, and hooks
+match both it and the spelling the model used.
+
+When no allowed tool matches, or two do, nothing runs and the call fails as
+not allowed; for an unknown name the error names up to three allowed tools
+closest to it (`did you mean "file-read"?`), counting the same words in
+another order (`read_file`) as closest. Matching never grants anything:
+only tools the agent may already call are candidates, and a name Spettro
+knows (an explorer calling `file-write`) is never re-routed.
 
 ## Tools of your own with a built-in's name
 

@@ -260,3 +260,20 @@ func TestCompactStage1PreservesSmallAndUnspooledResults(t *testing.T) {
 		t.Fatalf("unspooled result not pruned with an excerpt: %q", got)
 	}
 }
+
+// A stamp record with Seen is its path's whole state, so its Shell mark,
+// false included, replaces an earlier one when records are merged.
+func TestMergeStampsShellMarkFollowsSeen(t *testing.T) {
+	seen := strings.Repeat("a", 64)
+	marked := []provider.Message{
+		{FileStamps: []provider.FileStamp{{Path: "/r/f.go", Seen: seen, Read: seen}}},
+		{FileStamps: []provider.FileStamp{{Path: "/r/f.go", Seen: strings.Repeat("b", 64), Shell: true}}},
+	}
+	if got := mergeStamps(marked); len(got) != 1 || !got[0].Shell || got[0].Read != seen {
+		t.Fatalf("shell re-stamp lost in merge: %+v", got)
+	}
+	cleared := append(marked, provider.Message{FileStamps: []provider.FileStamp{{Path: "/r/f.go", Seen: seen, Read: seen}}})
+	if got := mergeStamps(cleared); len(got) != 1 || got[0].Shell {
+		t.Fatalf("a later re-read did not clear the mark: %+v", got)
+	}
+}

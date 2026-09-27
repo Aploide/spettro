@@ -246,8 +246,9 @@ func (r *toolRuntime) traceID() string {
 type toolCall struct {
 	Tool string          `json:"tool"`
 	Args json.RawMessage `json:"args"`
-	// CalledAs is the retired name the model used when canonicalToolCall
-	// rewrote the call to its canonical tool; hooks match it as well.
+	// CalledAs is the name the model used when it differs from Tool: the
+	// retired name canonicalToolCall rewrote, or the misspelt name
+	// routeNearMissCall corrected. Hooks match it as well.
 	CalledAs string `json:"-"`
 }
 
@@ -267,6 +268,15 @@ type toolRuntime struct {
 	fileStamps    map[string][32]byte
 	readStamps    map[string][32]byte
 	stampsChanged map[string]struct{} // stamp keys changed since takeStampDelta
+	// stampIDs holds, for a stamp whose content is known to be what the file
+	// held at the time, the file's identity then and when that was known:
+	// the cheap check that lets a foreground shell command re-stamp the
+	// files it changed itself (restampAfterShell).
+	stampIDs map[string]stampedIdentity
+	// shellStamped holds the stamp keys whose stamp a shell re-stamp set:
+	// content the agent's own command wrote but the model was never shown,
+	// so a file-write overwrite needs a file-read first (file_stamps.go).
+	shellStamped  map[string]struct{}
 	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
@@ -732,6 +742,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// llm_runtime_nudge.go); a second such reply is handled as before.
 	announceNudged := false
 	droppedCallNudged := false
+	// todoNoteGiven records that this turn already carried the note for a
+	// step spent on todo-write alone (todoOnlyStepNote).
+	todoNoteGiven := false
 	// thinking starts at the configured level and follows the level the
 	// manager actually succeeded with, so a level the model rejected is not
 	// re-sent (and re-rejected) on every later step.
@@ -996,7 +1009,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
 			// A deferred tool the model called by name is advertised from
 			// the next step on, so its next call has the schema.
-			runtime.noteCalls(toolCallNames(resp.ToolCalls))
+			runtime.noteCalls(resultToolNames(results))
 			runtime.recordActivations(convMsgs)
 			// Loop check after execution: the signature includes each result,
 			// so re-running a command whose output changes (edit → test) is
@@ -1021,6 +1034,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 					Images:  res.images,
 					SpoolID: ensureSpooled(res.output),
 				}
+			}
+			if !todoNoteGiven && todoOnlyStep(results) {
+				todoNoteGiven = true
+				last := len(toolResults) - 1
+				toolResults[last].Output = appendToolNote(toolResults[last].Output, todoOnlyStepNote)
 			}
 			// Tool results are appended before any exit check: an assistant
 			// tool-call turn without its matching results is an invalid prefix
@@ -1315,9 +1333,14 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	runnable := make([]int, 0, len(calls))
 	// Retired tool names become their canonical tool before anything else
 	// looks at the call, so the allow-list, policies, hooks, batching, traces
-	// and hosts only ever see canonical names.
+	// and hosts only ever see canonical names. A misspelt name (web_fetch)
+	// is first routed to the one allowed tool it stands for, if any
+	// (tool_near_miss.go).
 	calls = slices.Clone(calls)
 	for i, call := range calls {
+		if routed, ok := r.routeNearMissCall(call, allowed); ok {
+			call = routed
+		}
 		canon, err := r.canonicalCall(call)
 		if err != nil {
 			results[i] = parallelResult{
@@ -1567,7 +1590,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	}
 	ctx = withCalledAs(ctx, r.hookAlias(call))
 	if _, ok := allowed[call.Tool]; !ok {
-		return "", fmt.Errorf("tool %q not allowed", call.Tool)
+		return "", r.notAllowedError(call.Tool, allowed)
 	}
 	if spec, ok := r.toolPolicies[call.Tool]; ok {
 		if evaluatePermissionRule("tool", spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
@@ -1654,6 +1677,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			if err := r.checkFileStamp("file-write", rel, oldRaw); err != nil {
 				return "", err
 			}
+			if err := r.checkOverwriteSeen(rel); err != nil {
+				return "", err
+			}
 		}
 		newContent := args.Content
 		if args.Append {
@@ -1685,10 +1711,18 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
-		if !args.Append || !exists || stampedBefore {
+		switch {
+		case !args.Append || !exists:
+			// The model supplied every byte of the file.
+			r.recordFullWriteStamp(rel, []byte(newContent))
+		case stampedBefore:
+			// An append keeps what was there, so a file the model has
+			// not seen since its own bash command changed it stays
+			// marked (checkOverwriteSeen).
+			r.recordFileStamp(rel, []byte(newContent))
+		default:
 			// An append to a file the agent had not seen in full leaves it
 			// unstamped: the model still has not read what was there.
-			r.recordFileStamp(rel, []byte(newContent))
 		}
 		r.invalidateSymbolIndex(rel)
 		recordFileChange(ctx, abs, oldContent, newContent, !exists)
@@ -2077,7 +2111,12 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 		return "", "", err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("path outside workspace is not allowed")
+		// Every file tool is confined to the workspace, in every permission
+		// mode, yolo included: this is the file tools' scope, not an
+		// approval that a mode could grant. Shell commands are governed by
+		// the shell's own approval and sandbox rules, not by this check;
+		// only a bash cwd goes through it (shellDir).
+		return "", "", &outsideWorkspaceError{root: r.cwd}
 	}
 	// Under an active sandbox, also reject paths whose *real* target escapes the
 	// workspace through a symlink. Without this, an agent could `ln -s` a secret
@@ -2089,6 +2128,20 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 	}
 	rel = filepath.ToSlash(rel)
 	return abs, rel, nil
+}
+
+// outsideWorkspaceError is resolvePath's refusal of a path that leaves the
+// workspace. Its message is written for the file tools: models still aim
+// file-write at /tmp for scratch scripts (ten such calls in the round-7
+// bench), so it says where they can go instead, as the coding prompt does.
+// A caller that is not a file tool (shellDir) words its own refusal, since
+// "use bash" is wrong advice inside a bash call.
+type outsideWorkspaceError struct {
+	root string
+}
+
+func (e *outsideWorkspaceError) Error() string {
+	return fmt.Sprintf("path outside workspace is not allowed: the file tools only reach files under %s; for a scratch file elsewhere, use bash (e.g. pipe a heredoc to the interpreter)", e.root)
 }
 
 // realPathEscapes reports whether abs — after resolving symlinks on its
