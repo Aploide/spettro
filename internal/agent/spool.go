@@ -124,9 +124,13 @@ func spoolTruncate(out string, budget int, keepTail bool, id string) string {
 	// outside the workspace, where file-read cannot open it, so it is only
 	// named for shell output (keepTail): an agent that ran a command has a
 	// shell to search the file with.
+	// Path waits for the spool file's background write, so only shell
+	// output, which names the file, asks for it.
 	saved := ""
-	if path := jobs.Spool().Path(id); path != "" && keepTail {
-		saved = "full output saved to " + path + "; "
+	if keepTail {
+		if path := jobs.Spool().Path(id); path != "" {
+			saved = "full output saved to " + path + "; "
+		}
 	}
 	footer := fmt.Sprintf(
 		"[truncated: %s of %s lines omitted; %suse tool-output {\"id\":%q,\"offset\":%d} to read more]",

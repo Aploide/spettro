@@ -33,8 +33,19 @@ func TestSpoolAsyncWriteIsReadableAndPathWaits(t *testing.T) {
 	}
 }
 
+// flush waits until every write queued before the call has finished.
+func (s *SpoolStore) flush() {
+	s.mu.Lock()
+	writes := make([]*spoolWrite, 0, len(s.pending))
+	for _, w := range s.pending {
+		writes = append(writes, w)
+	}
+	s.mu.Unlock()
+	wait(writes)
+}
+
 // Many writers and readers at once (run with -race): every entry reads back
-// exactly, and after Flush every file is on disk.
+// exactly, and after a flush every file is on disk.
 func TestSpoolConcurrentAddRead(t *testing.T) {
 	s := NewSpoolStore()
 	defer s.Cleanup()
@@ -57,12 +68,12 @@ func TestSpoolConcurrentAddRead(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	s.Flush()
+	s.flush()
 	s.mu.Lock()
 	pending := len(s.pending)
 	s.mu.Unlock()
 	if pending != 0 {
-		t.Fatalf("%d writes still pending after Flush", pending)
+		t.Fatalf("%d writes still pending after flush", pending)
 	}
 	for i, id := range ids {
 		data, err := os.ReadFile(s.Path(id))
@@ -116,7 +127,7 @@ func TestSpoolFailedWriteServesFromMemory(t *testing.T) {
 	if _, err := s.Add("first"); err != nil {
 		t.Fatal(err)
 	}
-	s.Flush()
+	s.flush()
 	if err := os.Chmod(s.Dir(), 0o500); err != nil {
 		t.Fatal(err)
 	}
@@ -134,5 +145,44 @@ func TestSpoolFailedWriteServesFromMemory(t *testing.T) {
 	}
 	if got, _, _, err := s.Read(id, 0, 0); err != nil || got != "second output" {
 		t.Fatalf("Read of a failed write = %q, %v; want the content from memory", got, err)
+	}
+}
+
+// Failed writes keep their content in memory only up to the store's budget;
+// past it Read reports the output lost instead of holding it.
+func TestSpoolFailedWritesAreCapped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block file creation on Windows")
+	}
+	s := NewSpoolStore()
+	defer s.Cleanup()
+	s.failedBudget = 10
+	if _, err := s.Add("first"); err != nil {
+		t.Fatal(err)
+	}
+	s.flush()
+	if err := os.Chmod(s.Dir(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(s.Dir(), 0o700)
+	if f, err := os.Create(filepath.Join(s.Dir(), "probe")); err == nil {
+		f.Close()
+		t.Skip("running with privileges that ignore directory permissions")
+	}
+	kept, _ := s.Add("12345678")
+	dropped, _ := s.Add("too much to keep")
+	s.flush()
+	if got, _, _, err := s.Read(kept, 0, 0); err != nil || got != "12345678" {
+		t.Fatalf("Read of a failed write within budget = %q, %v", got, err)
+	}
+	if _, _, _, err := s.Read(dropped, 0, 0); err == nil || !strings.Contains(err.Error(), "no longer available") {
+		t.Fatalf("Read of a failed write past the budget = %v, want it reported lost", err)
+	}
+	if s.Path(dropped) != "" {
+		t.Fatal("Path of a lost write must be empty")
+	}
+	s.Remove(kept, dropped)
+	if s.failedBytes != 0 || len(s.lost) != 0 {
+		t.Fatalf("after Remove: failedBytes = %d, lost = %d; want both released", s.failedBytes, len(s.lost))
 	}
 }

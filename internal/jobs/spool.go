@@ -27,14 +27,14 @@ import (
 //     Read serves the queued content from memory.
 //   - When Path returns a path, the file is complete on disk (Path waits
 //     for that entry's write).
-//   - Flush returns once every write queued before the call has finished;
-//     Remove and Cleanup flush the entries they delete first, so a late
-//     write can never recreate a removed file.
+//   - Remove and Cleanup wait for the writes of the entries they delete
+//     first, so a late write can never recreate a removed file.
 //
 // A write that fails (disk full, directory removed) keeps the content in
-// memory for the rest of the session: Read still serves it, Path returns ""
-// because there is no file to name. Queued writes are lost if the process
-// exits without Cleanup, which is harmless: the spool directory is
+// memory, so Read still serves it, up to maxFailedSpoolBytes in all; past
+// that the content is dropped and Read reports it lost. Path returns "" for
+// either, because there is no file to name. Queued writes are lost if the
+// process exits without Cleanup, which is harmless: the spool directory is
 // temporary session state.
 type SpoolStore struct {
 	mu    sync.Mutex
@@ -48,9 +48,20 @@ type SpoolStore struct {
 	queue   []*spoolWrite
 	// writing is set while a writer goroutine is draining queue.
 	writing bool
-	// failed holds the content of entries whose write failed.
-	failed map[string]string
+	// failed holds the content of entries whose write failed, failedBytes
+	// its total size, at most failedBudget; lost holds the failed entries
+	// whose content did not fit.
+	failed       map[string]string
+	failedBytes  int
+	failedBudget int
+	lost         map[string]struct{}
 }
+
+// maxFailedSpoolBytes caps the content a store keeps in memory for writes
+// that failed. A failure usually means the disk is full, and every later
+// write then fails too: without a cap a long session would hold every
+// large tool output in memory.
+const maxFailedSpoolBytes = 32 << 20
 
 // spoolWrite is one queued spool file.
 type spoolWrite struct {
@@ -62,7 +73,13 @@ type spoolWrite struct {
 // NewSpoolStore returns an empty store; its directory is created on the
 // first Add.
 func NewSpoolStore() *SpoolStore {
-	return &SpoolStore{files: map[string]string{}, pending: map[string]*spoolWrite{}, failed: map[string]string{}}
+	return &SpoolStore{
+		files:        map[string]string{},
+		pending:      map[string]*spoolWrite{},
+		failed:       map[string]string{},
+		failedBudget: maxFailedSpoolBytes,
+		lost:         map[string]struct{}{},
+	}
 }
 
 var defaultSpool = NewSpoolStore()
@@ -120,11 +137,31 @@ func (s *SpoolStore) drain() {
 		s.mu.Lock()
 		delete(s.pending, w.id)
 		if err != nil {
-			s.failed[w.id] = w.content
+			s.keepFailedLocked(w)
 		}
 		s.mu.Unlock()
 		close(w.done)
 	}
+}
+
+// keepFailedLocked records that w's write failed, keeping its content in
+// memory while the failed-content budget allows. The caller holds s.mu.
+func (s *SpoolStore) keepFailedLocked(w *spoolWrite) {
+	if s.failedBytes+len(w.content) > s.failedBudget {
+		s.lost[w.id] = struct{}{}
+		return
+	}
+	s.failed[w.id] = w.content
+	s.failedBytes += len(w.content)
+}
+
+// forgetLocked drops id's failure records. The caller holds s.mu.
+func (s *SpoolStore) forgetLocked(id string) {
+	if content, ok := s.failed[id]; ok {
+		s.failedBytes -= len(content)
+		delete(s.failed, id)
+	}
+	delete(s.lost, id)
 }
 
 // writeSpoolFile writes content to a new file at path.
@@ -163,10 +200,17 @@ func (s *SpoolStore) Path(id string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, failed := s.failed[id]; failed {
+	if s.writeFailedLocked(id) {
 		return ""
 	}
 	return s.files[id]
+}
+
+// writeFailedLocked reports whether id's write failed. The caller holds s.mu.
+func (s *SpoolStore) writeFailedLocked(id string) bool {
+	_, failed := s.failed[id]
+	_, lost := s.lost[id]
+	return failed || lost
 }
 
 // Dir returns the spool directory of this store, or "" when nothing has been
@@ -191,9 +235,13 @@ func (s *SpoolStore) Read(id string, offset, max int) (chunk string, next, size 
 	} else if content, failed := s.failed[id]; failed {
 		inMemory, fromMemory = content, true
 	}
+	_, lost := s.lost[id]
 	s.mu.Unlock()
 	if !ok {
 		return "", 0, 0, fmt.Errorf("unknown spool %q", id)
+	}
+	if lost {
+		return "", 0, 0, fmt.Errorf("spool %s: saving the output failed (is the disk full?) and it is no longer available", id)
 	}
 	data := inMemory
 	if !fromMemory {
@@ -214,17 +262,6 @@ func (s *SpoolStore) Read(id string, offset, max int) (chunk string, next, size 
 		end = offset + max
 	}
 	return data[offset:end], end, len(data), nil
-}
-
-// Flush waits until every write queued before the call has finished.
-func (s *SpoolStore) Flush() {
-	s.mu.Lock()
-	writes := make([]*spoolWrite, 0, len(s.pending))
-	for _, w := range s.pending {
-		writes = append(writes, w)
-	}
-	s.mu.Unlock()
-	wait(writes)
 }
 
 // Remove deletes the given spool entries and their files. Unknown IDs are
@@ -248,7 +285,7 @@ func (s *SpoolStore) Remove(ids ...string) {
 		if path, ok := s.files[id]; ok {
 			_ = os.Remove(path)
 			delete(s.files, id)
-			delete(s.failed, id)
+			s.forgetLocked(id)
 		}
 	}
 }
@@ -274,4 +311,6 @@ func (s *SpoolStore) Cleanup() {
 	s.dir = ""
 	s.files = map[string]string{}
 	s.failed = map[string]string{}
+	s.failedBytes = 0
+	s.lost = map[string]struct{}{}
 }

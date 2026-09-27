@@ -428,12 +428,14 @@ run end, and are deleted on `/clear` and when the process exits (TUI exit,
 `/exit`).
 
 The files are written in the background, in the order the results were
-produced, so spooling never delays the agent's next step. Until a file is on
-disk, `tool-output` pages through the result from memory; the spool file path a
-truncated shell result names always exists by the time the result is returned.
-`/clear` and a normal exit wait for pending writes before deleting the
-directory. If a write fails (for example, the disk is full), the result stays
-readable through `tool-output` from memory for the rest of the session.
+produced. Until a file is on disk, `tool-output` pages through the result from
+memory. Only a truncated shell result names its spool file, and it waits for
+that one write so the path always exists by the time the result is returned;
+every other result returns without waiting for its file. `/clear` and a
+normal exit wait for pending writes before deleting the directory. If a write
+fails (for example, the disk is full), the result stays readable through
+`tool-output` from memory, up to 32 MB of such results per session; past that,
+`tool-output` reports the result as lost.
 
 ```text
 # example: model receives truncated grep output with a footer
