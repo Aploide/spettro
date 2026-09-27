@@ -32,6 +32,8 @@ type Manager struct {
 	catalog       []Model
 	localModels   []Model
 	spettroModels []Model
+	// snapshot indexes the three lists above (see modelSnapshot).
+	snapshot      *modelSnapshot
 	apiKeys       map[string]string
 	providerAPIs  map[string]string
 	providerKinds map[string]string // provider id -> models.APIOpenAI | models.APIAnthropic
@@ -51,6 +53,7 @@ func NewManager() *Manager {
 		apiKeys:       map[string]string{},
 		providerAPIs:  map[string]string{},
 		providerKinds: map[string]string{},
+		snapshot:      emptySnapshot(),
 	}
 }
 
@@ -86,6 +89,7 @@ func (m *Manager) SetCatalog(cat models.Catalog) {
 	}
 	m.mu.Lock()
 	m.catalog = built
+	m.rebuildSnapshotLocked()
 	m.providerKinds = kinds
 	for k, v := range m.providerAPIs {
 		if strings.HasPrefix(k, "http://") || strings.HasPrefix(k, "https://") {
@@ -106,6 +110,7 @@ func (m *Manager) SetCatalog(cat models.Catalog) {
 func (m *Manager) SetSpettro(inferenceBaseURL string, models []Model) {
 	m.mu.Lock()
 	m.spettroModels = models
+	m.rebuildSnapshotLocked()
 	if inferenceBaseURL != "" {
 		m.providerAPIs[spettroProviderID] = inferenceBaseURL
 	}
@@ -116,6 +121,7 @@ func (m *Manager) SetSpettro(inferenceBaseURL string, models []Model) {
 func (m *Manager) ClearSpettro() {
 	m.mu.Lock()
 	m.spettroModels = nil
+	m.rebuildSnapshotLocked()
 	delete(m.providerAPIs, spettroProviderID)
 	m.mu.Unlock()
 }
@@ -134,6 +140,7 @@ func (m *Manager) AddLocalModels(models []Model) {
 		}
 	}
 	m.localModels = append(filtered, models...)
+	m.rebuildSnapshotLocked()
 	m.providerAPIs[providerID] = baseURL
 	m.mu.Unlock()
 }
@@ -147,25 +154,17 @@ func (m *Manager) RemoveLocalModels(providerID string) {
 		}
 	}
 	m.localModels = filtered
+	m.rebuildSnapshotLocked()
 	delete(m.providerAPIs, providerID)
 	m.mu.Unlock()
 }
 
+// Models returns a copy of every known model in display order: Spettro
+// Subscription models, then the catalog (or the built-in fallback list when
+// no catalog is loaded), then local endpoints. It is for listings (pickers,
+// provider lists); per-request checks use Lookup, which does not copy.
 func (m *Manager) Models() []Model {
-	m.mu.RLock()
-	cat := m.catalog
-	local := m.localModels
-	spettro := m.spettroModels
-	m.mu.RUnlock()
-	base := cat
-	if len(base) == 0 {
-		base = fallbackModels
-	}
-	out := make([]Model, 0, len(spettro)+len(base)+len(local))
-	out = append(out, spettro...)
-	out = append(out, base...)
-	out = append(out, local...)
-	return out
+	return append([]Model(nil), m.models().models...)
 }
 
 func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
@@ -291,30 +290,18 @@ func (m *Manager) ProviderNames() []string {
 }
 
 func (m *Manager) SupportsVision(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.Vision
-		}
-	}
-	return false
+	mod, _ := m.Lookup(providerName, modelName)
+	return mod.Vision
 }
 
 func (m *Manager) SupportsToolCalls(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.ToolCall
-		}
-	}
-	return false
+	mod, _ := m.Lookup(providerName, modelName)
+	return mod.ToolCall
 }
 
 func (m *Manager) ModelContext(providerName, modelName string) int {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.Context
-		}
-	}
-	return 0
+	mod, _ := m.Lookup(providerName, modelName)
+	return mod.Context
 }
 
 // SupportsReasoning reports whether the thinking switcher should be offered
@@ -329,15 +316,14 @@ func (m *Manager) ModelContext(providerName, modelName string) int {
 // forwards reasoning_effort to its upstream, the list need not flag
 // reasoning, and a rejection steps down the same ladder.
 func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			if item.NoReasoning {
-				return false
-			}
-			return item.Reasoning || item.Local || providerName == spettroProviderID
-		}
+	item, ok := m.Lookup(providerName, modelName)
+	if !ok {
+		return true
 	}
-	return true
+	if item.NoReasoning {
+		return false
+	}
+	return item.Reasoning || item.Local || providerName == spettroProviderID
 }
 
 // ConfiguredThinking is the thinking level a run on the model sends for the
@@ -361,21 +347,13 @@ func (m *Manager) isLocalEndpoint(providerName, modelName string) bool {
 	if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
 		return true
 	}
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.Local
-		}
-	}
-	return false
+	item, _ := m.Lookup(providerName, modelName)
+	return item.Local
 }
 
 func (m *Manager) HasModel(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return true
-		}
-	}
-	return false
+	_, ok := m.Lookup(providerName, modelName)
+	return ok
 }
 
 // Send dispatches req and transparently waits out rate limits rather than
@@ -692,10 +670,8 @@ func (m *Manager) unflaggedThinkingFallback(providerName, modelName string, leve
 	if status, _, ok := httpErrorDetails(err); !ok || status != http.StatusBadRequest {
 		return false
 	}
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return !item.Reasoning
-		}
+	if item, ok := m.Lookup(providerName, modelName); ok {
+		return !item.Reasoning
 	}
 	return true
 }

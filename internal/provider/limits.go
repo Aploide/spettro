@@ -97,10 +97,8 @@ func outputRoom(window, promptTokens int) int {
 // catalog's value first, then the built-in table of well-known families.
 // 0 means unknown.
 func (m *Manager) MaxOutputTokens(providerName, modelName string) int {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName && item.MaxOutput > 0 {
-			return item.MaxOutput
-		}
+	if entry, ok := m.models().index[modelKey{providerName, modelName}]; ok && entry.maxOutput > 0 {
+		return entry.maxOutput
 	}
 	return knownOutputLimit(modelName)
 }
