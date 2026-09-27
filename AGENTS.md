@@ -22,7 +22,12 @@ This file lets you define, in one place:
 ### Root fields
 
 - `version` (int, required): schema version, currently `14`. Older manifests
-  are migrated on load (with a `.bak` backup): v3 rewrites the previously
+  are migrated on load and written back next to a
+  `spettro.agents.toml.migrated-<time>.bak` backup of the original. Both
+  keep the original file's permissions, and a manifest that is a symlink
+  stays one (its target is migrated). When the manifest cannot be written
+  (a read-only checkout or mount), the migrated manifest is still used and
+  the migration simply runs again on the next load. v3 rewrites the previously
   inert `sandbox_mode = "workspace-write"` default to `full-access` (the
   field is now enforced — re-set it explicitly if you want the OS sandbox);
   later versions retrofit new built-in tools (v5 `view-image`, v6
@@ -33,7 +38,11 @@ This file lets you define, in one place:
   already hold `file-read`, v10 `ask-user`, v11 the `general-purpose`
   subagent). Each retrofit widens only allow-lists that already show the
   same level of trust, so a deliberately restricted agent is never opened
-  up.
+  up: the tool that shows the trust must be one the agent can actually call
+  (a shell listed but disabled or denied by a rule does not earn the pty
+  tools), and the `general-purpose` handoff goes only to a delegating
+  primary that can already exercise every kind of access that subagent has
+  (a read-only agent does not gain writes and commands through it).
 - v12 folds duplicate built-ins into one canonical tool each and removes the
   `grok-image`/`grok-video` generators:
 
@@ -54,7 +63,10 @@ This file lets you define, in one place:
   the longer timeout, the higher risk, its command/path rules that deny or
   ask), or it becomes the canonical tool in place when that is missing. The
   canonical tool keeps its own `enabled` flag and `permitted_actions`, so a
-  canonical tool you switched off stays off. The retired tool's allow rules,
+  canonical tool you switched off stays off. The canonical tool's own allow
+  rules move to the agents that already held it, so an agent that reaches it
+  only through a retired name does not inherit them (a tool's rules come
+  last and would override the agent's own). The retired tool's allow rules,
   and the rules that switched it off, are not merged. Permission rules that
   name a retired ID are left as written: they only ever decided whether that
   tool could be called, which the allow-lists now carry. An agent that could

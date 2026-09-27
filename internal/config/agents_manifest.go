@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -402,21 +404,35 @@ func AgentManifestPath(cwd string) string {
 	return filepath.Join(cwd, AgentManifestFilename)
 }
 
+// LoadAgentManifestForProject loads the project's spettro.agents.toml, or
+// the default manifest when the project has none. An older manifest is
+// migrated in memory and, when that changed anything, written back with a
+// backup of the original (see backupAndWriteManifest).
+//
+// Only a manifest that cannot be read, decoded or validated is an error.
+// Writing the migration back is a convenience: in a read-only checkout,
+// mount or container, or a directory the process sandbox does not let
+// spettro write, the write fails, and the migrated manifest is returned
+// anyway (the migration then simply runs again on the next load). Failing
+// the load instead would stop spettro from starting, and callers that
+// ignore the error would run with an empty manifest or another project's.
 func LoadAgentManifestForProject(cwd string) (AgentManifest, error) {
 	p := AgentManifestPath(cwd)
 	m, originalVersion, changed, err := loadAgentManifestWithMigrationInfo(p)
-	if err == nil {
-		if changed || originalVersion == 1 {
-			if werr := backupAndWriteManifest(p, m); werr != nil {
-				return AgentManifest{}, werr
-			}
-		}
-		return m, nil
-	}
 	if errors.Is(err, os.ErrNotExist) {
 		return DefaultAgentManifest(), nil
 	}
-	return AgentManifest{}, err
+	if err != nil {
+		return AgentManifest{}, err
+	}
+	if changed || originalVersion == 1 {
+		if werr := backupAndWriteManifest(p, m); werr != nil {
+			// Debug level: an info or warning record would go to stderr,
+			// which is the TUI's screen.
+			slog.Debug("migrated agent manifest not written back", "path", p, "err", werr)
+		}
+	}
+	return m, nil
 }
 
 func LoadAgentManifest(path string) (AgentManifest, error) {
@@ -473,14 +489,35 @@ func DecodeAgentManifestWithMigrationInfo(r io.Reader) (AgentManifest, int, bool
 	return manifest, originalVersion, changed, nil
 }
 
+// backupAndWriteManifest saves a copy of the manifest at path as
+// <manifest>.migrated-<UTC time>.bak and replaces it with m.
+//
+//   - A manifest that is a symlink (one manifest shared across worktrees,
+//     or kept in a dotfiles repository) stays one: the link's target is
+//     backed up and rewritten, so every link sees the migration.
+//   - The backup and the rewritten file keep the original's permissions:
+//     a manifest can carry tokens in http or mcp entry points, and a 0600
+//     file must not come back 0644.
+//   - Concurrent migrations (several ACP sessions opening at once, or the
+//     TUI and an editor started together after an upgrade) never share a
+//     file: the new content goes to a unique temp file that is renamed over
+//     the manifest, so the last rename wins and each one installs the same
+//     content. The backup is created exclusively; when another migration
+//     already wrote it within the same second it held the same original, so
+//     it is kept as is.
 func backupAndWriteManifest(path string, m AgentManifest) error {
-	if _, err := os.Stat(path); err == nil {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return fmt.Errorf("read manifest before migration backup: %w", rerr)
 		}
 		backup := fmt.Sprintf("%s.migrated-%s.bak", path, time.Now().UTC().Format("20060102-150405"))
-		if werr := os.WriteFile(backup, data, 0o644); werr != nil {
+		if werr := writeFileExclusive(backup, data, mode); werr != nil && !errors.Is(werr, fs.ErrExist) {
 			return fmt.Errorf("write migration backup: %w", werr)
 		}
 	}
@@ -488,14 +525,44 @@ func backupAndWriteManifest(path string, m AgentManifest) error {
 	if err != nil {
 		return fmt.Errorf("encode migrated manifest: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("write migrated manifest: %w", err)
 	}
-	if err := safeio.Replace(tmp, path); err != nil {
+	tmpPath := tmp.Name()
+	_, werr := tmp.Write(raw)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmpPath, mode)
+	}
+	if werr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write migrated manifest: %w", werr)
+	}
+	if err := safeio.Replace(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("replace migrated manifest: %w", err)
 	}
 	return nil
+}
+
+// writeFileExclusive creates path with data, failing with fs.ErrExist when
+// the file already exists.
+func writeFileExclusive(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(path)
+	}
+	return werr
 }
 
 func (m *AgentManifest) normalizeFromVersion() bool {
@@ -659,9 +726,12 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 // ensureGeneralPurposeAgent retrofits the general-purpose subagent into a
 // manifest that predates v11. The agent is added when absent, and the handoff
 // goes to primary/orchestrator agents that already delegate at all (a
-// non-empty handoffs list): an operator who stripped an agent's handoffs
-// disabled its delegation deliberately, and a manifest whose agent was
-// removed by hand does not get it back.
+// non-empty handoffs list) and that can already do everything the new
+// agent can (every permission family it can exercise, see usableFamilies):
+// an operator who stripped an agent's handoffs disabled its delegation
+// deliberately, a read-only agent must not gain writes and commands through
+// a delegation, and a manifest whose agent was removed by hand does not get
+// it back.
 //
 // Tools the manifest is missing entirely are dropped from the allow-list,
 // since Validate rejects an agent referencing an unknown tool. So are tools
@@ -701,14 +771,60 @@ func (m *AgentManifest) ensureGeneralPurposeAgent() {
 	}
 	spec.AllowedTools = tools
 	m.Agents = append(m.Agents, spec)
+	needs := m.usableFamilies(spec)
 	for i := range m.Agents {
 		if !m.Agents[i].IsPrimaryRole() || len(m.Agents[i].Handoffs) == 0 {
+			continue
+		}
+		// The agent tool checks only that the target is a handoff, so a
+		// handoff to general-purpose lends the primary everything
+		// general-purpose can do. A primary that could not already do all
+		// of it (a read-only "ask" agent next to a subagent that writes
+		// files and runs commands) does not get it.
+		if !coversFamilies(m.usableFamilies(m.Agents[i]), needs) {
 			continue
 		}
 		if !slices.Contains(m.Agents[i].Handoffs, spec.ID) {
 			m.Agents[i].Handoffs = append(m.Agents[i].Handoffs, spec.ID)
 		}
 	}
+}
+
+// usableFamilies returns the permission families (read, search, edit,
+// execute, network, ...) agent a can exercise: for each tool on its
+// allow-list that it can call (ToolUsableBy), the tool's families that the
+// agent's permitted_actions allow, or all of them when the agent does not
+// filter actions.
+func (m *AgentManifest) usableFamilies(a AgentSpec) map[string]bool {
+	allowed := map[string]bool{}
+	for _, action := range a.PermittedActions {
+		if f := NormalizePermissionFamily(action); f != "" {
+			allowed[f] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, id := range a.AllowedTools {
+		t, ok := m.toolNamed(id)
+		if !ok || !m.ToolUsableBy(a, t) {
+			continue
+		}
+		for _, f := range ToolPermissionFamilies(t) {
+			if len(allowed) == 0 || allowed[f] {
+				out[f] = true
+			}
+		}
+	}
+	return out
+}
+
+// coversFamilies reports whether have holds every family in need.
+func coversFamilies(have, need map[string]bool) bool {
+	for f := range need {
+		if !have[f] {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureAskUserTool retrofits the ask-user grant into a manifest that predates
@@ -749,8 +865,8 @@ func (m *AgentManifest) ensureAskUserTool() {
 
 // ensureToolOutputTool retrofits the tool-output spool reader into a manifest
 // that predates v9: the definition is added when absent, and any agent
-// already holding file-read gets it allowed (identical read trust level, so
-// deliberate restrictions are preserved).
+// that can use the built-in file-read gets it allowed (identical read trust
+// level, so deliberate restrictions are preserved; see holdsBuiltin).
 func (m *AgentManifest) ensureToolOutputTool() {
 	haveTool := false
 	for _, t := range m.Tools {
@@ -767,18 +883,18 @@ func (m *AgentManifest) ensureToolOutputTool() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["file-read"] && !allowed["tool-output"] {
+		if m.holdsBuiltin(m.Agents[i], "file-read") && !allowed["tool-output"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "tool-output")
 		}
 	}
 }
 
 // ensurePTYTools retrofits the pty session tools into a manifest that
-// predates v8: definitions are added when absent, and any agent already
-// holding a shell (shell-exec, or bash, its v12 name) gets all three
-// (identical execute trust level, so deliberate restrictions are preserved).
-// Only the built-in shell counts, and only a built-in pty tool is granted
-// (see holdsBuiltin).
+// predates v8: definitions are added when absent, and any agent that can
+// use a shell (shell-exec, or bash, its v12 name) gets all three (identical
+// execute trust level, so deliberate restrictions are preserved). Only the
+// built-in shell counts, only when the agent can actually call it, and only
+// a built-in pty tool is granted (see holdsBuiltin).
 func (m *AgentManifest) ensurePTYTools() {
 	have := map[string]bool{}
 	for _, t := range m.Tools {
@@ -805,13 +921,24 @@ func (m *AgentManifest) ensurePTYTools() {
 	}
 }
 
-// holdsBuiltin reports whether agent a lists name and name reaches a
-// built-in (builtinToolNamed). The retrofits below grant a new tool to the
-// agents whose tools already show the same trust; a tool of the operator's
-// own that shares a built-in's name (a "grep" script) shows none, since it
-// is not that built-in.
+// holdsBuiltin reports whether agent a can actually use the built-in tool
+// called name: it lists name, name reaches a built-in (builtinToolNamed),
+// and the agent can call that tool (ToolUsableBy: enabled, an action the
+// agent may take, no permission rule denying it).
+//
+// The retrofits (v5 to v9) grant a new tool only to agents whose tools
+// already show the same trust, and each asks this. Listing a tool is not
+// that trust: a shell the operator switched off or denied, or a tool of the
+// operator's own that shares a built-in's name (a "grep" script), shows
+// none, and must not turn into a new tool that does the same job (pty-start
+// in place of a disabled shell-exec, rename-symbol next to a disabled
+// file-edit).
 func (m *AgentManifest) holdsBuiltin(a AgentSpec, name string) bool {
-	return slices.Contains(a.AllowedTools, name) && m.builtinToolNamed(name)
+	if !slices.Contains(a.AllowedTools, name) || !m.builtinToolNamed(name) {
+		return false
+	}
+	t, _ := m.toolNamed(name)
+	return m.ToolUsableBy(a, t)
 }
 
 // ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool
@@ -880,8 +1007,8 @@ func (m *AgentManifest) ensureLSPDeepTools() {
 
 // ensureVisionTools retrofits the view-image tool into a manifest that
 // predates it. The definition is added when absent; each agent's allow-list
-// grows the tool only when it already holds file-read, so an operator's
-// deliberate restrictions are preserved.
+// grows the tool only when it can already use the built-in file-read (see
+// holdsBuiltin), so an operator's deliberate restrictions are preserved.
 func (m *AgentManifest) ensureVisionTools() {
 	haveTool := false
 	for _, t := range m.Tools {
@@ -898,7 +1025,7 @@ func (m *AgentManifest) ensureVisionTools() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["file-read"] && !allowed["view-image"] {
+		if m.holdsBuiltin(m.Agents[i], "file-read") && !allowed["view-image"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "view-image")
 		}
 	}

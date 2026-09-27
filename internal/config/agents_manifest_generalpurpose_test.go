@@ -8,8 +8,9 @@ import (
 )
 
 // preV11Manifest is a minimal manifest from before the general-purpose
-// subagent: an orchestrator that already delegates, one whose handoffs an
-// operator deliberately emptied, and a worker. It declares only a subset of
+// subagent: an orchestrator that already delegates (and can read and search,
+// all the new agent can do here), one whose handoffs an operator
+// deliberately emptied, and a worker. It declares only a subset of
 // the tools the shipped spec asks for, so the migration has to drop the rest
 // instead of writing an allow-list Validate would reject.
 const preV11Manifest = `
@@ -49,9 +50,9 @@ description = "p"
 skill = "planning"
 mode = "orchestrator"
 role = "orchestrator"
-allowed_tools = ["file-read"]
+allowed_tools = ["file-read", "grep"]
 permission = "ask-first"
-permitted_actions = ["read", "plan"]
+permitted_actions = ["read", "search", "plan"]
 handoffs = ["worker"]
 enabled = true
 

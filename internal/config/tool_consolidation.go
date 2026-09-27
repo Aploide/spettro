@@ -183,6 +183,9 @@ func canonicalOf(id string) (string, bool) {
 //     covered. For a tool whose retired tools became its operations
 //     (opFolds: lsp), an agent granted the tool through some of them gets
 //     an lsp-op rule denying each op it could not call before.
+//   - The canonical tool's own allow rules stay with the agents that held
+//     it (see localizeCanonicalAllowRules): an agent that reached it only
+//     through a retired tool does not inherit them.
 //   - An agent granted a canonical tool through a retired one it could call
 //     keeps being able to call it: where its rules would deny the canonical
 //     tool (an allow-list written as a "*" deny plus an allow per tool), it
@@ -240,6 +243,7 @@ func (m *AgentManifest) consolidateBuiltinTools(groups []toolFold, removedIDs []
 			}
 		}
 	}
+	m.localizeCanonicalAllowRules(groups, usable, created)
 	removed := map[string]bool{}
 	for _, id := range removedIDs {
 		if i := m.toolIndex(id); i >= 0 && m.Tools[i].IsBuiltin() {
@@ -287,6 +291,62 @@ func (m *AgentManifest) consolidateBuiltinTools(groups []toolFold, removedIDs []
 		}
 		a.AllowedTools = tools
 	}
+}
+
+// localizeCanonicalAllowRules moves each canonical tool's allow rules from
+// the tool to the agents that held the tool before the fold, when the fold
+// also grants the tool to agents that did not.
+//
+// Why: rules are evaluated runtime, then agent, then tool, and the last
+// match wins, so a tool's own allow rule (bash: execute "*" allow) overrides
+// even an agent's denies. An agent that held only shell-exec, whose rules
+// asked before every command, would otherwise inherit bash's allow and run
+// every command without approval. Appending the rules to the end of each
+// holder's own rules keeps them after that agent's rules, as they were; the
+// only change for a holder is that the tool's remaining deny and ask rules
+// now come after the allows, which can only make a command ask or be
+// denied, never newly allowed. A canonical tool made in place from a
+// retired one (created) keeps its rules: they were that tool's all along.
+func (m *AgentManifest) localizeCanonicalAllowRules(groups []toolFold, usable []map[string]bool, created map[string]bool) {
+	for _, g := range groups {
+		ci := m.toolIndex(g.canonical)
+		if ci < 0 || created[g.canonical] || m.userToolNamed(g.canonical) {
+			continue
+		}
+		var allows, rest []PermissionRule
+		for _, r := range m.Tools[ci].PermissionRules {
+			if r.Action == RuleAllow {
+				allows = append(allows, r)
+			} else {
+				rest = append(rest, r)
+			}
+		}
+		if len(allows) == 0 || !m.foldGrantsNewHolders(g, usable) {
+			continue
+		}
+		for i := range m.Agents {
+			a := &m.Agents[i]
+			if slices.Contains(a.AllowedTools, g.canonical) {
+				a.PermissionRules = append(a.PermissionRules, allows...)
+			}
+		}
+		m.Tools[ci].PermissionRules = rest
+	}
+}
+
+// foldGrantsNewHolders reports whether some agent that does not list the
+// group's canonical tool could call one of its retired tools, and so gains
+// the canonical tool from the fold.
+func (m *AgentManifest) foldGrantsNewHolders(g toolFold, usable []map[string]bool) bool {
+	for i, a := range m.Agents {
+		if slices.Contains(a.AllowedTools, g.canonical) {
+			continue
+		}
+		if slices.ContainsFunc(g.retired, func(id string) bool { return usable[i][id] }) {
+			return true
+		}
+	}
+	return false
 }
 
 // denyUnheldOps gives agent i, whose allow-list becomes tools, an lsp-op
@@ -411,6 +471,11 @@ func (m *AgentManifest) renameInPlace(canonical string, retired []string, folded
 	t := &m.Tools[pick]
 	folded[t.ID] = canonical
 	t.ID = canonical
+	// An operator may have taught the retired tool its future name as an
+	// alias (skill-read answering to "skill"). Now that the name is the
+	// tool's ID, the alias would name the tool itself, which Validate
+	// rejects ("alias is another tool's id") and spettro would not start.
+	t.Aliases = slices.DeleteFunc(t.Aliases, func(a string) bool { return a == canonical })
 	if spec, ok := defaultToolSpec(canonical); ok {
 		t.Name, t.Description = spec.Name, spec.Description
 	}
@@ -420,11 +485,11 @@ func (m *AgentManifest) renameInPlace(canonical string, retired []string, folded
 // userToolNamed reports whether name is the ID or an alias of a tool of the
 // operator's own (kind mcp, script or http). Such a name is theirs: no
 // migration folds a built-in into it, adds it to a built-in's aliases, or
-// grants it to an agent in place of a built-in.
+// grants it to an agent in place of a built-in. It is UserTool as a yes/no,
+// so the migrations and the runtime agree on whose a name is.
 func (m *AgentManifest) userToolNamed(name string) bool {
-	return slices.ContainsFunc(m.Tools, func(t ToolSpec) bool {
-		return !t.IsBuiltin() && (t.ID == name || slices.Contains(t.Aliases, name))
-	})
+	_, ok := m.UserTool(name)
+	return ok
 }
 
 // builtinToolNamed reports whether name reaches a built-in tool: it is the
