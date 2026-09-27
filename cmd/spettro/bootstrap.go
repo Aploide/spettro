@@ -66,6 +66,7 @@ func bootstrapSession(cwd string, overrides sandbox.Overrides) (*bootstrap, erro
 	}
 	pm := provider.NewManager()
 	pm.SetStreamAll(true)
+	pm.SetWireMode(cfg.ProviderWire)
 	pm.SetAPIKeys(cfg.APIKeys)
 	models.LoadAndRefresh(pm.SetCatalog)
 	return &bootstrap{

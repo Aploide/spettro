@@ -3,8 +3,7 @@ package provider
 import (
 	"regexp"
 	"strings"
-
-	"spettro/internal/budget"
+	"unicode/utf8"
 )
 
 // DefaultMaxOutputTokens is the output cap sent to Anthropic-protocol models
@@ -97,10 +96,8 @@ func outputRoom(window, promptTokens int) int {
 // catalog's value first, then the built-in table of well-known families.
 // 0 means unknown.
 func (m *Manager) MaxOutputTokens(providerName, modelName string) int {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName && item.MaxOutput > 0 {
-			return item.MaxOutput
-		}
+	if entry, ok := m.models().index[modelKey{providerName, modelName}]; ok && entry.maxOutput > 0 {
+		return entry.maxOutput
 	}
 	return knownOutputLimit(modelName)
 }
@@ -157,33 +154,43 @@ func (m *Manager) resolveMaxOutput(providerName, apiKind, modelName string, requ
 // thousand tokens that ride on every request). chars/4 heuristic; callers
 // that have provider-reported usage should prefer it (see the agent loop's
 // calibration).
+//
+// It counts characters in place (the same count budget.EstimateTokens
+// makes over the same texts, see TestEstimateRequestTokensMatchesBudget)
+// instead of collecting the texts into a slice: at 500 messages that slice
+// was 57 KB and 270 allocations per call, on every step.
 func EstimateRequestTokens(req Request) int {
-	parts := make([]string, 0, 2+len(req.Messages)*2)
-	parts = append(parts, req.System, req.Prompt)
+	chars := utf8.RuneCountInString(req.System) + utf8.RuneCountInString(req.Prompt)
 	for _, m := range req.Messages {
-		parts = append(parts, m.Content)
+		chars += utf8.RuneCountInString(m.Content)
 		for _, r := range m.Reasoning {
-			parts = append(parts, r.Text)
+			chars += utf8.RuneCountInString(r.Text)
 		}
 		for _, tc := range m.ToolCalls {
-			parts = append(parts, tc.Name, string(tc.Args))
+			chars += utf8.RuneCountInString(tc.Name) + utf8.RuneCount(tc.Args)
 		}
 		for _, tr := range m.ToolResults {
-			parts = append(parts, tr.Output)
+			chars += utf8.RuneCountInString(tr.Output)
 		}
 	}
-	return budget.EstimateTokens(parts...) + EstimateToolTokens(req.Tools)
+	return tokensForChars(chars) + EstimateToolTokens(req.Tools)
 }
 
 // EstimateToolTokens approximates the prompt tokens taken by tool
 // definitions (name, description and JSON schema of each).
 func EstimateToolTokens(tools []ToolSpec) int {
-	if len(tools) == 0 {
+	chars := 0
+	for _, t := range tools {
+		chars += utf8.RuneCountInString(t.Name) + utf8.RuneCountInString(t.Description) + utf8.RuneCount(t.Schema)
+	}
+	return tokensForChars(chars)
+}
+
+// tokensForChars is budget.EstimateTokens' chars/4 rule on a character
+// count: 0 for no text, otherwise chars/4 + 1.
+func tokensForChars(chars int) int {
+	if chars == 0 {
 		return 0
 	}
-	parts := make([]string, 0, len(tools)*3)
-	for _, t := range tools {
-		parts = append(parts, t.Name, t.Description, string(t.Schema))
-	}
-	return budget.EstimateTokens(parts...)
+	return chars/4 + 1
 }

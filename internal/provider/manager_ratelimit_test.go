@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	openai "github.com/openai/openai-go/v3"
+	openai "github.com/charmbracelet/openai-go"
 )
 
 // Guards the auto-wait behaviour for the Spettro Subscription overflow tier:

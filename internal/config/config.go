@@ -59,6 +59,14 @@ type UserConfig struct {
 	// models whose limit is unknown (their implicit default is only 4096).
 	// Distinct from TokenBudget, which limits the prompt.
 	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// ProviderWire selects the client that carries streamed requests to
+	// OpenAI-compatible chat-completions endpoints (OpenAI-compatible
+	// catalog providers, the Spettro Subscription, local servers): "native"
+	// (empty means native) is Spettro's own client, "fantasy" the fantasy
+	// SDK it replaced, kept as a fallback. The SPETTRO_PROVIDER_WIRE
+	// environment variable overrides it for one process. Anthropic and the
+	// official OpenAI provider always use fantasy.
+	ProviderWire string `json:"provider_wire,omitempty"`
 	// Ultra, when true, injects the ultra fan-out tool and swarm guidance into
 	// the top-level agent so it decomposes hard tasks across many parallel
 	// sub-agents. Works with any model (sub-agents inherit the active model).

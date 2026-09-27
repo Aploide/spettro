@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
-	anthropic "github.com/anthropics/anthropic-sdk-go"
+	anthropic "github.com/charmbracelet/anthropic-sdk-go"
 
 	"spettro/internal/models"
 )

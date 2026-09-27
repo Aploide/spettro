@@ -142,6 +142,45 @@ start.
 SPETTRO_THEME=light spettro     # override for one run
 ```
 
+## Provider wire
+
+Which client carries streamed requests to OpenAI-compatible chat-completions
+endpoints: catalog providers with an OpenAI-style API, the Spettro
+Subscription and local servers. Anthropic-protocol providers, the official
+`openai` provider (Responses API) and non-streamed requests always use the
+fantasy SDK.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `provider_wire` | `""` (treated as `native`) | `native`: Spettro's own client, which re-encodes only the messages a step added and decodes streamed tool calls in linear time. `fantasy`: the fantasy SDK, as before the native client existed. An unknown value means `native`. |
+
+`SPETTRO_PROVIDER_WIRE` (`native` or `fantasy`) overrides the key for one
+process. Both clients send the same request JSON and report replies, errors
+and rate limits the same way; the native one falls back to fantasy by itself
+if it ever fails to encode a request. See [Architecture](architecture.md#provider-abstraction).
+
+The native client differs from fantasy only in these points, all but the
+last on replies where fantasy fails or loses data:
+
+- a chunk whose delta carries both text and a tool-call fragment keeps both
+  (fantasy drops the fragment);
+- a choice without a `delta` member counts as an empty delta (fantasy fails
+  the request);
+- a read error after the `[DONE]` terminator is ignored (fantasy fails the
+  request);
+- tool arguments that do not start as a JSON object, array or string stop
+  being re-checked for completeness after 4 KB;
+- requests carry the User-Agent `Spettro/<version>`.
+
+Like the SDK, the native client sends `OPENAI_ORG_ID` and
+`OPENAI_PROJECT_ID`, when set, as the `OpenAI-Organization` and
+`OpenAI-Project` headers.
+
+Between the steps of a run the native client keeps each conversation's
+encoded messages (up to 48 conversations and 8 MB in all; a request of a
+single message is not kept) and the images it sent (up to 6 MB); both are
+released after 5 minutes without use.
+
 ## Notifications
 
 When the terminal is unfocused (or a run took more than 10 s), Spettro alerts

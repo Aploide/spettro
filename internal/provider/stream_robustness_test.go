@@ -34,7 +34,7 @@ func sseChunk(delta map[string]any, finish string, usage map[string]any) string 
 
 // newCompatStreamServer serves every request with the given SSE events and
 // records the request bodies.
-func newCompatStreamServer(t *testing.T, events ...string) (*Manager, string, *[]map[string]any) {
+func newCompatStreamServer(t *testing.T, mode WireMode, events ...string) (*Manager, string, *[]map[string]any) {
 	t.Helper()
 	var mu sync.Mutex
 	var bodies []map[string]any
@@ -52,8 +52,17 @@ func newCompatStreamServer(t *testing.T, events ...string) (*Manager, string, *[
 	}))
 	t.Cleanup(srv.Close)
 	pm := NewManager()
+	pm.SetWireMode(string(mode))
 	pm.AddLocalModels([]Model{{Provider: srv.URL, Name: "m", Local: true}})
 	return pm, srv.URL, &bodies
+}
+
+// forEachWire runs fn once per chat-completions client, so the OpenAI-
+// compatible stream tests cover the native client and the fantasy path.
+func forEachWire(t *testing.T, fn func(t *testing.T, mode WireMode)) {
+	for _, mode := range []WireMode{WireNative, WireFantasy} {
+		t.Run(string(mode), func(t *testing.T) { fn(t, mode) })
+	}
 }
 
 func toolCallDelta(id, name, args string) map[string]any {
@@ -77,207 +86,225 @@ func streamReq() Request {
 // never emitted by the adapter (its JSON never becomes valid); it must still
 // surface — not vanish — carrying a truncation error instead of "{}" args.
 func TestStreamTruncatedToolCallReportsTruncation(t *testing.T) {
-	pm, url, _ := newCompatStreamServer(t,
-		sseChunk(toolCallDelta("call_1", "file-write", `{"path":"a.go","content":"package main\nfunc`), "", nil),
-		sseChunk(map[string]any{}, "length", map[string]any{"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60}),
-	)
-	resp, err := pm.Send(context.Background(), url, "m", streamReq())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.FinishReason != FinishLength || !resp.Truncated() {
-		t.Fatalf("finish = %q, want length", resp.FinishReason)
-	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("want the truncated call surfaced, got %+v", resp.ToolCalls)
-	}
-	tc := resp.ToolCalls[0]
-	if tc.Name != "file-write" || string(tc.Args) != "{}" {
-		t.Fatalf("unexpected call %+v", tc)
-	}
-	if !strings.Contains(tc.ArgsError, "truncated at the output token limit") {
-		t.Fatalf("ArgsError = %q, want truncation message", tc.ArgsError)
-	}
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		pm, url, _ := newCompatStreamServer(t, mode,
+			sseChunk(toolCallDelta("call_1", "file-write", `{"path":"a.go","content":"package main\nfunc`), "", nil),
+			sseChunk(map[string]any{}, "length", map[string]any{"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60}),
+		)
+		resp, err := pm.Send(context.Background(), url, "m", streamReq())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.FinishReason != FinishLength || !resp.Truncated() {
+			t.Fatalf("finish = %q, want length", resp.FinishReason)
+		}
+		if len(resp.ToolCalls) != 1 {
+			t.Fatalf("want the truncated call surfaced, got %+v", resp.ToolCalls)
+		}
+		tc := resp.ToolCalls[0]
+		if tc.Name != "file-write" || string(tc.Args) != "{}" {
+			t.Fatalf("unexpected call %+v", tc)
+		}
+		if !strings.Contains(tc.ArgsError, "truncated at the output token limit") {
+			t.Fatalf("ArgsError = %q, want truncation message", tc.ArgsError)
+		}
+	})
 }
 
 // A complete but slightly malformed call (raw newline inside a string,
 // trailing comma) is repaired instead of being dropped or emptied.
 func TestStreamMalformedToolCallIsRepaired(t *testing.T) {
-	pm, url, _ := newCompatStreamServer(t,
-		sseChunk(toolCallDelta("call_1", "file-write", "{\"path\":\"a.go\",\"content\":\"line1\nline2\",}"), "", nil),
-		sseChunk(map[string]any{}, "tool_calls", map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}),
-	)
-	resp, err := pm.Send(context.Background(), url, "m", streamReq())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ArgsError != "" {
-		t.Fatalf("want one repaired call, got %+v", resp.ToolCalls)
-	}
-	var args struct{ Path, Content string }
-	if err := json.Unmarshal(resp.ToolCalls[0].Args, &args); err != nil {
-		t.Fatal(err)
-	}
-	if args.Path != "a.go" || args.Content != "line1\nline2" {
-		t.Fatalf("repaired args = %+v", args)
-	}
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		pm, url, _ := newCompatStreamServer(t, mode,
+			sseChunk(toolCallDelta("call_1", "file-write", "{\"path\":\"a.go\",\"content\":\"line1\nline2\",}"), "", nil),
+			sseChunk(map[string]any{}, "tool_calls", map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}),
+		)
+		resp, err := pm.Send(context.Background(), url, "m", streamReq())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ArgsError != "" {
+			t.Fatalf("want one repaired call, got %+v", resp.ToolCalls)
+		}
+		var args struct{ Path, Content string }
+		if err := json.Unmarshal(resp.ToolCalls[0].Args, &args); err != nil {
+			t.Fatal(err)
+		}
+		if args.Path != "a.go" || args.Content != "line1\nline2" {
+			t.Fatalf("repaired args = %+v", args)
+		}
+	})
 }
 
 // An unrepairable call is reported precisely and never executed with {}.
 func TestStreamUnparseableToolCallReportsParseError(t *testing.T) {
-	pm, url, _ := newCompatStreamServer(t,
-		sseChunk(toolCallDelta("call_1", "grep", `{"pattern": foo bar}`), "", nil),
-		sseChunk(map[string]any{}, "tool_calls", map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}),
-	)
-	resp, err := pm.Send(context.Background(), url, "m", streamReq())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("got %+v", resp.ToolCalls)
-	}
-	msg := resp.ToolCalls[0].ArgsError
-	if !strings.Contains(msg, "not valid JSON") || !strings.Contains(msg, "at byte") || !strings.Contains(msg, "foo bar") {
-		t.Fatalf("ArgsError = %q, want a precise parse error", msg)
-	}
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		pm, url, _ := newCompatStreamServer(t, mode,
+			sseChunk(toolCallDelta("call_1", "grep", `{"pattern": foo bar}`), "", nil),
+			sseChunk(map[string]any{}, "tool_calls", map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}),
+		)
+		resp, err := pm.Send(context.Background(), url, "m", streamReq())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.ToolCalls) != 1 {
+			t.Fatalf("got %+v", resp.ToolCalls)
+		}
+		msg := resp.ToolCalls[0].ArgsError
+		if !strings.Contains(msg, "not valid JSON") || !strings.Contains(msg, "at byte") || !strings.Contains(msg, "foo bar") {
+			t.Fatalf("ArgsError = %q, want a precise parse error", msg)
+		}
+	})
 }
 
 // reasoning_content is captured with the producing provider/model, and
 // replayed on the next request of the same model.
 func TestStreamCompatReasoningRoundTrip(t *testing.T) {
-	pm, url, bodies := newCompatStreamServer(t,
-		sseChunk(map[string]any{"role": "assistant", "reasoning_content": "think hard"}, "", nil),
-		sseChunk(map[string]any{"content": "answer"}, "", nil),
-		sseChunk(map[string]any{}, "stop", map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
-	)
-	resp, err := pm.Send(context.Background(), url, "m", streamReq())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Content != "answer" || resp.FinishReason != FinishStop {
-		t.Fatalf("resp = %+v", resp)
-	}
-	if len(resp.Reasoning) != 1 || resp.Reasoning[0].Text != "think hard" || resp.Reasoning[0].Provider != url || resp.Reasoning[0].Model != "m" {
-		t.Fatalf("reasoning = %+v", resp.Reasoning)
-	}
-	next := streamReq()
-	next.Messages = append(next.Messages,
-		Message{Role: RoleAssistant, Content: resp.Content, Reasoning: resp.Reasoning},
-		Message{Role: RoleUser, Content: "more"})
-	if _, err := pm.Send(context.Background(), url, "m", next); err != nil {
-		t.Fatal(err)
-	}
-	msgs, _ := (*bodies)[1]["messages"].([]any)
-	found := false
-	for _, m := range msgs {
-		if mm, _ := m.(map[string]any); mm["role"] == "assistant" && mm["reasoning_content"] == "think hard" {
-			found = true
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		pm, url, bodies := newCompatStreamServer(t, mode,
+			sseChunk(map[string]any{"role": "assistant", "reasoning_content": "think hard"}, "", nil),
+			sseChunk(map[string]any{"content": "answer"}, "", nil),
+			sseChunk(map[string]any{}, "stop", map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
+		)
+		resp, err := pm.Send(context.Background(), url, "m", streamReq())
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !found {
-		t.Fatalf("reasoning_content not replayed: %v", msgs)
-	}
+		if resp.Content != "answer" || resp.FinishReason != FinishStop {
+			t.Fatalf("resp = %+v", resp)
+		}
+		if len(resp.Reasoning) != 1 || resp.Reasoning[0].Text != "think hard" || resp.Reasoning[0].Provider != url || resp.Reasoning[0].Model != "m" {
+			t.Fatalf("reasoning = %+v", resp.Reasoning)
+		}
+		next := streamReq()
+		next.Messages = append(next.Messages,
+			Message{Role: RoleAssistant, Content: resp.Content, Reasoning: resp.Reasoning},
+			Message{Role: RoleUser, Content: "more"})
+		if _, err := pm.Send(context.Background(), url, "m", next); err != nil {
+			t.Fatal(err)
+		}
+		msgs, _ := (*bodies)[1]["messages"].([]any)
+		found := false
+		for _, m := range msgs {
+			if mm, _ := m.(map[string]any); mm["role"] == "assistant" && mm["reasoning_content"] == "think hard" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("reasoning_content not replayed: %v", msgs)
+		}
+	})
 }
 
 // A stream that goes silent fails with the retryable ErrStreamIdle instead
 // of hanging the run.
 func TestStreamIdleTimeout(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, sseChunk(map[string]any{"role": "assistant", "content": "hel"}, "", nil))
-		w.(http.Flusher).Flush()
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-	}))
-	t.Cleanup(func() { close(release); srv.Close() })
-	pm := NewManager()
-	pm.AddLocalModels([]Model{{Provider: srv.URL, Name: "m", Local: true}})
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, sseChunk(map[string]any{"role": "assistant", "content": "hel"}, "", nil))
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}))
+		t.Cleanup(func() { close(release); srv.Close() })
+		pm := NewManager()
+		pm.SetWireMode(string(mode))
+		pm.AddLocalModels([]Model{{Provider: srv.URL, Name: "m", Local: true}})
 
-	req := streamReq()
-	req.StreamIdleTimeout = 150 * time.Millisecond
-	start := time.Now()
-	_, err := pm.Send(context.Background(), srv.URL, "m", req)
-	if !errors.Is(err, ErrStreamIdle) {
-		t.Fatalf("err = %v, want ErrStreamIdle", err)
-	}
-	if time.Since(start) > 5*time.Second {
-		t.Fatalf("idle stream took %s to fail", time.Since(start))
-	}
-	if ClassifyRetry(err) != RetryTransient {
-		t.Fatalf("stream idle must be retryable")
-	}
+		req := streamReq()
+		req.StreamIdleTimeout = 150 * time.Millisecond
+		start := time.Now()
+		_, err := pm.Send(context.Background(), srv.URL, "m", req)
+		if !errors.Is(err, ErrStreamIdle) {
+			t.Fatalf("err = %v, want ErrStreamIdle", err)
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("idle stream took %s to fail", time.Since(start))
+		}
+		if ClassifyRetry(err) != RetryTransient {
+			t.Fatalf("stream idle must be retryable")
+		}
+	})
 }
 
 // With SetStreamAll a caller that wants no live tokens still streams, so the
 // idle watchdog protects sub-agent and headless requests too.
 func TestStreamAllCoversRequestsWithoutOnStream(t *testing.T) {
-	pm, url, bodies := newCompatStreamServer(t,
-		sseChunk(map[string]any{"role": "assistant", "content": "ok"}, "stop", map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
-	)
-	pm.SetStreamAll(true)
-	resp, err := pm.Send(context.Background(), url, "m", Request{Messages: []Message{{Role: RoleUser, Content: "go"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Content != "ok" {
-		t.Fatalf("content = %q", resp.Content)
-	}
-	if stream, _ := (*bodies)[0]["stream"].(bool); !stream {
-		t.Fatal("request did not stream")
-	}
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		pm, url, bodies := newCompatStreamServer(t, mode,
+			sseChunk(map[string]any{"role": "assistant", "content": "ok"}, "stop", map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+		)
+		pm.SetStreamAll(true)
+		resp, err := pm.Send(context.Background(), url, "m", Request{Messages: []Message{{Role: RoleUser, Content: "go"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Content != "ok" {
+			t.Fatalf("content = %q", resp.Content)
+		}
+		if stream, _ := (*bodies)[0]["stream"].(bool); !stream {
+			t.Fatal("request did not stream")
+		}
+	})
 }
 
 // A transient failure of a streaming request is left to the caller's retry
 // policy: it must not be doubled by the non-streaming fallback request.
 func TestStreamTransientFailureIsNotResentWithoutStreaming(t *testing.T) {
-	var mu sync.Mutex
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		var mu sync.Mutex
+		calls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			http.Error(w, `{"error":{"message":"upstream overloaded"}}`, http.StatusServiceUnavailable)
+		}))
+		t.Cleanup(srv.Close)
+		pm := NewManager()
+		pm.SetWireMode(string(mode))
+		pm.AddLocalModels([]Model{{Provider: srv.URL, Name: "m", Local: true}})
+		_, err := pm.Send(context.Background(), srv.URL, "m", streamReq())
+		if err == nil {
+			t.Fatal("expected an error")
+		}
 		mu.Lock()
-		calls++
-		mu.Unlock()
-		http.Error(w, `{"error":{"message":"upstream overloaded"}}`, http.StatusServiceUnavailable)
-	}))
-	t.Cleanup(srv.Close)
-	pm := NewManager()
-	pm.AddLocalModels([]Model{{Provider: srv.URL, Name: "m", Local: true}})
-	_, err := pm.Send(context.Background(), srv.URL, "m", streamReq())
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	// The OpenAI SDK's own retries are disabled by fantasy, so one request
-	// means no extra non-streaming resend.
-	if calls != 1 {
-		t.Fatalf("server saw %d requests, want 1", calls)
-	}
+		defer mu.Unlock()
+		// The OpenAI SDK's own retries are disabled by fantasy, so one request
+		// means no extra non-streaming resend.
+		if calls != 1 {
+			t.Fatalf("server saw %d requests, want 1", calls)
+		}
+	})
 }
 
 // The input budget counts tool results (most of a coding session's
 // context), while the output cap is no longer mistaken for an input limit.
 func TestInputBudgetCountsToolResultsAndIsSeparateFromMaxTokens(t *testing.T) {
-	pm, url, _ := newCompatStreamServer(t,
-		sseChunk(map[string]any{"role": "assistant", "content": "ok"}, "stop", map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
-	)
-	big := strings.Repeat("x", 40000) // ~10k tokens, only in a tool result
-	req := streamReq()
-	req.Messages = []Message{
-		{Role: RoleUser, Content: "go"},
-		{Role: RoleAssistant, ToolCalls: []NativeTool{{ID: "c1", Name: "file-read", Args: json.RawMessage(`{}`)}}},
-		{Role: RoleUser, ToolResults: []ToolResult{{ID: "c1", Name: "file-read", Output: big}}},
-	}
-	req.MaxTokens = 100 // an output cap: must not reject a 10k-token prompt
-	if _, err := pm.Send(context.Background(), url, "m", req); err != nil {
-		t.Fatalf("output cap rejected the prompt: %v", err)
-	}
-	req.InputBudget = 5000
-	if _, err := pm.Send(context.Background(), url, "m", req); err == nil || !strings.Contains(err.Error(), "token budget exceeded") {
-		t.Fatalf("err = %v, want the input budget to count the tool result", err)
-	}
+	forEachWire(t, func(t *testing.T, mode WireMode) {
+		pm, url, _ := newCompatStreamServer(t, mode,
+			sseChunk(map[string]any{"role": "assistant", "content": "ok"}, "stop", map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+		)
+		big := strings.Repeat("x", 40000) // ~10k tokens, only in a tool result
+		req := streamReq()
+		req.Messages = []Message{
+			{Role: RoleUser, Content: "go"},
+			{Role: RoleAssistant, ToolCalls: []NativeTool{{ID: "c1", Name: "file-read", Args: json.RawMessage(`{}`)}}},
+			{Role: RoleUser, ToolResults: []ToolResult{{ID: "c1", Name: "file-read", Output: big}}},
+		}
+		req.MaxTokens = 100 // an output cap: must not reject a 10k-token prompt
+		if _, err := pm.Send(context.Background(), url, "m", req); err != nil {
+			t.Fatalf("output cap rejected the prompt: %v", err)
+		}
+		req.InputBudget = 5000
+		if _, err := pm.Send(context.Background(), url, "m", req); err == nil || !strings.Contains(err.Error(), "token budget exceeded") {
+			t.Fatalf("err = %v, want the input budget to count the tool result", err)
+		}
+	})
 }
 
 // --- Anthropic SSE fixtures ------------------------------------------------

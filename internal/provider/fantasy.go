@@ -3,7 +3,6 @@ package provider
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -260,148 +259,74 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		return Response{}, idleErr(err)
 	}
 
-	var (
-		textSB strings.Builder
-		usage  fantasy.Usage
-		finish FinishReason
-		// finishReported is set once the provider said why the reply
-		// ended; fantasy emits a Finish part on any clean EOF, with an
-		// unknown reason when the stream simply stopped.
-		finishReported bool
-		streamErr      error
-		// Tool calls in first-seen order. Inputs are accumulated from the
-		// delta events too: the OpenAI-compatible stream only emits a
-		// ToolCall part once the arguments parse as JSON, so a call cut off
-		// at the output limit (or malformed) would otherwise vanish.
-		calls     []*rawToolCall
-		callsByID = map[string]*rawToolCall{}
-		// Reasoning blocks in first-seen order, keyed by stream part ID.
-		thoughts     []*streamReasoning
-		thoughtsByID = map[string]*streamReasoning{}
-		// rawFinish and orphanDeltas feed Response.Diagnostics only.
-		rawFinish    fantasy.FinishReason
-		orphanDeltas int
-	)
-	toolCall := func(id, name string) *rawToolCall {
-		if tc, ok := callsByID[id]; ok {
-			if tc.name == "" {
-				tc.name = name
-			}
-			return tc
-		}
-		tc := &rawToolCall{id: id, name: name}
-		callsByID[id] = tc
-		calls = append(calls, tc)
-		return tc
-	}
-	thought := func(id string) *streamReasoning {
-		if r, ok := thoughtsByID[id]; ok {
-			return r
-		}
-		r := &streamReasoning{}
-		thoughtsByID[id] = r
-		thoughts = append(thoughts, r)
-		return r
-	}
+	collector := newStreamCollector(req.OnStream)
+	var streamErr error
 	for part := range stream {
 		watchdog.touch()
-		switch part.Type {
-		case fantasy.StreamPartTypeTextDelta:
-			textSB.WriteString(part.Delta)
-			if req.OnStream != nil && part.Delta != "" {
-				req.OnStream(StreamEvent{Kind: StreamText, Delta: part.Delta})
-			}
-		case fantasy.StreamPartTypeReasoningStart, fantasy.StreamPartTypeReasoningDelta, fantasy.StreamPartTypeReasoningEnd:
-			r := thought(part.ID)
-			r.text.WriteString(part.Delta)
-			if sig, redacted := reasoningMetadata(part.ProviderMetadata); sig != "" || redacted != "" {
-				if sig != "" {
-					r.signature = sig
-				}
-				if redacted != "" {
-					r.redacted = redacted
-				}
-			}
-			if part.Type == fantasy.StreamPartTypeReasoningDelta && req.OnStream != nil && part.Delta != "" {
-				req.OnStream(StreamEvent{Kind: StreamReasoning, Delta: part.Delta})
-			}
-		case fantasy.StreamPartTypeToolInputStart:
-			if !part.ProviderExecuted {
-				toolCall(part.ID, part.ToolCallName)
-			}
-		case fantasy.StreamPartTypeToolInputDelta:
-			tc, ok := callsByID[part.ID]
-			if !ok {
-				orphanDeltas++
-				continue
-			}
-			if !tc.complete {
-				// The OpenAI-style adapters carry the fragment in Delta,
-				// the Anthropic one in ToolCallInput.
-				tc.input += cmp.Or(part.Delta, part.ToolCallInput)
-			}
-		case fantasy.StreamPartTypeToolCall:
-			if part.ProviderExecuted {
-				continue
-			}
-			tc := toolCall(part.ID, part.ToolCallName)
-			tc.input = part.ToolCallInput
-			tc.complete = true
-		case fantasy.StreamPartTypeFinish:
-			usage = part.Usage
-			rawFinish = part.FinishReason
-			finish = mapFinishReason(part.FinishReason)
-			finishReported = part.FinishReason != "" && part.FinishReason != fantasy.FinishReasonUnknown
-		case fantasy.StreamPartTypeError:
-			if part.Error != nil {
-				streamErr = part.Error
-			}
+		if part.Type == fantasy.StreamPartTypeError && part.Error != nil {
+			streamErr = part.Error
+			continue
 		}
+		collectFantasyPart(collector, part)
 	}
 	watchdog.stop()
+	if err := streamOutcome(ctx, streamCtx, streamErr, collector, req.localEndpoint); err != nil {
+		return Response{}, err
+	}
+	return collector.response(providerName, modelName, sentMaxOutput(call)), nil
+}
+
+// collectFantasyPart feeds one fantasy stream part to the collector.
+func collectFantasyPart(c *streamCollector, part fantasy.StreamPart) {
+	switch part.Type {
+	case fantasy.StreamPartTypeTextDelta:
+		c.textDelta(part.Delta)
+	case fantasy.StreamPartTypeReasoningStart, fantasy.StreamPartTypeReasoningDelta, fantasy.StreamPartTypeReasoningEnd:
+		sig, redacted := reasoningMetadata(part.ProviderMetadata)
+		c.reasoning(part.ID, part.Delta, sig, redacted, part.Type == fantasy.StreamPartTypeReasoningDelta)
+	case fantasy.StreamPartTypeToolInputStart:
+		if !part.ProviderExecuted {
+			c.toolCall(part.ID, part.ToolCallName)
+		}
+	case fantasy.StreamPartTypeToolInputDelta:
+		// The OpenAI-style adapters carry the fragment in Delta, the
+		// Anthropic one in ToolCallInput.
+		c.toolInputDelta(part.ID, cmp.Or(part.Delta, part.ToolCallInput))
+	case fantasy.StreamPartTypeToolCall:
+		if !part.ProviderExecuted {
+			c.toolCallComplete(part.ID, part.ToolCallName, part.ToolCallInput)
+		}
+	case fantasy.StreamPartTypeFinish:
+		c.finishPart(part.Usage, part.FinishReason)
+	}
+}
+
+// streamOutcome decides whether a finished stream produced a usable reply:
+// it returns the stream's error (ErrStreamIdle when the watchdog cut it),
+// ErrStreamIdle when the watchdog fired without an error surfacing, and
+// ErrStreamIncomplete when the reply ended without the provider saying why
+// (see below); nil when the collected reply stands.
+func streamOutcome(ctx, streamCtx context.Context, streamErr error, c *streamCollector, localEndpoint bool) error {
+	idle := ctx.Err() == nil && errors.Is(context.Cause(streamCtx), ErrStreamIdle)
 	if streamErr != nil {
-		return Response{}, idleErr(streamErr)
+		if idle {
+			return ErrStreamIdle
+		}
+		return streamErr
 	}
-	if err := context.Cause(streamCtx); err != nil && errors.Is(err, ErrStreamIdle) && ctx.Err() == nil {
-		// The watchdog fired but the iterator ended without an error part.
-		return Response{}, ErrStreamIdle
+	if idle {
+		// The watchdog fired but the stream ended without an error.
+		return ErrStreamIdle
 	}
-	if !finishReported && !req.localEndpoint {
+	if !c.finishReported && !localEndpoint {
 		// The response ended cleanly but the model never said it was done
 		// (no finish_reason / message_delta): a proxy or load balancer cut
 		// the stream mid-generation. Accepting it would pass half an answer
 		// (or a half-streamed tool call) off as complete. Local servers are
 		// exempt: some omit the finish reason, and nothing sits between.
-		return Response{}, ErrStreamIncomplete
+		return ErrStreamIncomplete
 	}
-
-	totalTokens := int(usage.TotalTokens)
-	if totalTokens == 0 {
-		totalTokens = int(usage.InputTokens + usage.OutputTokens)
-	}
-
-	maxOut := sentMaxOutput(call)
-	raw := make([]rawToolCall, 0, len(calls))
-	for _, tc := range calls {
-		raw = append(raw, *tc)
-	}
-	finish = detectTruncation(finish, usage, maxOut)
-	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut, int(usage.OutputTokens))
-	var reasoning []ReasoningBlock
-	for _, r := range thoughts {
-		reasoning = appendReasoning(reasoning, r.text.String(), r.signature, r.redacted, providerName, modelName)
-	}
-
-	return Response{
-		Content:         textSB.String(),
-		ToolCalls:       toolCalls,
-		EstimatedTokens: totalTokens,
-		Usage:           usageFromFantasy(usage),
-		FinishReason:    finish,
-		Reasoning:       reasoning,
-		MaxOutputTokens: maxOut,
-		Diagnostics:     rawDiagnostics(string(rawFinish), raw, orphanDeltas),
-	}, nil
+	return nil
 }
 
 // rawDiagnostics summarizes a reply's raw tool calls for
@@ -423,11 +348,6 @@ func rawDiagnostics(rawFinish string, raw []rawToolCall, orphanDeltas int) Respo
 type rawToolCall struct {
 	id, name, input string
 	complete        bool
-}
-
-type streamReasoning struct {
-	text                strings.Builder
-	signature, redacted string
 }
 
 // finalizeToolCalls normalizes every call's arguments (see
@@ -759,8 +679,8 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 	if len(req.Tools) > 0 {
 		call.Tools = make([]fantasy.Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			var schema map[string]any
-			if err := json.Unmarshal(t.Schema, &schema); err != nil || schema == nil {
+			schema := toolSchemas.parse(t.Schema)
+			if schema == nil {
 				schema = map[string]any{"type": "object", "additionalProperties": true}
 			}
 			call.Tools = append(call.Tools, fantasy.FunctionTool{
@@ -841,13 +761,14 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 // loadToolResultMedia reads an image file into a media tool-result output
 // (base64 + mime), keeping the tool's text output alongside it. Returns false
 // when the file cannot be read so the caller falls back to a text-only result.
+// The encoding comes from the media cache.
 func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedia, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := requestMedia.base64(path)
+	if !ok {
 		return fantasy.ToolResultOutputContentMedia{}, false
 	}
 	return fantasy.ToolResultOutputContentMedia{
-		Data:      base64.StdEncoding.EncodeToString(data),
+		Data:      data,
 		MediaType: mediaTypeFromPath(path),
 		Text:      text,
 	}, true
@@ -855,12 +776,13 @@ func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedi
 
 // fantasyImageParts loads image files into fantasy FileParts. Unreadable
 // paths are skipped (matching the legacy adapters) so a vanished temp file
-// degrades to a text-only turn instead of failing the whole request.
+// degrades to a text-only turn instead of failing the whole request. The
+// bytes come from the media cache and are shared: fantasy only reads them.
 func fantasyImageParts(paths []string) []fantasy.FilePart {
 	var parts []fantasy.FilePart
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
+		data, ok := requestMedia.bytes(p)
+		if !ok {
 			continue
 		}
 		parts = append(parts, fantasy.FilePart{

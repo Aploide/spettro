@@ -117,6 +117,21 @@ finish reason, the number of tool calls parsed and seen in the stream
 sizes, output tokens and the first characters of the text. Without the
 variable nothing is logged.
 
+## A local server or OpenAI-compatible provider misbehaves
+
+Streamed requests to OpenAI-compatible endpoints (catalog providers with an
+OpenAI-style API, the Spettro Subscription, local servers) go through
+Spettro's own chat-completions client. To rule it out, send them through the
+fantasy SDK it replaced, for one run or for good:
+
+```bash
+SPETTRO_PROVIDER_WIRE=fantasy spettro    # one run
+```
+
+or set `"provider_wire": "fantasy"` in `~/.spettro/config.json` (see
+[Configuration](configuration.md#provider-wire)). If the problem goes away,
+please report it with the debug log described above.
+
 ## Reset local state
 
 If needed, remove local Spettro state:
