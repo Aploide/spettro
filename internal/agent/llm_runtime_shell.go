@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -332,6 +333,11 @@ func summarizeSubagentToolResults(traces []ToolTrace, limit int) []map[string]st
 	return out
 }
 
+// alwaysAllowedCommandTokens are the command prefixes that may run without
+// approval in every permission mode. A prefix only nominates a command:
+// isAlwaysAllowedCommand still checks its arguments, because flags such as
+// `rg --pre=<prog>`, `git diff --output=<file>` or `go test -exec <prog>`
+// turn these commands into ones that run programs or write files.
 var alwaysAllowedCommandTokens = [][]string{
 	{"ls"},
 	{"pwd"},
@@ -555,14 +561,44 @@ func splitShellCommandSegments(command string) []string {
 	return segments
 }
 
+// isAlwaysAllowedCommand reports whether one command segment may skip the
+// approval prompt. Three checks must all pass:
+//
+//  1. the segment has no substitution, redirection or backgrounding;
+//  2. any leading VAR=value only changes formatting (GIT_EXTERNAL_DIFF=…,
+//     GOFLAGS=-toolexec=… and a leading `env` would run other programs);
+//  3. the command matches a prefix in alwaysAllowedCommandTokens and its
+//     arguments cannot make it write files or run another program. The
+//     read-only commands reuse the checkpoint classifier (readOnlyCommand),
+//     so both places agree on what "read-only" means; go and make, which
+//     build and test the project by design, get their own argument checks.
 func isAlwaysAllowedCommand(segment string) bool {
 	if segmentHasUnsafeShellFeatures(segment) {
 		return false
 	}
-	tokens := commandTokens(segment)
-	if len(tokens) == 0 {
+	tokens := slices.DeleteFunc(lexShellTokens(segment), func(t string) bool { return t == "" })
+	for len(tokens) > 0 && looksLikeEnvAssignment(tokens[0]) {
+		if !harmlessEnvAssignment(tokens[0]) {
+			return false
+		}
+		tokens = tokens[1:]
+	}
+	if len(tokens) == 0 || !hasAlwaysAllowedPrefix(tokens) {
 		return false
 	}
+	switch strings.ToLower(tokens[0]) {
+	case "go":
+		return safeGoBuildArgs(tokens[2:])
+	case "make":
+		return plainMakeArgs(tokens[2:])
+	default:
+		return readOnlyCommand(tokens)
+	}
+}
+
+// hasAlwaysAllowedPrefix reports whether tokens start with one of the
+// alwaysAllowedCommandTokens prefixes (case-insensitively).
+func hasAlwaysAllowedPrefix(tokens []string) bool {
 	for _, allow := range alwaysAllowedCommandTokens {
 		if len(tokens) < len(allow) {
 			continue
@@ -579,6 +615,54 @@ func isAlwaysAllowedCommand(segment string) bool {
 		}
 	}
 	return false
+}
+
+// safeGoBuildArgs reports whether the arguments of `go test|build|vet`
+// only build and run the project's own code: no flag that runs another
+// program (-exec, -toolexec, -vettool), rewrites go.mod (-mod*), or writes
+// an output file at a path the model chooses (-o, -c, the profile flags,
+// -outputdir). GOFLAGS is checked too, because the go command applies it
+// as if typed on the command line.
+func safeGoBuildArgs(args []string) bool {
+	if slices.ContainsFunc(args, unsafeGoBuildFlag) {
+		return false
+	}
+	return !slices.ContainsFunc(strings.Fields(goEnvFlags()), unsafeGoBuildFlag)
+}
+
+// unsafeGoBuildFlag is the per-flag test behind safeGoBuildArgs. Test binary
+// flags may be spelled with a "test." prefix (-test.coverprofile), so that
+// prefix is removed before the name is compared.
+func unsafeGoBuildFlag(a string) bool {
+	if !strings.HasPrefix(a, "-") {
+		return false
+	}
+	if unsafeGoFlag(a) {
+		return true
+	}
+	name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+	name = strings.TrimPrefix(name, "test.")
+	switch name {
+	case "exec", "o", "c", "outputdir", "trace",
+		"coverprofile", "cpuprofile", "memprofile", "blockprofile", "mutexprofile":
+		return true
+	}
+	return false
+}
+
+// plainMakeArgs accepts `make test` / `make build` with nothing after the
+// target but job-control flags. Variable overrides (SHELL=…), -f and -C
+// would let the command run a different recipe than the project's own.
+func plainMakeArgs(args []string) bool {
+	for _, a := range args {
+		switch {
+		case a == "-s" || a == "-k":
+		case strings.HasPrefix(a, "-j") && strings.Trim(a[2:], "0123456789") == "":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func segmentHasUnsafeShellFeatures(segment string) bool {

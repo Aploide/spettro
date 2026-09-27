@@ -129,7 +129,13 @@ Session policy for `/storage clean` and `spettro clean`; see
 ### Shell command approvals
 
 - The `bash` tool runs commands via `bash -lc` (PowerShell on Windows; see [Windows](windows.md)).
-- Some safe read-only commands are always allowed.
+- Some safe commands are always allowed without a prompt: `ls`, `pwd`, `cat`,
+  `head`, `tail`, `wc`, `grep`, `rg`, `stat`, `git status`, `git diff`,
+  `go test`/`build`/`vet` and `make test`/`build`. The arguments are checked
+  too: a flag that runs another program or writes a file (`rg --pre`,
+  `git diff --output`/`--ext-diff`, `go test -exec`/`-o`/`-coverprofile`,
+  `make test SHELL=...`, a leading `GIT_EXTERNAL_DIFF=...` or `GOFLAGS=...`)
+  sends the command through the normal approval path.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
 
