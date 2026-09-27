@@ -135,7 +135,10 @@ func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
 	}
 
 	stat := make(map[string]modifiedFileEntry)
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+	// Only line ends are trimmed: the first column of the first line is the
+	// status of the index, often a space (" M a.go"), and TrimSpace made
+	// that file's path lose its first two characters.
+	for line := range strings.SplitSeq(strings.TrimRight(string(out), "\r\n"), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if len(line) < 4 {
 			continue
@@ -318,6 +321,12 @@ type diffCommandMsg struct {
 	diff string
 	// noFiles reports that no path was given and git listed no modified file.
 	noFiles bool
+	// gitState reports that the command re-read the side panel's git state
+	// (a /diff without paths lists the modified files); branch and files
+	// then carry it, as a modifiedFilesMsg would.
+	gitState bool
+	branch   string
+	files    []modifiedFileEntry
 }
 
 // handleDiffCommand implements /diff [path…]: it pushes a colored diff view of
@@ -332,13 +341,16 @@ func (m Model) handleDiffCommand(input string) (tea.Model, tea.Cmd) {
 	}
 	cwd := m.cwd
 	return m, func() tea.Msg {
+		var msg diffCommandMsg
 		if len(paths) == 0 {
-			_, files := queryModifiedFiles(cwd)
-			for _, f := range files {
+			msg.gitState = true
+			msg.branch, msg.files = queryModifiedFiles(cwd)
+			for _, f := range msg.files {
 				paths = append(paths, f.Path)
 			}
 			if len(paths) == 0 {
-				return diffCommandMsg{noFiles: true}
+				msg.noFiles = true
+				return msg
 			}
 		}
 		var parts []string
@@ -347,12 +359,17 @@ func (m Model) handleDiffCommand(input string) (tea.Model, tea.Cmd) {
 				parts = append(parts, strings.TrimRight(d, "\n"))
 			}
 		}
-		return diffCommandMsg{diff: strings.Join(parts, "\n")}
+		msg.diff = strings.Join(parts, "\n")
+		return msg
 	}
 }
 
 // applyDiffCommand shows a /diff result.
 func (m *Model) applyDiffCommand(msg diffCommandMsg) {
+	if msg.gitState {
+		m.gitBranch = msg.branch
+		m.modifiedFiles = msg.files
+	}
 	switch {
 	case msg.noFiles:
 		m.showBanner("no modified files in the working tree", "info")

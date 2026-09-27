@@ -73,8 +73,12 @@ does not grow with the length of the session:
   is steady unless `cursor_blink` is set. Otherwise an idle TUI does no work
   between keystrokes.
 - **Off the Update goroutine**. The side panel's git state (`git status`,
-  `git diff --numstat`), `/diff`, and the save of the mode and side panel
-  toggle to `config.json` run as background commands.
+  `git diff --numstat`), `/diff` (which also hands the modified files it
+  lists to the side panel), a goal iteration's workspace fingerprints
+  (taken in the run's command before and after the run), and the save of
+  the mode and side panel toggle to `config.json` run as background
+  commands. `TestNoGitOnTheUpdateGoroutine` counts git processes started by
+  `tui.New` and by Update.
 - **Side panel**. Only the rows in the visible window are styled, and the
   activity feed keeps the newest 2,000 items (the subtitle counts the rest).
 

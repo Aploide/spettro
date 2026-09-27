@@ -145,6 +145,10 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
 	cwd := m.cwd
+	// A goal iteration fingerprints the workspace before and after the run
+	// for the no-progress guard (advanceGoal); git runs here, in the run's
+	// command, not on the Update goroutine.
+	goalRun := m.activeGoal != nil
 	store := m.store
 	perm := m.cfg.Permission
 	agentID := spec.ID
@@ -284,6 +288,10 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				}
 			}
 			a.Spec = runSpec
+			sigBefore := ""
+			if goalRun {
+				sigBefore = workspaceSignature(cwd)
+			}
 			result, err := a.Run(ctx, input)
 			// The done message must not overtake the run's last events
 			// (see runEventQueue).
@@ -299,7 +307,11 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
 				return planDoneMsg{run: events, plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, messages: result.Messages}
 			}
-			return agentDoneMsg{run: events, content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary, messages: result.Messages}
+			done := agentDoneMsg{run: events, content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary, messages: result.Messages}
+			if goalRun {
+				done.goalSigBefore, done.goalSigAfter = sigBefore, workspaceSignature(cwd)
+			}
+			return done
 		},
 	)
 }

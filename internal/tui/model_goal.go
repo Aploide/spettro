@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"hash/fnv"
-	"os/exec"
 	"slices"
 	"sort"
 	"strings"
@@ -142,7 +141,6 @@ func (m Model) dispatchGoalIteration() (tea.Model, tea.Cmd) {
 			"%s%s\n\n(Continuing autonomously — iteration %d. Review what is already done in the workspace, then keep going. Call goal-complete only when the objective is fully met and verified.)",
 			agent.GoalModePreamble, g.Objective, g.Iteration)
 	}
-	g.LastSignature = m.workspaceSignature() // snapshot before the run (progress detection)
 	model, cmd := m.runAgent(spec, task, nil, nil)
 	// Override the generic progressNote set by runAgentApproved with a
 	// goal-specific message so the activity line reflects the goal.
@@ -189,13 +187,15 @@ func (m *Model) advanceGoal(msg agentDoneMsg) tea.Cmd {
 		return nil
 	}
 
-	// 3. No-progress guard.
-	sig := m.workspaceSignature()
-	if sig == g.LastSignature {
+	// 3. No-progress guard. The fingerprints come with the done message
+	// (computed off the Update goroutine); a message without them counts
+	// as progress, the safe side (see workspaceSignature).
+	if msg.goalSigAfter != "" && msg.goalSigAfter == msg.goalSigBefore {
 		g.NoProgress++
 	} else {
 		g.NoProgress = 0
 	}
+	g.LastSignature = msg.goalSigAfter
 	if g.NoProgress >= g.NoProgressLimit {
 		m.pushSystemMsg(fmt.Sprintf("⏹ goal stalled: %d iterations with no detectable progress. Last response:\n%s",
 			g.NoProgress, truncateLabel(msg.content, 500)))
@@ -296,10 +296,11 @@ func (m Model) showGoalStatus() (tea.Model, tea.Cmd) {
 // consecutive iterations => no progress. Conservative: false "progress" just
 // lets the loop run longer; false "stall" is the bad case, so we prefer to
 // under-report stalls.
-func (m Model) workspaceSignature() string {
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = m.cwd
-	out, err := cmd.Output()
+//
+// It runs git, so it is called only from a run's background command
+// (runAgentApproved), never on the Update goroutine.
+func workspaceSignature(cwd string) string {
+	out, err := runGit(cwd, "status", "--porcelain")
 	if err != nil {
 		// Not a git repo or git unavailable — fall back to a time-based
 		// signature so the no-progress guard never falsely trips.

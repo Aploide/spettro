@@ -110,6 +110,12 @@ type agentDoneMsg struct {
 	// this to decide whether to stop or continue.
 	goalComplete bool
 	goalSummary  string
+	// goalSigBefore and goalSigAfter fingerprint the workspace (see
+	// workspaceSignature) before and after a goal iteration, taken in the
+	// run's command. Equal values mean the iteration changed nothing. Both
+	// are empty for a run outside goal mode.
+	goalSigBefore string
+	goalSigAfter  string
 	// messages is the full structured post-run conversation (RunResult.Messages),
 	// stored as the next turn's cache-stable prefix.
 	messages []provider.Message
@@ -271,7 +277,7 @@ type goalState struct {
 	Iteration       int    // outer-loop iterations dispatched so far
 	NoProgress      int    // consecutive iterations with no detected progress
 	StartedAt       time.Time
-	LastSignature   string // fingerprint of workspace/tool state, for progress detection (step 04)
+	LastSignature   string // workspace fingerprint after the last iteration (agentDoneMsg.goalSigAfter)
 	MaxIterations   int    // resolved from cfg at start (0 = unlimited)
 	NoProgressLimit int    // resolved from cfg at start
 	Completed       bool   // set when goal-complete fired (step 03/04)
