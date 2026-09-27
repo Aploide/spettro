@@ -16,10 +16,14 @@ import (
 // and fixes them in its next step instead of discovering them at build time.
 
 const (
-	// defaultSettle is how long the server must stay quiet after its first
-	// publish before the set counts as final. Most servers publish once per
-	// change; the window catches the ones that follow up quickly.
+	// defaultSettle is how long a server without a known publishing pattern
+	// must stay quiet after its first publish before the set counts as
+	// final. Most servers publish once per change; the window catches the
+	// ones that follow up quickly.
 	defaultSettle = 300 * time.Millisecond
+	// defaultStageCeiling bounds the wait for a staged server's later
+	// publishes, counted from its first one.
+	defaultStageCeiling = time.Second
 	// MaxPostEditErrors caps the errors listed for the edited file.
 	MaxPostEditErrors = 20
 	// maxOtherFiles caps the other files named in the summary line.
@@ -32,12 +36,41 @@ const (
 	postEditGrace = 150 * time.Millisecond
 )
 
-// settleFor returns the quiet window for a server key.
-func settleFor(key string) time.Duration {
-	if b, ok := builtinServers[key]; ok && b.settle > 0 {
-		return b.settle
+// settlePolicy decides when the diagnostics a server published after an edit
+// are final (see Client.waitSettled):
+//
+//   - a staged server (stages > 1: typescript-language-server sends its
+//     syntactic set, then its semantic one) is waited for until it has
+//     published stages sets, or for ceiling after its first publish;
+//   - any other server is done at once when the publish carries the
+//     version of the text just sent, and otherwise once it has been quiet
+//     for the quiet window.
+type settlePolicy struct {
+	quiet   time.Duration
+	stages  int
+	ceiling time.Duration
+}
+
+// settlePolicy returns the policy for a server key: the built-in pattern of
+// the server, with the configured settle_ms (the quiet window, or a staged
+// server's ceiling) when set.
+func (m *Manager) settlePolicy(key string) settlePolicy {
+	p := settlePolicy{quiet: defaultSettle}
+	if b, ok := builtinServers[key]; ok && b.stages > 1 {
+		p.stages, p.ceiling = b.stages, defaultStageCeiling
 	}
-	return defaultSettle
+	m.mu.Lock()
+	settleMs := m.cfg.Servers[key].SettleMs
+	m.mu.Unlock()
+	if settleMs != nil && *settleMs >= 0 {
+		d := time.Duration(*settleMs) * time.Millisecond
+		if p.stages > 1 {
+			p.ceiling = d
+		} else {
+			p.quiet = d
+		}
+	}
+	return p
 }
 
 // fileErrors is the error count of one file other than the edited one.
@@ -109,7 +142,7 @@ func (m *Manager) postEdit(ctx context.Context, absPath string, also []string) p
 		rep.skip = true
 		return rep
 	}
-	ds, fresh := c.waitSettled(ctx, d, settleFor(key))
+	ds, fresh := c.waitSettled(ctx, d, m.settlePolicy(key))
 	if !fresh {
 		rep.noAnswer = true
 		return rep

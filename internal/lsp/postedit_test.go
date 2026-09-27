@@ -528,7 +528,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 
 	// nothing published: not fresh, returned at the deadline
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, fresh := c.waitSettled(ctx, d, 50*time.Millisecond); fresh {
+	if _, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 50 * time.Millisecond}); fresh {
 		t.Fatal("no publish should not count as fresh")
 	}
 	cancel()
@@ -541,7 +541,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 	}()
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ds, fresh := c.waitSettled(ctx, d, 200*time.Millisecond)
+	ds, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 200 * time.Millisecond})
 	if !fresh || len(ds) != 1 || ds[0].Message != "semantic error" {
 		t.Fatalf("got %+v fresh=%v, want the later publish", ds, fresh)
 	}
@@ -601,14 +601,14 @@ func TestWaitSettledIgnoresOlderVersions(t *testing.T) {
 	}
 	publish(1, "about v1")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, fresh := c.waitSettled(ctx, d, 20*time.Millisecond); fresh {
+	if _, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 20 * time.Millisecond}); fresh {
 		t.Fatal("a publish for version 1 answered the sync of version 2")
 	}
 	cancel()
 	publish(2, "about v2")
 	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ds, fresh := c.waitSettled(ctx, d, 20*time.Millisecond)
+	ds, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 20 * time.Millisecond})
 	if !fresh || len(ds) != 1 || ds[0].Message != "about v2" {
 		t.Fatalf("got %+v fresh=%v, want the version 2 publish", ds, fresh)
 	}
