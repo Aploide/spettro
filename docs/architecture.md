@@ -43,7 +43,8 @@ does not grow with the length of the session:
   12 ms, newest first, and leaves the older messages' previous rendering (or a
   one-row placeholder) in place; `renderFillMsg` continues on the following
   frames until the transcript is complete. The scroll height is approximate
-  until then; a view following the bottom stays at the bottom.
+  until then; a view following the bottom stays at the bottom, and a view
+  scrolled up stays on the message it showed (see the viewport below).
 - **Live drafts**. The streamed answer and thinking are rendered
   incrementally: completed lines (outside a code fence or table) are rendered
   once, and only the line being written is rendered per token. The final
@@ -52,7 +53,11 @@ does not grow with the length of the session:
   blocks as row slices with per-block offsets and draws only the rows on
   screen; content is wrapped to the pane width before it gets there. It
   follows the latest output only while it is at the bottom; submitting a
-  prompt jumps to the bottom. Building with `-tags spettro_bubblesviewport`
+  prompt jumps to the bottom. A view scrolled up keeps showing the same place
+  through a refresh that re-renders the blocks above it (a resize, the side
+  panel, ctrl+o/ctrl+g, the frame-budget fill): refreshViewport anchors the
+  top row to its block and the row within it, scaled when the block was
+  rewrapped to a new width. Building with `-tags spettro_bubblesviewport`
   swaps in the previous `bubbles/viewport` for comparison (one release).
 - **Run events** (`run_events.go`). Stream chunks and tool traces travel from
   the agent to the UI through one unbounded, ordered queue; the agent never
