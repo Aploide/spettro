@@ -285,7 +285,10 @@ type Request struct {
 	// PromptTokens, when positive, is the caller's own estimate of this
 	// request's prompt (EstimateRequestTokens of the same request): Send
 	// uses it for the input budget and the output cap instead of estimating
-	// again. 0 means Send estimates.
+	// again. 0 means Send estimates. Send ignores it when it has to change
+	// the request first (images stripped for a model without vision). The
+	// agent run loop sets it from its incremental estimate (promptSizer),
+	// which saves a walk over the whole history per step.
 	PromptTokens int
 	// InputBudget is the user's per-request INPUT token budget
 	// (config token_budget). Requests whose estimated prompt is at or above

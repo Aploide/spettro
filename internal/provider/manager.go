@@ -541,6 +541,9 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		// (history retains them, so switching back restores vision) and leave a
 		// text placeholder so the model knows something was omitted.
 		req = stripImages(req)
+		// The caller's estimate measured the request before its images were
+		// replaced by text placeholders; measure the request that is sent.
+		req.PromptTokens = 0
 	}
 
 	// The input budget (config token_budget) caps the PROMPT: estimate the

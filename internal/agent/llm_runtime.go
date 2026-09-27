@@ -864,6 +864,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			MaxTokens:     cfg.MaxOutputTokens,
 			Thinking:      thinking,
 			ContextWindow: contextWindow(),
+			// promptTokens measured exactly this request (system, history,
+			// tools), so Send need not count the history again.
+			PromptTokens: promptTokens,
 		}
 		if len(nativeToolSpecs) > 0 {
 			req.Tools = nativeToolSpecs
