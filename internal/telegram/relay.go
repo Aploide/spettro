@@ -579,7 +579,11 @@ func (r *Relay) bindChat(chatID int64) {
 // payloads. Failures are surfaced through observer events but do not stop
 // the relay.
 func (r *Relay) Broadcast(text string) {
-	chunks := SplitForTelegram(text)
+	r.broadcastChunks(SplitForTelegram(text))
+}
+
+// broadcastChunks sends chunks, in order, to every currently bound chat.
+func (r *Relay) broadcastChunks(chunks []string) {
 	if len(chunks) == 0 {
 		return
 	}

@@ -17,11 +17,13 @@ package acp
 // asked (approvalToolCallID). The main agent and its sub-agents run tools in
 // parallel, so the runtime names the asking agent and its working directory
 // on the request (ShellApprovalRequest.AgentID and CWD), and only that
-// agent's cards are candidates. Among them, the card whose arguments name
-// what the approval is about wins; a card already showing a prompt never
-// does, because its call is blocked on that prompt and cannot be asking
-// again. With no candidate left the request describes the call on a card of
-// its own.
+// agent's cards are candidates, and only those whose arguments name what
+// the approval is about: the editor shows the prompt under the card's title,
+// so a card of another call would present the approval under a command or
+// path other than the one approved. A card already showing a prompt is not
+// a candidate either, because its call is blocked on that prompt and cannot
+// be asking again. With no candidate left the request describes the call on
+// a card of its own.
 //
 // Options. Every request offers "Allow once" and "Deny". "Always allow" is
 // offered only where the runtime remembers the answer: for shell commands
@@ -218,17 +220,15 @@ func (t *turnState) settleApprovalCard(id acpsdk.ToolCallId, attached bool, deci
 // approvalToolCallID finds the open tool call an approval belongs to, so the
 // editor shows the prompt on the card it is already rendering. Candidates
 // are the open calls of the asking tool, made by the asking agent (when the
-// request names one), that are not already showing a prompt. Among them a
-// call whose arguments name the approval's subject (the command, the
-// changed file, the network target) wins, then the most recently announced
-// one. The chosen card is marked as awaiting an answer until
-// settleApprovalCard. attached is false when there is no candidate, and a
-// fresh ID is returned.
+// request names one), that are not already showing a prompt and whose
+// arguments name the approval's subject (the command, the changed file, the
+// network target); among several, the most recently announced one wins. The
+// chosen card is marked as awaiting an answer until settleApprovalCard.
+// attached is false when there is no candidate, and a fresh ID is returned.
 func (t *turnState) approvalToolCallID(subject approvalSubject, ar agent.ShellApprovalRequest) (id acpsdk.ToolCallId, attached bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var best openToolCall
-	bestMatches := false
 	found := false
 	for _, queue := range t.open {
 		for _, call := range queue {
@@ -241,12 +241,11 @@ func (t *turnState) approvalToolCallID(subject approvalSubject, ar agent.ShellAp
 			if t.awaiting[call.id] {
 				continue
 			}
-			matches := t.callMatchesApproval(call, subject, ar)
-			better := !found ||
-				(matches && !bestMatches) ||
-				(matches == bestMatches && call.seq > best.seq)
-			if better {
-				best, bestMatches, found = call, matches, true
+			if !t.callMatchesApproval(call, subject, ar) {
+				continue
+			}
+			if !found || call.seq > best.seq {
+				best, found = call, true
 			}
 		}
 	}
@@ -274,8 +273,11 @@ func (t *turnState) callMatchesApproval(call openToolCall, subject approvalSubje
 		}
 		return collapseSpaces(spec.fromArgs(call.args)) == collapseSpaces(subject.target)
 	case subject.command:
+		// Exactly the command, up to the blanks the runtime trims around it
+		// (authorizeShellCommandIn): two calls whose commands differ by a
+		// no-break space where the other has a space are different commands.
 		command := call.args.commandArg()
-		return command != "" && collapseSpaces(command) == collapseSpaces(ar.Command)
+		return command != "" && strings.Trim(command, " \t\n") == ar.Command
 	case ar.Change != nil:
 		p := call.args.pathArg()
 		if p == "" {
@@ -294,8 +296,8 @@ func (t *turnState) callMatchesApproval(call openToolCall, subject approvalSubje
 }
 
 // collapseSpaces trims s and turns every run of whitespace into one space,
-// the normalization the runtime applies to commands and network targets
-// before asking (normalizeCommand in internal/agent).
+// the normalization the runtime applies to network targets before asking
+// (normalizeCommand in internal/agent).
 func collapseSpaces(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }

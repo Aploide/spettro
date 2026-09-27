@@ -51,7 +51,8 @@ type ApprovalRequest struct {
 // ApprovalEvent is the data of an approval_request event for req: tool_id,
 // command, reason, segments, and diff when there is one, each text field
 // with its size, truncation flag and hidden-character fields (see the
-// comment above). RequestApproval adds the approval_id a client answers
+// comment above), and segments_visible, the segments written out, when one
+// of them holds a hidden character. RequestApproval adds the approval_id a client answers
 // with.
 func ApprovalEvent(req ApprovalRequest) map[string]any {
 	data := map[string]any{
@@ -62,6 +63,18 @@ func ApprovalEvent(req ApprovalRequest) map[string]any {
 	putApprovalText(data, "command", req.Command)
 	if req.Diff != "" {
 		putApprovalText(data, "diff", req.Diff)
+	}
+	// The segments are what "allow-always" remembers, so a client that lists
+	// them gets them written out too when one holds hidden characters.
+	for _, seg := range req.Segments {
+		if termtext.HasHidden(seg) {
+			visible := make([]string, len(req.Segments))
+			for i, s := range req.Segments {
+				visible[i] = termtext.EscapeLines(s)
+			}
+			data["segments_visible"] = visible
+			break
+		}
 	}
 	return data
 }

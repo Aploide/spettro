@@ -658,6 +658,11 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if body.ApprovalID == "" && body.Decision != "deny" {
+		// Only a denial may name its request by tool alone: see findApproval.
+		http.Error(w, "an allow must name the approval_id of the request it approves", http.StatusConflict)
+		return
+	}
 	pending, status, msg := s.findApproval(body.ApprovalID, body.ToolID)
 	if pending == nil {
 		http.Error(w, msg, status)
@@ -676,6 +681,14 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 // approval of that tool. When several approvals of that tool are pending
 // the answer is refused (409) rather than guessed: it could approve a call
 // the user never saw. On failure it returns the HTTP status and message.
+//
+// A tool_id alone can still name the wrong request when only one is
+// pending: the one the client shows may have been withdrawn (its window ran
+// out, the run was cancelled) and another call of the same tool asked
+// since, which the client has not drawn yet. handleApproval therefore takes
+// a tool_id-only answer for a denial only, where the worst outcome is a
+// call denied that the user would have allowed; an allow must carry the
+// approval_id of what it approves.
 func (s *Server) findApproval(approvalID, toolID string) (*pendingApproval, int, string) {
 	if approvalID != "" {
 		if val, ok := s.pendingApprovals.Load(approvalID); ok {

@@ -99,6 +99,89 @@ func FormatApproval(a Approval) (string, *Document) {
 	return b.String(), doc
 }
 
+// Markers of an approval notice split over several messages
+// (ApprovalMessages). A line cut in two gets a marker of its own: with one
+// marker for both, "a" + "b" split mid-line and "a" and "b" on two lines,
+// which a shell runs as two commands, would read the same.
+const (
+	approvalContNextLine = "\n... (continued in the next message)"
+	approvalContSameLine = "\n... (this line continues in the next message)"
+	approvalContPrefix   = "(...cont)\n"
+)
+
+// ApprovalMessages splits an approval notice (FormatApproval) into chat
+// messages without losing, adding or hiding a character. SplitForTelegram
+// is for prose: it drops the blanks at each break, so "./build/ ~/" (which
+// deletes the home directory) and "./build/~/" (which does not) split into
+// the same two messages there. Here a break falls, in order of preference:
+// at a line break, which the break stands for (approvalContNextLine); inside
+// a line between two characters that are not blanks, never inside an escape
+// written by termtext (approvalContSameLine); and only in a line with no
+// such place, just before a blank, which then starts the next message after
+// its "(...cont)" line, where it shows as indentation. Every message but the
+// first starts with that line and every one but the last ends with a
+// marker, so no blank is left at either end of a message, where the chat
+// app would trim it.
+func ApprovalMessages(text string) []string {
+	text = strings.TrimRight(text, "\n")
+	if len(text) <= MaxMessageLen {
+		return []string{text}
+	}
+	budget := MaxMessageLen - len(approvalContPrefix) - len(approvalContSameLine)
+	var out []string
+	for len(text) > MaxMessageLen {
+		cut, atNewline := approvalCut(text, budget)
+		marker := approvalContSameLine
+		rest := text[cut:]
+		if atNewline {
+			marker = approvalContNextLine
+			rest = text[cut+1:]
+		}
+		out = append(out, text[:cut]+marker)
+		text = approvalContPrefix + rest
+	}
+	return append(out, text)
+}
+
+// approvalCut picks where ApprovalMessages ends a message holding the start
+// of text, at most budget bytes in: the byte offset of the break and
+// whether it is a line break (whose "\n" is dropped, the marker standing
+// for it). See ApprovalMessages for the order of preference.
+func approvalCut(text string, budget int) (int, bool) {
+	budget = min(budget, len(text)-1)
+	if i := strings.LastIndexByte(text[:budget+1], '\n'); i > 0 && i >= budget/2 {
+		return i, true
+	}
+	blank := func(c byte) bool { return c == ' ' || c == '\n' }
+	for cut := budget; cut >= max(budget/2, 1); cut-- {
+		if utf8.RuneStart(text[cut]) && !blank(text[cut-1]) && !blank(text[cut]) && !insideEscape(text, cut) {
+			return cut, false
+		}
+	}
+	for cut := budget; cut >= 1; cut-- {
+		if text[cut] == ' ' && !insideEscape(text, cut) {
+			return cut, false
+		}
+	}
+	for cut := budget; cut >= 1; cut-- {
+		if utf8.RuneStart(text[cut]) {
+			return cut, false
+		}
+	}
+	return budget, false
+}
+
+// insideEscape reports whether offset cut of text falls inside an escape
+// termtext wrote (at most ten bytes long: "\U000e0100").
+func insideEscape(text string, cut int) bool {
+	for start := max(cut-9, 0); start < cut; start++ {
+		if n := termtext.EscapeLen(text[start:]); n > 0 && start+n > cut {
+			return true
+		}
+	}
+	return false
+}
+
 // approvalHead is the beginning of body shown when the whole of it goes as
 // an attachment: whole lines, at most approvalHeadLines of them and
 // approvalHeadBytes bytes, or, when the first line alone is longer, that
@@ -147,10 +230,11 @@ func plural(n int, one, many string) string {
 }
 
 // BroadcastApproval sends an approval notice (FormatApproval) to every bound
-// chat: the text first, then the document when there is one, in that order
-// in each chat. Failures are recorded like Broadcast's.
+// chat, split by ApprovalMessages rather than as prose: the text first, then
+// the document when there is one, in that order in each chat. Failures are
+// recorded like Broadcast's.
 func (r *Relay) BroadcastApproval(text string, doc *Document) {
-	r.Broadcast(text)
+	r.broadcastChunks(ApprovalMessages(text))
 	if doc == nil {
 		return
 	}
