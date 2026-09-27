@@ -331,6 +331,38 @@ func TestApprovalReviewOfACommand(t *testing.T) {
 	}
 }
 
+// A command whose lines are hard-wrapped in the preview is counted in rows,
+// not lines: an 83-line heredoc wrapped onto 243 rows of a 40-column dialog
+// used to read "243 lines not shown", and at 80 columns "lines 1-4 of 163".
+// A diff, one row per line, keeps saying lines.
+func TestApprovalPreviewCountsWrappedRowsAsRows(t *testing.T) {
+	heredoc := "cat <<'EOF' > out.txt\n" + strings.Repeat("heredoc line "+strings.Repeat("z", 60)+"\n", 81) + "EOF"
+	req := agent.ShellApprovalRequest{ToolID: "bash", Command: heredoc, Reason: "non-whitelisted command"}
+	for _, size := range [][2]int{{40, 15}, {80, 24}, {120, 40}} {
+		m := approvalModel(size[0], size[1], req)
+		m.syncApprovalReview()
+		plain := ansi.Strip(m.View().Content)
+		lay := m.approvalLayout(m.approvalContentWidth())
+		if !lay.wrapped {
+			if size[0] < 120 {
+				t.Fatalf("%v: the heredoc lines should wrap in the preview", size)
+			}
+			continue
+		}
+		if strings.Contains(plain, "lines not shown") || strings.Contains(plain, "lines 1-") {
+			t.Errorf("%v: wrapped rows counted as lines:\n%s", size, plain)
+		}
+		if !strings.Contains(plain, "rows not shown") && !strings.Contains(plain, "rows 1-") {
+			t.Errorf("%v: nothing counts the preview rows:\n%s", size, plain)
+		}
+	}
+	m := approvalModel(80, 24, bigWriteApproval())
+	m.syncApprovalReview()
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "lines 1-") {
+		t.Errorf("a diff preview should count lines:\n%s", plain)
+	}
+}
+
 // The review shows what the preview shows: control, bidi and zero-width
 // characters made visible, never interpreted.
 func TestApprovalReviewShowsHiddenCharacters(t *testing.T) {

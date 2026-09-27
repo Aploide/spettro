@@ -71,6 +71,10 @@ type approvalPreviewCache struct {
 	// overflow is set when a diff line is wider than the preview and was
 	// cut with "…" (diff.Overflows).
 	overflow bool
+	// wrapped is set when a command line was hard-wrapped onto more than
+	// one row, so the preview's rows are not its lines (see
+	// approvalFooterText).
+	wrapped bool
 }
 
 // approvalPreviewLines returns every display row of the pending approval's
@@ -91,8 +95,8 @@ func (m Model) approvalPreview(width int) *approvalPreviewCache {
 	if c := req.previewCache; c != nil && c.width == width {
 		return c
 	}
-	lines, overflow := buildApprovalPreview(req.request, width)
-	req.previewCache = &approvalPreviewCache{width: width, lines: lines, overflow: overflow}
+	lines, overflow, wrapped := buildApprovalPreview(req.request, width)
+	req.previewCache = &approvalPreviewCache{width: width, lines: lines, overflow: overflow, wrapped: wrapped}
 	return req.previewCache
 }
 
@@ -107,8 +111,9 @@ func (m Model) approvalPreview(width int) *approvalPreviewCache {
 // break, and none ends a row where it could not be seen), each continuation
 // row marked as one. A diff is escaped exactly too (diff.Options.Exact). A
 // diff line wider than the dialog is cut with "…",
-// which overflow reports so the dialog can offer the review.
-func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []string, overflow bool) {
+// which overflow reports so the dialog can offer the review; wrapped reports
+// that a command line took more than one row.
+func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []string, overflow, wrapped bool) {
 	if strings.TrimSpace(req.Diff) != "" {
 		// Stay in the unified layout: the side-by-side one halves the room
 		// each line gets, and a narrow dialog is where this is read most.
@@ -122,7 +127,7 @@ func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []st
 			Indent: "  ",
 			Exact:  true,
 		}
-		return strings.Split(diff.Render(req.Diff, opts), "\n"), diff.Overflows(req.Diff, opts)
+		return strings.Split(diff.Render(req.Diff, opts), "\n"), diff.Overflows(req.Diff, opts), false
 	}
 	label := formatApprovalCommandLabel(req.Command)
 	text := trimShellBlanks(req.Command)
@@ -132,7 +137,7 @@ func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []st
 		text = label
 	}
 	if !strings.Contains(text, "\n") && approvalSummaryFits(label, width) {
-		return nil, false
+		return nil, false, false
 	}
 	textW := max(width-len(approvalPreviewIndent), 8)
 	for _, raw := range strings.Split(text, "\n") {
@@ -140,11 +145,12 @@ func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []st
 			indent := approvalPreviewIndent
 			if i > 0 {
 				indent = approvalPreviewWrapIndent
+				wrapped = true
 			}
 			lines = append(lines, styleMuted.Render(indent+part))
 		}
 	}
-	return lines, false
+	return lines, false, wrapped
 }
 
 // approvalSummaryFits reports whether a one-line summary label (see
@@ -161,6 +167,7 @@ type approvalLayout struct {
 	showSegments bool // the "remembers:" (or permission-debug "segments:") row
 	previewRows  int  // preview rows on screen; may be 0 when there is no room
 	previewTotal int  // preview rows in all
+	wrapped      bool // a command line takes more than one preview row
 	previewStart int  // index of the first preview row on screen
 	showFooter   bool // the "lines a-b of n" row under the preview
 	canExpand    bool // ctrl+o would show more of the preview
@@ -196,6 +203,7 @@ func (m Model) approvalLayoutFor(contentW, controlRows int) approvalLayout {
 	preview := m.approvalPreview(contentW)
 	lay.previewTotal = len(preview.lines)
 	lay.overflow = preview.overflow
+	lay.wrapped = preview.wrapped
 
 	fixedChrome := 1 + 2 + 1 + m.workingIndicatorHeight() + m.parallelFooterHeight() +
 		dialogMinTranscriptRows(m.height) + 2
@@ -462,22 +470,31 @@ func approvalSummary(label string) string {
 // comes before the keys that only move the preview: on a narrow dialog the
 // end of the row is what gets cut. A preview with no room at all says how
 // much is not shown, in the longest wording that fits.
+//
+// The counts are preview rows. A diff row is one line of the diff, and a
+// command row one line of the command unless a line was hard-wrapped; then
+// the counts say "rows", as the review does, so an 83-line command wrapped
+// onto 243 rows of a narrow dialog is not reported as 243 lines.
 func approvalFooterText(lay approvalLayout, expanded bool, width int) string {
+	unit := "lines"
+	if lay.wrapped {
+		unit = "rows"
+	}
 	if lay.previewRows == 0 {
 		var text string
 		for _, format := range []string{
-			"%d lines not shown - press v to review",
-			"%d lines not shown - v to review",
-			"%d lines hidden - v to review",
+			"%d %s not shown - press v to review",
+			"%d %s not shown - v to review",
+			"%d %s hidden - v to review",
 		} {
-			text = fmt.Sprintf(format, lay.previewTotal)
+			text = fmt.Sprintf(format, lay.previewTotal, unit)
 			if ansi.StringWidth(text) <= width {
 				break
 			}
 		}
 		return text
 	}
-	text := fmt.Sprintf("lines %d-%d of %d", lay.previewStart+1, lay.previewStart+lay.previewRows, lay.previewTotal)
+	text := fmt.Sprintf("%s %d-%d of %d", unit, lay.previewStart+1, lay.previewStart+lay.previewRows, lay.previewTotal)
 	if lay.overflow {
 		text += ", long lines cut"
 	}

@@ -418,7 +418,7 @@ func TestApprovalDialogFitsWithHugeArguments(t *testing.T) {
 					} else if !strings.Contains(plain, "what to do instead") {
 						t.Fatalf("%s at %v: the instead prompt is missing:\n%s", label, size, plain)
 					}
-					if name != "network" && !strings.Contains(plain, " of ") && !strings.Contains(plain, "lines not shown - ") {
+					if name != "network" && !strings.Contains(plain, " of ") && !strings.Contains(plain, "lines not shown - ") && !strings.Contains(plain, "rows not shown - ") {
 						t.Fatalf("%s at %v: a partly shown preview must say so:\n%s", label, size, plain)
 					}
 				}
