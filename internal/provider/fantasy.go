@@ -71,6 +71,7 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		FinishReason:    finish,
 		Reasoning:       reasoning,
 		MaxOutputTokens: maxOut,
+		Diagnostics:     rawDiagnostics(string(resp.FinishReason), raw, 0),
 	}, nil
 }
 
@@ -277,6 +278,9 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		// Reasoning blocks in first-seen order, keyed by stream part ID.
 		thoughts     []*streamReasoning
 		thoughtsByID = map[string]*streamReasoning{}
+		// rawFinish and orphanDeltas feed Response.Diagnostics only.
+		rawFinish    fantasy.FinishReason
+		orphanDeltas int
 	)
 	toolCall := func(id, name string) *rawToolCall {
 		if tc, ok := callsByID[id]; ok {
@@ -326,7 +330,12 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 				toolCall(part.ID, part.ToolCallName)
 			}
 		case fantasy.StreamPartTypeToolInputDelta:
-			if tc, ok := callsByID[part.ID]; ok && !tc.complete {
+			tc, ok := callsByID[part.ID]
+			if !ok {
+				orphanDeltas++
+				continue
+			}
+			if !tc.complete {
 				// The OpenAI-style adapters carry the fragment in Delta,
 				// the Anthropic one in ToolCallInput.
 				tc.input += cmp.Or(part.Delta, part.ToolCallInput)
@@ -340,6 +349,7 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 			tc.complete = true
 		case fantasy.StreamPartTypeFinish:
 			usage = part.Usage
+			rawFinish = part.FinishReason
 			finish = mapFinishReason(part.FinishReason)
 			finishReported = part.FinishReason != "" && part.FinishReason != fantasy.FinishReasonUnknown
 		case fantasy.StreamPartTypeError:
@@ -390,7 +400,21 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 		FinishReason:    finish,
 		Reasoning:       reasoning,
 		MaxOutputTokens: maxOut,
+		Diagnostics:     rawDiagnostics(string(rawFinish), raw, orphanDeltas),
 	}, nil
+}
+
+// rawDiagnostics summarizes a reply's raw tool calls for
+// Response.Diagnostics. It must be given the calls before finalizeToolCalls
+// drops the unnamed ones.
+func rawDiagnostics(rawFinish string, raw []rawToolCall, orphanDeltas int) ResponseDiagnostics {
+	d := ResponseDiagnostics{RawFinishReason: rawFinish, ToolCallsSeen: len(raw), OrphanToolDeltas: orphanDeltas}
+	for _, tc := range raw {
+		if tc.name == "" {
+			d.UnnamedToolCalls++
+		}
+	}
+	return d
 }
 
 // rawToolCall is one tool call as the model produced it, before argument

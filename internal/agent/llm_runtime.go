@@ -693,6 +693,15 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// truncatedText collects the pieces of a text answer that hit the output
 	// limit and was continued; they are joined into the final answer.
 	var truncatedText []string
+	// toolCallsThisTurn counts the tool calls this run has executed. The
+	// announce-only nudge applies only while it is zero: once the model has
+	// done real work, a short closing line is a legitimate final answer.
+	toolCallsThisTurn := 0
+	// announceNudged and droppedCallNudged record that this turn already
+	// spent its one announce-only or dropped-tool-call nudge (see
+	// llm_runtime_nudge.go); a second such reply is handled as before.
+	announceNudged := false
+	droppedCallNudged := false
 	// thinking starts at the configured level and follows the level the
 	// manager actually succeeded with, so a level the model rejected is not
 	// re-sent (and re-rejected) on every later step.
@@ -888,9 +897,32 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			})
 		}
 
+		logReply(runtime.traceID(), steps, resp)
+
 		content := strings.TrimSpace(resp.Content)
 		main, _ := stripThinkTags(content)
 		main = strings.TrimSpace(main)
+		// stepCapReached: the host's per-run step budget (goal-mode
+		// iterations) is spent, so no nudge may ask for another request.
+		stepCapReached := cfg.MaxSteps > 0 && steps >= cfg.MaxSteps
+
+		// The provider says the reply stopped for tool calls, yet none
+		// arrived: the call was lost on the way. Ask once for it again
+		// instead of ending the turn on whatever text came with it. Not
+		// during a continuation of a truncated answer, which has its own
+		// bounded flow.
+		if droppedToolCall(resp) && !droppedCallNudged && len(nativeToolSpecs) > 0 && len(truncatedText) == 0 && !stepCapReached {
+			droppedCallNudged = true
+			logDroppedToolCall(runtime.traceID(), steps)
+			if main != "" {
+				emitNarration(cfg, main)
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: droppedToolCallNudge})
+			notify("the model stopped for a tool call that never arrived — asking it to send the call again")
+			continue
+		}
+
 		if main == "" && len(resp.ToolCalls) == 0 {
 			if resp.FinishReason == provider.FinishContentFilter {
 				return fail(fmt.Errorf("agent call failed: the provider's content filter stopped the response"))
@@ -928,6 +960,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// Native tool-calling path: model returned structured tool calls.
 		if len(resp.ToolCalls) > 0 {
 			truncatedText = nil
+			toolCallsThisTurn += len(resp.ToolCalls)
 			emitNarration(cfg, main)
 			internalCalls := runtime.loopCalls(resp.ToolCalls)
 			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
@@ -1010,6 +1043,17 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			emitNarration(cfg, main)
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
+			continue
+		}
+		// An announcement with nothing done yet ("I'll start by exploring
+		// the repository...") is not a final answer: nudge once to go on.
+		if !announceNudged && toolCallsThisTurn == 0 && len(nativeToolSpecs) > 0 && len(truncatedText) == 0 && !stepCapReached && looksLikeAnnouncement(main) {
+			announceNudged = true
+			emitNarration(cfg, main)
+			convMsgs = append(convMsgs,
+				provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning},
+				provider.Message{Role: provider.RoleUser, Content: announceOnlyNudge})
+			notify("the model announced work without calling a tool — nudging it to continue")
 			continue
 		}
 		// Store the answer with its reasoning (finish only records plain

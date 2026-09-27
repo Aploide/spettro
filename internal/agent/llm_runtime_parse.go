@@ -181,6 +181,62 @@ func (p rawFileEditPair) resolve() fileEditPair {
 	return fileEditPair{OldString: oldText, NewString: newText, ReplaceAll: bool(p.ReplaceAll), Expected: max(int(p.Expected), 0), hasNew: hasNew}
 }
 
+// flexEdits is file-edit's edits[] argument. Besides the JSON array the
+// schema asks for, it accepts the two shapes models most often send instead
+// (seen as "cannot unmarshal object into ... edits" errors, each costing a
+// turn):
+//
+//   - a single edit object, which is treated as a one-item list;
+//   - a JSON-encoded string holding either of those ("[{...}]" or "{...}").
+//
+// null and "" decode as no edits. Items are decoded exactly (unknown fields
+// are rejected), the same as when they arrive inside a real array, so a typo
+// in an item's field name is still reported rather than silently ignored.
+type flexEdits []rawFileEditPair
+
+func (e *flexEdits) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	// A string value: unwrap it once and decode what it contains. A string
+	// inside that string is not unwrapped again; that shape is not seen in
+	// practice and would only hide a real mistake.
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var inner string
+		if err := json.Unmarshal(trimmed, &inner); err != nil {
+			return err
+		}
+		trimmed = bytes.TrimSpace([]byte(inner))
+	}
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*e = nil
+		return nil
+	}
+	switch trimmed[0] {
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return err
+		}
+		out := make(flexEdits, 0, len(items))
+		for i, item := range items {
+			var pair rawFileEditPair
+			if err := decodeJSONExact(item, &pair); err != nil {
+				return fmt.Errorf("edits[%d]: %w", i, err)
+			}
+			out = append(out, pair)
+		}
+		*e = out
+		return nil
+	case '{':
+		var pair rawFileEditPair
+		if err := decodeJSONExact(trimmed, &pair); err != nil {
+			return fmt.Errorf("edits: %w", err)
+		}
+		*e = flexEdits{pair}
+		return nil
+	}
+	return fmt.Errorf("edits: expected an array of edit objects, got %s", truncate(string(trimmed), 40))
+}
+
 // requireNew rejects an edit whose new_string was never sent: decoding it as
 // "" would delete the matched text and report a successful edit.
 func (p fileEditPair) requireNew(label string) error {
@@ -207,9 +263,9 @@ func decodeFileEditArgs(raw []byte) (fileEditArgs, error) {
 		Path     string `json:"path"`
 		FilePath string `json:"file_path"`
 		rawFileEditPair
-		StartLine flexInt           `json:"start_line"`
-		EndLine   flexInt           `json:"end_line"`
-		Edits     []rawFileEditPair `json:"edits"`
+		StartLine flexInt   `json:"start_line"`
+		EndLine   flexInt   `json:"end_line"`
+		Edits     flexEdits `json:"edits"`
 	}
 	if err := decodeJSONExact(raw, &in); err != nil {
 		return fileEditArgs{}, fmt.Errorf("file-edit args: %w", err)

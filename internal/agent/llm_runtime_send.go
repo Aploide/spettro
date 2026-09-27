@@ -7,7 +7,9 @@ import (
 )
 
 // Loop-control limits and the synthetic user turns the run loop injects when
-// a reply cannot be used as-is.
+// a reply cannot be used as-is. The announce-only and dropped-tool-call
+// nudges, for replies that would end a turn without doing anything, live in
+// llm_runtime_nudge.go.
 const (
 	// maxEmptyReplies ends the turn with an error once this many consecutive
 	// replies carried neither text nor tool calls. Earlier empty replies get
