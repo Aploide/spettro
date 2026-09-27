@@ -78,6 +78,12 @@ dropped, a flag shows as its two letters (Italy's flag becomes `IT`) and a
 keycap as its digit. The stored session and the text sent to the model are
 unchanged.
 
+Only emoji sequences are rewritten. Text in scripts that combine letters
+with marks (Devanagari, Bengali, Tamil, Thai, Tibetan and others) is shown
+exactly as written, even though a terminal that does not cluster graphemes
+may give such a row a few more cells than the layout expects, which can
+push a table's right border out of line on that row.
+
 ## The agent stops early or ends without doing anything
 
 The run loop does not accept every reply without tool calls as the final

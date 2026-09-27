@@ -71,3 +71,30 @@ func TestStableWidthASCIIDoesNotAllocate(t *testing.T) {
 		t.Fatalf("StableWidth on ASCII allocated %v times", n)
 	}
 }
+
+// Scripts that cluster a base letter with combining marks measure
+// differently by grapheme and by rune, but they are words, not emoji
+// sequences: StableWidth must keep them byte for byte (it once turned them
+// into U+FFFD).
+func TestStableWidthKeepsComplexScripts(t *testing.T) {
+	inputs := []string{
+		"नमस्ते दुनिया, यह एक परीक्षण है", // Devanagari (Hindi)
+		"मराठी",         // Devanagari (Marathi)
+		"বাংলা",         // Bengali
+		"ગુજરાતી",       // Gujarati
+		"ಕನ್ನಡ",         // Kannada
+		"வணக்கம் தமிழ்", // Tamil
+		"สวัสดีครับ ภาษาไทย", // Thai
+		"ཀུ",                 // Tibetan
+		"\u1100\u1161\u11A8", // decomposed Hangul jamo
+		"한국어", "Ελληνικά", "Tiếng Việt", "مرحبا بالعالم", "שלום",
+	}
+	for _, in := range inputs {
+		if got := StableWidth(in); got != in {
+			t.Errorf("StableWidth(%q) = %q, want it unchanged", in, got)
+		}
+		if got := SanitizeLine(in); got != in {
+			t.Errorf("SanitizeLine(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}

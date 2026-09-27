@@ -23,15 +23,21 @@ import (
 // opposite case, 2 cells to the layout and 1 to the renderer and the
 // terminal.
 //
-// A cluster is kept when all three measures agree: its grapheme width, its
-// wcwidth, and the sum of its runes' wcwidths. Otherwise the joiners and
-// presentation modifiers are dropped (U+200D ZERO WIDTH JOINER, the U+FE0E
+// Only emoji sequences are rewritten: a cluster that holds a presentation
+// modifier or a regional indicator, and whose three measures (its grapheme
+// width, its wcwidth, and the sum of its runes' wcwidths) do not all agree.
+// Every other cluster is kept byte for byte. Text in scripts that cluster a
+// base letter with combining marks (Devanagari, Thai, Tamil, decomposed
+// Hangul) also measures differently by grapheme and by rune, but it has no
+// modifier that could be dropped without changing the words, so it is left
+// exactly as the base renderer drew it.
+// In a rewritten cluster the joiners and presentation modifiers are dropped (U+200D ZERO WIDTH JOINER, the U+FE0E
 // and U+FE0F variation selectors, the U+1F3FB..U+1F3FF skin tones, the
 // U+20E3 keycap and the U+E0020..U+E007F tag characters), which leaves the
 // sequence's component glyphs, each of which every terminal measures the
 // same; a regional-indicator flag becomes its two ASCII letters (U+1F1EE
-// U+1F1F9 -> "IT"); anything still ambiguous becomes U+FFFD, one cell
-// everywhere.
+// U+1F1F9 -> "IT"); an emoji component that is still ambiguous becomes
+// U+FFFD, one cell everywhere.
 // Pure ASCII, the common case, is returned without being looked at twice.
 func StableWidth(s string) string {
 	if isASCII(s) || !hasUnstableCluster(s) {
@@ -75,9 +81,37 @@ func hasUnstableCluster(s string) bool {
 	return false
 }
 
-// clusterIsStable reports whether the grapheme width of cluster, its
-// wcwidth, and the sum of its runes' wcwidths are all width.
+// clusterIsStable reports whether cluster is kept as it is: it is not an
+// emoji sequence (see isEmojiSequence), or the grapheme width of cluster,
+// its wcwidth, and the sum of its runes' wcwidths are all width.
 func clusterIsStable(cluster string, width int) bool {
+	if len(cluster) == 1 || !isEmojiSequence(cluster) {
+		return true
+	}
+	return measuresAgree(cluster, width)
+}
+
+// isEmojiSequence reports whether cluster holds a rune that only exists to
+// build an emoji sequence: a presentation modifier or a regional indicator.
+// Only such clusters are ever rewritten.
+func isEmojiSequence(cluster string) bool {
+	for _, r := range cluster {
+		if isPresentationModifier(r) || isRegionalIndicator(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRegionalIndicator reports whether r is a regional indicator symbol
+// letter A..Z, the runes a flag is made of.
+func isRegionalIndicator(r rune) bool {
+	return r >= 0x1F1E6 && r <= 0x1F1FF
+}
+
+// measuresAgree reports whether the grapheme width of cluster, its wcwidth,
+// and the sum of its runes' wcwidths are all width.
+func measuresAgree(cluster string, width int) bool {
 	if len(cluster) == 1 {
 		return true // one ASCII byte
 	}
@@ -98,8 +132,7 @@ func writeStableCluster(b *strings.Builder, cluster string) {
 	for _, r := range cluster {
 		switch {
 		case isPresentationModifier(r):
-		case r >= 0x1F1E6 && r <= 0x1F1FF:
-			// Regional indicator symbol letter A..Z.
+		case isRegionalIndicator(r):
 			kept.WriteByte(byte('A' + (r - 0x1F1E6)))
 		default:
 			kept.WriteRune(r)
@@ -108,7 +141,7 @@ func writeStableCluster(b *strings.Builder, cluster string) {
 	for rest := kept.String(); rest != ""; {
 		part, width := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
 		rest = rest[len(part):]
-		if clusterIsStable(part, width) {
+		if measuresAgree(part, width) {
 			b.WriteString(part)
 		} else {
 			b.WriteRune(utf8.RuneError)
