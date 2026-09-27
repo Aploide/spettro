@@ -33,7 +33,7 @@ func TestRenderPtyLiveTail(t *testing.T) {
 		t.Fatalf("live tail missing session output, got %q", tail)
 	}
 
-	out := renderToolGroups([]ToolItem{{Name: "pty-write", Status: "running", Args: args}}, 120, false, false, theme.Current().BgHeader)
+	out := renderToolGroups([]ToolItem{{Name: "pty-write", Status: "running", Args: args}}, 120, false, false, theme.Current().BgHeader, nil)
 	if !strings.Contains(out, "tail-marker") {
 		t.Fatalf("renderToolGroups missing live tail, got %q", out)
 	}

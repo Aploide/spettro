@@ -42,7 +42,12 @@ const toolDetailIndent = "    ⎿  "
 // folded onto one line and cut with "…"; output rows are sanitized (escape
 // sequences, tabs, carriage returns) and either cut with "…" or, in the
 // ctrl+g full-output view, wrapped so nothing is lost.
-func renderToolGroups(tools []ToolItem, width int, showTools, fullOutput bool, mc color.Color) string {
+//
+// userTool reports whether a name belongs to a tool of the operator's own
+// (Model.isUserTool; nil means none does). Such a call gets the generic
+// label, and none of the extras a built-in of the same name would get (a
+// path row, a live terminal tail): see tool_labels.go.
+func renderToolGroups(tools []ToolItem, width int, showTools, fullOutput bool, mc color.Color, userTool func(name string) bool) string {
 	if len(tools) == 0 {
 		return ""
 	}
@@ -80,20 +85,47 @@ func renderToolGroups(tools []ToolItem, width int, showTools, fullOutput bool, m
 		}
 		group := tools[i:j]
 		name := group[0].Name
+		ownTool := userTool != nil && userTool(name)
+		// label is the one-row label of one call in this run.
+		label := func(item ToolItem) string {
+			running := item.Status == "running"
+			switch {
+			case ownTool:
+				return userToolLabel(name, running)
+			case running:
+				return formatRunningLabel(name, item.Args)
+			default:
+				return formatToolLabel(name, item.Args)
+			}
+		}
+		// path is the file path a built-in file tool shows under its label.
+		path := func(item ToolItem) string {
+			if ownTool {
+				return ""
+			}
+			return extractToolPath(name, item.Args)
+		}
+		// liveTail is the live terminal tail of a running pty tool.
+		liveTail := func(item ToolItem) []string {
+			if ownTool {
+				return nil
+			}
+			return liveTailRows(renderPtyLiveTail(name, item.Args, fullOutput), width)
+		}
 
 		if len(group) == 1 {
 			item := group[0]
 			switch item.Status {
 			case "running":
-				lines = append(lines, header(formatRunningLabel(name, item.Args), styleMuted))
-				output(liveTailRows(renderPtyLiveTail(name, item.Args, fullOutput), width))
+				lines = append(lines, header(label(item), styleMuted))
+				output(liveTail(item))
 			case "error":
-				lines = append(lines, header(formatToolLabel(name, item.Args), errStyle))
+				lines = append(lines, header(label(item), errStyle))
 			default:
-				lines = append(lines, header(formatToolLabel(name, item.Args), styleMuted))
+				lines = append(lines, header(label(item), styleMuted))
 			}
 			if showTools {
-				if p := extractToolPath(name, item.Args); p != "" {
+				if p := path(item); p != "" {
 					lines = append(lines, detail(p+toolStatusIcon(item.Status)))
 				}
 			}
@@ -105,24 +137,24 @@ func renderToolGroups(tools []ToolItem, width int, showTools, fullOutput bool, m
 				output(toolOutputRows(item.Output, singleCap, width, fullOutput))
 			}
 		} else {
-			label := formatToolGroupLabel(name, group)
-			if !showTools {
-				label += "  (ctrl+o to expand)"
+			groupLabel := formatToolGroupLabel(name, group)
+			if ownTool {
+				groupLabel = userToolGroupLabel(name, len(group), hasRunningTool(group))
 			}
-			lines = append(lines, header(label, styleMuted))
+			if !showTools {
+				groupLabel += "  (ctrl+o to expand)"
+			}
+			lines = append(lines, header(groupLabel, styleMuted))
 			if showTools {
 				for _, gt := range group {
 					// Arguments can be a whole file; parse them once per row.
-					switch p := extractToolPath(gt.Name, gt.Args); {
-					case p != "":
+					if p := path(gt); p != "" {
 						lines = append(lines, detail(p+toolStatusIcon(gt.Status)))
-					case gt.Status == "running":
-						lines = append(lines, detail(formatRunningLabel(gt.Name, gt.Args)))
-					default:
-						lines = append(lines, detail(formatToolLabel(gt.Name, gt.Args)))
+					} else {
+						lines = append(lines, detail(label(gt)))
 					}
 					if gt.Status == "running" {
-						output(liveTailRows(renderPtyLiveTail(gt.Name, gt.Args, fullOutput), width))
+						output(liveTail(gt))
 					} else {
 						output(toolOutputRows(gt.Output, groupCap, width, fullOutput))
 					}

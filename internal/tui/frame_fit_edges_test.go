@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
+	"spettro/internal/config"
 )
 
 // runningFooterModel is a model in the middle of a run with a long todo list
@@ -261,5 +262,50 @@ func TestStatusBarRightClusterFits(t *testing.T) {
 			t.Fatalf("width %d: status bar is %d cells", width, w)
 		}
 		assertFrameFits(t, "status bar", m.View().Content, width, 15)
+	}
+}
+
+// A tool of the operator's own that shares a name with the lsp or skill
+// tool, or one of their retired names, is not labelled as that built-in:
+// since a user's tool always wins its name, the call never reached the
+// built-in, and "Found references to" or "Listed skills" would misreport
+// what ran.
+func TestOperatorToolsKeepGenericLabels(t *testing.T) {
+	for _, name := range []string{"references", "skill", "diagnostics", "skill-list", "bash"} {
+		m := footerModel(120, 40)
+		m.showTools = true
+		m.manifest.Tools = append(m.manifest.Tools, config.ToolSpec{ID: name, Kind: "script", Enabled: true})
+		args := mustJSON(map[string]any{"query": "needle"})
+		m.messages = append(m.messages,
+			ChatMessage{Role: RoleUser, Content: "go"},
+			ChatMessage{Role: RoleAssistant, Content: "done", Tools: []ToolItem{
+				{Name: name, Status: "error", Args: args},
+				{Name: "other", Status: "success"},
+				{Name: name, Status: "error", Args: args},
+				{Name: name, Status: "error", Args: args},
+			}},
+		)
+		m.applyToolTraceToObservability(agent.ToolTrace{Name: name, Status: "error", Args: args})
+		m = m.recalcLayout()
+		m.refreshViewport()
+		transcript := ansi.Strip(m.renderMessages())
+		want := humanizeToolID(name)
+		if !strings.Contains(transcript, "● "+want) {
+			t.Fatalf("%s: the transcript does not use the generic label %q:\n%s", name, want, transcript)
+		}
+		for _, builtin := range []string{"Found references", "Listed skills", "Loaded skill", "Queried", "the language server", "Ran "} {
+			if strings.Contains(transcript, builtin) {
+				t.Fatalf("%s: the transcript labels an operator's tool as a built-in (%q):\n%s", name, builtin, transcript)
+			}
+		}
+		items := m.sidePanelItems()
+		if len(items) == 0 || items[0].Title != want {
+			t.Fatalf("%s: the activity entry is not labelled %q: %+v", name, want, items)
+		}
+	}
+	// A built-in keeps its own label.
+	m := footerModel(120, 40)
+	if got := m.toolLabel("skill", mustJSON(map[string]any{"name": "pdf"}), false); !strings.Contains(got, "pdf") {
+		t.Fatalf("the built-in skill tool lost its label: %q", got)
 	}
 }

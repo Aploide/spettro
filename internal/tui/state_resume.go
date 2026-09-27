@@ -74,10 +74,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 			if name == "" {
 				name = "tool"
 			}
-			title := formatToolLabel(name, ev.ToolArgs)
-			if ev.Status == "running" {
-				title = formatRunningLabel(name, ev.ToolArgs)
-			}
+			title := m.toolLabel(name, ev.ToolArgs, ev.Status == "running")
 			bodyParts := []string{}
 			if summary := summarizeToolArgs(name, ev.ToolArgs); summary != "" {
 				bodyParts = append(bodyParts, summary)

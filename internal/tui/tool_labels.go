@@ -182,3 +182,57 @@ func isSkillTool(name string) bool {
 	}
 	return false
 }
+
+// Labels for tools of the operator's own.
+//
+// Every label function in this package (formatToolLabel, formatRunningLabel,
+// formatToolGroupLabel and the helpers behind them) picks its wording by the
+// tool's name alone: "bash" reads "Ran $ ...", "references" reads "Found
+// references to ...". A tool the operator defines in the agent manifest
+// (kind mcp, script or http) may take any name, a built-in's included, and
+// it always owns that name: a call under it never reaches the built-in (see
+// agent/tool_names.go). Labelling it as the built-in would misreport what
+// ran, so a call of such a tool gets the generic label every unknown tool
+// gets instead. Only the Model knows the manifest, so it makes that choice
+// (toolLabel, isUserTool) and hands the transcript renderer the predicate.
+
+// isUserTool reports whether name belongs to a tool of the operator's own,
+// per the loaded agent manifest.
+func (m Model) isUserTool(name string) bool {
+	_, ok := m.manifest.UserTool(name)
+	return ok
+}
+
+// toolLabel is the one-row label of a single tool call, as the activity
+// panel and the run summary show it: the generic label for a tool of the
+// operator's own, else the built-in's label for a finished or a running
+// call.
+func (m Model) toolLabel(name, argsJSON string, running bool) string {
+	switch {
+	case m.isUserTool(name):
+		return userToolLabel(name, running)
+	case running:
+		return formatRunningLabel(name, argsJSON)
+	default:
+		return formatToolLabel(name, argsJSON)
+	}
+}
+
+// userToolLabel is the label of one call of a tool of the operator's own:
+// the same wording formatToolLabel and formatRunningLabel use for a tool
+// they do not know ("Deploy Preview", "Using Deploy Preview…").
+func userToolLabel(name string, running bool) string {
+	if running {
+		return "Using " + humanizeToolID(name) + "…"
+	}
+	return humanizeToolID(name)
+}
+
+// userToolGroupLabel is the header of a run of consecutive calls of a tool
+// of the operator's own.
+func userToolGroupLabel(name string, count int, running bool) string {
+	if running {
+		return fmt.Sprintf("Using %s %d time(s)…", humanizeToolID(name), count)
+	}
+	return fmt.Sprintf("Used %s %d times", humanizeToolID(name), count)
+}

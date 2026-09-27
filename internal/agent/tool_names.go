@@ -64,11 +64,7 @@ func (r *toolRuntime) userTool(name string) (config.ToolSpec, bool) {
 		return spec, true
 	}
 	if r.manifest != nil {
-		for _, t := range r.manifest.Tools {
-			if !t.IsBuiltin() && (t.ID == name || slices.Contains(t.Aliases, name)) {
-				return t, true
-			}
-		}
+		return r.manifest.UserTool(name)
 	}
 	return config.ToolSpec{}, false
 }

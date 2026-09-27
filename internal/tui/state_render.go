@@ -142,7 +142,7 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
 
 	var bodyParts []string
 	if len(msg.Tools) > 0 {
-		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, innerW, m.showTools, m.showFullOutput, mc))
+		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, innerW, m.showTools, m.showFullOutput, mc, m.isUserTool))
 	}
 	bodyParts = append(bodyParts, renderMarkdown(strings.TrimSpace(msg.Content), innerW))
 
@@ -247,7 +247,7 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		body := renderMarkdown(msg.Content, m.paneWidth()-8)
 		var entryLines []string
 		if len(msg.Tools) > 0 {
-			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.transcriptWidth(), m.showTools, m.showFullOutput, mc))
+			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.transcriptWidth(), m.showTools, m.showFullOutput, mc, m.isUserTool))
 		}
 		if strings.TrimSpace(msg.Content) != "" {
 			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))

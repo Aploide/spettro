@@ -193,6 +193,20 @@ func (t ToolSpec) IsBuiltin() bool {
 	return t.Kind == "" || t.Kind == "builtin"
 }
 
+// UserTool returns the tool of the operator's own (not a built-in) that
+// answers to name, as its ID or one of its aliases. Such a tool owns that
+// name even when it is a built-in's (see IsBuiltin): the agent runtime never
+// hands a call under it to the built-in, and the TUI labels it as the
+// operator's tool rather than as the built-in of that name.
+func (m AgentManifest) UserTool(name string) (ToolSpec, bool) {
+	for _, t := range m.Tools {
+		if !t.IsBuiltin() && (t.ID == name || slices.Contains(t.Aliases, name)) {
+			return t, true
+		}
+	}
+	return ToolSpec{}, false
+}
+
 type AgentSpec struct {
 	ID               string           `toml:"id"`
 	Name             string           `toml:"name"`
