@@ -19,6 +19,10 @@ import (
 // trained on them, a carried conversation, or a hand-written hook keeps
 // working, but only the canonical tool is advertised.
 //
+// A retired name is an alias only while its canonical tool is the built-in.
+// When a tool of the operator's own holds the canonical name (or the retired
+// name itself), tool_names.go decides what a call under the name reaches.
+//
 // The table is built in rather than read from the manifest so it also covers
 // runs with a hard-coded tool list and no manifest policies (LLMCoder, the
 // planner, the explorer).
@@ -94,60 +98,19 @@ func canonicalToolCall(call toolCall) (toolCall, error) {
 	return out, nil
 }
 
-// canonicalCall is canonicalToolCall for this run. A retired name that a
-// tool of the operator's own answers to (a script or MCP tool that happens to
-// be called "ls" or "hover") is that tool, not an alias. And when the
-// operator's own tool is called lsp, v13 left the language-server built-ins
-// unfolded: their calls keep their own names (see unfoldedLSPTool).
-func (r *toolRuntime) canonicalCall(call toolCall) (toolCall, error) {
-	if r.userToolNamed(call.Tool) || r.unfoldedLSPTool(call.Tool) {
-		return call, nil
-	}
-	return canonicalToolCall(call)
-}
-
-// userToolNamed reports whether name is the ID or an alias of a tool that is
-// not a built-in: one of this agent's, or any in the manifest.
-func (r *toolRuntime) userToolNamed(name string) bool {
-	if spec, ok := r.toolPolicies[name]; ok && !isBuiltinTool(spec) {
-		return true
-	}
-	if r.manifest != nil {
-		for _, t := range r.manifest.Tools {
-			if !isBuiltinTool(t) && (t.ID == name || slices.Contains(t.Aliases, name)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isBuiltinTool(t config.ToolSpec) bool {
-	return t.Kind == "" || t.Kind == "builtin"
-}
-
-// unfoldedLSPTool reports whether name is one of the retired language-server
-// built-ins while the operator has a tool of their own called lsp. v13 left
-// those built-ins unfolded then, so a call keeps its name and runs the
-// built-in (when the agent holds it) rather than becoming a call of the
-// operator's lsp.
-func (r *toolRuntime) unfoldedLSPTool(name string) bool {
-	lt, ok := legacyTools[name]
-	return ok && lt.canonical == "lsp" && r.userToolNamed("lsp")
-}
-
 // hookAlias is the retired name the hooks of this (canonical) call also
 // match (see toolRuntime.toolHookRules): the name the model called the tool
-// by, or, for an lsp call made under its own name, the retired tool its op
-// replaced. Each op is exactly one of the old tools, so a hook written for
-// "diagnostics" keeps firing on lsp {op: "diagnostics"} and on nothing else.
-// A retired name the operator's own tool now answers to (a "hover" script) is
-// that tool's, so its hooks do not fire on the op.
+// by, or, for a call of the built-in lsp made under its own name, the retired
+// tool its op replaced. Each op is exactly one of the old tools, so a hook
+// written for "diagnostics" keeps firing on lsp {op: "diagnostics"} and on
+// nothing else. A retired name the operator's own tool now answers to (a
+// "hover" script) is that tool's, so its hooks do not fire on the op; and a
+// call of the operator's own lsp has no ops at all.
 func (r *toolRuntime) hookAlias(call toolCall) string {
 	if call.CalledAs != "" || call.Tool != "lsp" {
 		return call.CalledAs
 	}
-	if r.userToolNamed("lsp") {
+	if r.builtinFor("lsp") != "lsp" {
 		return ""
 	}
 	name := lspOpTools[lspCallOp(call.Args)]
@@ -166,7 +129,7 @@ func (r *toolRuntime) hookAlias(call toolCall) string {
 // operation it did not have. Rules for any other permission, "tool" and "*"
 // included, only decide whether lsp can be called at all.
 func (r *toolRuntime) lspOpDenied(call toolCall, spec config.ToolSpec) error {
-	if call.Tool != "lsp" || !isBuiltinTool(spec) {
+	if call.Tool != "lsp" || !spec.IsBuiltin() {
 		return nil
 	}
 	op := lspCallOp(call.Args)

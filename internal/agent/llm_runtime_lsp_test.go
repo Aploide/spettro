@@ -74,7 +74,7 @@ func TestEditToolsAppendDiagnostics(t *testing.T) {
 		t.Fatalf("file-write result:\n%s\nwant it to end with:%s", out, want)
 	}
 
-	out, err = rt.runFileEdit(ctx, toolArgs(t, map[string]any{
+	out, err = rt.runFileEdit(ctx, "file-edit", toolArgs(t, map[string]any{
 		"path": "a.fk", "old_string": "ERR from write", "new_string": "WARN only",
 	}))
 	if err != nil {
@@ -84,7 +84,7 @@ func TestEditToolsAppendDiagnostics(t *testing.T) {
 		t.Fatalf("a clean edit should add nothing, got:\n%s", out)
 	}
 
-	out, err = rt.runFileEdit(ctx, toolArgs(t, map[string]any{
+	out, err = rt.runFileEdit(ctx, "file-edit", toolArgs(t, map[string]any{
 		"path": "a.fk",
 		"edits": []map[string]any{
 			{"old_string": "fine", "new_string": "ERR first"},
@@ -121,7 +121,7 @@ func TestFileReadWarmsServer(t *testing.T) {
 	time.Sleep(time.Second) // the model thinks; the server finishes starting
 
 	start = time.Now()
-	out, err := rt.runFileEdit(ctx, toolArgs(t, map[string]any{
+	out, err := rt.runFileEdit(ctx, "file-edit", toolArgs(t, map[string]any{
 		"path": "a.fk", "old_string": "fine", "new_string": "ERR now",
 	}))
 	if err != nil {
@@ -144,7 +144,7 @@ func TestEditNeverFailsOnSilentServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	out, err := rt.runFileEdit(context.Background(), toolArgs(t, map[string]any{
+	out, err := rt.runFileEdit(context.Background(), "file-edit", toolArgs(t, map[string]any{
 		"path": "a.fk", "old_string": "fine", "new_string": "ERR now",
 	}))
 	if err != nil {

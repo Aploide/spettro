@@ -58,7 +58,10 @@ func (r *toolRuntime) runPreToolHooks(ctx context.Context, toolID string, args j
 			r.emitApprovalTrace("denied", "hook", toolID, "", reason)
 			return nil, reason, nil
 		case "allow":
-			if len(res.UpdatedArgs) > 0 && toolID == "bash" {
+			// Only a shell command may be rewritten by a hook: a call the
+			// built-in shell carries out, under bash or an unfolded
+			// shell-exec, and never a tool of the operator's own called bash.
+			if len(res.UpdatedArgs) > 0 && r.builtinFor(toolID) == "bash" {
 				updated = res.UpdatedArgs
 			}
 		}
@@ -95,18 +98,26 @@ func (r *toolRuntime) hasPostToolHooks(ctx context.Context, toolID string) bool 
 //     is bash), so a hook written for "shell-exec" keeps guarding the shell
 //     now that the model only sees bash.
 //
+// Names are matched only while they belong to the tool the call runs (see
+// tool_names.go): a call of the operator's own tool called bash is not the
+// shell, so hooks written for shell-exec do not fire on it; and a retired
+// name the operator's own tool answers to (a "shell-exec" script) is that
+// tool's, so its hooks do not fire on the built-in bash.
+//
 // A hook that applies only through a retired name is skipped when a hook
 // with the same command already applies, so a hook copied under both
 // "shell-exec" and "bash" runs once per call, not twice. The tool_id a hook
-// script receives is the canonical name.
+// script receives is the call's own name: the canonical one for an alias.
 func (r *toolRuntime) toolHookRules(ctx context.Context, event hooks.Event, toolID string) []hooks.EffectiveRule {
 	var retired []string
 	if alias := calledAs(ctx); alias != "" && alias != toolID {
 		retired = append(retired, alias)
 	}
-	for _, name := range LegacyToolNames(toolID) {
-		if legacyTools[name].sameTool && !slices.Contains(retired, name) {
-			retired = append(retired, name)
+	if r.builtinFor(toolID) == toolID {
+		for _, name := range LegacyToolNames(toolID) {
+			if legacyTools[name].sameTool && !r.userToolNamed(name) && !slices.Contains(retired, name) {
+				retired = append(retired, name)
+			}
 		}
 	}
 	var out []hooks.EffectiveRule
@@ -164,7 +175,11 @@ func calledAs(ctx context.Context) string {
 func (r *toolRuntime) finishToolCall(ctx context.Context, call toolCall, out string, err error) string {
 	abs, rel, ok := "", "", false
 	if err == nil && r.hasPostToolHooks(ctx, call.Tool) {
-		abs, rel, ok = r.writtenFile(call)
+		// Which file was written depends on the built-in that carried the
+		// call out (an unfolded multi-edit is file-edit's code).
+		if run, runErr := r.builtinCall(call); runErr == nil {
+			abs, rel, ok = r.writtenFile(run)
+		}
 	}
 	if !ok {
 		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)

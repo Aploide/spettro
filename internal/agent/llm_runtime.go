@@ -929,7 +929,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		if len(resp.ToolCalls) > 0 {
 			truncatedText = nil
 			emitNarration(cfg, main)
-			internalCalls := loopCalls(resp.ToolCalls)
+			internalCalls := runtime.loopCalls(resp.ToolCalls)
 			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
 			// A deferred tool the model called by name is advertised from
 			// the next step on, so its next call has the schema.
@@ -1191,19 +1191,30 @@ func planToolBatches(calls []toolCall, indices []int) [][]int {
 	return batches
 }
 
-// concurrentCall reports whether a call may run together with its
-// neighbours (see concurrentTools). An lsp restart stops the servers the
-// lookups next to it would be talking to, so it runs alone, as lsp-restart
-// always did.
+// concurrentCall reports whether a call, as the built-in that carries it out
+// sees it (toolRuntime.builtinCall), may run together with its neighbours
+// (see concurrentTools). An lsp restart stops the servers the lookups next
+// to it would be talking to, so it runs alone, as lsp-restart always did.
 func concurrentCall(call toolCall) bool {
 	if call.Tool == "lsp" {
 		return lspCallOp(call.Args) != "restart"
 	}
-	if lt, ok := legacyTools[call.Tool]; ok && lt.canonical == "lsp" {
-		// A language-server built-in left unfolded (see unfoldedLSPTool).
-		return call.Tool != "lsp-restart"
-	}
 	return concurrentTools[call.Tool]
+}
+
+// planBatches is planToolBatches over how each call is carried out
+// (toolRuntime.builtinCall), not what it is named: an unfolded retired
+// built-in batches as the built-in whose code it runs, and a call no built-in
+// carries out (a tool of the operator's own, or arguments that do not
+// convert) is a batch of its own.
+func (r *toolRuntime) planBatches(calls []toolCall, indices []int) [][]int {
+	carried := make([]toolCall, len(calls))
+	for _, idx := range indices {
+		if run, err := r.builtinCall(calls[idx]); err == nil {
+			carried[idx] = run
+		}
+	}
+	return planToolBatches(carried, indices)
 }
 
 // parallelExec executes one step's tool calls and returns their results in
@@ -1327,7 +1338,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			}
 		}
 	}
-	for _, batch := range planToolBatches(calls, runnable) {
+	for _, batch := range r.planBatches(calls, runnable) {
 		if r.shouldStop() {
 			// An earlier batch ended the turn (ask-user's reply-in-chat exit,
 			// task-stop): later calls were planned on the assumption the turn
@@ -1389,7 +1400,14 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		call = canon
 	}
 	ctx = withCalledAs(ctx, r.hookAlias(call))
-	if blocksOnUserInput(call.Tool) {
+	// How the call is bounded depends on the built-in that carries it out,
+	// not on its name. A call no built-in carries out fails in execute
+	// before doing anything, so the default deadline is all it needs.
+	run, runErr := r.builtinCall(call)
+	if runErr != nil {
+		run = toolCall{}
+	}
+	if blocksOnUserInput(run.Tool) {
 		// The tool is waiting on a person, who may take as long as they take.
 		// A deadline here would cancel the question out from under them and
 		// hand the model a timeout error as if nobody was there — the run must
@@ -1398,14 +1416,14 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 		out, err := r.execute(ctx, call, allowed)
 		return r.finishToolCall(ctx, call, out, err), err
 	}
-	if call.Tool == "agent" {
+	if run.Tool == "agent" {
 		// The agent case bounds the sub-agent run itself (agentTimeout), so
 		// that a sub-agent running out of time is reported with its partial
 		// work instead of the whole call being cut off.
 		out, err := r.execute(ctx, call, allowed)
 		return r.finishToolCall(ctx, call, out, err), err
 	}
-	if r.isForegroundShellCall(call) {
+	if r.isForegroundShellCall(run) {
 		// runShellTool owns both deadlines of a foreground command: the
 		// approval prompt gets the tool's default window, and the command's
 		// own timeout (honouring a per-call timeout argument) starts only once
@@ -1425,20 +1443,25 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 
 // defaultToolTimeoutSec is a tool's execution limit in seconds when the call
 // does not ask for its own: the manifest's timeout_sec, else 45s, with longer
-// floors for swarms/workflows and for shell tools in goal mode.
+// floors for swarms/workflows and for shell tools in goal mode. tool is the
+// call's identity, whose manifest entry sets the limit; the floors follow the
+// built-in that carries the call out (toolRuntime.builtinFor), so an
+// unfolded shell-exec gets the shell's and a tool of the operator's own
+// called bash does not.
 func (r *toolRuntime) defaultToolTimeoutSec(tool string) int {
 	timeoutSec := 45
 	if spec, ok := r.toolPolicies[tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
 	}
-	if tool == "ultra" || tool == "workflow" {
+	builtin := r.builtinFor(tool)
+	if builtin == "ultra" || builtin == "workflow" {
 		// A swarm — or a workflow script, which may run several rounds of them
 		// — is many full sub-agent turns; the per-tool default (and any
 		// manifest value tuned for single tools) would kill it mid-flight.
 		timeoutSec = 7200
 	}
 	if r.goalMode {
-		switch tool {
+		switch builtin {
 		case "bash":
 			if r.shellTimeoutSec > 0 {
 				timeoutSec = r.shellTimeoutSec
@@ -1491,13 +1514,22 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	if len(updatedArgs) > 0 {
 		call.Args = updatedArgs
 	}
+	// Everything above judged the call by its identity. From here on it is
+	// carried out: call becomes the built-in's view of it (tool_names.go),
+	// and id keeps the identity, for the per-tool policy a built-in looks up
+	// while it runs (approvals, command and path rules) and for labels.
+	id := call.Tool
+	call, err = r.builtinCall(call)
+	if err != nil {
+		return "", err
+	}
 	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
 	if r.checkpoint != nil && needsCheckpoint(call) {
-		r.checkpointStep(call.Tool)
+		r.checkpointStep(id)
 	}
 	switch call.Tool {
 	case "file-read":
@@ -1642,8 +1674,6 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runConfigTool(call.Args)
 	case "lsp":
 		return r.runLSP(ctx, call.Args, call.CalledAs)
-	case "diagnostics", "references", "hover", "lsp-restart":
-		return r.runUnfoldedLSPTool(ctx, call)
 	case "rename-symbol":
 		return r.runLSPRename(ctx, call.Args)
 	case "mcp-list-resources":
@@ -1658,7 +1688,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTodoWrite(call.Args)
 	case "file-edit":
 		defer r.lockFileForMutation(call.Args)()
-		return r.runFileEdit(ctx, call.Args)
+		return r.runFileEdit(ctx, id, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
@@ -1675,7 +1705,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if json.Unmarshal(call.Args, &probe) == nil && strings.TrimSpace(probe.JobID) != "" {
 			return r.runJobOutput(call.Args)
 		}
-		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
+		return r.runShellTool(ctx, id, call.Args, "bash")
 	case "job-output":
 		return r.runJobOutput(call.Args)
 	case "tool-output":
@@ -1862,7 +1892,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "workflow":
 		return r.runWorkflow(ctx, call.Args)
 	default:
-		return "", fmt.Errorf("unsupported tool %q", call.Tool)
+		return "", fmt.Errorf("unsupported tool %q", id)
 	}
 }
 

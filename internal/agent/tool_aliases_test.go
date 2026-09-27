@@ -408,7 +408,7 @@ func TestHooksCopiedUnderBothShellNamesRunOnce(t *testing.T) {
 
 // The loop detector signs a retired call and its canonical call alike.
 func TestLoopCallsUseCanonicalNames(t *testing.T) {
-	calls := loopCalls([]provider.NativeTool{
+	calls := (&toolRuntime{}).loopCalls([]provider.NativeTool{
 		{Name: "shell-exec", Args: json.RawMessage(`{"command":"go test"}`)},
 		{Name: "repo-search", Args: json.RawMessage(`{"query":"Foo"}`)},
 	})
