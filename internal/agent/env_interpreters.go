@@ -40,9 +40,10 @@ var interpreterAliases = []interpreterAlias{
 }
 
 // interpreterProbeTimeout bounds the one-time probe. A login shell whose
-// profile hangs must not stall the first request; on timeout no hint is
-// given, which is the behaviour from before hints existed.
-const interpreterProbeTimeout = 5 * time.Second
+// profile hangs must not stall the first request; on timeout the probe's
+// whole process tree is killed and no hint is given, which is the behaviour
+// from before hints existed. It is a variable only so tests can shorten it.
+var interpreterProbeTimeout = 5 * time.Second
 
 // interpreterHintLines returns one Environment line per alias whose bare
 // command is missing while its versioned command is available, e.g.
@@ -108,6 +109,13 @@ func probeCommands(names []string) map[string]bool {
 	// A profile may leave a background child holding stdout open; without a
 	// WaitDelay, Output would wait for it even after the timeout kills bash.
 	cmd.WaitDelay = time.Second
+	// Run the probe as its own process tree, as the bash tool does. On Unix
+	// that puts it in its own process group, out of the terminal's foreground
+	// group: a profile command that reads the terminal (an ssh-add or gpg
+	// passphrase prompt) is stopped instead of competing with the TUI for
+	// keystrokes. On timeout the whole group is killed, so nothing the
+	// profile started outlives the probe.
+	shell.ConfigureProcessTree(cmd)
 	out, _ := cmd.Output()
 	// A login profile may print its own lines; only exact requested names
 	// count.

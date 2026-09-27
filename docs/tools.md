@@ -56,7 +56,9 @@ it adds a line saying to use `python3`, and likewise for `pip` and `pip3`,
 since models type the bare names by habit. The check asks the same login
 shell the `bash` tool uses (`command -v`), so PATH additions from the user's
 profile count; on a PowerShell or cmd host it searches spettro's own PATH.
-Like the language-server check it runs once per process: the Environment
+The login shell runs in its own process group, as `bash` tool commands do,
+and is given 5 seconds: on timeout the whole group is killed and no line is
+added. Like the language-server check it runs once per process: the Environment
 section is part of the cached system prompt and never changes mid-session.
 
 ## Retired names
