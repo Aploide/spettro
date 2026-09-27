@@ -13,6 +13,8 @@ func TestEstimateTokens(t *testing.T) {
 		{[]string{"ab", "cd"}, 2},
 		{[]string{"a"}, 1},
 		{[]string{"ààà"}, 1}, // counted in runes, not bytes
+		// Each invalid byte counts as one rune, as len([]rune(s)) does.
+		{[]string{"\xff\xfe\xfd\xfc", "\xc3"}, 2},
 	}
 	for _, c := range cases {
 		if got := EstimateTokens(c.parts...); got != c.want {

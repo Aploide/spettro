@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"regexp"
+	"hash"
 	"slices"
 	"strings"
 
@@ -107,17 +107,16 @@ func newLoopDetector(p config.LoopDetectionPolicy) *loopDetector {
 	return d
 }
 
-// volatileOutput matches result fragments that change between otherwise
-// identical runs (durations, timestamps, pointer addresses, and the spool /
-// background-job ids a fresh run is always given — every oversized output's
-// truncation footer carries a new "spool:N" and the file backing it,
-// ".../spettro-spool-XXXX/N.txt"), so a failing test that prints
-// "FAIL pkg 0.012s" then "FAIL pkg 0.015s" still hashes the same.
-var volatileOutput = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|µs|us|ms|s|m|h)\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|0x[0-9a-fA-F]+|\bspool:\d+|spettro-spool-[^\s/\\]*[/\\]\d+\.txt|\bjob-\d+`)
-
 // callSignature normalizes one executed tool call to
 // "name\x00hash(args)\x00hash(status+output)". JSON args are compacted first
-// so whitespace differences don't defeat detection.
+// so whitespace differences don't defeat detection. The output is hashed
+// with its volatile fragments (durations, timestamps, pointer addresses, and
+// the spool / background-job ids a fresh run is always given: every
+// oversized output's truncation footer carries a new "spool:N" and the file
+// backing it, ".../spettro-spool-XXXX/N.txt") replaced by "#", so a failing
+// test that prints "FAIL pkg 0.012s" then "FAIL pkg 0.015s" still hashes the
+// same (see normalizeVolatile). The normalized text is streamed into the
+// hash, never built.
 func callSignature(name string, args json.RawMessage, status, output string) string {
 	norm := bytes.TrimSpace(args)
 	var buf bytes.Buffer
@@ -125,8 +124,42 @@ func callSignature(name string, args json.RawMessage, status, output string) str
 		norm = buf.Bytes()
 	}
 	ah := sha256.Sum256(norm)
-	rh := sha256.Sum256([]byte(status + "\x00" + volatileOutput.ReplaceAllString(output, "#")))
-	return name + "\x00" + hex.EncodeToString(ah[:8]) + "\x00" + hex.EncodeToString(rh[:8])
+
+	rh := newStringHasher()
+	rh.writeString(status)
+	rh.writeString("\x00")
+	normalizeVolatile(output, rh.writeString)
+	rsum := rh.sum()
+
+	var ahex, rhex [16]byte
+	hex.Encode(ahex[:], ah[:8])
+	hex.Encode(rhex[:], rsum[:8])
+	return name + "\x00" + string(ahex[:]) + "\x00" + string(rhex[:])
+}
+
+// stringHasher feeds strings to a SHA-256 hash through a fixed buffer, so
+// hashing a string never converts it to a fresh []byte.
+type stringHasher struct {
+	h   hash.Hash
+	buf [512]byte
+}
+
+func newStringHasher() *stringHasher {
+	return &stringHasher{h: sha256.New()}
+}
+
+func (s *stringHasher) writeString(str string) {
+	for len(str) > 0 {
+		n := copy(s.buf[:], str)
+		s.h.Write(s.buf[:n])
+		str = str[n:]
+	}
+}
+
+// sum returns the hash of everything written. It reuses the copy buffer (so
+// the digest needs no allocation of its own): write nothing after it.
+func (s *stringHasher) sum() []byte {
+	return s.h.Sum(s.buf[:0])
 }
 
 // loopCalls converts a step's native tool calls to the calls the detector

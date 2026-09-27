@@ -19,7 +19,6 @@ package checkpoint
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -101,6 +100,29 @@ type Checkpointer struct {
 	alternates bool   // borrowing objects from the project's own .git
 	warning    string // one-time big-repo warning, empty if not applicable
 	lastConv   convState
+
+	// gen counts the operations that stage a tree or record a checkpoint
+	// (Prepare, Commit, RestoreFiles). A Prepared snapshot can be committed
+	// only while gen is still the value it was prepared at: nothing else
+	// was staged, recorded or restored in between (see Prepared).
+	gen uint64
+	// unclaimed is the commit of the newest Prepared snapshot that is not
+	// (yet) a checkpoint: pinned by its ref so gc keeps it, unpinned by the
+	// next Prepare that does not reuse it, and marked by a file in
+	// pendingDir so a later Open can unpin it after an exit.
+	unclaimed preparedCommit
+	// gcDue is set when the list reached a multiple of GCEvery (by a
+	// recorded checkpoint, or found so by Open). The next Prepare runs git
+	// gc --auto before staging, or the current Snapshot right after it
+	// recorded its checkpoint; a claim (Commit) never does.
+	gcDue bool
+	// listCache is checkpoints.json as last read or written (see list).
+	listCache listCache
+	// gitRuns counts the git processes this Checkpointer started. Nothing
+	// in the package acts on it: it is the work-count seam for tests (a
+	// claim must start none), kept per instance so parallel tests do not
+	// share it.
+	gitRuns int
 }
 
 // Dir returns the per-project history directory under globalDir.
@@ -150,7 +172,13 @@ func OpenWith(globalDir, projectPath string, opts Options) (*Checkpointer, error
 	}
 	c.setupAlternates()
 	c.writeDefaultExcludes()
+	c.dropAbandonedPrepared()
 	c.enforceRetention()
+	if list, err := c.list(); err == nil {
+		// A process that exited right after the GCEvery-th checkpoint
+		// never ran the gc it made due.
+		c.gcDue = c.gcDueAt(len(list))
+	}
 	c.computeWarning()
 	return c, nil
 }
@@ -294,6 +322,7 @@ func (c *Checkpointer) gitStdin(stdin string, args ...string) (string, error) {
 		// collect the objects; a reflog would keep them reachable forever.
 		"-c", "core.logAllRefUpdates=false",
 	}, args...)
+	c.gitRuns++
 	cmd := exec.Command("git", full...)
 	cmd.Dir = c.project
 	cmd.Env = append(os.Environ(),
@@ -422,149 +451,6 @@ func (c *Checkpointer) sameConversation(prev Checkpoint, conversation []byte) bo
 	return statErr == nil && c.lastConv.key == prev.ConvKey() && c.lastConv.sum == sha256.Sum256(conversation)
 }
 
-// Snapshot commits the current working tree and stores the given conversation
-// blob alongside it. label describes the pending tool call; prompt is the
-// user prompt of the current run.
-//
-// Commits are parentless and pinned by refs/checkpoints/<hash>, so retention
-// can drop any checkpoint independently. The hot path runs as few git
-// processes as it can, because on a warm index a process spawn costs more
-// than the work each one does:
-//
-//   - `add -A` refreshes the shadow index, which persists between snapshots,
-//     so only files whose stat data changed are rehashed.
-//   - One diff-index against the previous checkpoint answers "did anything
-//     change", yields FilesChanged, and finds files over the size cap.
-//   - An unchanged tree mints no commit: the entry reuses the previous
-//     commit, and if the conversation is unchanged too the previous entry is
-//     returned as is rather than adding a duplicate.
-//   - A changed tree costs write-tree, commit-tree and one update-ref --stdin
-//     transaction for both refs.
-func (c *Checkpointer) Snapshot(tool, prompt string, conversation []byte) (Checkpoint, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.disabled {
-		return Checkpoint{}, fmt.Errorf("checkpointing disabled")
-	}
-	if out, err := c.git("add", "-A", "."); err != nil {
-		return Checkpoint{}, fmt.Errorf("checkpoint add: %v: %s", err, out)
-	}
-	list, _ := c.list()
-	var prev *Checkpoint
-	if len(list) > 0 {
-		prev = &list[len(list)-1]
-	}
-	base := emptyTree
-	if prev != nil {
-		base = prev.ID
-	}
-	changes, diffErr := c.stagedChanges(base)
-	if diffErr != nil && base != emptyTree {
-		// The previous commit is unreadable (its borrowed objects were
-		// pruned): diff against nothing so the snapshot is still taken.
-		base = emptyTree
-		changes, diffErr = c.stagedChanges(base)
-	}
-	var skipped []string
-	if diffErr == nil {
-		skipped, changes = c.excludeOversized(changes)
-	}
-	if len(prompt) > 200 {
-		prompt = prompt[:200] + "…"
-	}
-	cp := Checkpoint{
-		At:           time.Now(),
-		Tool:         tool,
-		Prompt:       prompt,
-		SkippedLarge: skipped,
-	}
-
-	if prev != nil && base == prev.ID && diffErr == nil && len(changes) == 0 {
-		// No-change fast path: the index matches the previous commit.
-		if c.sameConversation(*prev, conversation) {
-			return *prev, nil
-		}
-		cp.ID = prev.ID
-		cp.Tree = prev.Tree
-		cp.Conv = fmt.Sprintf("%s-%d", prev.ID[:min(12, len(prev.ID))], len(list))
-	} else {
-		tree, err := c.git("write-tree")
-		if err != nil {
-			return Checkpoint{}, fmt.Errorf("checkpoint write-tree: %v: %s", err, tree)
-		}
-		msg := fmt.Sprintf("checkpoint before %s", tool)
-		hash, err := c.git("commit-tree", tree, "-m", msg)
-		if err != nil {
-			return Checkpoint{}, fmt.Errorf("checkpoint commit: %v: %s", err, hash)
-		}
-		refs := fmt.Sprintf("update refs/checkpoints/%s %s\nupdate HEAD %s\n", hash, hash, hash)
-		if out, err := c.gitStdin(refs, "update-ref", "--stdin"); err != nil {
-			return Checkpoint{}, fmt.Errorf("checkpoint ref: %v: %s", err, out)
-		}
-		cp.ID = hash
-		cp.Tree = tree
-		cp.FilesChanged = len(changes)
-	}
-
-	if err := c.storeConversation(&cp, conversation); err != nil {
-		return Checkpoint{}, err
-	}
-	list = append(list, cp)
-	if err := c.writeList(list); err != nil {
-		return Checkpoint{}, err
-	}
-	if len(list)%c.opts.GCEvery == 0 {
-		_, _ = c.git("gc", "--auto", "--quiet")
-	}
-	return cp, nil
-}
-
-// List returns all checkpoints, oldest first.
-func (c *Checkpointer) List() ([]Checkpoint, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.list()
-}
-
-// checkpointsFile is the on-disk format of checkpoints.json. The project path
-// is recorded alongside the list so storage cleanup can detect orphaned
-// history dirs (the dir name is sha256(projectPath) — one-way).
-type checkpointsFile struct {
-	ProjectPath string       `json:"project_path"`
-	Checkpoints []Checkpoint `json:"checkpoints"`
-}
-
-func (c *Checkpointer) list() ([]Checkpoint, error) {
-	data, err := os.ReadFile(filepath.Join(c.dir, "checkpoints.json"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var file checkpointsFile
-	if err := json.Unmarshal(data, &file); err != nil {
-		// Legacy format: a bare array without project_path metadata.
-		var out []Checkpoint
-		if err := json.Unmarshal(data, &out); err != nil {
-			return nil, err
-		}
-		return out, nil
-	}
-	return file.Checkpoints, nil
-}
-
-func (c *Checkpointer) writeList(list []Checkpoint) error {
-	raw, err := json.MarshalIndent(checkpointsFile{
-		ProjectPath: c.project,
-		Checkpoints: list,
-	}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(c.dir, "checkpoints.json"), raw, 0o600)
-}
-
 func (c *Checkpointer) convPath(id string) string {
 	return filepath.Join(c.dir, "conv", id+".json")
 }
@@ -588,6 +474,8 @@ func (c *Checkpointer) RestoreFiles(id string) error {
 	if c.disabled {
 		return fmt.Errorf("checkpointing disabled")
 	}
+	// A snapshot prepared before the restore no longer describes the tree.
+	c.gen++
 	// With alternates, a user-side `git gc --prune` can delete borrowed
 	// objects this checkpoint still needs; verify every object is present
 	// and fail with a clear message instead of a raw git error mid-reset.

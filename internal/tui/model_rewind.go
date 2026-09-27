@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"spettro/internal/agent"
 	"spettro/internal/checkpoint"
 	"spettro/internal/provider"
 	"spettro/internal/session"
@@ -44,6 +45,49 @@ func (m *Model) ensureCheckpointer() *checkpoint.Checkpointer {
 	}
 	m.checkpointer = cp
 	return cp
+}
+
+// runCheckpoints are one agent run's checkpoint hooks: the synchronous
+// snapshot and the preparer the runtime calls while the model generates
+// (agent.LLMAgent.Checkpoint and CheckpointPrepare). Every checkpoint of the
+// run records the same prompt and run-start conversation.
+type runCheckpoints struct {
+	cp           *checkpoint.Checkpointer
+	prompt       string
+	conversation []byte
+}
+
+// snapshot takes a synchronous checkpoint before tool.
+func (rc runCheckpoints) snapshot(tool string) {
+	_, _ = rc.cp.Snapshot(tool, rc.prompt, rc.conversation)
+}
+
+// prepare stages and commits the tree ahead of the step's first mutating
+// call; nil when that failed (the runtime then snapshots synchronously).
+func (rc runCheckpoints) prepare() agent.PreparedCheckpoint {
+	// The commit is minted before the tool is known; the checkpoint entry
+	// that claims it records the tool.
+	p, err := rc.cp.Prepare("the next tool call")
+	if err != nil {
+		return nil
+	}
+	return preparedRunCheckpoint{run: rc, prepared: p}
+}
+
+// preparedRunCheckpoint is a prepared snapshot the runtime can claim.
+type preparedRunCheckpoint struct {
+	run      runCheckpoints
+	prepared *checkpoint.Prepared
+}
+
+func (p preparedRunCheckpoint) Claim(tool string) bool {
+	_, err := p.run.cp.Commit(p.prepared, tool, p.run.prompt, p.run.conversation)
+	return err == nil
+}
+
+func (p preparedRunCheckpoint) ClaimRefreshed(tool string) bool {
+	_, err := p.run.cp.CommitTracked(p.prepared, tool, p.run.prompt, p.run.conversation)
+	return err == nil
 }
 
 // conversationSnapshot serializes the current conversation state for storage

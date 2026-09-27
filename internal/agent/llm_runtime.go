@@ -218,6 +218,12 @@ type toolLoopConfig struct {
 	MaxDepth        int
 	MaxToolCalls    int            // max tool calls per LLM step (0 → default 32)
 	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
+
+	// CheckpointPrepare prepares a step's snapshot ahead of its first
+	// mutating call (see LLMAgent.CheckpointPrepare); nil means every
+	// snapshot is taken synchronously through Checkpoint.
+	CheckpointPrepare func() PreparedCheckpoint
+
 	// Steering, when set, is drained at every step boundary; each pending
 	// message is appended to the conversation as a user turn so the model sees
 	// it before its next step. Top-level runs get the host's queue; a delegated
@@ -315,6 +321,17 @@ type toolRuntime struct {
 	// working tree (checkpoint_policy.go); parallelExec clears it per step.
 	stepCheckpointMu sync.Mutex
 	stepCheckpointed bool
+	// checkpointPrepare, runCheckpointed, speculative and speculativeDirty
+	// implement the snapshot prepared while the model generates
+	// (checkpoint_speculative.go). runCheckpointed records that this run
+	// took a checkpoint, which turns preparing ahead on; speculative is the
+	// pending preparation; speculativeDirty records that a call that may
+	// write the tree ran since it started. The last three are guarded by
+	// stepCheckpointMu.
+	checkpointPrepare func() PreparedCheckpoint
+	runCheckpointed   bool
+	speculative       *speculativeCheckpoint
+	speculativeDirty  bool
 
 	delegationDepth      int
 	maxParallelWorkers   int
@@ -617,6 +634,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		return toolLoopResult{}, err
 	}
 	runtime.hooksConfig = hooksCfg
+	// Preparing snapshots ahead is only safe when nothing but the tools
+	// themselves changes files between steps (checkpoint_speculative.go),
+	// and only useful when a tool can take a snapshot at all. Only the
+	// host's own run is handed a preparer; sub-agents sharing the checkout
+	// snapshot synchronously (subagentCheckpoint).
+	if !hooksMayWriteFiles(hooksCfg) && mayCheckpoint(allowed) {
+		runtime.checkpointPrepare = cfg.CheckpointPrepare
+	}
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
 		return toolLoopResult{}, err
 	}
@@ -751,10 +776,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	thinking := cfg.Thinking
 	// measure is the calibrated prompt size of a would-be request: history +
 	// system + tool schemas, scaled by what the provider reported for the
-	// previous step (see usageCalibration).
+	// previous step (see usageCalibration). The sizer re-counts only the
+	// messages that changed since its last call (prompt_size.go), so the
+	// several measurements a step makes cost a comparison pass each, not a
+	// full count of the history.
 	var calibration usageCalibration
+	var sizer promptSizer
 	measure := func(system string, msgs []provider.Message) int {
-		return calibration.apply(provider.EstimateRequestTokens(provider.Request{System: system, Messages: msgs, Tools: nativeToolSpecs}))
+		return calibration.apply(sizer.requestTokens(system, msgs, nativeToolSpecs))
 	}
 	contextWindow := func() int {
 		w := cfg.ContextWindow
@@ -808,9 +837,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				notify(fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(measure(system, convMsgs))))
 			}
 		}
+		// promptTokens is this step's uncalibrated request estimate, taken
+		// once the history is final: the input budget checks its calibrated
+		// value, and the calibration samples it against the reported usage.
+		promptTokens := sizer.requestTokens(system, convMsgs, nativeToolSpecs)
 		// Input budget (config token_budget): the whole prompt — tool results
 		// and tool schemas included — must stay under it.
-		if err := budget.CheckTokens(cfg.MaxTokens, measure(system, convMsgs)); err != nil {
+		if err := budget.CheckTokens(cfg.MaxTokens, calibration.apply(promptTokens)); err != nil {
 			// Over budget (e.g. an oversized tool result blew up the history):
 			// force-compact once instead of failing the run. Only if forced
 			// compaction doesn't help either does the run error out.
@@ -855,7 +888,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 		}
 		model := runtime.effectiveModel()
-		sentEstimate := provider.EstimateRequestTokens(req)
+		// req is exactly what promptTokens measured: the system prompt, the
+		// history and the advertised tools.
+		sentEstimate := promptTokens
+		// The tree is quiet while the model generates: snapshot it now for
+		// the step's first mutating call to claim.
+		runtime.prepareStepCheckpoint()
 		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()
@@ -1632,6 +1670,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	if r.checkpoint != nil && needsCheckpoint(call) {
 		r.checkpointStep(id)
 	}
+	r.noteTreeUse(call)
 	switch call.Tool {
 	case "file-read":
 		return r.runFileRead(ctx, call.Args)

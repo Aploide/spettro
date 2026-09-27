@@ -168,14 +168,15 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	// runtime calls back so the working tree is committed to the shadow repo
 	// together with the conversation as it stood when this run started. The
 	// snapshot blob is captured now — the model value is immutable during the
-	// run — and the checkpointer itself is thread-safe.
+	// run — and the checkpointer itself is thread-safe. The runtime also
+	// prepares each step's snapshot while the model generates and claims it
+	// at the first mutating call (checkpointPrepare).
 	var checkpointFn func(string)
+	var checkpointPrepare func() agent.PreparedCheckpoint
 	if cp := m.ensureCheckpointer(); cp != nil {
-		convSnapshot := m.conversationSnapshot()
-		prompt := input
-		checkpointFn = func(tool string) {
-			_, _ = cp.Snapshot(tool, prompt, convSnapshot)
-		}
+		run := runCheckpoints{cp: cp, prompt: input, conversation: m.conversationSnapshot()}
+		checkpointFn = run.snapshot
+		checkpointPrepare = run.prepare
 	}
 	// Live permission: consulted before every approval decision so a
 	// /permission change while this run executes applies immediately. It
@@ -274,6 +275,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			}
 		},
 	}
+	a.CheckpointPrepare = checkpointPrepare
 
 	return m, tea.Batch(
 		waitForRunEvents(events),

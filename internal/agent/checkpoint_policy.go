@@ -30,6 +30,17 @@ import (
 //     substitution, background jobs — still counts as mutating, because a
 //     spurious snapshot costs milliseconds while a missed one is
 //     unrecoverable.
+//
+// A third keeps the remaining cost off the mutating call's path: once a run
+// has taken its first checkpoint, the host prepares each later step's
+// snapshot while the model generates and the step's first mutating call
+// claims it (checkpoint_speculative.go). A preparation races outside edits
+// made during generation; the claim re-stages tracked files when a file the
+// agent knows changed, falls back to a synchronous snapshot whenever the
+// preparation cannot be trusted (a same-step write without a checkpoint, an
+// old preparation, background work), and the residual risk (an outside edit
+// to a file the agent never touched, within at most 30 seconds) is
+// documented there and in docs/checkpointing.md.
 
 // needsCheckpoint reports whether a tool call can modify the working tree
 // and so must be preceded by a snapshot.
@@ -74,8 +85,11 @@ func (r *toolRuntime) checkpointStep(tool string) {
 	if r.stepCheckpointed {
 		return
 	}
-	r.checkpoint(tool)
+	if !r.claimSpeculativeLocked(tool) {
+		r.checkpoint(tool)
+	}
 	r.stepCheckpointed = true
+	r.runCheckpointed = true
 }
 
 // subagentCheckpoint is the Checkpoint hook for a sub-agent working in

@@ -205,7 +205,15 @@ type LLMAgent struct {
 	// this checkout) so the host can snapshot files + conversation for
 	// /rewind. See checkpoint_policy.go for what counts as file-modifying.
 	Checkpoint func(tool string)
-	Manifest   *config.AgentManifest // for sub-agent spawning via agent tool
+	// CheckpointPrepare, optional next to Checkpoint, lets the runtime take
+	// a step's snapshot while the model is still generating: it is called
+	// on a background goroutine when the step's request is sent, and
+	// returns the prepared snapshot (nil when preparing failed). The step's
+	// first mutating call then claims it instead of waiting for Checkpoint.
+	// Only this run uses it; sub-agents snapshot through Checkpoint. See
+	// checkpoint_policy.go.
+	CheckpointPrepare func() PreparedCheckpoint
+	Manifest          *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
 	// whole agent tree. nil means the sandbox feature is disabled.
 	SandboxState    *SandboxState
@@ -335,6 +343,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ShellApproval:       a.ShellApproval,
 		AskUser:             a.AskUser,
 		Checkpoint:          a.Checkpoint,
+		CheckpointPrepare:   a.CheckpointPrepare,
 		Manifest:            a.Manifest,
 		SandboxState:        a.SandboxState,
 		SessionDir:          a.SessionDir,
