@@ -128,6 +128,9 @@ such name.
 never turned into a call of a built-in and never runs a built-in's code, and
 your tool is never advertised with a built-in's description or schema.
 Permission rules and hooks written for the name apply to your tool's calls.
+The TUI's transcript and activity panel label them with your tool's name
+(`References`, not `Found references to ...`), never with the built-in's
+wording.
 Spettro does not run `mcp`, `script` or `http` tools yet: a call of one is
 checked against the allow-list, permission rules and hooks like any other
 call, then fails with an error saying nothing was run.
