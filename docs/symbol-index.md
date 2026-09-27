@@ -40,22 +40,39 @@ holding `grep` by the v7 manifest migration). Manifest v12 folded it into
   lookup of a session (the TUI warms the index in the background at
   startup). There is one index per workspace root per process, shared by
   the TUI and every session, persisted at
-  `<project>/.spettro/cache/symbols.gob` and reloaded by the next process
-  (an older `symbols.json` cache is removed).
-- **Freshness.** A lookup re-syncs with the filesystem when the last sync is
-  more than 5 seconds old: files whose mtime or size changed are re-parsed,
-  deleted files are dropped. Within those 5 seconds it answers from memory
-  (a warm lookup takes milliseconds on a 60k-file tree), except that the
-  agent's own `file-write` / `file-edit` tools queue the touched file for
-  re-parsing and each foreground `bash` command forces a full re-sync on the
-  next lookup. So only an edit made outside Spettro can be missed, for at
-  most 5 seconds.
+  `<project>/.spettro/cache/symbols.idx` and reloaded by the next process
+  (older `symbols.json` and `symbols.gob` caches are removed). The cache is
+  rewritten only when the index changed, never by a start-up on an
+  unchanged tree.
+- **Freshness.** Only the first lookup of a process with no usable cache
+  waits for a full scan. After that a lookup answers from memory at once
+  (a few milliseconds on a 60k-file tree) and never waits for a re-scan;
+  instead:
+  - the files the symbol search's usage `grep` matched are re-checked by
+    mtime and size (and re-parsed, or added, when they changed) before the
+    definitions are listed. Every file defining the name contains it, so
+    unless the usages were cut at 200 matches the definitions are current
+    even for edits made outside Spettro a moment ago;
+  - the files of the best 50 definitions are re-checked the same way, so a
+    listed definition never points into a changed or deleted file;
+  - the agent's own `file-write` / `file-edit` tools queue the touched file
+    for re-parsing before the next lookup;
+  - a full re-scan (new, changed and deleted files) starts in the
+    background when the last one is more than 30 seconds old, or after a
+    `bash` command (foreground or background job) or a checkpoint rewind.
+  So a definition can be missing only from a file changed outside
+  Spettro that the usage grep did not reach (a name with more than 200
+  matches), until that background re-scan finishes.
 - **Bounded.** Indexing stops at 100k source files or 10 seconds (reading
   and parsing run in parallel), skips files over 1 MiB, and respects
-  `.gitignore` files the way `grep` does (nested ones included) plus the
-  usual junk directories (`.git`, `node_modules`, `vendor`, `dist`,
-  `build`, virtualenvs). When the file cap or the time bound cuts the
-  index short, the `definitions:` block says so.
+  `.gitignore` files the way `grep` does (nested ones included; files
+  above the project root do not apply, so a dotfiles `~/.gitignore` cannot
+  hide a project's sources) plus the usual junk directories (`.git`,
+  `node_modules`, `vendor`, `dist`, `build`, virtualenvs). Symlinks to
+  source files are indexed under the link's path; symlinked directories
+  are not followed. When the file cap or the time bound cuts the index
+  short, the result says so, also when no definition was found (the
+  definition may be in the part never indexed).
 - **Usages.** The matches after the definitions are a case-insensitive
   literal `grep` for the name, so they skip ignored, binary and oversized
   files like any `grep`, and stop at 200 (with the usual truncation note).

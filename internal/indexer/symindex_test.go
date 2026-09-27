@@ -143,7 +143,7 @@ func TestMtimeInvalidationWithoutExplicitCall(t *testing.T) {
 
 func TestCachePersistsAcrossInstances(t *testing.T) {
 	root := fixtureRepo(t)
-	cache := filepath.Join(root, ".spettro", "cache", "symbols.gob")
+	cache := filepath.Join(root, ".spettro", "cache", "symbols.idx")
 	x := NewSymbolIndex(root, cache)
 	x.Lookup(context.Background(), "Server")
 	x.Flush()

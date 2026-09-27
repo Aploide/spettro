@@ -34,8 +34,9 @@ func DefaultExtractors() []Extractor {
 // regexExtract runs kind-tagged patterns line by line. Each pattern must have
 // exactly one capture group: the symbol name. mayDefine is a cheap necessary
 // condition for any rule to match a line (a keyword the rules start with):
-// lines failing it skip the regexps, which is most lines of a file (the
-// per-file cost on the 61k-file corpus dropped ~6x; symindex_bench_test.go).
+// lines failing it skip the regexps, which is most lines of a file: the Go
+// files of net/http extract in 4.6 ms instead of 22 ms (BenchmarkExtractGo
+// against BenchmarkExtractGoOracle in symindex_bench_test.go).
 // The returned strings are copies, so they do not keep src alive.
 func regexExtract(relPath string, src []byte, rules []regexRule, mayDefine func(line []byte) bool) []Symbol {
 	var out []Symbol

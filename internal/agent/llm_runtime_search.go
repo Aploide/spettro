@@ -293,9 +293,6 @@ func (q grepQuery) wantsFile(rel string) bool {
 	return false
 }
 
-// runGrep implements the grep tool: ripgrep when it is installed (fast, and
-// exact about .gitignore), otherwise a Go walk honouring the root .gitignore.
-// Both skip binary files, clip long lines and stop at max_results.
 // runSymbolSearch answers grep's symbol form: a case-insensitive literal
 // search backed by the symbol index, listing ranked definitions of an
 // identifier before its usages.
@@ -339,10 +336,29 @@ func (r *toolRuntime) runListDir(dirPath string) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+// runGrep implements the grep tool: ripgrep when it is installed (fast, and
+// exact about .gitignore), otherwise a Go walk applying the same filters.
+// Both skip binary files, clip long lines and stop at max_results.
 func (r *toolRuntime) runGrep(ctx context.Context, args grepArgs) (string, error) {
-	q, err := r.newGrepQuery(args)
+	out, err := r.grepMatches(ctx, args)
 	if err != nil {
 		return "", err
+	}
+	return r.reportGrep(out), nil
+}
+
+// grepOutcome is a finished grep search, before formatting.
+type grepOutcome struct {
+	q         grepQuery
+	results   []grepFileResult // capped at max_results
+	truncated bool             // max_results cut the results
+}
+
+// grepMatches runs a grep search and caps its results.
+func (r *toolRuntime) grepMatches(ctx context.Context, args grepArgs) (grepOutcome, error) {
+	q, err := r.newGrepQuery(args)
+	if err != nil {
+		return grepOutcome{}, err
 	}
 	var results []grepFileResult
 	usedRipgrep := false
@@ -354,31 +370,44 @@ func (r *toolRuntime) runGrep(ctx context.Context, args grepArgs) (string, error
 	}
 	if !usedRipgrep {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", fmt.Errorf("grep: %w", ctxErr)
+			return grepOutcome{}, fmt.Errorf("grep: %w", ctxErr)
 		}
 		results, err = r.grepWithWalk(ctx, q)
 		if err != nil {
-			return "", fmt.Errorf("grep walk: %w", err)
+			return grepOutcome{}, fmt.Errorf("grep walk: %w", err)
 		}
 	}
-	var truncated bool
+	out := grepOutcome{q: q, results: results}
 	if q.mode == "content" {
-		results, truncated = capGrepResults(results, q.max, q.context)
+		out.results, out.truncated = capGrepResults(results, q.max, q.context)
 	} else if len(results) > q.max {
 		// count and files_with_matches answer "how many" and "which files":
 		// max_results caps the files listed, never a file's count.
-		results, truncated = results[:q.max], true
+		out.results, out.truncated = results[:q.max], true
 	}
-	if len(results) == 0 {
-		return fmt.Sprintf("no matches for %q", args.Pattern), nil
+	return out, nil
+}
+
+// files lists the workspace-relative paths of the files that matched.
+func (o grepOutcome) files() []string {
+	paths := make([]string, len(o.results))
+	for i, fr := range o.results {
+		paths[i] = fr.path
 	}
-	// Mark as read from search
+	return paths
+}
+
+// reportGrep records the matched files as read and renders the result.
+func (r *toolRuntime) reportGrep(o grepOutcome) string {
+	if len(o.results) == 0 {
+		return fmt.Sprintf("no matches for %q", o.q.pattern)
+	}
 	r.mu.Lock()
-	for _, fr := range results {
+	for _, fr := range o.results {
 		r.readSet[fr.path] = struct{}{}
 	}
 	r.mu.Unlock()
-	return formatGrepResults(results, q, truncated), nil
+	return formatGrepResults(o.results, o.q, o.truncated)
 }
 
 // looksBinary reports whether data looks like a binary file: a NUL byte in

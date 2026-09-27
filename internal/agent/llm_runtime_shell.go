@@ -121,6 +121,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 		if err != nil {
 			return "", fmt.Errorf("start background job: %w", err)
 		}
+		r.markSymbolIndexStale()
 		return fmt.Sprintf("started background job %s (poll with job-output, terminate with job-kill)", job.ID), nil
 	}
 	// The deadline starts here, after approval, so time spent waiting on the
@@ -147,11 +148,7 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	stamped := r.snapshotStampsForShell()
 	out, err := shell.CombinedOutput(cmd)
 	restampNote := r.restampNote(r.restampAfterShell(stamped))
-	// The command may have changed any source file: the next symbol lookup
-	// re-syncs the index with the disk instead of trusting its TTL.
-	if r.searcher.Index != nil {
-		r.searcher.Index.MarkStale()
-	}
+	r.markSymbolIndexStale()
 	// The output is sized as the shell's ("bash": a generous budget, head and
 	// tail kept), not by toolID. toolID is the call's identity, which for an
 	// unfolded retired name (shell-exec, bash-output) is that name; it decides
@@ -873,4 +870,15 @@ func saveAllowedCommandSet(cwd string, set map[string]struct{}) error {
 		return fmt.Errorf("write allowed commands temp: %w", err)
 	}
 	return safeio.Replace(tmp, path)
+}
+
+// markSymbolIndexStale tells the symbol index that a shell command may have
+// changed any file: the next symbol lookup starts a full re-sync in the
+// background instead of waiting for the index's TTL. (A background job can
+// change files after this, too; the lookups' own re-checks of the files
+// they list and of the files the symbol search's grep matched cover it.)
+func (r *toolRuntime) markSymbolIndexStale() {
+	if r.searcher.Index != nil {
+		r.searcher.Index.MarkStale()
+	}
 }
