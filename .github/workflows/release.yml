@@ -36,6 +36,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Ship the current model catalog as the embedded offline fallback. A
+      # catalog outage keeps the committed snapshot rather than failing the
+      # release.
+      - name: Refresh embedded model catalog
+        run: go generate ./internal/models || echo "::warning::catalog download failed; keeping the committed snapshot"
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}

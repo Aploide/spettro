@@ -32,6 +32,15 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      # The binary embeds a model catalog snapshot as its offline fallback
+      # (internal/models); fail when it is more than 30 days older than the
+      # live catalog. Network-dependent, so it runs once, not per OS.
+      - name: Embedded model catalog is current
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          SPETTRO_CATALOG_FRESHNESS_CHECK: "1"
+        run: go test -count=1 -run TestEmbeddedCatalogFreshness ./internal/models
+
   build:
     name: Build check / ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
