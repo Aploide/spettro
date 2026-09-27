@@ -30,8 +30,7 @@ func (m *Model) stopAgent() {
 	}
 	m.discardQuestionQueue(fmt.Errorf("cancelled"))
 	m.thinking = false
-	m.toolCh = nil
-	m.streamCh = nil
+	m.runEvents = nil
 	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -128,10 +129,8 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	if m.steering == nil {
 		m.steering = agent.NewSteeringQueue()
 	}
-	toolCh := make(chan agent.ToolTrace, 64)
-	m.toolCh = toolCh
-	streamCh := make(chan agent.StreamChunk, 256)
-	m.streamCh = streamCh
+	events := newRunEventQueue()
+	m.runEvents = events
 	usageCh := make(chan agent.UsageEvent, 16)
 	m.usageCh = usageCh
 	m.liveRunTokens = 0
@@ -222,23 +221,14 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		ShellTimeoutSec: m.cfg.GoalShellTimeoutSec,
 		Steering:        m.steering,
 		PermissionFn:    permissionFn,
+		// Neither callback can block the agent: the queue is unbounded,
+		// and one the TUI stopped reading (after stopAgent) is dropped
+		// with the run.
 		ToolCallback: func(t agent.ToolTrace) {
-			// Guard the send against a cancelled run: after stopAgent() the TUI
-			// stops draining toolCh, so an unguarded send from an in-flight
-			// step could block the agent goroutine forever once the 64-slot
-			// buffer fills.
-			select {
-			case toolCh <- t:
-			case <-ctx.Done():
-			}
+			events.push(runEvent{trace: &t})
 		},
 		StreamCallback: func(c agent.StreamChunk) {
-			// Same cancellation guard as ToolCallback: never block the agent
-			// goroutine on a stream send once the TUI stops draining.
-			select {
-			case streamCh <- c:
-			case <-ctx.Done():
-			}
+			events.push(runEvent{chunk: &c})
 		},
 		UsageCallback: func(ev agent.UsageEvent) {
 			select {
@@ -282,8 +272,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	}
 
 	return m, tea.Batch(
-		waitForTool(toolCh),
-		waitForStream(streamCh),
+		waitForRunEvents(events),
 		waitForUsage(usageCh),
 		waitForShellApproval(approvalCh),
 		waitForAskUser(askUserCh),
@@ -296,8 +285,10 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			}
 			a.Spec = runSpec
 			result, err := a.Run(ctx, input)
-			close(toolCh)
-			close(streamCh)
+			// The done message must not overtake the run's last events
+			// (see runEventQueue).
+			events.close()
+			events.waitDrained(2 * time.Second)
 			close(usageCh)
 			close(approvalCh)
 			close(askUserCh)

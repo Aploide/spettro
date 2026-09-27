@@ -408,8 +408,9 @@ type Model struct {
 
 	liveTools   []ToolItem
 	currentTool *ToolItem
-	toolCh      chan agent.ToolTrace
-	streamCh    chan agent.StreamChunk
+	// runEvents carries the active run's stream chunks and tool traces, in
+	// order (see runEventQueue); nil when no run is streaming.
+	runEvents   *runEventQueue
 	usageCh     chan agent.UsageEvent
 	approvalCh  chan shellApprovalRequestMsg
 	askUserCh   chan askUserRequestMsg

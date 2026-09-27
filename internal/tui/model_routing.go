@@ -40,7 +40,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) resetRunState() {
 	m.thinking = false
 	m.cancelAgent = nil
-	m.toolCh = nil
+	m.runEvents = nil
 	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
@@ -410,85 +410,33 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.refreshViewport()
+	case runEventsMsg:
+		// A batch left over from a stopped run is dropped: its queue is no
+		// longer the active one (tests deliver batches with no queue).
+		if m.thinking && (msg.queue == nil || msg.queue == m.runEvents) {
+			for _, ev := range msg.events {
+				if ev.chunk != nil {
+					m.applyStreamChunk(*ev.chunk)
+				} else if ev.trace != nil {
+					cmds = append(cmds, m.applyToolTrace(*ev.trace)...)
+				}
+			}
+			// One refresh for the whole batch, however many events it held.
+			m.refreshViewport()
+			if m.runEvents != nil {
+				cmds = append(cmds, waitForRunEvents(m.runEvents))
+			}
+		}
 	case toolProgressMsg:
+		// A single trace, as tests deliver them; a live run delivers
+		// runEventsMsg batches.
 		if m.thinking {
-			t := msg.trace
-			m.applyToolTraceToObservability(t)
-			m.publishRemoteToolTrace(t)
-			if t.Name == "comment" {
-				if t.Status == "success" {
-					if message := extractCommentMessage(t.Args, t.Output); message != "" {
-						m.setProgressNote(message)
-					}
-				}
-				if m.toolCh != nil {
-					cmds = append(cmds, waitForTool(m.toolCh))
-				}
-				m.refreshViewport()
-				break
-			}
-			switch t.Name {
-			case "todo-write":
-				if t.Status != "running" {
-					m.syncTodosFromSession()
-				}
-			}
-			m.trackSessionEditFromTrace(t)
-			if t.Status != "running" {
-				switch t.Name {
-				case "file-write", "bash", "agent":
-					// Refresh the side-panel file list off the Update
-					// goroutine, throttled so a burst of traces does not
-					// spawn git serially on the hot path.
-					if cmd := m.scheduleModifiedRefresh(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-					// Re-scan repo files so @-mention suggestions pick
-					// up files created or deleted by the tool.
-					if cmd := m.scheduleRepoScan(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
-			}
-			if t.Status == "running" {
-				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
-				m.currentTool = &item
-				m.appendToolStreamMessage(item)
-			} else {
-				m.toolSeq++
-				completed := ToolItem{
-					Name:   t.Name,
-					Status: t.Status,
-					Args:   t.Args,
-					Output: t.Output,
-					Seq:    m.toolSeq,
-				}
-				// Compute the diff off the Update goroutine: computeFileDiff
-				// shells out to git, which used to block Update per edit. The
-				// result is attached later via toolDiffMsg keyed on Seq.
-				cmds = append(cmds, computeFileDiffCmd(completed.Seq, m.cwd, t.Name, t.Args, t.Status))
-				// Cap m.liveTools to bound memory and the run summary built
-				// at interrupt time. When the LLM emits very large tool
-				// batches we keep the most recent maxLiveTools entries so
-				// the most useful context (what just happened) survives.
-				m.liveTools = append(m.liveTools, completed)
-				if len(m.liveTools) > maxLiveTools {
-					m.liveTools = append([]ToolItem(nil), m.liveTools[len(m.liveTools)-maxLiveTools:]...)
-				}
-				m.currentTool = nil
-				m.updateToolStreamMessage(completed)
-			}
-			if m.toolCh != nil {
-				cmds = append(cmds, waitForTool(m.toolCh))
-			}
+			cmds = append(cmds, m.applyToolTrace(msg.trace)...)
 			m.refreshViewport()
 		}
 	case streamChunkMsg:
 		if m.thinking {
 			m.applyStreamChunk(msg.chunk)
-			if m.streamCh != nil {
-				cmds = append(cmds, waitForStream(m.streamCh))
-			}
 			m.refreshViewport()
 		}
 	case usageEventMsg:
