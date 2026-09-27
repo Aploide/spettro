@@ -213,8 +213,7 @@ func (m Model) approvalDialogLines(label string, contentW int) []string {
 	if lay.showLabel {
 		lines = append(lines, label)
 	}
-	summary := approvalSummary(formatApprovalCommandLabel(req.Command))
-	lines = append(lines, styleWarn.Render(termtext.Fit("  "+summary, contentW)))
+	lines = append(lines, styleWarn.Render(approvalSummaryRow(req, contentW)))
 	if lay.showReason {
 		lines = append(lines, styleMuted.Render(termtext.Fit("  why: "+termtext.SingleLine(req.Reason), contentW)))
 	}
@@ -239,6 +238,31 @@ func (m Model) approvalDialogLines(label string, contentW int) []string {
 	}
 	return lines
 }
+
+// approvalSummaryRow is the dialog's summary row, at most contentW cells,
+// indented by two. A command too long for it is cut at the end (the preview
+// shows it whole). A file change ("$ file-write <path>") is cut in the
+// middle of its path instead, keeping the tool name and the path's end: cut
+// at the end, a deep path lost its file name, and on a terminal too short
+// for the diff preview (40x15) the dialog asked to approve a write without
+// naming the file.
+func approvalSummaryRow(req agent.ShellApprovalRequest, contentW int) string {
+	summary := approvalSummary(formatApprovalCommandLabel(req.Command))
+	isFileChange := req.Change != nil || strings.TrimSpace(req.Diff) != ""
+	if !isFileChange || ansi.StringWidth(summary)+2 <= contentW {
+		return termtext.Fit("  "+summary, contentW)
+	}
+	head := "  $ " + req.ToolID + " "
+	path, ok := strings.CutPrefix(summary, "$ "+req.ToolID+" ")
+	if req.ToolID == "" || !ok || ansi.StringWidth(head)+minApprovalPathCells > contentW {
+		return termtext.Fit("  "+summary, contentW)
+	}
+	return head + termtext.FitLeft(path, contentW-ansi.StringWidth(head))
+}
+
+// minApprovalPathCells is the fewest cells approvalSummaryRow keeps for a
+// path cut from the left; with less, the row is simply cut at the end.
+const minApprovalPathCells = 8
 
 // approvalSummary puts a command label on the dialog's one summary row. The
 // lines of a multi-line command are joined with a space; nothing else is
