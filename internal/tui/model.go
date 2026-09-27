@@ -294,6 +294,12 @@ type Model struct {
 	vp lineView
 	ta textarea.Model
 
+	// frameMemo keeps the header, input area, status bar and side panel
+	// between frames (see frameMemo); chromeSeq is its key, advanced by
+	// Update for every message that can change them.
+	frameMemo *frameMemo
+	chromeSeq uint64
+
 	// renderCache memoizes per-message rendered blocks so the chat transcript
 	// is not re-rendered (markdown regex and all) on every frame. See
 	// renderTranscriptBlocks / renderCacheState. Pointer so the cache

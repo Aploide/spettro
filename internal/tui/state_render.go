@@ -337,7 +337,8 @@ func (m Model) recalcLayout() Model {
 	// dialogs keep themselves inside the terminal (questionBlockBudget,
 	// approvalLayout), so measuring can never squeeze the conversation away.
 	m.ta.SetWidth(m.paneWidth() - 6)
-	inputH := lipgloss.Height(m.viewInput(m.paneWidth()))
+	_, input := m.cachedInput(m.paneWidth())
+	inputH := len(input.rows)
 
 	fixed := headerH + sepH + inputH + statusH + m.parallelFooterHeight() + m.workingIndicatorHeight()
 	// At least one transcript row, even when the chrome alone fills the

@@ -55,10 +55,10 @@ func (m Model) viewContent() string {
 		return clampFrame(h.view(m), m.width, m.height)
 	}
 
-	header := m.viewHeader()
+	header := m.cachedHeader()
 	paneW := m.paneWidth()
-	inputArea := m.viewInput(paneW)
-	statusBar := m.viewStatusBar(paneW)
+	inputArea, inputPart := m.cachedInput(paneW)
+	statusBar := m.cachedStatusBar(paneW)
 	sideW := m.sidePanelWidth()
 
 	// The working indicator sits directly above the input box on every path
@@ -66,7 +66,7 @@ func (m Model) viewContent() string {
 	// is open. It is "" when idle and costs no row then.
 	indicator := m.viewWorkingIndicator(paneW)
 
-	var parts []string
+	var parts []framePart
 	if len(m.cmdItems) > 0 {
 		// The overlay takes the place of the separators, the transcript and
 		// the footer: every row the header, the status bar, the working
@@ -75,33 +75,29 @@ func (m Model) viewContent() string {
 		// chips, a taller textarea).
 		innerH := max(m.height-1-1-m.workingIndicatorHeight()-lipgloss.Height(inputArea), 1)
 		overlay := m.viewCmdOverlay(m.vp.Width(), innerH)
-		parts = []string{overlay}
+		parts = []framePart{newFramePart(overlay)}
 	} else {
-		sep := m.viewSep(paneW)
-		content := m.vp.View()
-		parts = []string{sep, content, sep}
+		sep := fixedWidthPart(m.viewSep(paneW), paneW)
+		parts = []framePart{sep, fixedWidthPart(m.vp.View(), m.vp.Width()), sep}
 		if m.showsParallelFooter() {
 			if pa := m.renderParallelAgents(); pa != "" {
-				parts = append(parts, pa)
+				parts = append(parts, newFramePart(pa))
 			}
 		}
 	}
 	if indicator != "" {
-		parts = append(parts, indicator)
+		parts = append(parts, newFramePart(indicator))
 	}
-	parts = append(parts, inputArea, statusBar)
-
-	mainPane := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	parts = append(parts, inputPart, statusBar)
 
 	if sideW <= 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
+		return composeFrame(header, parts, nil)
 	}
-	sidePane := m.viewSidePanel(sideW)
 	// A blank gutter column between the panes: the panel draws its own
 	// border. The gutter was once a one-row "│", which JoinHorizontal left
 	// as a stray tick at the end of the transcript's top rule.
-	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, " ", sidePane)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	side := m.cachedSidePanel(sideW)
+	return composeFrame(header, parts, &side)
 }
 
 // clampFrame cuts a full-screen frame to the terminal: at most height rows,

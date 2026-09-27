@@ -14,6 +14,12 @@ import (
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	newModel, cmd := m.update(msg)
 	if nm, ok := newModel.(Model); ok {
+		if nm.frameMemo == nil {
+			nm.frameMemo = &frameMemo{}
+		}
+		if !transcriptOnly(msg) {
+			nm.chromeSeq++
+		}
 		nm = nm.recalcLayout()
 		if timers := nm.armTimers(); timers != nil {
 			cmd = tea.Batch(cmd, timers)
