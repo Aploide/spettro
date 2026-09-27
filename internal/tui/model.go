@@ -353,7 +353,16 @@ type Model struct {
 
 	favorites map[string]bool
 
+	// pendingPlan is the last plan the plan agent produced that has not
+	// been run: /approve (or "Execute plan" in the picker) runs it with the
+	// coding agent. It survives "Don't execute" and Esc, and is dropped
+	// with the conversation (/clear, /resume).
 	pendingPlan string
+	// planEditing is set when the user picked "Edit" in the plan picker:
+	// the next non-command input is then a change request for the plan
+	// (handlePlanEdit) instead of a new prompt. Nothing else sets it, so a
+	// kept plan never captures an ordinary prompt.
+	planEditing bool
 
 	banner        string
 	bannerKind    string

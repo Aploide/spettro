@@ -41,12 +41,15 @@ func (m Model) updatePlanApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			plan := m.pendingPlan
 			m.pendingPlan = ""
+			m.planEditing = false
 			return m.runAgentApproved(spec, plan, nil, nil, true)
 		case 1:
-			m.pendingPlan = ""
+			// Keep the plan: /approve runs it later.
+			m.planEditing = false
 			m.showBanner("plan saved to .spettro/PLAN.md — use /approve later to execute", "info")
 			return m, nil
 		case 2:
+			m.planEditing = true
 			m.showBanner("describe your changes and press enter", "info")
 			m.ta.Focus()
 			return m, nil
@@ -55,6 +58,7 @@ func (m Model) updatePlanApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.showPlanApproval = false
 		m.planApprovalCursor = 0
+		m.planEditing = false
 		m.showBanner("plan saved — use /approve to execute later", "info")
 		return m, nil
 	}
@@ -138,6 +142,7 @@ func (m Model) handlePlanEdit(editInstruction string) (tea.Model, tea.Cmd) {
 	}
 	task := m.pendingPlan + "\n\n---\nUser requested the following changes to the plan:\n" + editInstruction
 	m.pendingPlan = ""
+	m.planEditing = false
 	return m.runAgent(spec, task, nil, nil)
 }
 

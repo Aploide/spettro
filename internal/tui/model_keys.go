@@ -298,7 +298,7 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ta.Reset()
 		m.cmdItems = nil
 		m.mentionItems = nil
-		if m.pendingPlan != "" && !isCmd {
+		if m.planEditing && !isCmd {
 			return m.handlePlanEdit(input)
 		}
 		if isCmd {

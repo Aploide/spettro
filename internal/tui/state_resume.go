@@ -14,6 +14,25 @@ import (
 	"spettro/internal/theme"
 )
 
+// resetConversationState drops what belongs to the conversation on screen
+// and not to the one that replaces it, on /clear and /resume:
+//
+//   - the structured carried history: a resumed session's first turn
+//     rebuilds context from the loaded transcript instead;
+//   - the context gauge (contextTokens, compactWarningLevel): kept, a long
+//     conversation's occupancy would block the first prompt of a short
+//     resumed one with "context limit reached";
+//   - a pending plan and plan-edit mode: the next prompt must not run or
+//     edit the previous conversation's plan.
+func (m *Model) resetConversationState() {
+	m.convHistory = nil
+	m.autoCompactNoopLen = 0
+	m.contextTokens = 0
+	m.compactWarningLevel = 0
+	m.pendingPlan = ""
+	m.planEditing = false
+}
+
 func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 	return session.Load(m.store.GlobalDir, sel.ID)
 }
@@ -173,11 +192,9 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.parallelAgents = nil
 			m.workflow = nil
 			m.activityFeed = nil
-			// The structured carried history belongs to the previous in-memory
-			// conversation; drop it so the resumed session's first turn rebuilds
-			// context from the loaded transcript instead.
-			m.convHistory = nil
-			m.autoCompactNoopLen = 0
+			// The carried history, context gauge and pending plan belong to
+			// the previous conversation (see resetConversationState).
+			m.resetConversationState()
 			m.messages = make([]ChatMessage, 0, len(state.Messages))
 			for _, cm := range state.Messages {
 				m.messages = append(m.messages, ChatMessage{

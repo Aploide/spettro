@@ -183,6 +183,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			} else {
 				plan := m.pendingPlan
 				m.pendingPlan = ""
+				m.planEditing = false
 				return m.runAgentApproved(spec, plan, nil, nil, true)
 			}
 		}
@@ -193,18 +194,14 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
-		m.convHistory = nil
-		m.autoCompactNoopLen = 0
+		m.resetConversationState()
 		// Spooled tool outputs are only reachable through the cleared
 		// history's references; drop them with the conversation.
 		jobs.Spool().Cleanup()
 		m.sessionID = ""
 		m.todos = nil
-		// Occupancy resets with the conversation; keep the gauge honest.
-		m.contextTokens = 0
 		// Usage counters are per-conversation; a cleared session starts at zero.
 		m.providers.ResetUsage()
-		m.compactWarningLevel = 0
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
 	case "/stats":
