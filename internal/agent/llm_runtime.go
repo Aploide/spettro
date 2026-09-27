@@ -751,10 +751,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	thinking := cfg.Thinking
 	// measure is the calibrated prompt size of a would-be request: history +
 	// system + tool schemas, scaled by what the provider reported for the
-	// previous step (see usageCalibration).
+	// previous step (see usageCalibration). The sizer re-counts only the
+	// messages that changed since its last call (prompt_size.go), so the
+	// several measurements a step makes cost a comparison pass each, not a
+	// full count of the history.
 	var calibration usageCalibration
+	var sizer promptSizer
 	measure := func(system string, msgs []provider.Message) int {
-		return calibration.apply(provider.EstimateRequestTokens(provider.Request{System: system, Messages: msgs, Tools: nativeToolSpecs}))
+		return calibration.apply(sizer.requestTokens(system, msgs, nativeToolSpecs))
 	}
 	contextWindow := func() int {
 		w := cfg.ContextWindow
@@ -808,9 +812,13 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 				notify(fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(measure(system, convMsgs))))
 			}
 		}
+		// promptTokens is this step's uncalibrated request estimate, taken
+		// once the history is final: the input budget checks its calibrated
+		// value, and the calibration samples it against the reported usage.
+		promptTokens := sizer.requestTokens(system, convMsgs, nativeToolSpecs)
 		// Input budget (config token_budget): the whole prompt — tool results
 		// and tool schemas included — must stay under it.
-		if err := budget.CheckTokens(cfg.MaxTokens, measure(system, convMsgs)); err != nil {
+		if err := budget.CheckTokens(cfg.MaxTokens, calibration.apply(promptTokens)); err != nil {
 			// Over budget (e.g. an oversized tool result blew up the history):
 			// force-compact once instead of failing the run. Only if forced
 			// compaction doesn't help either does the run error out.
@@ -855,7 +863,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 		}
 		model := runtime.effectiveModel()
-		sentEstimate := provider.EstimateRequestTokens(req)
+		// req is exactly what promptTokens measured: the system prompt, the
+		// history and the advertised tools.
+		sentEstimate := promptTokens
 		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()

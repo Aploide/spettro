@@ -1,11 +1,20 @@
+// Package budget holds the chars/4 token heuristic and the token budget
+// checks built on it.
 package budget
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
+// EstimateTokens approximates the tokens of parts: their total rune count
+// divided by four, plus one for any non-empty text (0 for no text at all).
 func EstimateTokens(parts ...string) int {
 	totalChars := 0
 	for _, p := range parts {
-		totalChars += len([]rune(p))
+		// The same count as len([]rune(p)), invalid bytes included, written
+		// so it never depends on the compiler eliding the rune slice.
+		totalChars += utf8.RuneCountInString(p)
 	}
 
 	if totalChars == 0 {
