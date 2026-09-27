@@ -16,6 +16,12 @@ side — the ACP agent reuses your existing configuration (active
 provider/model, API keys, permission level, agent manifest, sandbox
 settings).
 
+`initialize` is answered without touching the network. Local endpoint
+probes and the Spettro Subscription model list run in the background;
+`session/new`, `session/load` and `session/resume` wait up to 2 seconds for
+them, and models that arrive later are sent to every open session as a
+`config_option_update` (see [Model catalog](configuration.md#model-catalog)).
+
 The sandbox flags work as in the other modes:
 
 ```bash

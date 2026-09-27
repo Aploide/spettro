@@ -20,10 +20,11 @@ deleted.
 | `~/.spettro/history/<hash>/` | Checkpoint shadow repo + conversation blobs per project | history | Yes — loses `/rewind` history for that project only |
 | `~/.spettro/sessions/session-*/` | Saved conversations, tasks, events | history | Yes — loses `/resume` for that session |
 | `~/.spettro/sessions/session-*/workflows/wf_*/` | [Workflow](workflows.md) run transcripts: `script.js`, `meta.json`, `journal.jsonl`, `result.json` | history | Yes — loses the ability to resume that run from its journal |
-| `~/.spettro/catalog.json` | models.dev catalog cache | cache | Yes — re-fetched on demand |
+| `~/.spettro/catalog.json` | Model catalog cache | cache | Yes — the embedded snapshot is used until the background refresh fetches a new copy |
+| `~/.spettro/update-check.json` | Last GitHub release check | cache | Yes — checked again on the next start |
 | `~/.spettro/memory-inbox.json` | Mined-fact candidates | cache | Yes — loses pending `/memory review` items (not preselected) |
 | `~/.spettro/skills/` | Installed skills | user | Only via `/skill uninstall` |
-| `~/.spettro/memory.md`, `config.json`, `keys.enc`, `master.key`, `trusted.json`, `telegram.json`, `allowed_commands.json`, `commands/` | Config, secrets, user content | secret/user | **Never** — not even listed in the cleaner |
+| `~/.spettro/memory.md`, `config.json`, `keys.enc`, `keys.enc.v1`, `master.key`, `trusted.json`, `telegram.json`, `allowed_commands.json`, `commands/` | Config, secrets, user content | secret/user | **Never** — not even listed in the cleaner |
 | `<project>/.spettro/cache/` (e.g. `symbols.json`) | Regenerable caches | cache | Yes — rebuilt lazily |
 | `<project>/.spettro/memory.md`, `commands/`, `workflows/` | User content (including saved workflow scripts) | user | **Never** |
 | `$TMPDIR/spettro-spool-*` | Oversized tool outputs from crashed sessions | cache | Yes, when dead (untouched > 48 h and not the live session's spool) |

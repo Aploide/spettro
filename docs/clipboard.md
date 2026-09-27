@@ -30,7 +30,7 @@ does not support vision` and the paste is ignored.
 
 | Platform | `Ctrl+V` clipboard image paste |
 |----------|-------------------------------|
-| macOS    | ✅ Supported (native clipboard) |
+| macOS    | ✅ Supported (native clipboard; AppKit is loaded on the first paste, not at startup) |
 | Linux    | ✅ Supported (X11/Wayland via `xclip` or `wl-paste`) |
 | Windows  | ❌ Not yet supported |
 
