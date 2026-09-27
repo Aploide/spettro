@@ -54,6 +54,19 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	return rel, nil
 }
 
+// RefreshLatestRelease asks GitHub for the newest published release,
+// ignoring the release-check cache, and stores the answer in the cache so the
+// next launch sees it. It is for an explicit request (/update), where a
+// release published since the last check must not be missed.
+func RefreshLatestRelease(ctx context.Context) (*Release, error) {
+	rel, err := FetchLatestRelease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	storeRelease(rel, time.Now())
+	return rel, nil
+}
+
 // cachedRelease returns the cached release when the cache is fresh at now.
 func cachedRelease(now time.Time) (*Release, bool) {
 	path, err := releaseCheckPath()

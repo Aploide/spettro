@@ -13,7 +13,7 @@ Spettro uses both project-local and user-global storage.
 | `trusted.json` | Permanently trusted project paths. |
 | `catalog.json` | Cached provider/model catalog (see [Model catalog](#model-catalog)). |
 | `catalog-meta.json` | When the server last confirmed `catalog.json`, and the server's `ETag`/`Last-Modified` for it. |
-| `update-check.json` | Result of the last GitHub release check, reused for 24 hours. |
+| `update-check.json` | Result of the last GitHub release check, reused for 24 hours by the startup notice (`/update` always checks live). |
 | `hooks.json` | Global runtime hooks fallback/default. |
 | `lsp.json` | Optional [LSP](lsp.md) overrides; servers are auto-detected on PATH with zero config. |
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |

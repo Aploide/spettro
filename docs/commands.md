@@ -6,6 +6,7 @@
 | --- | --- |
 | `/help` | Show in-app help text. |
 | `/exit`, `/quit` | Quit Spettro. |
+| `/update` | Install a newer Spettro release and restart into it. The startup notice may rest on a release check up to 24 hours old; `/update` always asks GitHub again, so a release published since then is found and installed. |
 | `/mode`, `/next` | Cycle active manifest agent/mode. |
 | `/theme` | Open the [theme](theme.md) picker: pick dark, light or auto from a list with a live preview panel. Also reports the selection, the palette it resolved to, and which source decided (env / config / detection / default). |
 | `/theme <dark\|light\|auto>` | Switch palette immediately and persist it to `~/.spettro/config.json`. `auto` detects the terminal background and falls back to dark. `SPETTRO_THEME` picks the palette at startup; `/theme` still overrides it for the rest of the session. |

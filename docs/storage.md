@@ -22,7 +22,7 @@ deleted.
 | `~/.spettro/sessions/session-*/workflows/wf_*/` | [Workflow](workflows.md) run transcripts: `script.js`, `meta.json`, `journal.jsonl`, `result.json` | history | Yes — loses the ability to resume that run from its journal |
 | `~/.spettro/catalog.json` | Model catalog cache | cache | Yes — the embedded snapshot is used until the background refresh fetches a new copy |
 | `~/.spettro/catalog-meta.json` | Validators and last confirmation time for `catalog.json` | cache | Yes — the next refresh downloads the catalog once instead of revalidating it |
-| `~/.spettro/update-check.json` | Last GitHub release check | cache | Yes — checked again on the next start |
+| `~/.spettro/update-check.json` | Last GitHub release check (the startup notice reuses it for 24 h; `/update` always checks live) | cache | Yes — checked again on the next start |
 | `~/.spettro/memory-inbox.json` | Mined-fact candidates | cache | Yes — loses pending `/memory review` items (not preselected) |
 | `~/.spettro/skills/` | Installed skills | user | Only via `/skill uninstall` |
 | `~/.spettro/memory.md`, `config.json`, `keys.enc`, `keys.enc.v1`, `master.key`, `trusted.json`, `telegram.json`, `allowed_commands.json`, `commands/` | Config, secrets, user content | secret/user | **Never** — not even listed in the cleaner |

@@ -55,3 +55,21 @@ func TestReleaseCacheExpires(t *testing.T) {
 		t.Fatalf("fresh check not served: %+v %v", rel, ok)
 	}
 }
+
+// An explicit check ignores a fresh cache and refreshes it.
+func TestRefreshLatestReleaseBypassesCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	storeRelease(&Release{Version: "v1.0.0"}, time.Now())
+	hits := startReleaseServer(t, "v2.0.0")
+
+	rel, err := RefreshLatestRelease(context.Background())
+	if err != nil || rel.Version != "v2.0.0" {
+		t.Fatalf("RefreshLatestRelease = %+v, %v", rel, err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d requests, want 1", n)
+	}
+	if cached, ok := cachedRelease(time.Now()); !ok || cached.Version != "v2.0.0" {
+		t.Fatalf("cache not refreshed: %+v %v", cached, ok)
+	}
+}
