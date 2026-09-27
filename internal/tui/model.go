@@ -406,6 +406,14 @@ type Model struct {
 	askUserCh   chan askUserRequestMsg
 	cancelAgent context.CancelFunc
 	pendingAuth *shellApprovalRequestMsg
+	// approvalQueue holds approvals that arrived while another one was on
+	// screen: sub-agents run in parallel and share one approval callback.
+	// Each is shown, in arrival order, once the one before it is answered;
+	// none replaces the one on screen (see presentApproval).
+	approvalQueue []shellApprovalRequestMsg
+	// approvalShownAt is when pendingAuth was put on screen; Enter is ignored
+	// for approvalEnterGuard after it (see updateShellApproval).
+	approvalShownAt time.Time
 	// pendingQuestion is the form the question modal is showing, nil when no
 	// form is open. It owns the whole interaction: see dialog_question.go.
 	pendingQuestion *questionForm

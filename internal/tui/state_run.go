@@ -17,11 +17,9 @@ func (m *Model) stopAgent() {
 		m.cancelAgent = nil
 	}
 	if m.pendingAuth != nil {
-		select {
-		case m.pendingAuth.response <- shellApprovalResponse{decision: agent.ShellApprovalDeny}:
-		default:
-		}
+		denyApproval(*m.pendingAuth)
 	}
+	m.discardApprovalQueue()
 	if m.pendingQuestion != nil {
 		m.pendingQuestion.reply(askUserResponse{err: fmt.Errorf("cancelled")})
 	}

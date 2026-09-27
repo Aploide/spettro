@@ -18,8 +18,11 @@ import (
 //
 //	◆ coding                          agent label
 //	  $ cat <<'EOF' > big.txt … [cut] summary: the call on one row
-//	  why: non-whitelisted command    reason (and, with permission debug on,
-//	                                  the segments that needed approval)
+//	  why: non-whitelisted command    reason
+//	  remembers: go build · go test   what "Allow always" would remember, when
+//	                                  that is not just the command (with
+//	                                  permission debug on, always: the
+//	                                  segments that needed approval)
 //	    …                             preview: the diff of a file change, or
 //	    …                             the full text of a command or network
 //	  lines 1-8 of 3002 · v review …  target too long for the summary row;
@@ -47,9 +50,15 @@ const (
 	approvalCommandCollapsedLines = 8
 )
 
-// approvalPreviewIndent prefixes each row of a command preview, under the
-// "$" of the summary row.
-const approvalPreviewIndent = "    "
+// approvalPreviewIndent prefixes the first row of each line of a command
+// preview, under the "$" of the summary row. approvalPreviewWrapIndent
+// prefixes the rows a line too long for the dialog continues on: the hook
+// arrow says the row is the same line, not the command's next one (a line
+// break separates two shell commands; a wrap separates nothing).
+const (
+	approvalPreviewIndent     = "    "
+	approvalPreviewWrapIndent = "  ↪ "
+)
 
 // approvalPreviewCache memoises the fully rendered preview of the pending
 // approval at one content width. View runs on every animation tick; wrapping
@@ -91,11 +100,13 @@ func (m Model) approvalPreview(width int) *approvalPreviewCache {
 // the diff when the request carries one (file-write, file-edit), otherwise
 // the full text of the summary row when it does not fit that row: the whole
 // command, or for a network call the whole sentence naming its target.
-// Control characters are made visible, not interpreted
-// (termtext.EscapeControls): the preview is what the user approves, so no
-// character of it may be hidden. A command is wrapped, never cut; a diff line
-// wider than the dialog is cut with "…", which overflow reports so the
-// dialog can offer the review.
+// Control and invisible characters are made visible, not interpreted: the
+// preview is what the user approves, so no character of it may be hidden. A
+// command is escaped exactly (termtext.EscapeExact: a tab is not shown as
+// spaces) and hard-wrapped (termtext.HardWrap: no space is dropped at a
+// break, and none ends a row where it could not be seen), each continuation
+// row marked as one. A diff line wider than the dialog is cut with "…",
+// which overflow reports so the dialog can offer the review.
 func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []string, overflow bool) {
 	if strings.TrimSpace(req.Diff) != "" {
 		// Stay in the unified layout: the side-by-side one halves the room
@@ -118,8 +129,12 @@ func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []st
 	}
 	textW := max(width-len(approvalPreviewIndent), 8)
 	for _, raw := range strings.Split(text, "\n") {
-		for _, part := range termtext.Wrap(termtext.EscapeControls(raw), textW) {
-			lines = append(lines, styleMuted.Render(approvalPreviewIndent+part))
+		for i, part := range termtext.HardWrap(termtext.EscapeExact(raw), textW) {
+			indent := approvalPreviewIndent
+			if i > 0 {
+				indent = approvalPreviewWrapIndent
+			}
+			lines = append(lines, styleMuted.Render(indent+part))
 		}
 	}
 	return lines, false
@@ -136,7 +151,7 @@ func approvalSummaryFits(label string, width int) bool {
 type approvalLayout struct {
 	showLabel    bool // the agent label row
 	showReason   bool // the "why:" row
-	showSegments bool // the permission-debug segments row
+	showSegments bool // the "remembers:" (or permission-debug "segments:") row
 	previewRows  int  // preview rows on screen; may be 0 when there is no room
 	previewTotal int  // preview rows in all
 	previewStart int  // index of the first preview row on screen
@@ -162,7 +177,9 @@ func (m Model) approvalLayout(contentW int) approvalLayout {
 // get theirs. What is left goes, in order, to: the preview footer (so a
 // preview is never hidden without saying so), the reason, the agent label,
 // the preview itself (up to its collapsed cap unless expanded), and the
-// permission-debug segments.
+// segments row. That row is shown when "Allow always" would remember more
+// than the command (approvalRemembersOther) or permission debug is on; when
+// it is needed and gets no room, the review offers what it would say.
 func (m Model) approvalLayoutFor(contentW, controlRows int) approvalLayout {
 	req := m.pendingAuth
 	var lay approvalLayout
@@ -209,7 +226,8 @@ func (m Model) approvalLayoutFor(contentW, controlRows int) approvalLayout {
 			rows++
 		}
 	}
-	lay.showSegments = len(req.request.Segments) > 0 && m.cfg.ShowPermissionDebug && take()
+	lay.showSegments = len(req.request.Segments) > 0 &&
+		(m.cfg.ShowPermissionDebug || approvalRemembersOther(req.request)) && take()
 	return lay
 }
 
@@ -247,7 +265,10 @@ func (m Model) approvalLatchedControlRows() int {
 // else shows the text whole. A file's path cut on the summary row counts; a
 // command or network target cut there does not when the preview under it is
 // all on screen, because the preview is that same text, wrapped. The reason
-// and segments rows are commentary, not what is approved, and do not count.
+// row is commentary, not what is approved, and does not count. What "Allow
+// always" would remember does count when it is more than the command: it is
+// part of what that choice approves, so a "remembers:" row that got no room,
+// is cut, or cannot show its commands apart offers the review.
 //
 // It is asked with four options because the review option is what it
 // decides: with the fifth row the dialog only has less room, so the answer
@@ -259,6 +280,9 @@ func (m Model) approvalHidesContent(contentW int) bool {
 	}
 	lay := m.approvalLayoutFor(contentW, 1+len(approvalBaseActions))
 	if lay.previewRows < lay.previewTotal || lay.overflow {
+		return true
+	}
+	if approvalRemembersOther(req.request) && (!lay.showSegments || !approvalRememberRowWhole(req.request, contentW)) {
 		return true
 	}
 	if !approvalSummaryCut(req.request, contentW) {
@@ -282,7 +306,16 @@ func (m Model) approvalDialogLines(label string, contentW int) []string {
 		lines = append(lines, styleMuted.Render(termtext.Fit("  why: "+termtext.SingleLine(req.Reason), contentW)))
 	}
 	if lay.showSegments {
-		lines = append(lines, styleMuted.Render(termtext.Fit("  segments: "+termtext.SingleLine(strings.Join(req.Segments, " | ")), contentW)))
+		row := termtext.Fit("  segments: "+termtext.SingleLine(strings.Join(req.Segments, " | ")), contentW)
+		if approvalRemembersOther(req) {
+			// What "Allow always" approves: a cut is marked like the
+			// summary row's (the review lists every command whole).
+			row = approvalRememberRow(req)
+			if ansi.StringWidth(row) > contentW {
+				row = termtext.Fit(row, contentW-ansi.StringWidth(approvalCutMarker)) + approvalCutMarker
+			}
+		}
+		lines = append(lines, styleMuted.Render(termtext.Fit(row, contentW)))
 	}
 	if lay.previewRows > 0 {
 		preview := m.approvalPreviewLines(contentW)
@@ -310,6 +343,11 @@ func (m Model) approvalDialogLines(label string, contentW int) []string {
 		}
 	}
 	title := "allow this command?"
+	if n := len(m.approvalQueue); n > 0 {
+		// Parallel agents: say that answering this one brings up another,
+		// so a second Enter is not pressed on the assumption it is over.
+		title = fmt.Sprintf("allow this command? (%d more waiting)", n)
+	}
 	if lay.previewTotal > 0 && !lay.showFooter && lay.previewRows < lay.previewTotal {
 		// No row was left for the preview's footer (a 40x15 terminal during
 		// a run): the picker's title says what is not shown instead, so the
@@ -352,6 +390,33 @@ func approvalSummaryRow(req agent.ShellApprovalRequest, contentW int) string {
 	return head + termtext.FitLeft(path, room-ansi.StringWidth(head)) + approvalCutMarker
 }
 
+// approvalRememberSep separates the commands of the "remembers:" row.
+const approvalRememberSep = " · "
+
+// approvalRememberRow is the dialog's "remembers:" row, uncut: every command
+// "Allow always" would remember (approvalRemembered), escaped exactly like
+// the summary row.
+func approvalRememberRow(req agent.ShellApprovalRequest) string {
+	remembered := approvalRemembered(req)
+	parts := make([]string, len(remembered))
+	for i, r := range remembered {
+		parts[i] = termtext.EscapeExact(r)
+	}
+	return "  remembers: " + strings.Join(parts, approvalRememberSep)
+}
+
+// approvalRememberRowWhole reports whether the "remembers:" row shows every
+// command whole at contentW, and apart: a command that itself contains the
+// separator would read as two.
+func approvalRememberRowWhole(req agent.ShellApprovalRequest, contentW int) bool {
+	for _, r := range approvalRemembered(req) {
+		if strings.Contains(termtext.EscapeExact(r), strings.TrimSpace(approvalRememberSep)) {
+			return false
+		}
+	}
+	return ansi.StringWidth(approvalRememberRow(req)) <= contentW
+}
+
 // approvalCutMarker ends a summary row that could not hold the whole call.
 const approvalCutMarker = " [cut]"
 
@@ -366,14 +431,15 @@ func approvalSummaryCut(req agent.ShellApprovalRequest, contentW int) bool {
 const minApprovalPathCells = 8
 
 // approvalSummary puts a command label on the dialog's one summary row. The
-// lines of a multi-line command are joined with a space; nothing else is
-// changed. In particular runs of spaces are kept and control characters are
-// shown (termtext.EscapeControls), because for a one-line command that fits,
-// this row is the only place the user sees what they are approving.
+// lines of a multi-line command are joined with a space (the preview under
+// the row shows them apart); nothing else is changed. In particular runs of
+// spaces are kept and control and invisible characters are shown
+// (termtext.EscapeExact), because for a one-line command that fits, this row
+// is the only place the user sees what they are approving.
 func approvalSummary(label string) string {
 	lines := strings.Split(label, "\n")
 	for i, line := range lines {
-		lines[i] = termtext.EscapeControls(line)
+		lines[i] = termtext.EscapeExact(line)
 	}
 	return strings.Join(lines, " ")
 }

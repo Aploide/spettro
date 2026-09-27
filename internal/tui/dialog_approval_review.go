@@ -24,19 +24,26 @@ import (
 //	tool     file-write                        what is approved, every
 //	path     src/very/long/…/name.go           field wrapped, never cut
 //	reason   file modification requires…
+//	always   same as once: every file change…  what "Allow always" remembers
 //	── diff · 905 lines ─────────────────────
 //	 1     + package main                      the complete diff (for a new
 //	 2     + …                                 file, its whole content) or
-//	── end of diff ──────────────────────────   the numbered command
+//	── end of diff ──────────────────────────   the numbered command (and
+//	                                           the commands "Allow always"
+//	                                           remembers, when not just it)
 //	────────────────────────────────────────
 //	rows 1-9 of 912 · 1%                       position
 //	↑↓ pgup/pgdn home/end · esc back           keys
 //
 // Nothing is cut: a line wider than the screen is wrapped (hard-wrapped, so
-// no space goes missing at a break) under a blank gutter, and every row of
-// the document can be scrolled to. Control, bidi and zero-width characters
-// are made visible exactly as in the dialog's preview (termtext.EscapeControls,
-// which the diff renderer applies to every diff line too).
+// no space goes missing at a break or ends a row unseen) under a blank
+// gutter, and every row of the document can be scrolled to. Control, bidi,
+// zero-width and other invisible characters are made visible
+// (termtext.EscapeExact, which the diff renderer applies to every diff line
+// too with diff.Options.Exact). Nothing is shown as something else either:
+// a tab is drawn as "⇥" and a carriage return ending a line as "^M", where
+// the dialog's diff preview, built to stay readable in a few rows, shows a
+// tab as spaces and drops that "\r".
 //
 // The document is rendered once per width and cached on the pending request
 // (approvalReviewCache), like the dialog's preview: a 60k-line file must not
@@ -48,12 +55,8 @@ type approvalReviewCache struct {
 	lines []string
 }
 
-// approvalReviewLabelW is the width of the field names column ("segments ").
+// approvalReviewLabelW is the width of the field names column ("reason   ").
 const approvalReviewLabelW = 9
-
-// approvalReviewMaxSegments is how many command segments the review lists
-// one by one; past it they are counted (see buildApprovalReview).
-const approvalReviewMaxSegments = 3
 
 // openApprovalReview shows the review of the pending approval.
 func (m Model) openApprovalReview() Model {
@@ -230,7 +233,7 @@ func buildApprovalReview(req agent.ShellApprovalRequest, width int) []string {
 	}
 	label := formatApprovalCommandLabel(req.Command)
 	isFile := approvalIsFileChange(req)
-	network := !strings.HasPrefix(label, "$ ") && label != ""
+	network := approvalIsNetwork(req)
 
 	field("tool", approvalReviewToolName(req))
 	switch {
@@ -262,23 +265,25 @@ func buildApprovalReview(req agent.ShellApprovalRequest, width int) []string {
 	if strings.TrimSpace(req.Reason) != "" {
 		field("reason", req.Reason)
 	}
-	// The segments still needing approval are parts of the command shown
-	// in full below; a few are listed, many (every line of a heredoc) would
-	// only repeat the command, so they are counted instead.
-	switch n := len(req.Segments); {
-	case n > 0 && n <= approvalReviewMaxSegments:
-		for _, seg := range req.Segments {
-			field("segment", seg)
+	switch {
+	case isFile:
+		field("always", "same as once: every file change is asked about")
+	case network:
+		for _, target := range approvalRemembered(req) {
+			field("always", "remembers "+target)
 		}
-	case n > approvalReviewMaxSegments:
-		field("segments", fmt.Sprintf("%d parts of the command below need approval", n))
+	case !approvalRemembersOther(req):
+		field("always", "remembers this command")
+	default:
+		// Listed in full after the command: see the end of this function.
+		field("always", "remembers "+plural(len(req.Segments), "command")+", listed below the command")
 	}
 
 	switch {
 	case isFile && strings.TrimSpace(req.Diff) != "":
 		n := strings.Count(strings.TrimRight(req.Diff, "\n"), "\n") + 1
 		out = append(out, approvalReviewRule("diff · "+plural(n, "line"), width))
-		rendered := diff.Render(req.Diff, diff.Options{Width: width, Wrap: true})
+		rendered := diff.Render(req.Diff, diff.Options{Width: width, Wrap: true, Exact: true})
 		out = append(out, strings.Split(rendered, "\n")...)
 		out = append(out, approvalReviewRule("end of diff", width))
 	case network:
@@ -289,12 +294,20 @@ func buildApprovalReview(req agent.ShellApprovalRequest, width int) []string {
 		out = append(out, approvalReviewRule("command · "+plural(len(lines), "line"), width))
 		out = append(out, approvalReviewNumbered(lines, width)...)
 		out = append(out, approvalReviewRule("end of command", width))
+		// Every command "Allow always" would remember, when that is not just
+		// the command above: the choice approves each of them for good, so
+		// none is left to a count.
+		if approvalRemembersOther(req) {
+			out = append(out, approvalReviewRule("allow always remembers · "+plural(len(req.Segments), "command"), width))
+			out = append(out, approvalReviewNumbered(req.Segments, width)...)
+			out = append(out, approvalReviewRule("end of list", width))
+		}
 	}
 	return out
 }
 
 // approvalReviewField renders one "name  value" field: the value escaped
-// (termtext.EscapeControls, line by line) and hard-wrapped under itself, or,
+// (termtext.EscapeExact, line by line) and hard-wrapped under itself, or,
 // on a screen too narrow for a names column, under the name.
 func approvalReviewField(name, value string, width int) []string {
 	labelW := approvalReviewLabelW
@@ -308,7 +321,7 @@ func approvalReviewField(name, value string, width int) []string {
 	}
 	first := true
 	for _, line := range strings.Split(value, "\n") {
-		for _, part := range termtext.HardWrap(termtext.EscapeControls(line), valueW) {
+		for _, part := range termtext.HardWrap(termtext.EscapeExact(line), valueW) {
 			prefix := strings.Repeat(" ", labelW)
 			if first && labelW > 0 {
 				prefix = styleMuted.Render(fmt.Sprintf("%-*s", labelW, name))
@@ -331,7 +344,7 @@ func approvalReviewNumbered(lines []string, width int) []string {
 	}
 	var out []string
 	for i, line := range lines {
-		for r, part := range termtext.HardWrap(termtext.EscapeControls(line), textW) {
+		for r, part := range termtext.HardWrap(termtext.EscapeExact(line), textW) {
 			prefix := ""
 			switch {
 			case gutter == 0:

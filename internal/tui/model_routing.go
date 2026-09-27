@@ -9,7 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/config"
-	"spettro/internal/remote"
 	"spettro/internal/theme"
 )
 
@@ -41,6 +40,7 @@ func (m *Model) resetRunState() {
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.discardApprovalQueue()
 	m.pendingQuestion = nil
 	m.discardQuestionQueue(fmt.Errorf("run ended"))
 	m.parallelAgents = nil
@@ -502,24 +502,23 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		}
 	case shellApprovalRequestMsg:
-		if m.thinking {
-			m.pendingAuth = &msg
-			m = m.resetApprovalUI()
-			m.ta.Reset()
-			m.showBanner("command approval required", "warn")
-			m.notifyIfUnfocused("Agent is waiting for command approval")
-			m.publishRemote("approval_request", remote.ApprovalEvent(remote.ApprovalRequest{
-				ToolID:   msg.request.ToolID,
-				Command:  msg.request.Command,
-				Reason:   msg.request.Reason,
-				Segments: msg.request.Segments,
-				Diff:     msg.request.Diff,
-			}))
-			if m.approvalCh != nil {
-				cmds = append(cmds, waitForShellApproval(m.approvalCh))
-			}
-			m.refreshViewport()
+		switch {
+		case !m.thinking:
+			// The run ended while this request was in flight: answer it so
+			// its tool call does not wait for a dialog that never opens.
+			denyApproval(msg)
+		case m.pendingAuth == nil:
+			m = m.presentApproval(msg)
+		default:
+			// Never replace the approval on screen: the user may be reading
+			// it, and their next Enter must answer what they read.
+			m.approvalQueue = append(m.approvalQueue, msg)
+			m.showBanner(fmt.Sprintf("another approval arrived — %d waiting after this one", len(m.approvalQueue)), "warn")
 		}
+		if m.thinking && m.approvalCh != nil {
+			cmds = append(cmds, waitForShellApproval(m.approvalCh))
+		}
+		m.refreshViewport()
 	case askUserRequestMsg:
 		switch {
 		case !m.thinking:

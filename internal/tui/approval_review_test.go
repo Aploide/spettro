@@ -89,7 +89,7 @@ func TestApprovalPickerWithEverythingVisible(t *testing.T) {
 		m.syncApprovalReview()
 		frame := m.View().Content
 		rows := pickerRows(frame)
-		want := []string{"› Allow once", "Allow always  (remember this command)", "Deny", "Tell the agent what to do instead"}
+		want := []string{"› Allow once", approvalAlwaysLabel(req), "Deny", "Tell the agent what to do instead"}
 		if !sameRows(rows, want) {
 			t.Fatalf("%q: picker = %q, want %q", req.Command, rows, want)
 		}
@@ -133,7 +133,7 @@ func TestApprovalPickerOffersReviewWhenSomethingIsHidden(t *testing.T) {
 			frame := m.View().Content
 			assertFrameFits(t, tc.name, frame, size[0], size[1])
 			rows := pickerRows(frame)
-			want := []string{"› " + tc.label, "Allow once", "Allow always  (remember this command)", "Deny", "Tell the agent what to do instead"}
+			want := []string{"› " + tc.label, "Allow once", approvalAlwaysLabel(tc.req), "Deny", "Tell the agent what to do instead"}
 			if !sameRows(rows, want) {
 				t.Fatalf("%s at %v: picker = %q, want %q\n%s", tc.name, size, rows, want, ansi.Strip(frame))
 			}

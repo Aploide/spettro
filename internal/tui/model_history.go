@@ -115,6 +115,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.discardApprovalQueue()
 	m.progressNote = fmt.Sprintf("Okay, let me work on that with the %s agent.", spec.ID)
 	m.activePrompt = &queuedPrompt{
 		Input:          input,

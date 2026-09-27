@@ -423,13 +423,14 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 				continue
 			}
 		}
+		key := RememberedCommandKey(seg)
 		r.mu.Lock()
-		_, preapproved := r.allowedShell[segNorm]
+		_, preapproved := r.allowedShell[key]
 		r.mu.Unlock()
 		if preapproved {
 			continue
 		}
-		missingApprovals = append(missingApprovals, segNorm)
+		missingApprovals = append(missingApprovals, key)
 	}
 	if len(missingApprovals) == 0 || !needsApproval {
 		return nil
@@ -484,6 +485,26 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 
 func normalizeCommand(command string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
+}
+
+// RememberedCommandKey is how a command segment is stored in, and looked up
+// in, the set of commands the user chose to always allow; it is also how the
+// segment is written in ShellApprovalRequest.Segments, so a host can compare
+// a segment with the whole command the same way. Like normalizeCommand it folds
+// runs of spaces and tabs into one space, but only ASCII whitespace: a shell
+// splits words there and nowhere else. strings.Fields would also fold a
+// no-break space (U+00A0) or an em space, which a shell keeps inside a word,
+// so approving "rm -rf ./build/<U+00A0>~/" for always (one harmless
+// argument) would have remembered "rm -rf ./build/ ~/", which deletes the
+// home directory.
+func RememberedCommandKey(command string) string {
+	return strings.Join(strings.FieldsFunc(command, func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\n', '\v', '\f', '\r':
+			return true
+		}
+		return false
+	}), " ")
 }
 
 func splitShellCommandSegments(command string) []string {
@@ -834,7 +855,7 @@ func loadAllowedCommandSet(cwd string) (map[string]struct{}, error) {
 		return nil, fmt.Errorf("decode allowed commands: %w", err)
 	}
 	for _, cmd := range parsed.AllowedCommands {
-		norm := normalizeCommand(cmd)
+		norm := RememberedCommandKey(cmd)
 		if norm != "" {
 			out[norm] = struct{}{}
 		}
