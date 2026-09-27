@@ -103,8 +103,12 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   the client as a structured payload; see [Agent questions](#agent-questions)
   below for the transports, the payload, and the answer shape.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
-  `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, `/workflows`, and `/clear` are advertised to
-  the client (`available_commands_update`). Config commands resolve in one
+  `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, `/workflows`,
+  `/skills`, and `/clear` are advertised to the client
+  (`available_commands_update`), followed by one command per
+  [Agent Skill](skills.md) the user can run in the session's workspace
+  (description and argument hint from its `SKILL.md`; a skill named like a
+  built-in command is not advertised). Config commands resolve in one
   turn without invoking the model; `/models` with no argument lists the
   connected models, and `/models provider:model [api_key]` switches the
   active one. `/memory show|add|clear` edits the persistent memory store
@@ -116,9 +120,12 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   the given interval inside the prompt turn the same way; `/loop stop` or the
   editor's cancel ends it. `/workflows` lists, shows, and locates saved
   [workflow](workflows.md) scripts inline; `/workflows run <name> [json]`
-  is rewritten into an ordinary turn that invokes that script. Anything
-  else needing a TUI dialog
-  (`/skill`, `/mcp`, ...) is not available over ACP yet. `/resume` is
+  is rewritten into an ordinary turn that invokes that script.
+  `/<skill-name> [args]` runs the turn with that skill's instructions, and
+  `$<skill-name>` in a prompt appends the skill's instructions; the
+  transcript replayed on `session/load` keeps what the user typed. `/skills`
+  lists the skills inline. Anything else needing a TUI dialog
+  (`/skill install`, `/mcp`, ...) is not available over ACP yet. `/resume` is
   intentionally not advertised: the editor's own session picker drives
   `session/load` instead (see below).
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
