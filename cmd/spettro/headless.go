@@ -62,7 +62,13 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 	// or removed key): fall back to the best connected model.
 	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
 
-	manifest, _ := config.LoadAgentManifestForProject(cwd)
+	// A manifest that cannot be loaded stops the server, as it stops the
+	// TUI: running with an empty manifest would ignore its sandbox_mode and
+	// fail every submission with "agent not found".
+	manifest, err := config.LoadAgentManifestForProject(cwd)
+	if err != nil {
+		fatal("agent manifest error: %v", err)
+	}
 	mode := manifest.DefaultAgent
 	if mode == "" {
 		mode = "plan"

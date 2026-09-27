@@ -735,3 +735,18 @@ func TestACPEndToEnd_AttachedFileIsReadOnce(t *testing.T) {
 		t.Fatalf("the write after the required read did not run: %v", err)
 	}
 }
+
+// A session in a project whose spettro.agents.toml is broken must not run
+// under the process's own manifest (another project's agents, rules and
+// sandbox, possibly wider): session/new fails with the manifest error.
+func TestACPEndToEnd_BrokenProjectManifestIsAnError(t *testing.T) {
+	llm := newScriptedLLM(t)
+	h := newACPHarness(t, llm, config.PermissionAskFirst)
+	h.initialize()
+	other := t.TempDir()
+	writeFile(t, filepath.Join(other, config.AgentManifestFilename), "version = 14\n[[agents]]\nid = 1\n")
+	_, err := h.conn.NewSession(h.ctx(), acpsdk.NewSessionRequest{Cwd: other, McpServers: []acpsdk.McpServer{}})
+	if err == nil || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("session/new in a project with a broken manifest: err = %v", err)
+	}
+}

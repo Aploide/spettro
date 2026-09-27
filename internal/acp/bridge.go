@@ -174,6 +174,20 @@ func (b *bridge) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (
 	return acpsdk.AuthenticateResponse{}, nil
 }
 
+// projectManifest loads the agent manifest of the project a session runs
+// in, which may not be the process's own. A manifest that cannot be loaded
+// is the client's error to see: falling back to the process manifest
+// would run the session under another project's agents, rules and sandbox,
+// possibly wider ones. (A migration that merely cannot be written back is
+// not an error; see config.LoadAgentManifestForProject.)
+func (b *bridge) projectManifest(cwd string) (config.AgentManifest, error) {
+	manifest, err := config.LoadAgentManifestForProject(cwd)
+	if err != nil {
+		return config.AgentManifest{}, acpsdk.NewInternalError(map[string]any{"error": fmt.Sprintf("agent manifest of %s: %v", cwd, err)})
+	}
+	return manifest, nil
+}
+
 func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
 	cwd := params.Cwd
 	if cwd == "" {
@@ -183,11 +197,9 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 		return acpsdk.NewSessionResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "cwd must be an absolute path"})
 	}
 
-	// Sessions may target a different project than the process cwd, so load
-	// that project's manifest; fall back to the process manifest on error.
-	manifest, err := config.LoadAgentManifestForProject(cwd)
+	manifest, err := b.projectManifest(cwd)
 	if err != nil {
-		manifest = b.opts.Manifest
+		return acpsdk.NewSessionResponse{}, err
 	}
 	agentID := manifest.DefaultAgent
 	if agentID == "" {

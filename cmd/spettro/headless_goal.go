@@ -74,7 +74,13 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	// or removed key): fall back to the best connected model.
 	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
 
-	manifest, _ := config.LoadAgentManifestForProject(cwd)
+	// A manifest that cannot be loaded stops the run: an empty manifest
+	// would ignore its sandbox_mode and have no coding agent.
+	manifest, err := config.LoadAgentManifestForProject(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent manifest error: %v\n", err)
+		exitSession(1)
+	}
 
 	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
 	if err != nil {

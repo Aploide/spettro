@@ -111,9 +111,9 @@ func (b *bridge) restoreSession(sessionID acpsdk.SessionId, reqCwd string) (*acp
 		return nil, session.State{}, acpsdk.NewInvalidParams(map[string]any{"error": "cwd must be an absolute path"})
 	}
 
-	manifest, err := config.LoadAgentManifestForProject(cwd)
+	manifest, err := b.projectManifest(cwd)
 	if err != nil {
-		manifest = b.opts.Manifest
+		return nil, session.State{}, err
 	}
 	agentID := manifest.DefaultAgent
 	if agentID == "" {
