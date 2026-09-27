@@ -113,3 +113,30 @@ func TestRunToolLoopOverflowRecoversWhenSummarizerFails(t *testing.T) {
 		t.Fatalf("carried history invalid: %v", err)
 	}
 }
+
+// The notice for a failed in-run auto-compaction says what happens next:
+// another try at the next step while failures stay under the limit, and a
+// pause once they reach it. It used to promise a retry "at the next
+// threshold crossing" on every failure, although the trigger fires again
+// at the very next step and pauses after the third failure.
+func TestCompactFailureNoticeSaysWhatHappensNext(t *testing.T) {
+	err := fmt.Errorf("compaction: empty summary")
+	limit := compactpkg.Config{}.FailureLimit()
+	if limit != 3 {
+		t.Fatalf("default failure limit = %d, want 3", limit)
+	}
+	for failures := 1; failures <= limit; failures++ {
+		got := compactFailureNotice(err, failures, limit)
+		if !strings.Contains(got, "compaction: empty summary") {
+			t.Errorf("notice %d does not name the error: %q", failures, got)
+		}
+		paused := strings.Contains(got, "paused after 3 failures in a row")
+		retry := strings.Contains(got, fmt.Sprintf("the next step tries again (failure %d of 3", failures))
+		if failures < limit && (!retry || paused) {
+			t.Errorf("failure %d: %q, want a retry at the next step", failures, got)
+		}
+		if failures == limit && (!paused || retry) {
+			t.Errorf("failure %d: %q, want the pause", failures, got)
+		}
+	}
+}

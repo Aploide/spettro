@@ -247,9 +247,11 @@ below apply to both triggers.
 Auto-compact uses a failure budget: if the summarizer fails 3 times in a row
 (provider errors), auto-compaction pauses instead of burning a failing call
 every step; a successful compaction (e.g. manual `/compact`) resets the
-counter. Failures never abort the run — the runtime warns and retries at the
-next threshold crossing, and an over-budget request still gets one forced
-compaction as a last resort.
+counter. Failures never abort the run: the runtime notes each one in the
+transcript ("failure 1 of 3 before it pauses") and tries again at the next
+step while the context is still over the threshold, says so when it pauses,
+and an over-budget request still gets one forced compaction as a last
+resort.
 
 ### Configuration
 

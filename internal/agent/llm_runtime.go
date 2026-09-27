@@ -830,7 +830,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// the trigger fires again at the next step until MaxFailures pauses it.
 		beforeTokens := measure(system, convMsgs)
 		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, contextWindow(), false, measure); err != nil {
-			notify(fmt.Sprintf("auto-compaction failed (%s) — continuing; will retry at the next threshold crossing", truncate(err.Error(), 200)))
+			notify(compactFailureNotice(err, runtime.compactFailures, runtime.compactCfg.FailureLimit()))
 		} else {
 			convMsgs = compacted
 			if did {
@@ -1262,6 +1262,19 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 		r.compactFailures = 0
 	}
 	return out, did, err
+}
+
+// compactFailureNotice is the transcript notice for a failed in-run
+// auto-compaction. failures is the consecutive-failure count including this
+// one. Below limit the trigger fires again at the next step while the
+// context is still over the threshold; at limit it pauses (compact.Evaluate)
+// until a compaction succeeds, which a manual /compact can do.
+func compactFailureNotice(err error, failures, limit int) string {
+	reason := truncate(err.Error(), 200)
+	if failures >= limit {
+		return fmt.Sprintf("auto-compaction failed (%s) — continuing; paused after %d failures in a row (/compact still works)", reason, failures)
+	}
+	return fmt.Sprintf("auto-compaction failed (%s) — continuing; the next step tries again (failure %d of %d before it pauses)", reason, failures, limit)
 }
 
 // formatTokens renders a token count compactly for transcript notices
