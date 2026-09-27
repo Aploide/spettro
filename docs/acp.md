@@ -45,6 +45,16 @@ Then open the Agent Panel and pick *Spettro* as the agent.
 
 - **Sessions** — each `session/new` gets its own working directory (the
   project the editor has open), conversation history, and agent mode.
+  Sessions on one connection run independently and at the same time: each
+  has its own run slot, steering queue and environment snapshot (the
+  working directory listing, git branch, date and instruction files taken
+  when the conversation started, then carried with its history), so a file
+  created while session A is open shows up in a session started later but
+  never changes A's system prompt. The mode is per session; the model,
+  permission, thinking level and Ultra live in your user config and are
+  shared, so changing one from any session sends a `config_option_update`
+  to every other open session and a run in progress there applies a new
+  permission level at its next approval.
 - **Toolbar selectors** — Spettro advertises ACP *session config options* so
   the editor draws native selectors in its message toolbar:
   - **Mode** — the orchestrator agents from the [manifest](../AGENTS.md)
@@ -67,12 +77,18 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `config_option_update` back so the selectors stay in sync. This supersedes
   the deprecated `session/set_mode` "modes" mechanism, which current clients
   no longer render.
-- **Streaming** — the model's reasoning streams live as thought chunks and
-  every tool call is reported with kind, status, file locations, and output,
-  so the editor can render progress and follow the agent across files. The
-  final answer is sent as a single `agent_message` block when the turn
-  completes (the internal stream has draft-reset semantics, so the answer is
-  flushed from the authoritative final content rather than chunked).
+- **Streaming** — the model's reasoning streams live as
+  `agent_thought_chunk`s. Text the model writes in a step that also calls
+  tools ("Let me check the tests first.") is sent once as an
+  `agent_message_chunk` when the step ends, followed by a blank line, and so
+  is a message it sends with the `comment` tool; a sub-agent's prose and the
+  runtime's own progress notes are not. The final answer is sent as a
+  single `agent_message_chunk` when the turn completes (the internal stream
+  has draft-reset semantics, so the answer is flushed from the
+  authoritative final content rather than chunked).
+- **Tool calls** — see [Tool calls](#tool-calls) below: every call is a
+  card with a kind, a readable title, absolute file locations, its output,
+  and a real diff for file changes.
 - **Token usage** — after every LLM request inside a turn (not just at the
   end), Spettro sends a `usage_update` session notification with the current
   context occupancy (`used`) against the model's context window (`size`), so
@@ -81,11 +97,16 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   (`spettro.app/tokensUsed`) on each update, and the completed turn's
   aggregated accounting (input/output plus cache read/write tokens) is
   returned in the `session/prompt` response's `usage` field.
-- **Plan** — whenever the agent updates its session task graph (`todo-write`, or
-  one of the retired `task-*` names that route to it), the full task list is mirrored
-  to the client as an ACP `plan` update in dependency order, so editors with
-  plan support render the agent's live todo list; tasks gated by incomplete
-  dependencies are suffixed with "(blocked)".
+- **Plan** — whenever the agent updates its session task graph (`todo-write`
+  replacing the list, merging changes into it, or deleting tasks, or one of
+  the retired `task-*` names that route to it), the full task list is
+  mirrored to the client as an ACP `plan` update in dependency order (a task
+  follows the tasks it waits for), so editors with plan support render the
+  agent's live todo list. Status maps to `pending`, `in_progress` or
+  `completed` (a cancelled task counts as completed); priority `high` or
+  `urgent` is `high`, `low` is `low`, anything else `medium`; a pending task
+  gated by incomplete dependencies is suffixed with "(blocked)". An empty
+  list is still sent, so deleting the last task clears the editor's plan.
 - **Workflows** — a [workflow](workflows.md) run (any message containing
   `ultracode`) opens a single `workflow <name>` tool call whose content is
   rewritten as the run progresses: declared phases appear immediately as
@@ -95,10 +116,11 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   still works. Phases are deliberately *not* published as ACP plan
   entries — that channel belongs to the session task graph, and a
   workflow would silently clobber it.
-- **Permissions** — shell command approvals are routed through
-  `session/request_permission`, so the editor shows its native approval
-  prompt. With `/permission yolo` set in Spettro's config, shell commands run
-  without asking.
+- **Permissions** — every approval the runtime asks for (shell commands,
+  file writes and edits, network access) is routed through
+  `session/request_permission` on the tool call's own card, so the editor
+  shows its native approval prompt there; see [Permissions](#permissions)
+  below. With `/permission yolo` nothing is asked.
 - **Agent questions** — when the agent calls `ask-user` the question is put to
   the client as a structured payload; see [Agent questions](#agent-questions)
   below for the transports, the payload, and the answer shape.
@@ -141,9 +163,20 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `tool_call`/`tool_call_update` carries an image content block (base64 +
   mime) next to the text output, so editors render the screenshot inline in
   the tool-call card.
-- **Cancellation** — `session/cancel` interrupts the running turn; the turn
-  ends with the `cancelled` stop reason. `/goal stop` and `/loop stop` sent
-  as new prompts also cancel a running goal/loop turn.
+- **Cancellation** — `session/cancel` interrupts the running turn, whatever
+  it is waiting on (the model, a tool, or a permission prompt, which is
+  withdrawn with `$/cancel_request`); the turn ends with the `cancelled`
+  stop reason, never with an error. `/goal stop` and `/loop stop` sent as
+  new prompts also cancel a running goal/loop turn.
+- **Stop reasons** — a `session/prompt` ends with `end_turn` when the model
+  answers (also for slash commands and for a prompt delivered as steering),
+  `cancelled` after `session/cancel` or `session/close`, and `refusal` when
+  the provider's content filter stopped the reply. Any other failure (the
+  provider unreachable after retries, an unknown agent) is a JSON-RPC error
+  carrying the runtime's message; the conversation up to the failure is
+  kept either way. Requests naming a session this connection does not hold,
+  a relative `cwd`, or an unknown mode or option value are rejected as
+  invalid params (`-32602`).
 - **Mid-run steering** — a `session/prompt` sent while a turn is already
   executing does not kill or replace the run: it is delivered to the running
   agent as steering, injected as a user message at the agent's next step
@@ -155,10 +188,11 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   keep it: sending `session/cancel` first stops the run, and the next prompt
   starts a fresh turn. A steering message the run never reached is held and
   delivered at the start of the session's next turn.
-- **Session persistence** — `session/load`, `session/resume`, and
-  `session/list` are fully supported (the agent advertises `LoadSession:
-  true`, plus `SessionCapabilities.List` and `SessionCapabilities.Resume` at
-  `initialize`). All three are backed by Spettro's on-disk session store, so
+- **Session persistence** — `session/load`, `session/resume`,
+  `session/list` and `session/close` are fully supported (the agent
+  advertises `LoadSession: true`, plus `SessionCapabilities.List`,
+  `SessionCapabilities.Resume` and `SessionCapabilities.Close` at
+  `initialize`). They are backed by Spettro's on-disk session store, so
   conversations started in either the TUI or the ACP client are visible to
   both:
   - `session/load` — restores the stored session under its original ID and
@@ -174,11 +208,79 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   - `session/list` — enumerates the on-disk store, optionally filtered to
     the request's `cwd`, newest first. Each entry carries the session id,
     project path, title (first user prompt preview), and `updatedAt`.
+  - `session/close` — cancels the session's running turn (which still
+    answers its `session/prompt` with `cancelled` and saves what it did) and
+    drops the session from the connection, freeing its in-memory history.
+    The stored conversation stays on disk: `session/load` or
+    `session/resume` brings it back.
 
   Sessions persist automatically after every prompt turn, so the editor's
   session picker stays current without any explicit save action. MCP
   servers provided by the editor in `session/new` are still ignored;
   Spettro's own MCP configuration applies as usual.
+
+## Tool calls
+
+Each tool call the agent (or one of its sub-agents) makes is one card in the
+editor: a `tool_call` notification when it starts (`in_progress`), then one
+`tool_call_update` when it finishes (`completed` or `failed`). Parallel calls
+get separate cards; identical calls running at once complete in the order
+they started. A call rejected before it could run (arguments of a retired
+tool name that do not convert) arrives as a single, already finished
+`tool_call`.
+
+| Field | What Spettro sends |
+|---|---|
+| `kind` | From the tool's canonical name, so a retired name gets its canonical tool's kind: `read` for `file-read`, `view-image`, `skill`, `job-output`, `tool-output` and the MCP resource tools; `edit` for `file-write`, `file-edit`, `rename-symbol`; `search` for `grep`, `glob`, `lsp`, `tool-search`; `execute` for `bash`, `job-kill` and the `pty-*` tools; `fetch` for `web-fetch`, `web-search`, `download`; `think` for `todo-write`, `agent`, `ultra`, `workflow`, `goal-complete`; `switch_mode` for `enter-plan-mode` and `exit-plan-mode`; `other` for the rest. A tool that is not a built-in (MCP, manifest) is classified from the words in its name. |
+| `title` | A sentence for the built-ins (`Run go test ./...`, `Edit internal/app.go`, `Search TODO in internal`, `Load skill greet`), `<name> <arguments>` for other tools, `agent <id>: <task>` for a sub-agent. Swarm members are prefixed with their instance (`[code#3] Read a.go`). One line, at most 120 characters. |
+| `locations` | The file named by the call's `path` argument, resolved against the session's working directory (ACP paths are absolute), with the start line when the call gives one. The completion replaces it with the absolute paths of the files the call actually changed. |
+| `rawInput` | The call's arguments, with each string cut to 2 KiB, the whole object to 16 KiB, and values named `token`, `api_key`, `password`, `secret` (and similar) redacted. |
+| `content` | On completion: a `diff` block (`path`, `oldText`, `newText`; no `oldText` for a created file) for every file `file-write`, `file-edit` or `rename-symbol` changed, then a short excerpt of the text output (the runtime cuts it to a few hundred bytes for every front-end; the model itself sees the full output) and any image the tool attached. |
+| `rawOutput` | `{"output": <the text output>}`. |
+
+Size limits keep a card renderable however large the call is. A change to a
+file over 256 KiB (before or after), or the part of a multi-file rename past
+512 KiB of diff text, is named in a "diff not shown" note instead of being
+diffed. Every clipped value ends with a note saying how much was left out.
+
+`comment` calls and the runtime's progress notes do not get cards (see
+**Streaming** above), and approval decisions are not reported separately:
+the card either waits on the permission prompt or fails with the policy's
+reason. Workflow runs are one long-lived card, see **Workflows** above.
+
+## Permissions
+
+Under `ask-first` (and `restricted`, for what it does not allow outright)
+the runtime asks before a shell command that is not already allowed, a file
+write or edit whose tool requires approval, and access to a network target
+not yet allowed. Permission rules, hooks and the saved allow-lists decide
+first; an `lsp-op` rule denies an lsp operation outright rather than asking.
+Each question becomes a `session/request_permission` whose `toolCall` is the
+card already on screen (matched by tool and by the command, file or URL the
+call names), set to `pending`, with:
+
+- for a file change, a `diff` block of the exact change (for a file too
+  large to diff structurally, the unified diff as text);
+- for a command, the reason and the command segments still needing
+  approval;
+- options `allow-once` ("Allow once"), `allow-always` ("Always allow this
+  command" / "Always allow this site") and `deny` ("Deny"). `allow-always`
+  is offered only for commands and network targets, the approvals Spettro
+  remembers (in the project's allowed-commands and allowed-network lists);
+  a file write is asked about every time, so it is not offered there.
+
+After "Allow" the card goes back to `in_progress` and finishes normally;
+after "Deny" (or a `cancelled` outcome) the call fails without running and
+the model is told it was denied. A question with no open card (rare) carries
+its own title, kind and input, and its card is finished right after the
+answer.
+
+A permission prompt is bound to the tool's own time limit (`timeout_sec` in
+the manifest: 120 s for `bash`, 60 s for `file-write`/`file-edit`). If it is
+still unanswered then, Spettro withdraws it with `$/cancel_request` and the
+call fails without running, telling the model nobody approved it in time;
+`session/cancel` withdraws it the same way. Nothing waits on the editor
+forever.
 
 ## Agent questions
 
@@ -355,3 +457,25 @@ selected `optionId` instead; selecting the synthetic `custom` option then
 escalates to an elicitation to collect the text, or fails if the client cannot
 collect it. `declined`, `cancelled`, and a cancelled permission outcome all
 tell the model that nobody answered.
+
+## For maintainers
+
+| Piece | Where |
+|---|---|
+| Handshake, sessions, prompt turns, stop reasons, `session/close`, shared-settings sync | `internal/acp/bridge.go` |
+| `session/load`, `session/resume`, `session/list` | `internal/acp/sessions.go` |
+| Tool call cards, comments and narration, plans | `internal/acp/content.go` |
+| Kinds, titles, locations, size limits, diffs | `internal/acp/tools.go` |
+| Permission requests | `internal/acp/permission.go` |
+| Toolbar selectors | `internal/acp/config_options.go` |
+| File changes reported by the runtime (`ToolTrace.FileChanges`, `ShellApprovalRequest.Change`) | `internal/agent/file_changes.go` |
+
+`internal/acp/e2e_test.go` drives the whole protocol the way an editor does:
+a client connection from the ACP Go SDK talks to the bridge over in-memory
+pipes, the agent runs the default manifest against a scripted
+OpenAI-compatible model (`e2e_harness_test.go`), and the tests read the
+JSON-RPC traffic as it went over the wire. Run them with
+
+```bash
+go test ./internal/acp -run TestACPEndToEnd
+```
