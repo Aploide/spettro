@@ -189,3 +189,47 @@ func TestNativeEncoderKeepsNoLaneForOneShotRequests(t *testing.T) {
 		t.Fatal("one-shot body differs from a fresh encoder's")
 	}
 }
+
+// A fan-out whose histories together pass encoderCacheLimit keeps the
+// lanes that fit, and those keep hitting, instead of every conversation
+// missing in turn as with plain least-recently-used eviction.
+func TestNativeEncoderKeepsWhatFitsWhenAFanOutDoesNot(t *testing.T) {
+	const conversations = 12
+	enc := &chatEncoder{}
+	chunk := strings.Repeat("y", encoderCacheLimit/8)
+	reqs := make([]Request, conversations)
+	for i := range reqs {
+		reqs[i] = Request{Messages: []Message{
+			{Role: RoleUser, Content: fmt.Sprint("sub-agent task ", i)},
+			{Role: RoleAssistant, Content: chunk},
+		}}
+	}
+	kept := func() map[*encoderLane]bool {
+		enc.mu.Lock()
+		defer enc.mu.Unlock()
+		if enc.total > encoderCacheLimit {
+			t.Fatalf("lanes hold %d bytes, limit %d", enc.total, encoderCacheLimit)
+		}
+		set := map[*encoderLane]bool{}
+		for _, l := range enc.lanes {
+			set[l] = true
+		}
+		return set
+	}
+	for _, r := range reqs {
+		enc.encode("p", "m", r)
+	}
+	first := kept()
+	for _, r := range reqs {
+		enc.encode("p", "m", r)
+	}
+	second := kept()
+	if len(first) < conversations/2 {
+		t.Fatalf("only %d of %d lanes kept", len(first), conversations)
+	}
+	for l := range first {
+		if !second[l] {
+			t.Fatal("a lane that fitted was dropped by the next round: the fan-out thrashes")
+		}
+	}
+}

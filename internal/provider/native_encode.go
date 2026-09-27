@@ -28,10 +28,10 @@ const (
 	// encodes the whole history again.
 	maxEncoderLanes = 48
 	// encoderCacheLimit bounds the cached encodings of all lanes together
-	// (a lane holds about its conversation's size in JSON). Past it, the
-	// least recently used lanes are dropped; their conversations encode in
-	// full on their next step, as every step did before this cache (about
-	// 1.3 ms at 1000 messages). 8 MB holds a conversation that fills a
+	// (a lane holds about its conversation's size in JSON). Past it, lanes
+	// are dropped (see chatEncoder.shrinkLocked); their conversations
+	// encode in full on their next step, as every step did before this
+	// cache (about 1.3 ms at 1000 messages). 8 MB holds a conversation that fills a
 	// 1M-token context window (about 4 MB of JSON) next to a fan-out's
 	// sub-agents at typical sizes; together with mediaCacheLimit it stays
 	// under the performance plan's 15 MB memory-regression allowance.
@@ -42,6 +42,12 @@ const (
 	// encodings, and the strings its snapshots share, until newer lanes
 	// pushed it out, which in a single-agent session never happens.
 	encoderLaneIdle = 5 * time.Minute
+	// encoderLaneActive is how recently a lane must have been used to
+	// count as part of the working set when the cache is over its limit:
+	// a sub-agent's next step comes one model reply later, seconds to
+	// tens of seconds, so a lane unused for a minute is most likely a
+	// conversation that has ended.
+	encoderLaneActive = time.Minute
 	// maxToolSurfaces bounds the distinct tool arrays kept.
 	maxToolSurfaces = 4
 )
@@ -63,8 +69,9 @@ const (
 // Key: lane = the conversation's first message plus the provider and model
 // (reasoning replay depends on them); entry = position within the lane.
 // Invalidation: by comparison on every use, as above. Lanes are dropped
-// least recently used first past maxEncoderLanes or encoderCacheLimit, and
-// by a timer once unused for encoderLaneIdle. Messages with images are
+// least recently used first past maxEncoderLanes; past encoderCacheLimit
+// as shrinkLocked describes; and by a timer once unused for
+// encoderLaneIdle. Messages with images are
 // never cached: their data URLs come from the media cache, which checks
 // the files on every use, and go into the body as chunks of their own.
 // Requests of a single message (a compaction summary, a one-shot helper
@@ -215,10 +222,9 @@ func (e *chatEncoder) lane(providerName, modelName string, first Message) *encod
 	return l
 }
 
-// charge records that l now caches size bytes, then drops the least
-// recently used lanes while the total is over encoderCacheLimit. The most
-// recently used lane stays even when it alone is over the limit. A lane
-// dropped while it was being encoded is not charged.
+// charge records that l now caches size bytes and brings the cache back
+// within encoderCacheLimit. A lane dropped while it was being encoded is
+// not charged.
 func (e *chatEncoder) charge(l *encoderLane, size int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -227,8 +233,28 @@ func (e *chatEncoder) charge(l *encoderLane, size int) {
 	}
 	e.total += size - l.size
 	l.size = size
-	for e.total > encoderCacheLimit && len(e.lanes) > 1 {
-		e.dropLaneLocked(len(e.lanes) - 1)
+	e.shrinkLocked(l, time.Now())
+}
+
+// shrinkLocked drops lanes until the cached encodings fit
+// encoderCacheLimit again, after grown was charged for new bytes. Lanes
+// unused for encoderLaneActive go first, least recently used first. If
+// that is not enough, grown itself is dropped: it does not fit next to
+// the working set. Plain LRU would instead drop the lane whose turn comes
+// next, so a fan-out larger than the limit would miss on every step (33
+// conversations of 500 messages taking turns: 3668 allocations and
+// 0.93 ms per encode); this way the conversations that fit keep hitting.
+// The total was within the limit before grown was charged, so dropping
+// grown always restores it.
+func (e *chatEncoder) shrinkLocked(grown *encoderLane, now time.Time) {
+	cutoff := now.Add(-encoderLaneActive)
+	for e.total > encoderCacheLimit {
+		last := len(e.lanes) - 1
+		if victim := e.lanes[last]; victim == grown || !victim.lastUse.Before(cutoff) {
+			e.dropLaneLocked(slices.Index(e.lanes, grown))
+			return
+		}
+		e.dropLaneLocked(last)
 	}
 }
 
