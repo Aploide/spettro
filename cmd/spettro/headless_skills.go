@@ -9,7 +9,7 @@ import (
 )
 
 // headlessCommandNames are the slash commands the headless remote handles
-// itself (handleHeadlessCommand, plus /approve, which its help lists). A
+// itself (handleHeadlessCommand, and /approve through takeApprovedPlan). A
 // skill with one of these names cannot be run as /name here: the built-in
 // wins, as in the TUI and over ACP.
 var headlessCommandNames = map[string]bool{

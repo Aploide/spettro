@@ -120,6 +120,9 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 		cancelRun  context.CancelFunc
 		tokensUsed int
 		msgCount   int
+		// pendingPlan is the answer of the last successful plan-mode run,
+		// which /approve hands to the coding agent (see takeApprovedPlan).
+		pendingPlan string
 	)
 
 	// Interrupt handler goroutine.
@@ -168,7 +171,13 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 				continue
 			}
 
-			if strings.HasPrefix(msg, "/") && !isSkill {
+			if plan, ok := takeApprovedPlan(msg, &pendingPlan, &manifest); ok && !isSkill {
+				// /approve runs the pending plan with the coding agent, as
+				// the TUI's /approve does; the run below reports it like
+				// any other prompt.
+				mode = "coding"
+				run = plan
+			} else if strings.HasPrefix(msg, "/") && !isSkill {
 				reply, note := handleHeadlessCommand(msg, &mode, &cfg, pm, &manifest)
 				req.Reply <- remote.SubmitResponse{Accepted: true, Note: note}
 				server.Publish("remote_command", map[string]any{
@@ -304,6 +313,9 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 						"tokens_used": result.TokensUsed,
 						"mode":        mode,
 					})
+					if mode == "plan" && strings.TrimSpace(result.Content) != "" {
+						pendingPlan = result.Content
+					}
 				}
 			}
 
@@ -323,6 +335,23 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 			})
 		}
 	}
+}
+
+// takeApprovedPlan reports whether msg is /approve with a plan pending and
+// a coding agent to run it; it then returns the plan and clears it, so a
+// plan runs at most once. /approve without a plan is left to
+// handleHeadlessCommand, which says there is none.
+func takeApprovedPlan(msg string, pendingPlan *string, manifest *config.AgentManifest) (string, bool) {
+	fields := strings.Fields(msg)
+	if len(fields) == 0 || fields[0] != "/approve" || strings.TrimSpace(*pendingPlan) == "" {
+		return "", false
+	}
+	if _, ok := manifest.AgentByID("coding"); !ok {
+		return "", false
+	}
+	plan := *pendingPlan
+	*pendingPlan = ""
+	return plan, true
 }
 
 func handleHeadlessCommand(
@@ -346,6 +375,10 @@ func handleHeadlessCommand(
 			"  /approve           run the pending plan",
 			"  /help              show this help",
 		}, "\n"), "help displayed"
+
+	case "/approve":
+		// takeApprovedPlan handles /approve when a plan is pending.
+		return "no pending plan — run a prompt in plan mode first", "no pending plan"
 
 	case "/mode", "/next":
 		next := nextHeadlessMode(*mode, manifest)
