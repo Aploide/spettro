@@ -303,7 +303,7 @@ func (r *toolRuntime) runSymbolSearch(ctx context.Context, args grepArgs) (strin
 	if strings.TrimSpace(args.Pattern) != "" {
 		return "", fmt.Errorf("grep: pass either pattern (a regex search) or symbol (a definitions-first lookup), not both")
 	}
-	out, err := r.searcher.Search(ctx, r.cwd, strings.TrimSpace(*args.Symbol))
+	out, err := r.searcher.searchWith(ctx, r, strings.TrimSpace(*args.Symbol))
 	if err != nil {
 		return "", err
 	}

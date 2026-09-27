@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,81 +15,60 @@ type SearchAgent interface {
 	Search(ctx context.Context, cwd, query string) (string, error)
 }
 
-// RepoSearcher walks the repo tree and optionally greps file contents. When
-// Index is set and the query looks like a symbol name, ranked definitions
-// from the symbol index are listed before the plain content matches.
+// RepoSearcher answers grep's symbol form: ranked definitions of an
+// identifier from the symbol index (when Index is set and the query looks
+// like one), then its usages from the grep engine.
 type RepoSearcher struct {
 	Index *indexer.SymbolIndex
 }
 
-// NewRepoSearcher returns a searcher backed by the project's symbol index,
-// persisted at <cwd>/.spettro/cache/symbols.json.
+// NewRepoSearcher returns a searcher backed by the project's shared symbol
+// index (one per workspace root per process, see indexer.Shared), persisted
+// at <cwd>/.spettro/cache/symbols.gob, so the TUI's startup warm-up and
+// every session's lookups use the same warm index.
 func NewRepoSearcher(cwd string) RepoSearcher {
-	return RepoSearcher{Index: indexer.NewSymbolIndex(cwd, filepath.Join(cwd, ".spettro", "cache", "symbols.json"))}
+	return RepoSearcher{Index: indexer.Shared(cwd, filepath.Join(cwd, ".spettro", "cache", "symbols.gob"))}
 }
 
 // identifierRE gates symbol lookups: only bare identifier-shaped queries hit
 // the index; phrases, regexes and paths go straight to the grep path.
 var identifierRE = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 
+// maxSymbolUsages caps the usages listed after the definitions: a common
+// name ("Context") used to list every occurrence in the tree (43 MB on a
+// 61k-file repo).
+const maxSymbolUsages = 200
+
+// Search runs the symbol search for cwd with a runtime of its own (no
+// sandbox, nothing recorded as read); the grep tool uses searchWith.
 func (s RepoSearcher) Search(ctx context.Context, cwd, query string) (string, error) {
-	var files []string
-	err := filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries
-		}
-		rel, _ := filepath.Rel(cwd, path)
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			return nil
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".spettro", "vendor", "node_modules", "dist", "build":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		files = append(files, rel)
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("walk: %w", err)
-	}
+	r := &toolRuntime{cwd: cwd, readSet: map[string]struct{}{}, requiredReads: map[string]struct{}{}}
+	return s.searchWith(ctx, r, query)
+}
 
+// searchWith answers a symbol query through r's search tools: the usages
+// are a case-insensitive literal grep (so .gitignore, the binary and size
+// filters and max_results apply, and rg is used when available), and an
+// empty query lists the workspace's files as glob "**" does (capped).
+func (s RepoSearcher) searchWith(ctx context.Context, r *toolRuntime, query string) (string, error) {
 	if query == "" {
-		return fmt.Sprintf("%d files:\n%s", len(files), strings.Join(files, "\n")), nil
+		return r.runGlob(ctx, "**", "")
 	}
-
-	q := strings.ToLower(query)
-	var results []string
-	for _, rel := range files {
-		abs := filepath.Join(cwd, rel)
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			continue
-		}
-		for i, line := range strings.Split(string(data), "\n") {
-			if strings.Contains(strings.ToLower(line), q) {
-				results = append(results, fmt.Sprintf("%s:%d: %s", rel, i+1, strings.TrimSpace(line)))
-			}
-		}
+	header := s.symbolHeader(ctx, query)
+	usages, err := r.runGrep(ctx, grepArgs{Pattern: regexp.QuoteMeta(query), CaseInsensitive: true, MaxResults: maxSymbolUsages})
+	if err != nil {
+		return "", err
 	}
-
-	header := s.symbolHeader(ctx, cwd, query)
-	if len(results) == 0 {
-		if header != "" {
-			return header + fmt.Sprintf("no other matches for %q in %d files", query, len(files)), nil
-		}
-		return fmt.Sprintf("no matches for %q in %d files", query, len(files)), nil
+	if strings.HasPrefix(usages, "no matches") && header != "" {
+		return header + fmt.Sprintf("no other matches for %q", query), nil
 	}
-	return header + fmt.Sprintf("%d matches:\n%s", len(results), strings.Join(results, "\n")), nil
+	return header + usages, nil
 }
 
 // symbolHeader returns a "definitions:" block for identifier-shaped queries,
 // ranked best-first by the symbol index, or "" when the index is disabled or
 // has nothing. Capped so a common name can't drown the content matches.
-func (s RepoSearcher) symbolHeader(ctx context.Context, cwd, query string) string {
+func (s RepoSearcher) symbolHeader(ctx context.Context, query string) string {
 	if s.Index == nil || !identifierRE.MatchString(query) {
 		return ""
 	}
@@ -111,6 +88,9 @@ func (s RepoSearcher) symbolHeader(ctx context.Context, cwd, query string) strin
 	}
 	if total > maxDefs {
 		fmt.Fprintf(&b, "... %d more definitions omitted\n", total-maxDefs)
+	}
+	if truncated, limit := s.Index.Truncated(); truncated {
+		fmt.Fprintf(&b, "(the symbol index stopped at %d source files: definitions in the rest are not listed, but the matches below come from every file)\n", limit)
 	}
 	b.WriteString("\n")
 	return b.String()

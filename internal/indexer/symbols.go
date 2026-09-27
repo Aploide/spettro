@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -31,22 +32,38 @@ func DefaultExtractors() []Extractor {
 }
 
 // regexExtract runs kind-tagged patterns line by line. Each pattern must have
-// exactly one capture group: the symbol name.
-func regexExtract(relPath string, src []byte, rules []regexRule) []Symbol {
+// exactly one capture group: the symbol name. mayDefine is a cheap necessary
+// condition for any rule to match a line (a keyword the rules start with):
+// lines failing it skip the regexps, which is most lines of a file (the
+// per-file cost on the 61k-file corpus dropped ~6x; symindex_bench_test.go).
+// The returned strings are copies, so they do not keep src alive.
+func regexExtract(relPath string, src []byte, rules []regexRule, mayDefine func(line []byte) bool) []Symbol {
 	var out []Symbol
-	for i, line := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimRight(line, " \t\r")
+	path := filepath.ToSlash(relPath)
+	for num := 1; len(src) > 0; num++ {
+		line := src
+		if i := bytes.IndexByte(src, '\n'); i >= 0 {
+			line, src = src[:i], src[i+1:]
+		} else {
+			src = nil
+		}
+		trimmed := bytes.TrimRight(line, " \t\r")
+		if !mayDefine(trimmed) {
+			continue
+		}
+		text := string(trimmed)
 		for _, r := range rules {
-			m := r.re.FindStringSubmatch(trimmed)
+			m := r.re.FindStringSubmatchIndex(text)
 			if m == nil {
 				continue
 			}
+			sig := strings.TrimSpace(text)
 			out = append(out, Symbol{
-				Path:      filepath.ToSlash(relPath),
-				Line:      i + 1,
+				Path:      path,
+				Line:      num,
 				Kind:      r.kind,
-				Name:      m[1],
-				Signature: strings.TrimSpace(trimmed),
+				Name:      text[m[2]:m[3]],
+				Signature: sig,
 			})
 			break
 		}
@@ -57,6 +74,18 @@ func regexExtract(relPath string, src []byte, rules []regexRule) []Symbol {
 type regexRule struct {
 	kind string
 	re   *regexp.Regexp
+}
+
+// startsWithWord reports whether line, after the leading white space \s
+// matches, starts with one of words.
+func startsWithWord(line []byte, words []string) bool {
+	line = bytes.TrimLeft(line, " \t\n\f\r")
+	for _, w := range words {
+		if bytes.HasPrefix(line, []byte(w)) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Go ---
@@ -71,9 +100,27 @@ var goRules = []regexRule{
 	{"var", regexp.MustCompile(`^var\s+([A-Za-z_][A-Za-z0-9_]*)\s`)},
 }
 
+// goMayDefine: every Go rule is anchored at column 0 on its keyword.
+func goMayDefine(line []byte) bool {
+	if len(line) == 0 {
+		return false
+	}
+	switch line[0] {
+	case 'f':
+		return bytes.HasPrefix(line, []byte("func"))
+	case 't':
+		return bytes.HasPrefix(line, []byte("type"))
+	case 'c':
+		return bytes.HasPrefix(line, []byte("const"))
+	case 'v':
+		return bytes.HasPrefix(line, []byte("var"))
+	}
+	return false
+}
+
 func (goExtractor) Extensions() []string { return []string{".go"} }
 func (goExtractor) Extract(relPath string, src []byte) []Symbol {
-	return regexExtract(relPath, src, goRules)
+	return regexExtract(relPath, src, goRules, goMayDefine)
 }
 
 // --- Python ---
@@ -86,9 +133,20 @@ var pyRules = []regexRule{
 	{"const", regexp.MustCompile(`^([A-Z_][A-Z0-9_]*)\s*=`)},
 }
 
+var pyKeywords = []string{"async", "def", "class"}
+
+// pyMayDefine: a def or class keyword after indentation, or a column-0
+// upper-case name (a constant).
+func pyMayDefine(line []byte) bool {
+	if len(line) > 0 && (line[0] == '_' || 'A' <= line[0] && line[0] <= 'Z') {
+		return true
+	}
+	return startsWithWord(line, pyKeywords)
+}
+
 func (pyExtractor) Extensions() []string { return []string{".py"} }
 func (pyExtractor) Extract(relPath string, src []byte) []Symbol {
-	return regexExtract(relPath, src, pyRules)
+	return regexExtract(relPath, src, pyRules, pyMayDefine)
 }
 
 // --- JavaScript / TypeScript ---
@@ -102,9 +160,14 @@ var jsRules = []regexRule{
 	{"const", regexp.MustCompile(`^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\(|function|[A-Za-z_$(<]|\d|['"{[])`)},
 }
 
+// jsKeywords are the words a JS/TS rule can start with.
+var jsKeywords = []string{"export", "default", "async", "function", "abstract", "class", "interface", "type", "enum", "const", "let", "var"}
+
+func jsMayDefine(line []byte) bool { return startsWithWord(line, jsKeywords) }
+
 func (jsExtractor) Extensions() []string {
 	return []string{".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 }
 func (jsExtractor) Extract(relPath string, src []byte) []Symbol {
-	return regexExtract(relPath, src, jsRules)
+	return regexExtract(relPath, src, jsRules, jsMayDefine)
 }

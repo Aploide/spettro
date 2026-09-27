@@ -147,6 +147,11 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	stamped := r.snapshotStampsForShell()
 	out, err := shell.CombinedOutput(cmd)
 	restampNote := r.restampNote(r.restampAfterShell(stamped))
+	// The command may have changed any source file: the next symbol lookup
+	// re-syncs the index with the disk instead of trusting its TTL.
+	if r.searcher.Index != nil {
+		r.searcher.Index.MarkStale()
+	}
 	// The output is sized as the shell's ("bash": a generous budget, head and
 	// tail kept), not by toolID. toolID is the call's identity, which for an
 	// unfolded retired name (shell-exec, bash-output) is that name; it decides
