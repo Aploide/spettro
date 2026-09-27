@@ -246,8 +246,9 @@ func (r *toolRuntime) traceID() string {
 type toolCall struct {
 	Tool string          `json:"tool"`
 	Args json.RawMessage `json:"args"`
-	// CalledAs is the retired name the model used when canonicalToolCall
-	// rewrote the call to its canonical tool; hooks match it as well.
+	// CalledAs is the name the model used when it differs from Tool: the
+	// retired name canonicalToolCall rewrote, or the misspelt name
+	// routeNearMissCall corrected. Hooks match it as well.
 	CalledAs string `json:"-"`
 }
 
@@ -996,7 +997,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
 			// A deferred tool the model called by name is advertised from
 			// the next step on, so its next call has the schema.
-			runtime.noteCalls(toolCallNames(resp.ToolCalls))
+			runtime.noteCalls(resultToolNames(results))
 			runtime.recordActivations(convMsgs)
 			// Loop check after execution: the signature includes each result,
 			// so re-running a command whose output changes (edit → test) is
@@ -1315,9 +1316,14 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	runnable := make([]int, 0, len(calls))
 	// Retired tool names become their canonical tool before anything else
 	// looks at the call, so the allow-list, policies, hooks, batching, traces
-	// and hosts only ever see canonical names.
+	// and hosts only ever see canonical names. A misspelt name (web_fetch)
+	// is first routed to the one allowed tool it stands for, if any
+	// (tool_near_miss.go).
 	calls = slices.Clone(calls)
 	for i, call := range calls {
+		if routed, ok := r.routeNearMissCall(call, allowed); ok {
+			call = routed
+		}
 		canon, err := r.canonicalCall(call)
 		if err != nil {
 			results[i] = parallelResult{
@@ -1567,7 +1573,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	}
 	ctx = withCalledAs(ctx, r.hookAlias(call))
 	if _, ok := allowed[call.Tool]; !ok {
-		return "", fmt.Errorf("tool %q not allowed", call.Tool)
+		return "", r.notAllowedError(call.Tool, allowed)
 	}
 	if spec, ok := r.toolPolicies[call.Tool]; ok {
 		if evaluatePermissionRule("tool", spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {

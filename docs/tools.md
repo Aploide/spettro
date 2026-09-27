@@ -114,6 +114,25 @@ SKILL.md files the catalog exposes). No migration folds anything into a
 canonical name a tool of your own holds (see below). See the v12, v13 and
 v14 notes in [AGENTS.md](../AGENTS.md#root-fields).
 
+## Misspelt tool names
+
+Models trained on other harnesses often call a tool by a near spelling:
+`web_fetch`, `file_read`, `todo_write`, `Bash`. A call under a name Spettro
+does not know at all (not a built-in, a retired name, or a manifest tool or
+alias) is compared with the agent's tools ignoring case and reading `_` and
+spaces as `-`. When exactly one tool on the agent's `allowed_tools` matches,
+the call runs as that tool; a retired name that matches counts as its
+canonical tool (`task_create` is a `todo-write` call). Permission rules,
+approvals, the trace and the clients see the tool's real name, and hooks
+match both it and the spelling the model used.
+
+When no allowed tool matches, or two do, nothing runs and the call fails as
+not allowed; for an unknown name the error names up to three allowed tools
+closest to it (`did you mean "file-read"?`), counting the same words in
+another order (`read_file`) as closest. Matching never grants anything:
+only tools the agent may already call are candidates, and a name Spettro
+knows (an explorer calling `file-write`) is never re-routed.
+
 ## Tools of your own with a built-in's name
 
 A tool you define in the manifest (`kind` `mcp`, `script` or `http`) may use
