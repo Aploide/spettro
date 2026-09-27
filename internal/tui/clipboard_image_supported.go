@@ -1,4 +1,9 @@
-//go:build (linux || darwin || windows) && !arm && !386 && !ios && !android
+//go:build (linux || windows) && !arm && !386 && !android
+
+// Linux and Windows read clipboard images through go-nativeclipboard, which
+// loads the platform library (libX11, user32) in its package initializer.
+// macOS uses internal/clipboard instead, which loads AppKit on first use
+// (see clipboard_image_darwin.go).
 
 package tui
 
