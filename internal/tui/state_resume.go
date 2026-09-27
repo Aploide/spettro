@@ -10,6 +10,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/session"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -268,7 +269,9 @@ func (m Model) viewResume() string {
 		if preview == "" {
 			preview = "(empty)"
 		}
-		preview = strings.ReplaceAll(preview, "\n", " ")
+		// One row per session: folded onto one line and cut by display cells
+		// (a rune count lets CJK text wrap the row and grow the dialog).
+		preview = termtext.SingleLine(preview)
 		var prefix string
 		var timeStyle, previewStyle lipgloss.Style
 		if isSelected {
@@ -283,7 +286,7 @@ func (m Model) viewResume() string {
 		prefixWidth := lipgloss.Width(prefix)
 		timeWidth := lipgloss.Width(timeStr) + 2
 		previewBudget := max(8, dialogWidth-prefixWidth-timeWidth-6)
-		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(truncateLabel(preview, previewBudget)))
+		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(termtext.Fit(preview, previewBudget)))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, styleMuted.Render("  no saved conversations"))
@@ -361,18 +364,43 @@ func (m Model) updateTrust(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// viewTrust is the first-run dialog asking whether to trust the folder.
+//
+// It is the first screen a new user sees, so it has to fit whatever size the
+// terminal starts at. Every text is wrapped to the dialog's inner width here
+// (the path in full: it is what the user is deciding about), so the height
+// is known; when the spaced layout is taller than the terminal, the blank
+// rows and the vertical padding are dropped, and MaxHeight guarantees the
+// frame never grows past the bottom even then.
 func (m Model) viewTrust() string {
 	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ confirm folder trust")
 	pathStyle := lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true)
 	warnStyle := lipgloss.NewStyle().Foreground(theme.Current().WarningSoft)
 
+	dialogWidth := 64
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+	// The box is dialogWidth+2 wide including its border (2) and horizontal
+	// padding (4); texts are indented two more cells inside it.
+	textW := dialogWidth - 4 - 2
+	indented := func(text string, style lipgloss.Style) []string {
+		var out []string
+		for _, line := range termtext.Wrap(text, textW) {
+			out = append(out, style.Render("  "+line))
+		}
+		return out
+	}
+
 	options := []string{
 		"Yes, trust this session",
 		"Yes, and remember this folder",
 		"No, exit",
 	}
-
 	var optLines []string
 	for i, opt := range options {
 		var prefix string
@@ -384,40 +412,51 @@ func (m Model) viewTrust() string {
 			prefix = "  "
 			style = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 		}
-		optLines = append(optLines, prefix+style.Render(fmt.Sprintf("%d  %s", i+1, opt)))
+		optLines = append(optLines, prefix+style.Render(termtext.Fit(fmt.Sprintf("%d  %s", i+1, opt), textW)))
 	}
 
-	inner := lipgloss.JoinVertical(lipgloss.Left,
-		title, "",
-		pathStyle.Render("  "+m.cwd),
-		"",
-		warnStyle.Render("  Spettro may read files and run commands in this folder."),
-		styleMuted.Render("  Only trust folders you own and control."),
-		"",
-		strings.Join(optLines, "\n"),
-		"",
-		styleMuted.Render("  ↑↓ navigate  enter confirm  1/2/3 direct select"),
-	)
-
-	dialogWidth := 64
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
+	sections := [][]string{
+		{title},
+		indented(termtext.EscapeControls(m.cwd), pathStyle),
+		append(indented("Spettro may read files and run commands in this folder.", warnStyle),
+			indented("Only trust folders you own and control.", styleMuted)...),
+		optLines,
+		indented("↑↓ navigate  enter confirm  1/2/3 direct select", styleMuted),
 	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
+	spacedHeight := 2 + 2 + len(sections) - 1 // border, padding, the blank rows between sections
+	for _, section := range sections {
+		spacedHeight += len(section)
+	}
+	spaced := spacedHeight <= m.height
+	if compactHeight := spacedHeight - 2 - (len(sections) - 1); compactHeight > m.height {
+		// Not even the compact form fits: the path, the only text of
+		// unbounded length, gives way to one row showing its end, so the
+		// options stay on screen.
+		sections[1] = []string{pathStyle.Render("  " + termtext.FitLeft(termtext.EscapeControls(m.cwd), textW))}
 	}
 
-	dialog := lipgloss.NewStyle().
+	var lines []string
+	for i, section := range sections {
+		if spaced && i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, section...)
+	}
+	style := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(inner)
+		Width(dialogWidth + 2)
+	if spaced {
+		style = style.Padding(1, 2)
+	} else {
+		style = style.Padding(0, 2)
+	}
+	dialog := style.Render(strings.Join(lines, "\n"))
 
-	return lipgloss.Place(m.width, m.height,
+	return lipgloss.NewStyle().MaxHeight(max(m.height, 1)).Render(lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
-	)
+	))
 }

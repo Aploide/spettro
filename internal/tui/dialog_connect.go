@@ -12,6 +12,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -640,21 +641,21 @@ func (m Model) viewConnect() string {
 				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
-				Render(label))
+				Render(termtext.Fit(label, innerW)))
 		} else {
 			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 			suffix := ""
 			if isConnected {
 				suffix = "  " + lipgloss.NewStyle().Foreground(theme.Current().Success).Render("✓ connected")
 			}
-			rows = append(rows, "  "+nameStyle.Render(name)+suffix)
+			rows = append(rows, termtext.Fit("  "+nameStyle.Render(name)+suffix, innerW))
 		}
 	}
 	if len(m.connectItems) == 0 {
 		rows = append(rows, styleMuted.Render("  no matches"))
 	}
 
-	hint := styleMuted.Render("↑↓ navigate  enter connect  esc close")
+	hint := styleMuted.Render(termtext.Fit("↑↓ navigate  enter connect  esc close", innerW))
 	maxRows := max(m.height-12, 4)
 	start := 0
 	if len(rows) > maxRows {

@@ -52,7 +52,7 @@ func (m Model) viewContent() string {
 	// never disagree with update()'s key routing. A nil view (modalSetup,
 	// legacy) falls through to the main pane.
 	if h, ok := modalHandlers[m.activeModal()]; ok && h.view != nil {
-		return h.view(m)
+		return clampFrame(h.view(m), m.width, m.height)
 	}
 
 	header := m.viewHeader()
@@ -97,6 +97,28 @@ func (m Model) viewContent() string {
 	divider := lipgloss.NewStyle().Foreground(theme.Current().Border).Render("│")
 	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
+}
+
+// clampFrame cuts a full-screen frame to the terminal: at most height rows,
+// each at most width cells (cut with "…"). The full-screen modals (resume,
+// model selector, connect, theme, rewind, memory review, ...) centre a
+// dialog of their own design; each keeps itself inside the terminal at the
+// sizes it was designed for, and this is the backstop that makes a dialog
+// taller or wider than a very small window crop at the edge instead of
+// scrolling the whole screen. A zero size (no WindowSizeMsg yet) leaves the
+// frame alone.
+func clampFrame(frame string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return frame
+	}
+	lines := strings.Split(frame, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i, line := range lines {
+		lines[i] = termtext.Fit(line, width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // diagFillTitle builds a section header like "Title ╱╱╱╱╱╱╱╱╱╱╱" filling innerWidth.

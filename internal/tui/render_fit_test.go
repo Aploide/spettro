@@ -676,6 +676,56 @@ func TestPalettesFitShortTerminals(t *testing.T) {
 	}
 }
 
+// The trust dialog is the first screen a new user sees and the resume
+// dialog lists whatever the first prompts of old sessions were; both fit
+// every size, with the options of the trust dialog always on screen.
+func TestTrustAndResumeDialogsFit(t *testing.T) {
+	var sessions []session.Summary
+	for range 30 {
+		sessions = append(sessions, session.Summary{
+			ID: "id", StartedAt: time.Now(), UpdatedAt: time.Now(),
+			Preview: strings.Repeat("first prompt 宽 text\twith tabs\n", 30),
+		})
+	}
+	for _, size := range fitSizes {
+		for _, cwd := range []string{"/Users/someone/projects/app", "/" + strings.Repeat("very/long/", 40)} {
+			m := footerModel(size[0], size[1])
+			m.showTrust = true
+			m.cwd = cwd
+			frame := m.View().Content
+			assertFrameFits(t, "trust", frame, size[0], size[1])
+			for _, option := range []string{"1  Yes, trust", "2  Yes, and", "3  No, exit"} {
+				if !strings.Contains(ansi.Strip(frame), option) {
+					t.Fatalf("%v: trust option %q is not on screen:\n%s", size, option, ansi.Strip(frame))
+				}
+			}
+		}
+		m := footerModel(size[0], size[1])
+		m.SetResumeItemsForTesting(sessions)
+		m.showResume = true
+		assertFrameFits(t, "resume", m.View().Content, size[0], size[1])
+	}
+}
+
+// The full-screen dialogs opened by commands fit whole, bottom border
+// included: clampFrame keeps any of them inside the terminal, but a dialog
+// it had to crop would be missing its keys.
+func TestCommandDialogsFitWhole(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, size := range fitSizes[:3] {
+		for _, command := range []string{"/theme", "/connect", "/models"} {
+			m := footerModel(size[0], size[1])
+			next, _ := m.handleCommand(command)
+			m = next.(Model).recalcLayout()
+			frame := m.View().Content
+			assertFrameFits(t, command, frame, size[0], size[1])
+			if !strings.Contains(frame, "╰") {
+				t.Fatalf("%s at %v: the dialog was cropped:\n%s", command, size, ansi.Strip(frame))
+			}
+		}
+	}
+}
+
 // BenchmarkRenderMessagesHugeTools measures a transcript refresh (the work
 // done on every streamed token) with 200 tool calls that each carry a whole
 // file. Cache hits must stay cheap: they still hash every message.

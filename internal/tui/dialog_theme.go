@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -113,6 +114,8 @@ func (m Model) viewThemePicker() string {
 			desc += " (now: " + theme.Seed(theme.AutoKind).String() + ")"
 		}
 
+		// Rows are cut, not wrapped, on a narrow terminal: a wrapped option
+		// reads as two options.
 		num := string(rune('1' + i))
 		if i == m.themeCursor {
 			rows = append(rows, lipgloss.NewStyle().
@@ -120,20 +123,27 @@ func (m Model) viewThemePicker() string {
 				Foreground(pal.Text).
 				Bold(true).
 				Width(innerW).
-				Render("› "+num+"  "+label+"   "+desc))
+				Render(termtext.Fit("› "+num+"  "+label+"   "+desc, innerW)))
 		} else {
-			rows = append(rows, "  "+num+"  "+
+			rows = append(rows, termtext.Fit("  "+num+"  "+
 				lipgloss.NewStyle().Foreground(pal.Text).Render(label)+
-				"   "+lipgloss.NewStyle().Foreground(pal.TextMuted).Render(desc))
+				"   "+lipgloss.NewStyle().Foreground(pal.TextMuted).Render(desc), innerW))
 		}
 	}
 
+	// The painted preview is the first thing to go on a short terminal: the
+	// options and the keys are what the dialog cannot do without, and the
+	// chosen theme is visible behind the dialog once applied anyway.
 	preview := m.previewKind()
+	previewRows := themePreview(theme.For(preview), innerW)
+	const chrome = 2 + 2 + 2 // border, vertical padding, the hint and the blank row above it
+	if len(rows)+2+len(previewRows)+chrome <= m.height || m.height <= 0 {
+		rows = append(rows, "",
+			lipgloss.NewStyle().Foreground(pal.TextMuted).Render("  preview — "+preview.String()))
+		rows = append(rows, previewRows...)
+	}
 	rows = append(rows, "",
-		lipgloss.NewStyle().Foreground(pal.TextMuted).Render("  preview — "+preview.String()))
-	rows = append(rows, themePreview(theme.For(preview), innerW)...)
-	rows = append(rows, "",
-		lipgloss.NewStyle().Foreground(pal.TextMuted).Render("↑↓ preview  enter apply  esc cancel"))
+		lipgloss.NewStyle().Foreground(pal.TextMuted).Render(termtext.Fit("↑↓ preview  enter apply  esc cancel", innerW)))
 
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
