@@ -237,7 +237,7 @@ func (m Model) handlePlanCommand(input string) (tea.Model, tea.Cmd) {
 		m.showBanner("plan agent not found", "error")
 		return m, nil
 	}
-	return m.runAgent(spec, task, nil, nil)
+	return m.runAgent(spec, m.expandSkillMentions(task), nil, nil)
 }
 
 func (m Model) handlePermissionsCommand(input string) (tea.Model, tea.Cmd) {

@@ -403,6 +403,12 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
 			task = trimmedTask
 			typed = strings.TrimSpace(strings.TrimPrefix(typed, "/plan"))
+			// $skill mentions in the task load those skills, as in any
+			// other prompt.
+			if section, names := skills.MentionInstructions(typed, agent.SkillCatalogFor(s.cwd, cfg)); len(names) > 0 {
+				shownTask = task
+				task += section
+			}
 		} else if rewritten, ok := acpWorkflowRunPrompt(s.cwd, trimmedTask); ok {
 			// /workflows run <name> becomes an ordinary turn instructing the
 			// agent to invoke the saved script, so the model reviews and acts

@@ -6,11 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
 	"spettro/internal/commands"
+	"spettro/internal/remote"
 	"spettro/internal/skills"
+	"spettro/internal/telegram"
 )
 
 // newSkillModel returns a test model whose workspace holds these skills in
@@ -287,4 +290,70 @@ func TestCmdMenuColumnsFit(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A "$" with nothing after it ends many prompts about regexes and shells
+// ("lines that end with $", "echo $"): it must not open the skill palette,
+// or Enter would complete a skill mention instead of sending the prompt.
+func TestBareDollarDoesNotCaptureEnter(t *testing.T) {
+	m := newSkillModel(t)
+	m.ta.SetValue("make the regex match lines that end with $")
+	m.syncInputSuggestions()
+	if len(m.mentionItems) != 0 {
+		t.Fatalf("a bare $ opened the skill palette: %v", m.mentionItems)
+	}
+	m.thinking = true // a send then asks steer-or-queue; nothing reaches a model
+	nm, _ := m.updateMain(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := nm.(Model)
+	if !got.showSteerChoice || got.steerPending != "make the regex match lines that end with $" {
+		t.Fatalf("Enter did not send the prompt as typed: input=%q pending=%q", got.ta.Value(), got.steerPending)
+	}
+}
+
+// $skill mentions are expanded on every path a prompt reaches the model by,
+// not only the idle local one: steering a running run, a remote or
+// Telegram prompt queued behind a run, and /plan <task>.
+func TestSkillMentionsExpandOnEveryPath(t *testing.T) {
+	const body = "Say hello to"
+	t.Run("steering", func(t *testing.T) {
+		m := newSkillModel(t)
+		m.thinking = true
+		m.steering = agent.NewSteeringQueue()
+		m.showSteerChoice, m.steerPending, m.steerCursor = true, "use $greet now", 0
+		nm, _ := m.updateSteerChoice(tea.KeyPressMsg{Code: tea.KeyEnter})
+		got := nm.(Model)
+		msgs := got.steering.Drain()
+		if len(msgs) != 1 || !strings.Contains(msgs[0], body) {
+			t.Fatalf("steered text = %q, want the skill's instructions", msgs)
+		}
+		var shown string
+		for _, msg := range got.messages {
+			if msg.Role == RoleUser {
+				shown = msg.Content
+			}
+		}
+		if shown != "use $greet now" {
+			t.Errorf("transcript shows %q, want what was typed", shown)
+		}
+	})
+	t.Run("remote queued", func(t *testing.T) {
+		m := newSkillModel(t)
+		m.thinking = true
+		reply := make(chan remote.SubmitResponse, 1)
+		nm, _ := m.handleRemoteSubmission(remote.SubmitRequest{Message: "use $greet now", Reply: reply})
+		got := nm.(Model)
+		if len(got.pendingPrompts) != 1 || !strings.Contains(got.pendingPrompts[0].Prompt, body) {
+			t.Fatalf("queued remote prompt = %+v", got.pendingPrompts)
+		}
+	})
+	t.Run("telegram queued", func(t *testing.T) {
+		m := newSkillModel(t)
+		m.thinking = true
+		reply := make(chan telegram.SubmitResponse, 1)
+		nm, _ := m.handleTelegramSubmission(telegram.SubmitRequest{Message: "use $greet now", Reply: reply})
+		got := nm.(Model)
+		if len(got.pendingPrompts) != 1 || !strings.Contains(got.pendingPrompts[0].Prompt, body) {
+			t.Fatalf("queued telegram prompt = %+v", got.pendingPrompts)
+		}
+	})
 }

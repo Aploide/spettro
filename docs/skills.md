@@ -194,10 +194,17 @@ The change applies to the next run; no reload needed.
   command menu, with the argument hint), and through the headless remote.
   The transcript shows what you typed; the agent receives the skill's
   instructions with your arguments substituted, and starts working.
-- **`$<name>`** anywhere in a prompt (Codex style). Typing `$` opens a
-  completion list of the skills you can run; on send, the instructions of
-  each mentioned skill (up to five) are appended to your prompt. `$5`,
-  `$HOME` and other words that are not skill names are left alone.
+- **`$<name>`** anywhere in a prompt (Codex style). Typing `$` and the
+  first letters of a name opens a completion list of the skills you can
+  run; a bare `$` (a prompt ending in "lines that end with $") opens
+  nothing, so Enter still sends. On send, the instructions of each
+  mentioned skill (up to five) are appended to your prompt, whichever way
+  the prompt reaches the agent: typed while idle, queued or steered into a
+  running run, sent from the remote API or Telegram, or as the task of
+  `/plan <task>`. `$5`, `$HOME` and other words that are not skill names are
+  left alone. (A `/goal <objective>` is not expanded: the objective is
+  stored and repeated on every iteration, so mention the skill in a normal
+  prompt instead.)
 
 ### The agent loading a skill
 

@@ -95,7 +95,9 @@ func (m Model) updateSteerChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				// the normal prompt path (starts a fresh run).
 				return m.handlePrompt(text)
 			}
-			m.steering.Push(text)
+			// The model gets the instructions of any $skill mentioned;
+			// the transcript keeps what was typed.
+			m.steering.Push(m.expandSkillMentions(text))
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleUser,
 				Content: text,

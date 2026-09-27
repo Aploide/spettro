@@ -315,7 +315,7 @@ func (m Model) handleRemoteSubmission(req remote.SubmitRequest) (tea.Model, tea.
 
 	if m.thinking {
 		mentionedFiles := m.extractMentionedFiles(text)
-		prompt := injectMentionGuidance(text, mentionedFiles)
+		prompt := injectMentionGuidance(m.expandSkillMentions(text), mentionedFiles)
 		m.queuePrompt(text, prompt, mentionedFiles, nil)
 		m.pushSystemMsg(fmt.Sprintf("queued remote request: %s", truncateLabel(text, 140)))
 		m.showBanner("remote request queued", "info")

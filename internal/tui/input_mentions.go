@@ -121,13 +121,19 @@ func (k mentionKind) sigil() string {
 
 // activeSkillMentionQuery reports whether the last token of the input is a
 // $mention being typed, and returns what follows the "$".
+//
+// A bare "$" is not a mention yet: prompts about regexes and shells end
+// with one ("lines that end with $", "echo $"), and an open palette would
+// make Enter complete a skill name instead of sending the prompt. The
+// palette opens from the first character after the "$".
 func activeSkillMentionQuery(input string) (string, bool) {
 	lastSpace := strings.LastIndexAny(input, " \n\t")
 	token := input[lastSpace+1:]
-	if !strings.HasPrefix(token, "$") {
+	query, ok := strings.CutPrefix(token, "$")
+	if !ok || query == "" {
 		return "", false
 	}
-	return strings.TrimPrefix(token, "$"), true
+	return query, true
 }
 
 // filterSkillMentions returns up to limit names of user-invocable skills
