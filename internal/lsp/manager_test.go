@@ -120,7 +120,8 @@ func TestLoadConfigOverride(t *testing.T) {
 func TestLoadConfigPartialOverrideKeepsEnabled(t *testing.T) {
 	root := t.TempDir()
 	stubLookPath(t, "gopls")
-	home := os.Getenv("HOME")
+	home := t.TempDir() // a home of its own: other tests read ~/.spettro/lsp.json too
+	t.Setenv("HOME", home)
 	writeLspJSON(t, home, Config{Servers: map[string]ServerConfig{"go": {Enabled: new(false)}}})
 	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{"go": {SettleMs: new(200)}}})
 	got, ok := loadConfig(root)
