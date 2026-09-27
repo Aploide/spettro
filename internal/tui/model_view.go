@@ -517,6 +517,19 @@ func wrapPlainLines(s string, width int) []string {
 	return lines
 }
 
+// wrapIndentedLines is wrapPlainLines for a block drawn indent cells in: the
+// text is wrapped to the width left beside the indent and every row gets
+// the indent, so wrapped rows line up under the first one. Wrapping the
+// indented text as a whole (as the ask-user dialog once did) indents only
+// the first row and sends the rest back to column 0.
+func wrapIndentedLines(s, indent string, width int) []string {
+	lines := wrapPlainLines(s, max(width-ansi.StringWidth(indent), 1))
+	for i, line := range lines {
+		lines[i] = indent + line
+	}
+	return lines
+}
+
 // clampTextLines keeps at most maxLines of text, marking the cut with an ellipsis
 // so a long question reads as truncated rather than silently missing its tail.
 func clampTextLines(lines []string, maxLines, width int) []string {
