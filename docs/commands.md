@@ -92,8 +92,9 @@
 | `Shift+Tab` | Cycle active mode/agent. |
 | `F2` | Next favorite model. |
 | `Shift+F2` | Previous favorite model. |
-| `Ctrl+O` | Toggle transcript tool details (trimmed outputs). |
+| `Ctrl+O` | Toggle transcript tool details (trimmed outputs). In an approval dialog: expand or collapse the preview. |
 | `Ctrl+G` | Toggle full (untrimmed) tool outputs; implies details visible. |
+| `PgUp` / `PgDn` | In an approval dialog: scroll the preview (a file change's diff, or a long command). |
 | `Ctrl+C` twice | Quit with safety confirmation. |
 | `Ctrl+Q` | Quit immediately. |
 | `Ctrl+V` | Paste image from clipboard (vision-capable models only). |
@@ -113,6 +114,9 @@
 - `/approve` requires a pending plan (typically produced in `plan` mode).
 - In `ask-first`, coding prompts are gated by approval flow.
 - Shell approval options: allow once, allow always, deny, or provide an alternative instruction.
+- The approval dialog always fits the terminal with every option visible, down to 40x15. It shows the call on one summary row, then a preview when there is more to see: the diff of a `file-write`/`file-edit`, or the full text of a command too long for the summary row (a heredoc, say). The preview is capped (16 diff lines, 8 command lines) until `Ctrl+O` expands it to every row the terminal can spare, and `PgUp`/`PgDn` scroll it; a footer row says which lines are on screen (`lines 1-8 of 3002`), or that the preview is hidden when the terminal is too short for it. Control characters in a command or a diff are shown rather than interpreted (`^M` for a carriage return, `^[` for an escape), so nothing the agent sends can hide part of what you approve.
+- Tool calls and outputs of any size stay inside the terminal. A tool's header row is one line (a multi-line command is folded onto it, a long path is cut from the left so the file name stays visible); output lines wider than the transcript are cut with `…` and a `long lines cut · ctrl+g for full output` note, and `Ctrl+G` shows them whole, wrapped. Escape sequences in output are dropped and progress meters that redraw with carriage returns show their final state.
+- With the activity panel open (`Ctrl+B`), the task list moves into the panel (the footer under the transcript is not drawn then); it shows live tasks first and counts completed ones.
 - "Allow always" persists normalized command approvals in `.spettro/allowed_commands.json`.
 - `/connect` includes `Local endpoints (LM Studio/Ollama/llama.cpp/…)` and probes `/v1/models`. Multiple local endpoints can be connected side by side; each can optionally carry an API key (for servers started with authentication, e.g. `llama-server --api-key`), and existing endpoints can be managed (edit key / remove) from the same dialog.
 - In `/models`, press `f` to toggle favorites for highlighted model.

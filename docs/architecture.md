@@ -10,7 +10,8 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 
 ## Core packages
 
-- `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions.
+- `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions. Every frame has to fit the terminal exactly: rows are fitted to their width before lipgloss sees them (a box that wraps a long row grows taller than the layout reserved), and `recalcLayout` measures the rendered input area instead of estimating it. `internal/tui/render_fit_test.go` renders huge tool calls, approvals and dialogs at sizes from 40x15 up and checks every frame.
+- `internal/termtext`: makes untrusted text safe for the cell grid. `SanitizeLine` shows tool output the way a terminal would (escape sequences removed, tabs expanded, carriage returns resolved to the final state of the line); `EscapeControls` shows text the user must judge (a command waiting for approval, a diff) with every control character visible instead; `Fit`, `FitLeft` and `Wrap` bound text to a number of cells, marking cuts with `…`.
 - `internal/agent`: LLM runtime loop, native tool-call execution, delegation, policy checks, and **tool output spooling** (large results from `file-read`, `grep`, `bash`, `web-fetch` etc. are written to a session-scoped spool file with a truncated head and a pageable offset, so the model can retrieve the full content via `tool-output` with `spool:N` IDs).
 - `internal/config`: config persistence, encrypted keys, trust list, manifest parsing/validation/migration.
 - `internal/provider`: provider adapters, endpoint resolution, connected model routing, and Fantasy-backed text model execution with legacy SDK fallback for vision or legacy completion endpoints.
