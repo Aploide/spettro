@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"slices"
 	"strings"
@@ -12,13 +11,10 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
-	"spettro/internal/spettro"
-	"spettro/internal/storage"
 )
 
 func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overrides) {
@@ -27,68 +23,24 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 	// Whatever the submissions started must not outlive the server.
 	defer releaseSessionResources()
 
-	store, err := storage.New(cwd)
+	boot, err := bootstrapSession(cwd, sandboxOverrides)
 	if err != nil {
-		fatal("storage error: %v", err)
+		fatal("%v", err)
 	}
+	store, pm, manifest := boot.store, boot.providers, boot.manifest
+	// The server reports ready without waiting for the network; the first
+	// submission waits (bounded) for local endpoints and the subscription
+	// model list instead.
+	discovery := startModelDiscovery(ctx, boot.cfg, pm, true)
+	cfg := boot.cfg
+	resolveActiveModel(&cfg, pm)
 
-	cfg, err := config.LoadFull()
-	if err != nil {
-		fatal("config error: %v", err)
-	}
-
-	pm := provider.NewManager()
-	pm.SetStreamAll(true)
-	pm.SetAPIKeys(cfg.APIKeys)
-
-	if cat, err := models.Load(); err == nil {
-		pm.SetCatalog(cat)
-	}
-	for _, endpoint := range cfg.LocalEndpoints {
-		if localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint]); err == nil {
-			pm.AddLocalModels(localModels)
-		}
-	}
-	// Register the Spettro Subscription endpoint + models when signed in.
-	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
-		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
-		if infos, err := spettro.ListModels(context.Background(), cfg.APIKeys[spettro.ProviderID]); err == nil {
-			pm.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
-		}
-	}
-	models.RefreshBackground(pm.SetCatalog)
-
-	// Don't run with a model whose provider has no credentials (fresh install
-	// or removed key): fall back to the best connected model.
-	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
-
-	// A manifest that cannot be loaded stops the server, as it stops the
-	// TUI: running with an empty manifest would ignore its sandbox_mode and
-	// fail every submission with "agent not found".
-	manifest, err := config.LoadAgentManifestForProject(cwd)
-	if err != nil {
-		fatal("agent manifest error: %v", err)
-	}
 	mode := manifest.DefaultAgent
 	if mode == "" {
 		mode = "plan"
 	}
-
 	// One SandboxState for the server lifetime, shared across submissions.
-	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
-	if err != nil {
-		fatal("sandbox error: %v", err)
-	}
-	sb := agent.NewSandboxState(sandboxPolicy)
-
-	// Write-confine the server process itself as defense-in-depth (best-effort;
-	// the model surface is confined at the shell and file-tool layers).
-	if sandboxPolicy.Enabled() {
-		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
-		if err := sandbox.ConfineParent(writable); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
-		}
-	}
+	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
 	server, err := remote.NewServer(remote.Options{BindHost: bindHost})
 	if err != nil {
@@ -154,6 +106,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 				return
 			}
 
+			discovery.Wait(sessionModelsWait)
 			// Reload config to pick up key changes made via /models.
 			if freshCfg, ferr := config.LoadFull(); ferr == nil {
 				cfg = freshCfg

@@ -12,17 +12,21 @@ import (
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/jobs"
-	"spettro/internal/models"
-	"spettro/internal/provider"
 	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/shell"
-	"spettro/internal/storage"
 	"spettro/internal/tui"
 	"spettro/internal/update"
+	"spettro/internal/version"
 )
 
 func main() {
+	// Answered before anything else runs, so it costs no more than the
+	// package initialisers (see printVersionIfRequested).
+	if printVersionIfRequested(os.Args[1:]) {
+		return
+	}
+
 	// On Linux, this re-execs as a Landlock-confined sandbox child when asked
 	// (see internal/sandbox); it must run before any flag parsing. No-op
 	// otherwise.
@@ -113,60 +117,23 @@ func main() {
 	if err != nil {
 		fatal("cwd error: %v", err)
 	}
-
-	store, err := storage.New(cwd)
+	boot, err := bootstrapSession(cwd, sandboxOverrides)
 	if err != nil {
-		fatal("storage error: %v", err)
+		fatal("%v", err)
 	}
+	// Local endpoints answer in the background; the TUI reads the provider
+	// manager on every frame, so their models show up as they arrive.
+	discovery := startModelDiscovery(context.Background(), boot.cfg, boot.providers, false)
+	// tui.New replaces a configured model that cannot run with the best
+	// connected one and saves that choice. When only a local endpoint can
+	// supply it, give the probes a bounded chance to answer first, or the
+	// saved choice would be "no model" on every launch.
+	if fallbackNeedsDiscovery(boot.cfg, boot.providers) {
+		discovery.Wait(sessionModelsWait)
+	}
+	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
-	cfg, err := config.LoadFull()
-	if err != nil {
-		fatal("config error: %v", err)
-	}
-
-	pm := provider.NewManager()
-	pm.SetStreamAll(true)
-	pm.SetAPIKeys(cfg.APIKeys)
-
-	manifest, err := config.LoadAgentManifestForProject(cwd)
-	if err != nil {
-		fatal("agent manifest error: %v", err)
-	}
-	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
-	if err != nil {
-		fatal("sandbox error: %v", err)
-	}
-	sb := agent.NewSandboxState(sandboxPolicy)
-
-	// Write-confine the spettro process itself (and its in-process file tools)
-	// as defense-in-depth. On macOS this re-execs under sandbox-exec and does
-	// not return; on Linux it applies Landlock in place. Done before the
-	// catalog/network setup to avoid redoing that work after the macOS re-exec.
-	// Best-effort: the model's surface is already confined at the shell and
-	// file-tool layers, so a failure here is only a warning.
-	if sandboxPolicy.Enabled() {
-		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
-		if err := sandbox.ConfineParent(writable); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
-		}
-	}
-
-	// Load cached catalog immediately (fast disk read) so the model selector
-	// is populated before the TUI starts.  Then refresh from the network in
-	// the background – exactly like opencode's ModelsDev pattern.
-	if cat, err := models.Load(); err == nil {
-		pm.SetCatalog(cat)
-	}
-	for _, endpoint := range cfg.LocalEndpoints {
-		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint])
-		if err != nil {
-			continue
-		}
-		pm.AddLocalModels(localModels)
-	}
-	models.RefreshBackground(pm.SetCatalog)
-
-	m := tui.New(cwd, cfg, store, pm, sb)
+	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb)
 
 	// Alt screen and mouse mode are declared on the tea.View in Model.View
 	// (bubbletea v2 removed the imperative program options).
@@ -187,6 +154,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "spettro was updated, but could not restart automatically: %v\nrun spettro again to use the new version.\n", err)
 		}
 	}
+}
+
+// printVersionIfRequested prints the version and reports true when the only
+// argument is --version, -v or version.
+func printVersionIfRequested(args []string) bool {
+	if len(args) != 1 {
+		return false
+	}
+	switch args[0] {
+	case "--version", "-v", "-version", "version":
+		fmt.Println("spettro " + version.App)
+		return true
+	}
+	return false
 }
 
 // fatal reports an error and exits with status 1, releasing whatever the

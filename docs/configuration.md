@@ -7,9 +7,13 @@ Spettro uses both project-local and user-global storage.
 | Path | Purpose |
 | --- | --- |
 | `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md). |
-| `keys.enc` | Encrypted API keys map by provider ID. |
+| `keys.enc` | Encrypted API keys map by provider ID (see [Encrypted API keys](#encrypted-api-keys)). |
+| `keys.enc.v1` | Backup of a pre-v2 `keys.enc`, written when it is migrated; kept for one release. |
+| `master.key` | Random secret `keys.enc` is encrypted under (created on first use). |
 | `trusted.json` | Permanently trusted project paths. |
-| `models.json` | Cached `models.dev` catalog. |
+| `catalog.json` | Cached provider/model catalog (see [Model catalog](#model-catalog)). |
+| `catalog-meta.json` | When the server last confirmed `catalog.json`, and the server's `ETag`/`Last-Modified` for it. |
+| `update-check.json` | Result of the last GitHub release check, reused for 24 hours by the startup notice (`/update` always checks live). |
 | `hooks.json` | Global runtime hooks fallback/default. |
 | `lsp.json` | Optional [LSP](lsp.md) overrides; servers are auto-detected on PATH with zero config. |
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
@@ -19,6 +23,63 @@ Spettro uses both project-local and user-global storage.
 | `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created; reclaimable via [`/storage clean`](storage.md)). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
+
+## Encrypted API keys
+
+`keys.enc` holds the provider API keys, encrypted with AES-256-GCM. The file
+key is derived from the random secret in `master.key` (or from
+`SPETTRO_MASTER_KEY` when that variable is set) and a per-file salt.
+
+- **Format v2** (`"kdf": "hkdf-sha256-v2"` in the file) derives the key with
+  HKDF-SHA256, which takes microseconds. Earlier versions used scrypt, which
+  added about 60 ms to every start of the TUI, ACP and headless modes. The
+  security does not change: the input is 32 random bytes, which a slow KDF
+  cannot strengthen, and `master.key` sits next to `keys.enc`.
+- **Migration.** The first start of a v2-capable build rewrites an older
+  `keys.enc` in format v2 (temp file, fsync, rename, so a crash leaves the
+  old or the new file, never a partial one). Before replacing it, the old
+  file is copied byte for byte to `keys.enc.v1`.
+- **Downgrading.** Older builds cannot read a v2 file. To go back, restore
+  the backup: `cp ~/.spettro/keys.enc.v1 ~/.spettro/keys.enc`. Keys added
+  after the upgrade are not in the backup and must be entered again.
+- **Removal timeline.** `keys.enc.v1` is kept for one release: the release
+  that introduces format v2 creates it, and the release after that stops
+  creating it and deletes an existing copy. Reading older files stays
+  supported, so an installation that skips a release still migrates.
+- **`SPETTRO_MASTER_KEY`.** A passphrase set in this variable is not
+  random, so files encrypted under it keep scrypt and are not migrated.
+
+## Model catalog
+
+The model picker is built from the Spettro provider catalog
+(`catalog.spettro.app`). Startup never waits for it:
+
+- A cached copy in `~/.spettro/catalog.json` is used when present.
+- Otherwise (first run, cache deleted, offline or behind a broken proxy) the
+  snapshot embedded in the binary at build time is used.
+- A background refresh then asks the server for a newer catalog only when
+  the server last confirmed the cached copy more than 6 hours ago. The
+  request is conditional: it carries the `ETag` and `Last-Modified` the server
+  sent with that copy (kept in `catalog-meta.json`), so an unchanged catalog
+  is not downloaded again. A cache without that file (written by an older
+  build, or left behind after `spettro clean`) is downloaded again once
+  stale.
+- Long sessions re-check hourly under the same rule. The cache is shared by
+  every spettro process: when another one (an ACP server, a second TUI) has
+  downloaded a newer catalog, a running session switches to it at its next
+  hourly check, without a request of its own.
+
+Local endpoints (`local_endpoints` in `config.json`) and the Spettro
+Subscription model list are also fetched in the background. Their models
+appear in the TUI as each server answers. A result that arrives after you
+removed or re-probed that endpoint (or signed out of the subscription) is
+dropped, so it never undoes the change. If the configured model cannot run
+(no key for its provider) and only a local endpoint can supply a
+replacement, the TUI waits up to 2 seconds for the endpoints before it picks
+and saves one. ACP `session/new`,
+`session/load` and `session/resume` wait up to 2 seconds for them; a slower
+server's models reach the editor afterwards as a `config_option_update`.
+The headless server waits the same way before its first submission.
 
 ## Project-local (`<repo>/.spettro/`)
 

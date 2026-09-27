@@ -31,10 +31,7 @@ type localModelsResp struct {
 // open servers. Returns an error if the server is unreachable or the response
 // is invalid.
 func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if !strings.HasPrefix(baseURL, "http") {
-		baseURL = "http://" + baseURL
-	}
+	baseURL = LocalProviderID(baseURL)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
@@ -96,6 +93,17 @@ func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, err
 		return nil, fmt.Errorf("server is running but returned no models")
 	}
 	return out, nil
+}
+
+// LocalProviderID returns the provider id the models of a local endpoint
+// get: the endpoint URL without a trailing slash, with http:// added when it
+// has no scheme.
+func LocalProviderID(endpoint string) string {
+	id := strings.TrimRight(endpoint, "/")
+	if !strings.HasPrefix(id, "http") {
+		id = "http://" + id
+	}
+	return id
 }
 
 // LocalProviderName derives a human-readable name from a local server URL.

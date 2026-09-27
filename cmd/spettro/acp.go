@@ -3,20 +3,12 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"spettro/internal/acp"
 	"spettro/internal/agent"
-	"spettro/internal/config"
-	"spettro/internal/models"
-	"spettro/internal/provider"
 	"spettro/internal/sandbox"
-	"spettro/internal/spettro"
-	"spettro/internal/storage"
 )
 
 // runACP serves the Agent Client Protocol over stdio so ACP clients (Zed,
@@ -29,68 +21,25 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	// the sessions started must not outlive the agent process.
 	defer releaseSessionResources()
 
-	store, err := storage.New(cwd)
+	boot, err := bootstrapSession(cwd, sandboxOverrides)
 	if err != nil {
-		fatal("storage error: %v", err)
+		fatal("%v", err)
 	}
-
-	cfg, err := config.LoadFull()
-	if err != nil {
-		fatal("config error: %v", err)
-	}
-
-	pm := provider.NewManager()
-	pm.SetStreamAll(true)
-	pm.SetAPIKeys(cfg.APIKeys)
-
-	if cat, err := models.Load(); err == nil {
-		pm.SetCatalog(cat)
-	}
-	for _, endpoint := range cfg.LocalEndpoints {
-		if localModels, err := provider.ProbeLocalServer(ctx, endpoint, cfg.APIKeys[endpoint]); err == nil {
-			pm.AddLocalModels(localModels)
-		}
-	}
-	// Register the Spettro Subscription endpoint + models when signed in.
-	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
-		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
-		if infos, err := spettro.ListModels(ctx, cfg.APIKeys[spettro.ProviderID]); err == nil {
-			pm.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
-		}
-	}
-	models.RefreshBackground(pm.SetCatalog)
-
-	// Don't run with a model whose provider has no credentials (fresh install
-	// or removed key): fall back to the best connected model.
-	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
-
-	manifest, err := config.LoadAgentManifestForProject(cwd)
-	if err != nil {
-		fatal("agent manifest error: %v", err)
-	}
-
-	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
-	if err != nil {
-		fatal("sandbox error: %v", err)
-	}
-	sb := agent.NewSandboxState(sandboxPolicy)
-
-	// Write-confine the server process itself as defense-in-depth (best-effort;
-	// the model surface is confined at the shell and file-tool layers).
-	if sandboxPolicy.Enabled() {
-		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
-		if err := sandbox.ConfineParent(writable); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
-		}
-	}
+	// initialize must not wait for the network: local endpoints and the
+	// subscription model list load in the background, and the bridge waits
+	// for them (bounded) only where it reports a model list.
+	discovery := startModelDiscovery(ctx, boot.cfg, boot.providers, true)
+	cfg := boot.cfg
+	resolveActiveModel(&cfg, boot.providers)
 
 	err = acp.Serve(ctx, acp.Options{
 		CWD:          cwd,
-		GlobalDir:    store.GlobalDir,
+		GlobalDir:    boot.store.GlobalDir,
 		Cfg:          cfg,
-		Providers:    pm,
-		Manifest:     manifest,
-		SandboxState: sb,
+		Providers:    boot.providers,
+		Manifest:     boot.manifest,
+		SandboxState: agent.NewSandboxState(boot.sandboxPolicy),
+		ModelsReady:  discovery.Done(),
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fatal("acp error: %v", err)

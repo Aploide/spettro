@@ -4,18 +4,24 @@
 package models
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"spettro/internal/homedir"
+	"spettro/internal/safeio"
 )
 
-const apiURL = "https://catalog.spettro.app/providers.min.json"
+// catalogURL is where the catalog is served; a variable so tests can point
+// it at a local server.
+var catalogURL = "https://catalog.spettro.app/providers.min.json"
 
 // APIKind is the wire protocol used to talk to a provider. Spettro's backend
 // supports exactly two: OpenAI-compatible and Anthropic-compatible.
@@ -54,6 +60,16 @@ type Catalog struct {
 	Providers map[string]CatalogProvider `json:"providers"`
 }
 
+// snapshotGz is the catalog as it was when this binary was built, gzip
+// compressed (about 9 KB). Load serves it when there is no usable disk cache
+// (first run, offline, a broken proxy), so startup never waits for the
+// network. Regenerate it with "go generate ./internal/models"; the release
+// workflow does so before every build.
+//
+//go:generate go run ./internal/snapshotgen -o catalog_snapshot.json.gz
+//go:embed catalog_snapshot.json.gz
+var snapshotGz []byte
+
 // cacheFile returns the path to the local JSON cache.
 func cacheFile() (string, error) {
 	home, err := homedir.Dir()
@@ -63,67 +79,69 @@ func cacheFile() (string, error) {
 	return filepath.Join(home, ".spettro", "catalog.json"), nil
 }
 
-// Load returns the catalog from disk cache, or fetches it if unavailable.
+// Load returns the catalog from the disk cache, or the snapshot embedded in
+// the binary when there is no usable cache. It never touches the network;
+// LoadAndRefresh also keeps the catalog current in the background.
 func Load() (Catalog, error) {
-	path, err := cacheFile()
-	if err == nil {
-		if data, err := os.ReadFile(path); err == nil {
-			var cat Catalog
-			if json.Unmarshal(data, &cat) == nil && len(cat.Providers) > 0 {
-				return cat, nil
-			}
-		}
+	if cached, err := readCache(); err == nil {
+		return cached.catalog, nil
 	}
-	return Fetch()
+	return Snapshot()
 }
 
-// Fetch downloads the catalog and updates the disk cache.
-func Fetch() (Catalog, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(apiURL)
+// Snapshot returns the catalog embedded in the binary at build time.
+func Snapshot() (Catalog, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(snapshotGz))
 	if err != nil {
-		return Catalog{}, fmt.Errorf("catalog fetch: %w", err)
+		return Catalog{}, fmt.Errorf("catalog snapshot: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return Catalog{}, fmt.Errorf("catalog fetch: status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(zr)
 	if err != nil {
-		return Catalog{}, fmt.Errorf("catalog read: %w", err)
+		return Catalog{}, fmt.Errorf("catalog snapshot: %w", err)
 	}
+	return parseCatalog(data)
+}
 
+// cachedCatalog is the content of the disk cache, catalog.json.
+type cachedCatalog struct {
+	catalog Catalog
+	// sum is the SHA-256 of the file, which identifies this copy (see
+	// cacheMeta.CacheSHA256 and refresher.applied).
+	sum [sha256.Size]byte
+	// modTime is when the file was last written.
+	modTime time.Time
+}
+
+// readCache returns the disk cache, or an error when it is missing or
+// unusable.
+func readCache() (cachedCatalog, error) {
+	path, err := cacheFile()
+	if err != nil {
+		return cachedCatalog{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return cachedCatalog{}, err
+	}
+	data, err := safeio.ReadFile(path)
+	if err != nil {
+		return cachedCatalog{}, err
+	}
+	cat, err := parseCatalog(data)
+	if err != nil {
+		return cachedCatalog{}, err
+	}
+	return cachedCatalog{catalog: cat, sum: sha256.Sum256(data), modTime: info.ModTime()}, nil
+}
+
+// parseCatalog decodes a catalog document and rejects one without providers.
+func parseCatalog(data []byte) (Catalog, error) {
 	var cat Catalog
-	if err := json.Unmarshal(body, &cat); err != nil {
+	if err := json.Unmarshal(data, &cat); err != nil {
 		return Catalog{}, fmt.Errorf("catalog parse: %w", err)
 	}
 	if len(cat.Providers) == 0 {
 		return Catalog{}, fmt.Errorf("catalog parse: no providers")
 	}
-
-	if path, err := cacheFile(); err == nil {
-		_ = os.MkdirAll(filepath.Dir(path), 0o755)
-		_ = os.WriteFile(path, body, 0o644)
-	}
-
 	return cat, nil
-}
-
-// RefreshBackground starts a goroutine that refreshes the cache once now and
-// then every hour.
-func RefreshBackground(onRefresh func(Catalog)) {
-	go func() {
-		if cat, err := Fetch(); err == nil && onRefresh != nil {
-			onRefresh(cat)
-		}
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			if cat, err := Fetch(); err == nil && onRefresh != nil {
-				onRefresh(cat)
-			}
-		}
-	}()
 }

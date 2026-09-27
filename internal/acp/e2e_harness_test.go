@@ -318,6 +318,13 @@ type acpHarness struct {
 // the ones a real installation ships with.
 func newACPHarness(t *testing.T, llm *scriptedLLM, permission config.PermissionLevel) *acpHarness {
 	t.Helper()
+	return newACPHarnessWith(t, llm, permission, nil)
+}
+
+// newACPHarnessWith is newACPHarness with a hook that adjusts the bridge
+// Options before the agent starts (nil for none).
+func newACPHarnessWith(t *testing.T, llm *scriptedLLM, permission config.PermissionLevel, adjust func(*Options)) *acpHarness {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")
@@ -352,13 +359,17 @@ func newACPHarness(t *testing.T, llm *scriptedLLM, permission config.PermissionL
 		t.Fatal(err)
 	}
 
-	b := newBridge(Options{
+	opts := Options{
 		CWD:       cwd,
 		GlobalDir: filepath.Join(home, ".spettro"),
 		Cfg:       cfg,
 		Providers: pm,
 		Manifest:  config.DefaultAgentManifest(),
-	})
+	}
+	if adjust != nil {
+		adjust(&opts)
+	}
+	b := newBridge(opts)
 
 	// Two one-way pipes: what the agent writes the client reads, and the
 	// other way round. The tap sits on the agent's writing end.
