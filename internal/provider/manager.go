@@ -41,6 +41,12 @@ type Manager struct {
 	// streamAll routes every request through the streaming path, even when
 	// the caller wants no live tokens (see SetStreamAll).
 	streamAll bool
+	// wire selects the chat-completions client (see SetWireMode); the zero
+	// value means WireNative.
+	wire WireMode
+	// encoder caches request encodings for the native client (see
+	// chatEncoder); created on first use.
+	encoder *chatEncoder
 	// effortDowngrades remembers, per provider, model and thinking level, the
 	// lower level Send stepped down to after the backend rejected the
 	// reasoning_effort value, so later sends start there instead of walking
@@ -547,7 +553,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	// retryable error instead of a hang. With streamAll every request does.
 	anthropicAPI := isAnthropicAPI(providerName, apiKind)
 	if req.OnStream != nil || anthropicAPI || streamAll {
-		resp, err := sendWithFantasyStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
+		resp, err := m.sendStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
 			return finalizeResponse(resp, providerName, modelName, req), nil
 		}
