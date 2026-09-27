@@ -112,21 +112,40 @@ func TestRead_RichSkill(t *testing.T) {
 	}
 }
 
-func TestRead_MissingFrontmatter(t *testing.T) {
+// SKILL.md files written for Claude Code often have no frontmatter at all;
+// they load with the directory name and the first body line.
+func TestRead_MissingFrontmatterDefaultsFromDirAndBody(t *testing.T) {
 	tmp := t.TempDir()
 	dir := writeSkill(t, tmp, "broken", "# just markdown without frontmatter\n")
 
-	if _, err := skills.Read(dir); err == nil {
-		t.Fatal("expected error for missing frontmatter")
+	skill, err := skills.Read(dir)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if skill.Name != "broken" || skill.Description != "just markdown without frontmatter" {
+		t.Errorf("defaults = %q / %q", skill.Name, skill.Description)
 	}
 }
 
-func TestRead_MissingDescription(t *testing.T) {
+func TestRead_MissingDescriptionUsesBody(t *testing.T) {
 	tmp := t.TempDir()
 	dir := writeSkill(t, tmp, "no-desc", "---\nname: no-desc\n---\nbody\n")
 
+	skill, err := skills.Read(dir)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if skill.Description != "body" {
+		t.Errorf("description = %q, want the first body line", skill.Description)
+	}
+}
+
+func TestRead_EmptySkillIsAnError(t *testing.T) {
+	tmp := t.TempDir()
+	dir := writeSkill(t, tmp, "empty", "---\nname: empty\n---\n")
+
 	if _, err := skills.Read(dir); err == nil {
-		t.Fatal("expected error for missing description")
+		t.Fatal("a skill with no description and no body must be an error")
 	}
 }
 
@@ -402,7 +421,7 @@ func TestCatalogPrompt_ContainsSkillsSection(t *testing.T) {
 	if !strings.Contains(prompt, "pdf-processing") {
 		t.Errorf("prompt missing skill name: %q", prompt)
 	}
-	if !strings.Contains(prompt, "skill-read tool") {
+	if !strings.Contains(prompt, "`skill` tool") {
 		t.Errorf("prompt missing activation guidance: %q", prompt)
 	}
 }

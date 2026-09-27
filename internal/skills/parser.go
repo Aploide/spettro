@@ -34,24 +34,36 @@ func splitFrontmatter(content string) (string, string) {
 	return front, body
 }
 
-// parse extracts metadata from SKILL.md content.
-func parse(content string) (Skill, error) {
-	front, _ := splitFrontmatter(content)
-	if strings.TrimSpace(front) == "" {
-		return Skill{}, fmt.Errorf("missing YAML frontmatter delimited by ---")
-	}
-	skill, err := parseFrontmatter(front)
-	if err != nil {
-		return Skill{}, err
-	}
-	if strings.TrimSpace(skill.Name) == "" {
-		return Skill{}, fmt.Errorf("frontmatter missing required field: name")
-	}
-	if strings.TrimSpace(skill.Description) == "" {
-		return Skill{}, fmt.Errorf("frontmatter missing required field: description")
-	}
+// parse extracts metadata from SKILL.md content. dirName is the name of the
+// skill's directory, used when the frontmatter has no name.
+//
+// Parsing follows Claude Code's leniency so skills written for it load
+// unchanged: every frontmatter field is optional, and a file without
+// frontmatter is all body. A missing name becomes dirName; a missing
+// description becomes the first non-empty line of the body (a leading
+// Markdown heading marker stripped). The only error is a skill with neither
+// a description nor a body, which would give the model nothing to go on.
+// Spec violations that do not stop the skill from working (a name that is
+// not lowercase-hyphenated, an over-long description) are reported in
+// Skill.Issues.
+func parse(content, dirName string) (Skill, error) {
+	front, body := splitFrontmatter(content)
+	skill := parseFrontmatter(front)
 	skill.Name = strings.TrimSpace(skill.Name)
 	skill.Description = strings.TrimSpace(skill.Description)
+	if skill.Name == "" {
+		skill.Name = strings.TrimSpace(dirName)
+	}
+	if skill.Name == "" {
+		return Skill{}, fmt.Errorf("skill has no name and no directory name")
+	}
+	if skill.Description == "" {
+		skill.Description = firstBodyLine(body)
+		if skill.Description == "" {
+			return Skill{}, fmt.Errorf("skill %q has no description and an empty body", skill.Name)
+		}
+		skill.Issues = append(skill.Issues, "frontmatter has no description; using the first line of the body")
+	}
 	if !nameRE.MatchString(skill.Name) {
 		skill.Issues = append(skill.Issues,
 			fmt.Sprintf("name %q does not match the spec (lowercase a-z, 0-9, hyphens; no leading/trailing/consecutive hyphens)", skill.Name))
@@ -65,34 +77,41 @@ func parse(content string) (Skill, error) {
 	return skill, nil
 }
 
+// firstBodyLine returns the first non-empty line of a Markdown body with any
+// heading marker ("# ") removed, or "" for an empty body.
+func firstBodyLine(body string) string {
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#"))
+		if line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
 // parseFrontmatter is a deliberately small YAML subset parser tailored to
 // the SKILL.md frontmatter shape. It supports:
 //
 //   - Top-level `key: value` pairs (string scalars, optionally quoted).
 //   - Multi-line block scalars with `|` and `>` indicators.
+//   - Lists, either inline (`[a, b]`) or as indented `- item` lines; they
+//     are joined with single spaces (see assignField).
 //   - One level of nesting under `metadata:` with `key: value` pairs.
 //
-// It is deliberately lenient with unquoted colons inside values, matching the
-// fallback behavior recommended by the Agent Skills spec for cross-client
-// compatibility.
-func parseFrontmatter(front string) (Skill, error) {
+// Anything else is skipped rather than rejected: a skill whose frontmatter
+// this parser cannot fully read still loads with the fields it could, which
+// matches the Agent Skills recommendation for cross-client compatibility.
+func parseFrontmatter(front string) Skill {
 	lines := strings.Split(front, "\n")
 	var skill Skill
 	skill.Metadata = map[string]string{}
 
 	i := 0
 	for i < len(lines) {
-		raw := lines[i]
-		line := strings.TrimRight(raw, " \t")
+		line := strings.TrimRight(lines[i], " \t")
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			i++
-			continue
-		}
-		// Determine indentation level.
-		indent := indentOf(line)
-		if indent > 0 {
-			// Stray indented line at top level — skip.
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || indentOf(line) > 0 {
+			// Blank, comment, or a stray indented line at top level.
 			i++
 			continue
 		}
@@ -104,26 +123,31 @@ func parseFrontmatter(front string) (Skill, error) {
 		key = strings.ToLower(key)
 		rest = strings.TrimSpace(rest)
 
-		// Block scalar (| or >) consumes following indented lines.
-		if rest == "|" || rest == ">" || strings.HasPrefix(rest, "|") || strings.HasPrefix(rest, ">") {
+		switch {
+		case strings.HasPrefix(rest, "|") || strings.HasPrefix(rest, ">"):
+			// Block scalar: consumes the following indented lines.
 			value, consumed := readBlockScalar(lines[i+1:])
 			i += 1 + consumed
 			assignField(&skill, key, value)
-			continue
-		}
-
-		// metadata: nested map.
-		if key == "metadata" && rest == "" {
+		case key == "metadata" && rest == "":
 			meta, consumed := readNestedMap(lines[i+1:])
 			maps.Copy(skill.Metadata, meta)
 			i += 1 + consumed
-			continue
+		case rest == "":
+			// "key:" followed by "- item" lines is a list; anything else
+			// leaves the value empty.
+			items, consumed := readList(lines[i+1:])
+			i += 1 + consumed
+			assignField(&skill, key, strings.Join(items, " "))
+		case strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]"):
+			assignField(&skill, key, strings.Join(splitInlineList(rest), " "))
+			i++
+		default:
+			assignField(&skill, key, unquote(rest))
+			i++
 		}
-
-		assignField(&skill, key, unquote(rest))
-		i++
 	}
-	return skill, nil
+	return skill
 }
 
 func indentOf(line string) int {
@@ -189,6 +213,42 @@ func readBlockScalar(lines []string) (string, int) {
 	return strings.TrimSpace(strings.Join(captured, "\n")), consumed
 }
 
+// readList reads the "- item" lines of a block list. It stops at the first
+// line that is neither blank nor a list item, so a key with an empty value
+// followed by another key consumes nothing.
+func readList(lines []string) ([]string, int) {
+	var items []string
+	consumed := 0
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			consumed++
+			continue
+		}
+		item, ok := strings.CutPrefix(trimmed, "-")
+		if !ok {
+			break
+		}
+		if v := unquote(item); v != "" {
+			items = append(items, v)
+		}
+		consumed++
+	}
+	return items, consumed
+}
+
+// splitInlineList splits a flow-style list such as `[Read, "Bash(git:*)"]`.
+func splitInlineList(s string) []string {
+	s = strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")
+	var out []string
+	for part := range strings.SplitSeq(s, ",") {
+		if v := unquote(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // readNestedMap reads a mapping with one level of indentation.
 func readNestedMap(lines []string) (map[string]string, int) {
 	out := map[string]string{}
@@ -213,29 +273,46 @@ func readNestedMap(lines []string) (map[string]string, int) {
 	return out, consumed
 }
 
+// parseBool reads a YAML-ish boolean; anything unrecognized is false.
+func parseBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "yes", "on", "1":
+		return true
+	}
+	return false
+}
+
+// assignField stores one frontmatter field. Keys are matched in both the
+// hyphenated spelling the spec uses and the underscored one some clients
+// write. Unknown keys are kept in Metadata so /skill info can show them.
 func assignField(s *Skill, key, value string) {
-	switch key {
+	switch strings.ReplaceAll(key, "_", "-") {
 	case "name":
 		s.Name = value
 	case "description":
 		s.Description = value
+	case "when-to-use":
+		s.WhenToUse = value
 	case "license":
 		s.License = value
 	case "compatibility":
 		s.Compatibility = value
-	case "allowed-tools", "allowed_tools":
+	case "allowed-tools":
 		s.AllowedTools = value
-	case "disabled", "disable", "enabled":
-		// Treat enabled: false / disabled: true as disabling the skill.
-		v := strings.ToLower(strings.TrimSpace(value))
-		flag := v == "true" || v == "yes" || v == "1"
-		if key == "enabled" {
-			s.Disabled = !flag
-		} else {
-			s.Disabled = flag
-		}
+	case "argument-hint":
+		s.ArgumentHint = value
+	case "arguments":
+		s.Arguments = strings.Fields(value)
+	case "disable-model-invocation":
+		s.ModelInvocationDisabled = parseBool(value)
+	case "user-invocable":
+		// Only an explicit false hides the skill; the default is invocable.
+		s.UserInvocationDisabled = strings.TrimSpace(value) != "" && !parseBool(value)
+	case "disabled", "disable":
+		s.Disabled = parseBool(value)
+	case "enabled":
+		s.Disabled = !parseBool(value)
 	default:
-		// Unknown top-level key — store under metadata for round-tripping.
 		if s.Metadata == nil {
 			s.Metadata = map[string]string{}
 		}
