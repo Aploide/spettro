@@ -34,26 +34,6 @@ func stripThinking(content string) (main, thinking string) {
 	return strings.TrimSpace(sb.String()), strings.TrimSpace(tb.String())
 }
 
-func waitForTool(ch chan agent.ToolTrace) tea.Cmd {
-	return func() tea.Msg {
-		t, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return toolProgressMsg{trace: t}
-	}
-}
-
-func waitForStream(ch chan agent.StreamChunk) tea.Cmd {
-	return func() tea.Msg {
-		c, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return streamChunkMsg{chunk: c}
-	}
-}
-
 func waitForUsage(ch chan agent.UsageEvent) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch

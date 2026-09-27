@@ -226,7 +226,7 @@ func (m Model) RenderCacheSizeForTesting() int {
 	if m.renderCache == nil {
 		return -1
 	}
-	return len(m.renderCache.blocks)
+	return len(m.renderCache.entries)
 }
 
 // RenderCacheWidthForTesting returns the layout width the cache was built for.
@@ -270,10 +270,9 @@ func StreamChunkMsgForTesting(kind, delta string, reset bool) tea.Msg {
 	return streamChunkMsg{chunk: agent.StreamChunk{Kind: kind, Delta: delta, Reset: reset}}
 }
 
-// SetStreamChForTesting installs a non-nil stream channel so the streamChunkMsg
-// handler re-arms its wait command (matching a live run).
+// SetStreamChForTesting installs a run event queue, as a live run has.
 func (m *Model) SetStreamChForTesting() {
-	m.streamCh = make(chan agent.StreamChunk, 8)
+	m.runEvents = newRunEventQueue()
 }
 
 func AgentDoneMsgForTesting(content string) tea.Msg {

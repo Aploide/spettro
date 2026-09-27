@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"encoding/binary"
 	"fmt"
-	"hash/maphash"
 	"image/color"
 	"strings"
 	"time"
@@ -109,7 +107,7 @@ func (m *Model) autoSave() {
 // scroll back down (or send a new prompt, see scrollToBottom).
 func (m *Model) refreshViewport() {
 	follow := m.vp.AtBottom()
-	m.vp.SetContent(m.renderMessages())
+	m.vp.SetBlocks(m.renderTranscript(renderFrameBudget))
 	if len(m.messages) == 0 {
 		// A fresh session is nothing but the logo and the hint; scrolling to
 		// the bottom of that would crop the art from the top on a short
@@ -126,7 +124,7 @@ func (m *Model) refreshViewport() {
 // Used when the user submits input, which should always bring the
 // conversation back into view.
 func (m *Model) scrollToBottom() {
-	m.vp.SetContent(m.renderMessages())
+	m.vp.SetBlocks(m.renderTranscript(renderFrameBudget))
 	if len(m.messages) == 0 {
 		m.vp.GotoTop()
 		return
@@ -205,31 +203,15 @@ func renderUserTextBlock(body string, width int, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderCacheState memoizes per-message rendered blocks so renderMessages does
-// not re-run the markdown regex over the whole transcript on every frame. The
-// cache is keyed by a content hash of each message's render-relevant fields and
-// scoped to the layout params (width / showTools / color); any change to those
-// params invalidates the whole cache. Entries for messages no longer present
-// are evicted by rebuilding the map on each call, bounding its size to the
-// current transcript.
-//
-// Access is single-threaded: renderMessages is only ever called from the Bubble
-// Tea Update goroutine, never from a background tea.Cmd.
-type renderCacheState struct {
-	width      int
-	showTools  bool
-	fullOutput bool
-	color      string
-	blocks     map[uint64]string
-}
-
 // renderMessageBlock renders a single chat message to its display string. It is
 // the pure, cacheable unit of renderMessages.
 func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	switch msg.Role {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(msg.Content)
+		// StableWidth: a prompt pasted with an emoji ZWJ sequence would
+		// otherwise measure differently here and in the terminal.
+		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(termtext.StableWidth(msg.Content))
 		var entry strings.Builder
 		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
@@ -327,101 +309,6 @@ func systemTextHangColumn(line string) int {
 	return col
 }
 
-// renderKeySeed seeds messageRenderKey. The keys only ever live in this
-// process's render cache, so a per-process random seed is all that is needed.
-var renderKeySeed = maphash.MakeSeed()
-
-// messageRenderKey hashes every field that influences how a message renders.
-// Length prefixes guard against boundary collisions (e.g. "ab"+"c" vs
-// "a"+"bc"). The layout params (width/showTools/color) are NOT folded in here —
-// they scope the whole cache and invalidate it wholesale on change.
-//
-// This runs for every message on every refresh, cache hit or not, so it has
-// to stay cheap on a transcript full of huge tool calls (a file-write carries
-// the whole file). maphash hashes a string in place; the FNV hasher it
-// replaced copied every field into a new byte slice first, which made one
-// refresh of 200 such messages cost tens of milliseconds and megabytes of
-// garbage, on every streamed token.
-func messageRenderKey(msg ChatMessage) uint64 {
-	var h maphash.Hash
-	h.SetSeed(renderKeySeed)
-	writeHashField := func(s string) {
-		var buf [8]byte
-		binary.LittleEndian.PutUint64(buf[:], uint64(len(s)))
-		_, _ = h.Write(buf[:])
-		_, _ = h.WriteString(s)
-	}
-	writeHashField(string(msg.Role))
-	writeHashField(msg.Kind)
-	writeHashField(msg.Content)
-	writeHashField(msg.Thinking)
-	writeHashField(msg.Meta)
-	for _, t := range msg.Tools {
-		writeHashField(t.Name)
-		writeHashField(t.Status)
-		writeHashField(t.Args)
-		writeHashField(t.Output)
-		writeHashField(t.Diff)
-		if t.Open {
-			writeHashField("open")
-		}
-	}
-	for _, img := range msg.Images {
-		writeHashField(img)
-	}
-	return h.Sum64()
-}
-
-func (m *Model) renderMessages() string {
-	// The logo opens the scrollback rather than sitting above it, so it
-	// scrolls out of the way as the conversation grows. It is recomputed on
-	// every call — it is not a ChatMessage and never enters the block cache —
-	// which is what lets a mode or theme switch repaint it.
-	banner := m.eyesBanner()
-
-	if len(m.messages) == 0 {
-		return banner + "\n\n" + styleMuted.Render("  no messages yet — type a prompt or /help")
-	}
-
-	mc := m.currentColor()
-	width := m.paneWidth()
-	color := colorCacheKey(mc)
-
-	// Reuse the prior cache only when the layout params match; otherwise start
-	// fresh so width/showTools/color changes fully re-render.
-	var prev map[uint64]string
-	if m.renderCache != nil && m.renderCache.width == width &&
-		m.renderCache.showTools == m.showTools && m.renderCache.fullOutput == m.showFullOutput &&
-		m.renderCache.color == color {
-		prev = m.renderCache.blocks
-	}
-	next := make(map[uint64]string, len(m.messages))
-
-	parts := make([]string, 0, len(m.messages)+1)
-	parts = append(parts, banner)
-	for _, msg := range m.messages {
-		key := messageRenderKey(msg)
-		block, ok := next[key]
-		if !ok {
-			if block, ok = prev[key]; !ok {
-				block = m.renderMessageBlock(msg, mc)
-			}
-			next[key] = block
-		}
-		parts = append(parts, block)
-	}
-
-	m.renderCache = &renderCacheState{
-		width:      width,
-		showTools:  m.showTools,
-		fullOutput: m.showFullOutput,
-		color:      color,
-		blocks:     next,
-	}
-
-	return strings.Join(parts, "\n\n")
-}
-
 // transcriptWidth is the width of the conversation viewport: the pane minus
 // a column of margin on each side. Anything placed in the transcript must fit
 // in it; the viewport cuts wider rows without a trace.
@@ -450,7 +337,8 @@ func (m Model) recalcLayout() Model {
 	// dialogs keep themselves inside the terminal (questionBlockBudget,
 	// approvalLayout), so measuring can never squeeze the conversation away.
 	m.ta.SetWidth(m.paneWidth() - 6)
-	inputH := lipgloss.Height(m.viewInput(m.paneWidth()))
+	_, input := m.cachedInput(m.paneWidth())
+	inputH := len(input.rows)
 
 	fixed := headerH + sepH + inputH + statusH + m.parallelFooterHeight() + m.workingIndicatorHeight()
 	// At least one transcript row, even when the chrome alone fills the

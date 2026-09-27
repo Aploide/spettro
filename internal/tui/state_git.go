@@ -16,6 +16,15 @@ import (
 	"spettro/internal/agent"
 )
 
+// runGit runs git with args in dir ("" for the current directory) and
+// returns its standard output. It is a variable so tests can count the
+// processes a code path starts (TestNoGitOnTheUpdateGoroutine).
+var runGit = func(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	return cmd.Output()
+}
+
 func parseNumstat(text string, totals map[string][2]int) {
 	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -113,24 +122,23 @@ func (m *Model) scheduleRepoScan() tea.Cmd {
 // run inside a tea.Cmd off the Update goroutine. An empty branch with nil files
 // means "not a git work tree".
 func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = cwd
-	out, err := cmd.Output()
+	out, err := runGit(cwd, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(string(out)) != "true" {
 		return "", nil
 	}
 
 	branch = readGitBranch(cwd)
 
-	cmd = exec.Command("git", "status", "--porcelain")
-	cmd.Dir = cwd
-	out, err = cmd.Output()
+	out, err = runGit(cwd, "status", "--porcelain")
 	if err != nil {
 		return branch, nil
 	}
 
 	stat := make(map[string]modifiedFileEntry)
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+	// Only line ends are trimmed: the first column of the first line is the
+	// status of the index, often a space (" M a.go"), and TrimSpace made
+	// that file's path lose its first two characters.
+	for line := range strings.SplitSeq(strings.TrimRight(string(out), "\r\n"), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if len(line) < 4 {
 			continue
@@ -158,9 +166,7 @@ func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
 
 	numTotals := make(map[string][2]int)
 	for _, args := range [][]string{{"diff", "--numstat"}, {"diff", "--cached", "--numstat"}} {
-		d := exec.Command("git", args...)
-		d.Dir = cwd
-		data, derr := d.Output()
+		data, derr := runGit(cwd, args...)
 		if derr == nil {
 			parseNumstat(string(data), numTotals)
 		}
@@ -178,12 +184,26 @@ func queryModifiedFiles(cwd string) (branch string, files []modifiedFileEntry) {
 	return branch, files
 }
 
-// refreshModifiedFiles synchronously updates the side-panel git state. It is
-// used for the one-time startup query in New() and as the message applier for
-// modifiedFilesMsg. Hot-path callers should prefer scheduleModifiedRefresh.
+// refreshModifiedFiles asks for the side-panel git state (branch and
+// modified files) to be re-read. It never runs git itself: the query takes
+// four or five git processes, 10-100 ms and much more in a large repository,
+// and ran on the Update goroutine at startup, at every run start and end,
+// on ctrl+b and after /rewind, freezing the UI for that long. Update turns
+// the request into refreshModifiedFilesCmd (see gitRefreshCmd), and the
+// answer arrives as a modifiedFilesMsg.
 func (m *Model) refreshModifiedFiles() {
-	m.gitBranch, m.modifiedFiles = queryModifiedFiles(m.cwd)
+	m.gitRefreshPending = true
+}
+
+// gitRefreshCmd returns the background git query a refreshModifiedFiles
+// call asked for, once, or nil.
+func (m *Model) gitRefreshCmd() tea.Cmd {
+	if !m.gitRefreshPending {
+		return nil
+	}
+	m.gitRefreshPending = false
 	m.lastModifiedRefreshAt = time.Now()
+	return refreshModifiedFilesCmd(m.cwd)
 }
 
 // scheduleModifiedRefresh returns a tea.Cmd that recomputes the modified-files
@@ -207,9 +227,7 @@ func refreshModifiedFilesCmd(cwd string) tea.Cmd {
 }
 
 func readGitBranch(cwd string) string {
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = cwd
-	out, err := cmd.Output()
+	out, err := runGit(cwd, "branch", "--show-current")
 	if err == nil {
 		branch := strings.TrimSpace(string(out))
 		if branch != "" {
@@ -217,9 +235,7 @@ func readGitBranch(cwd string) string {
 		}
 	}
 
-	cmd = exec.Command("git", "rev-parse", "--short", "HEAD")
-	cmd.Dir = cwd
-	out, err = cmd.Output()
+	out, err = runGit(cwd, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return "(unknown)"
 	}
@@ -248,16 +264,12 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 // first, then staged, then an all-additions pseudo-diff for untracked files.
 func gitPathDiff(cwd, path string) string {
 	// Try working-tree diff vs HEAD (covers modified tracked files).
-	cmd := exec.Command("git", "diff", "HEAD", "--", path)
-	cmd.Dir = cwd
-	if out, err := cmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+	if out, err := runGit(cwd, "diff", "HEAD", "--", path); err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		return string(out)
 	}
 
 	// Try staged diff vs HEAD (file was git-added before we see the trace).
-	cmd2 := exec.Command("git", "diff", "--cached", "--", path)
-	cmd2.Dir = cwd
-	if out2, err2 := cmd2.Output(); err2 == nil && len(strings.TrimSpace(string(out2))) > 0 {
+	if out2, err2 := runGit(cwd, "diff", "--cached", "--", path); err2 == nil && len(strings.TrimSpace(string(out2))) > 0 {
 		return string(out2)
 	}
 
@@ -266,7 +278,7 @@ func gitPathDiff(cwd, path string) string {
 	if !filepath.IsAbs(path) {
 		absPath = filepath.Join(cwd, path)
 	}
-	content, err := exec.Command("git", "ls-files", "--others", "--exclude-standard", "--", absPath).Output()
+	content, err := runGit("", "ls-files", "--others", "--exclude-standard", "--", absPath)
 	if err != nil || len(strings.TrimSpace(string(content))) == 0 {
 		return ""
 	}
@@ -303,41 +315,74 @@ func buildNewFileDiff(path, content string) string {
 	return sb.String()
 }
 
+// diffCommandMsg carries the /diff output computed in the background.
+type diffCommandMsg struct {
+	// diff is the combined unified diff; empty when there was nothing to show.
+	diff string
+	// noFiles reports that no path was given and git listed no modified file.
+	noFiles bool
+	// gitState reports that the command re-read the side panel's git state
+	// (a /diff without paths lists the modified files); branch and files
+	// then carry it, as a modifiedFilesMsg would.
+	gitState bool
+	branch   string
+	files    []modifiedFileEntry
+}
+
 // handleDiffCommand implements /diff [path…]: it pushes a colored diff view of
 // the files modified this session (per git), or of the given paths, into the
-// transcript as a Kind:"diff" system message.
+// transcript as a Kind:"diff" system message. git runs in a tea.Cmd; the
+// result arrives as a diffCommandMsg (applyDiffCommand).
 func (m Model) handleDiffCommand(input string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(input)
 	var paths []string
 	if len(fields) > 1 {
 		paths = fields[1:]
-	} else {
-		m.refreshModifiedFiles()
-		for _, f := range m.modifiedFiles {
-			paths = append(paths, f.Path)
-		}
 	}
-	if len(paths) == 0 {
+	cwd := m.cwd
+	return m, func() tea.Msg {
+		var msg diffCommandMsg
+		if len(paths) == 0 {
+			msg.gitState = true
+			msg.branch, msg.files = queryModifiedFiles(cwd)
+			for _, f := range msg.files {
+				paths = append(paths, f.Path)
+			}
+			if len(paths) == 0 {
+				msg.noFiles = true
+				return msg
+			}
+		}
+		var parts []string
+		for _, p := range paths {
+			if d := gitPathDiff(cwd, p); strings.TrimSpace(d) != "" {
+				parts = append(parts, strings.TrimRight(d, "\n"))
+			}
+		}
+		msg.diff = strings.Join(parts, "\n")
+		return msg
+	}
+}
+
+// applyDiffCommand shows a /diff result.
+func (m *Model) applyDiffCommand(msg diffCommandMsg) {
+	if msg.gitState {
+		m.gitBranch = msg.branch
+		m.modifiedFiles = msg.files
+	}
+	switch {
+	case msg.noFiles:
 		m.showBanner("no modified files in the working tree", "info")
-		return m, nil
-	}
-	var parts []string
-	for _, p := range paths {
-		if d := gitPathDiff(m.cwd, p); strings.TrimSpace(d) != "" {
-			parts = append(parts, strings.TrimRight(d, "\n"))
-		}
-	}
-	if len(parts) == 0 {
+	case msg.diff == "":
 		m.showBanner("no diffs to show", "info")
-		return m, nil
+	default:
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Kind:    "diff",
+			Content: msg.diff,
+			At:      time.Now(),
+		})
+		m.autoSaveDebounced()
+		m.refreshViewport()
 	}
-	m.messages = append(m.messages, ChatMessage{
-		Role:    RoleSystem,
-		Kind:    "diff",
-		Content: strings.Join(parts, "\n"),
-		At:      time.Now(),
-	})
-	m.autoSaveDebounced()
-	m.refreshViewport()
-	return m, nil
 }

@@ -46,13 +46,17 @@ const Ellipsis = "…"
 // meter that redraws itself with "\r" (downloads, test runners) leaves only
 // its final state on screen, so only the text after the last "\r" is kept.
 // A trailing "\r" (a CRLF line ending split on "\n") is simply removed.
+//
+// Grapheme clusters whose width depends on the terminal (emoji ZWJ
+// sequences, emoji-style variation selectors, flags) are rewritten by
+// StableWidth, so the width measured here is the width every terminal draws.
 func SanitizeLine(s string) string {
 	s = strings.TrimRight(s, "\r")
 	if i := strings.LastIndexByte(s, '\r'); i >= 0 {
 		s = s[i+1:]
 	}
 	if isPlainPrintable(s, false) {
-		return s
+		return StableWidth(s)
 	}
 	s = strings.ToValidUTF8(s, string(utf8.RuneError))
 	var b strings.Builder
@@ -68,7 +72,7 @@ func SanitizeLine(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return b.String()
+	return StableWidth(b.String())
 }
 
 // EscapeControls returns s with every character that would not show as

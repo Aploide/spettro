@@ -41,6 +41,10 @@ type UserConfig struct {
 	// degrades to dark when it cannot be determined. The SPETTRO_THEME
 	// environment variable overrides this for a single process.
 	Theme string `json:"theme,omitempty"`
+	// CursorBlink makes the input cursor blink. Off by default: a blinking
+	// cursor repaints the frame twice a second for as long as the TUI is
+	// open, which was most of an idle TUI's CPU once nothing else woke it.
+	CursorBlink bool `json:"cursor_blink,omitempty"`
 	// ThinkingLevel selects reasoning compute when the active model supports
 	// it. Allowed values are "off", "low", "medium", "high", "x-high", "max",
 	// or empty (never set: no thinking parameter is sent and the provider's

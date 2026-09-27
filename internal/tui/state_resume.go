@@ -39,6 +39,7 @@ func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 
 func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	m.activityFeed = nil
+	m.activityDropped = 0
 	m.parallelAgents = nil
 	m.workflow = nil
 	m.recentApprovals = nil
@@ -192,6 +193,7 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.parallelAgents = nil
 			m.workflow = nil
 			m.activityFeed = nil
+			m.activityDropped = 0
 			// The carried history, context gauge and pending plan belong to
 			// the previous conversation (see resetConversationState).
 			m.resetConversationState()

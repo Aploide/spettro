@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/config"
@@ -15,10 +14,36 @@ import (
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	newModel, cmd := m.update(msg)
 	if nm, ok := newModel.(Model); ok {
+		if nm.frameMemo == nil {
+			nm.frameMemo = &frameMemo{}
+		}
+		if !transcriptOnly(msg) {
+			nm.chromeSeq++
+		}
 		nm = nm.recalcLayout()
+		if timers := nm.armTimers(); timers != nil {
+			cmd = tea.Batch(cmd, timers)
+		}
+		if git := nm.gitRefreshCmd(); git != nil {
+			cmd = tea.Batch(cmd, git)
+		}
+		if fill := nm.fillCmd(); fill != nil {
+			cmd = tea.Batch(cmd, fill)
+		}
+		if save := nm.uiStateSaveCmd(); save != nil {
+			cmd = tea.Batch(cmd, save)
+		}
 		return nm, cmd
 	}
 	return newModel, cmd
+}
+
+// isActiveRun reports whether a message from the run identified by queue
+// belongs to the run in progress. A stopped run's messages do not, even
+// when a new run has started since. A nil queue (tests build messages
+// without one) matches whatever run is in progress.
+func (m *Model) isActiveRun(queue *runEventQueue) bool {
+	return m.thinking && (queue == nil || queue == m.runEvents)
 }
 
 // resetRunState clears every per-run field when an agent or plan run ends, so
@@ -29,7 +54,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) resetRunState() {
 	m.thinking = false
 	m.cancelAgent = nil
-	m.toolCh = nil
+	m.runEvents = nil
 	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
@@ -89,7 +114,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.applyTheme(theme.Resolve(theme.AutoKind, msg.Color))
 			m.themeDetected = msg.Color != nil
 		}
+	case clockTickMsg:
+		// Only re-renders the chrome (clockTickMsg is not transcriptOnly);
+		// Update re-arms the next one while needsClock holds.
+		m.clockArmed = false
 	case tickMsg:
+		// Update re-arms the next tick only while something animates (see
+		// armTimers).
+		m.tickArmed = false
 		m.eyeFrame++
 		// Auto-clear expired banners so the status bar falls back to
 		// goal info (or empty) after 5 seconds.
@@ -98,13 +130,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bannerKind = ""
 			m.bannerClearAt = time.Time{}
 		}
-		cmds = append(cmds, tick())
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spin, cmd = m.spin.Update(msg)
-		cmds = append(cmds, cmd)
+		if m.transcriptHasLiveTail() {
+			// A running pty tool's live tail comes from the pty session,
+			// not from the message, so only a repaint shows it moving.
+			m.refreshViewport()
+		}
+	case bannerExpiredMsg:
+		if m.banner != "" && m.bannerClearAt.Equal(msg.at) {
+			m.banner = ""
+			m.bannerKind = ""
+			m.bannerClearAt = time.Time{}
+		}
 	case agentDoneMsg:
-		if !m.thinking {
+		if !m.isActiveRun(msg.run) {
 			break
 		}
 		m.resetRunState()
@@ -207,7 +245,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoSave()
 		}
 	case planDoneMsg:
-		if !m.thinking {
+		if !m.isActiveRun(msg.run) {
 			break
 		}
 		m.resetRunState()
@@ -390,85 +428,33 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.refreshViewport()
+	case runEventsMsg:
+		// A batch left over from a stopped run is dropped: its queue is no
+		// longer the active one (tests deliver batches with no queue).
+		if m.isActiveRun(msg.queue) {
+			for _, ev := range msg.events {
+				if ev.chunk != nil {
+					m.applyStreamChunk(*ev.chunk)
+				} else if ev.trace != nil {
+					cmds = append(cmds, m.applyToolTrace(*ev.trace)...)
+				}
+			}
+			// One refresh for the whole batch, however many events it held.
+			m.refreshViewport()
+			if m.runEvents != nil {
+				cmds = append(cmds, waitForRunEvents(m.runEvents))
+			}
+		}
 	case toolProgressMsg:
+		// A single trace, as tests deliver them; a live run delivers
+		// runEventsMsg batches.
 		if m.thinking {
-			t := msg.trace
-			m.applyToolTraceToObservability(t)
-			m.publishRemoteToolTrace(t)
-			if t.Name == "comment" {
-				if t.Status == "success" {
-					if message := extractCommentMessage(t.Args, t.Output); message != "" {
-						m.setProgressNote(message)
-					}
-				}
-				if m.toolCh != nil {
-					cmds = append(cmds, waitForTool(m.toolCh))
-				}
-				m.refreshViewport()
-				break
-			}
-			switch t.Name {
-			case "todo-write":
-				if t.Status != "running" {
-					m.syncTodosFromSession()
-				}
-			}
-			m.trackSessionEditFromTrace(t)
-			if t.Status != "running" {
-				switch t.Name {
-				case "file-write", "bash", "agent":
-					// Refresh the side-panel file list off the Update
-					// goroutine, throttled so a burst of traces does not
-					// spawn git serially on the hot path.
-					if cmd := m.scheduleModifiedRefresh(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-					// Re-scan repo files so @-mention suggestions pick
-					// up files created or deleted by the tool.
-					if cmd := m.scheduleRepoScan(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
-			}
-			if t.Status == "running" {
-				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
-				m.currentTool = &item
-				m.appendToolStreamMessage(item)
-			} else {
-				m.toolSeq++
-				completed := ToolItem{
-					Name:   t.Name,
-					Status: t.Status,
-					Args:   t.Args,
-					Output: t.Output,
-					Seq:    m.toolSeq,
-				}
-				// Compute the diff off the Update goroutine: computeFileDiff
-				// shells out to git, which used to block Update per edit. The
-				// result is attached later via toolDiffMsg keyed on Seq.
-				cmds = append(cmds, computeFileDiffCmd(completed.Seq, m.cwd, t.Name, t.Args, t.Status))
-				// Cap m.liveTools to bound memory and the run summary built
-				// at interrupt time. When the LLM emits very large tool
-				// batches we keep the most recent maxLiveTools entries so
-				// the most useful context (what just happened) survives.
-				m.liveTools = append(m.liveTools, completed)
-				if len(m.liveTools) > maxLiveTools {
-					m.liveTools = append([]ToolItem(nil), m.liveTools[len(m.liveTools)-maxLiveTools:]...)
-				}
-				m.currentTool = nil
-				m.updateToolStreamMessage(completed)
-			}
-			if m.toolCh != nil {
-				cmds = append(cmds, waitForTool(m.toolCh))
-			}
+			cmds = append(cmds, m.applyToolTrace(msg.trace)...)
 			m.refreshViewport()
 		}
 	case streamChunkMsg:
 		if m.thinking {
 			m.applyStreamChunk(msg.chunk)
-			if m.streamCh != nil {
-				cmds = append(cmds, waitForStream(m.streamCh))
-			}
 			m.refreshViewport()
 		}
 	case usageEventMsg:
@@ -488,6 +474,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modifiedFilesMsg:
 		m.gitBranch = msg.branch
 		m.modifiedFiles = msg.files
+	case renderFillMsg:
+		if m.renderCache != nil {
+			m.renderCache.fillArmed = false
+		}
+		m.refreshViewport()
+	case diffCommandMsg:
+		m.applyDiffCommand(msg)
 	case toolDiffMsg:
 		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
 			m.attachToolDiff(msg.seq, msg.diff)
@@ -823,10 +816,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.syncInputSuggestions(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-
-		var vpCmd tea.Cmd
-		m.vp, vpCmd = m.vp.Update(msg)
-		cmds = append(cmds, vpCmd)
+		// The transcript viewport needs no passthrough: keys reach it
+		// through updateMain (pgup/pgdown) and the wheel through the
+		// tea.MouseMsg case above.
 	}
 
 	return m, tea.Batch(cmds...)

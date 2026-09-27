@@ -294,17 +294,33 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 	})
 }
 
+// maxActivityItems caps the side panel's activity feed (decision D8): the
+// oldest items are dropped past it and counted in activityDropped, which the
+// panel's subtitle reports. Without a cap a long session made every frame
+// scan and lay out tens of thousands of items.
+const maxActivityItems = 2000
+
+// upsertActivity replaces the feed item with the same key or appends it.
+// The scan runs from the newest item: an update is almost always to a
+// call that just started (running, then done), so it stops within a few
+// items, and the cap bounds the worst case.
 func (m *Model) upsertActivity(item activityItem) {
 	if item.At.IsZero() {
 		item.At = time.Now()
 	}
-	for i := range m.activityFeed {
+	for i := len(m.activityFeed) - 1; i >= 0; i-- {
 		if m.activityFeed[i].Key == item.Key {
 			m.activityFeed[i] = item
 			return
 		}
 	}
 	m.activityFeed = append(m.activityFeed, item)
+	if over := len(m.activityFeed) - maxActivityItems; over > 0 {
+		// Copy into a fresh slice rather than reslicing, so the dropped
+		// items (tool bodies can be large) are released.
+		m.activityFeed = append([]activityItem(nil), m.activityFeed[over:]...)
+		m.activityDropped += over
+	}
 }
 
 func extractCommentMessage(argsJSON, output string) string {

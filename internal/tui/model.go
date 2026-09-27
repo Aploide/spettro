@@ -6,9 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -80,6 +78,15 @@ type ChatMessage struct {
 	Tools    []ToolItem
 	Images   []string
 	At       time.Time
+
+	// id identifies the message to the render cache; zero until its first
+	// render (see renderTranscriptBlocks), then kept for its lifetime.
+	id uint64
+	// paintMode is the agent mode whose accent colour the message is drawn
+	// in: the mode active when it was first rendered (decision D7).
+	paintMode string
+	// draft holds the growing text of a live stream draft (see draftText).
+	draft *draftText
 }
 
 const localConnectProviderID = "__local_endpoint__"
@@ -87,6 +94,11 @@ const localConnectProviderID = "__local_endpoint__"
 type tickMsg time.Time
 
 type agentDoneMsg struct {
+	// run is the event queue of the run that finished, its identity: Update
+	// ignores the message when run is not the active m.runEvents (the run was
+	// stopped, and maybe another started). Nil, as tests send it, matches
+	// any run.
+	run           *runEventQueue
 	content       string
 	meta          string
 	tools         []agent.ToolTrace
@@ -98,12 +110,19 @@ type agentDoneMsg struct {
 	// this to decide whether to stop or continue.
 	goalComplete bool
 	goalSummary  string
+	// goalSigBefore and goalSigAfter fingerprint the workspace (see
+	// workspaceSignature) before and after a goal iteration, taken in the
+	// run's command. Equal values mean the iteration changed nothing. Both
+	// are empty for a run outside goal mode.
+	goalSigBefore string
+	goalSigAfter  string
 	// messages is the full structured post-run conversation (RunResult.Messages),
 	// stored as the next turn's cache-stable prefix.
 	messages []provider.Message
 }
 
 type planDoneMsg struct {
+	run           *runEventQueue // see agentDoneMsg.run
 	plan          string
 	tools         []agent.ToolTrace
 	tokensUsed    int
@@ -127,6 +146,11 @@ type searchDoneMsg struct {
 type memoryEditDoneMsg struct{ err error }
 
 type bannerClearMsg struct{}
+
+// bannerExpiredMsg is the one-shot timer of a banner that clears itself at
+// at (see armTimers). A newer banner has another bannerClearAt, so a stale
+// timer finds nothing to clear.
+type bannerExpiredMsg struct{ at time.Time }
 type quitWarningMsg struct{}
 
 type compactDoneMsg struct {
@@ -190,14 +214,14 @@ type modifiedFileEntry struct {
 	Unstaged  bool
 }
 
+// sidePanelItem is one entry of the side panel's activity list: a view of
+// an activityFeed entry, not a copy. sidePanelItems builds the list afresh
+// for each use and nothing keeps it across updates, so an item never
+// outlives the entry it reads. Copying the entries instead cost 1.1 MB per
+// fresh render with 10k of them, and the garbage collection that followed
+// was most of the render's time (BenchmarkSidePanel: 0.63 to 0.35 ms).
 type sidePanelItem struct {
-	Kind   string
-	ID     string
-	Title  string
-	Detail string
-	Body   string
-	Agent  string
-	Status string
+	*activityItem
 }
 
 type activityItem struct {
@@ -253,7 +277,7 @@ type goalState struct {
 	Iteration       int    // outer-loop iterations dispatched so far
 	NoProgress      int    // consecutive iterations with no detected progress
 	StartedAt       time.Time
-	LastSignature   string // fingerprint of workspace/tool state, for progress detection (step 04)
+	LastSignature   string // workspace fingerprint after the last iteration (agentDoneMsg.goalSigAfter)
 	MaxIterations   int    // resolved from cfg at start (0 = unlimited)
 	NoProgressLimit int    // resolved from cfg at start
 	Completed       bool   // set when goal-complete fired (step 03/04)
@@ -279,14 +303,19 @@ type Model struct {
 	ready     bool
 	startedAt time.Time
 
-	vp   viewport.Model
-	ta   textarea.Model
-	spin spinner.Model
+	vp lineView
+	ta textarea.Model
+
+	// frameMemo keeps the header, input area, status bar and side panel
+	// between frames (see frameMemo); chromeSeq is its key, advanced by
+	// Update for every message that can change them.
+	frameMemo *frameMemo
+	chromeSeq uint64
 
 	// renderCache memoizes per-message rendered blocks so the chat transcript
 	// is not re-rendered (markdown regex and all) on every frame. See
-	// renderMessages / renderCacheState. Pointer so the cache survives the
-	// value-copy semantics of the Bubble Tea Model.
+	// renderTranscriptBlocks / renderCacheState. Pointer so the cache
+	// survives the value-copy semantics of the Bubble Tea Model.
 	renderCache *renderCacheState
 
 	mode string
@@ -309,6 +338,11 @@ type Model struct {
 
 	eyeFrame int
 	thinking bool
+	// tickArmed records that a tickMsg is on its way, so armTimers never
+	// starts a second tick chain (which would double the animation speed).
+	tickArmed bool
+	// clockArmed records that a clockTickMsg is on its way (see armTimers).
+	clockArmed bool
 
 	showSelector bool
 	selItems     []provider.Model
@@ -373,6 +407,9 @@ type Model struct {
 	banner        string
 	bannerKind    string
 	bannerClearAt time.Time // when set, banner auto-clears at this time
+	// bannerTimerAt is the bannerClearAt a bannerExpiredMsg is already
+	// scheduled for (see armTimers).
+	bannerTimerAt time.Time
 
 	ctrlCAt time.Time
 
@@ -391,8 +428,9 @@ type Model struct {
 
 	liveTools   []ToolItem
 	currentTool *ToolItem
-	toolCh      chan agent.ToolTrace
-	streamCh    chan agent.StreamChunk
+	// runEvents carries the active run's stream chunks and tool traces, in
+	// order (see runEventQueue); nil when no run is streaming.
+	runEvents   *runEventQueue
 	usageCh     chan agent.UsageEvent
 	approvalCh  chan shellApprovalRequestMsg
 	askUserCh   chan askUserRequestMsg
@@ -446,15 +484,23 @@ type Model struct {
 	// lastModifiedRefreshAt throttles the async git modified-files query
 	// (see scheduleModifiedRefresh).
 	lastModifiedRefreshAt time.Time
+	// gitRefreshPending asks Update to start the background git query (see
+	// refreshModifiedFiles).
+	gitRefreshPending bool
+	// uiStateDirty asks Update to save the mode and side panel toggle in
+	// the background (see persistUIState).
+	uiStateDirty bool
 	// lastRepoScanAt throttles the async repo-file scan that feeds @-mention
 	// suggestions (see scheduleRepoScan).
 	lastRepoScanAt time.Time
 	// toolSeq is the monotonic counter handed to completed ToolItems so an
 	// async file diff can be matched back to its entry.
-	toolSeq         int
-	showSidePanel   bool
-	sessionEdits    map[string]struct{}
-	activityFeed    []activityItem
+	toolSeq       int
+	showSidePanel bool
+	sessionEdits  map[string]struct{}
+	activityFeed  []activityItem
+	// activityDropped counts feed items dropped by the maxActivityItems cap.
+	activityDropped int
 	currentRunKey   string
 	recentApprovals []session.AgentEvent
 
@@ -636,12 +682,8 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
-	ta.SetStyles(textareaStyles(pal))
+	ta.SetStyles(textareaStyles(pal, cfg.CursorBlink))
 	ta.Focus()
-
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(colorMuted)
 
 	favs := map[string]bool{}
 	for _, f := range cfg.Favorites {
@@ -683,7 +725,6 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		providers:     pm,
 		manifest:      manifest,
 		ta:            ta,
-		spin:          sp,
 		favorites:     favs,
 		showSidePanel: cfg.ShowSidePanel,
 		startedAt:     time.Now(),
@@ -695,13 +736,17 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		searcher:     agent.NewRepoSearcher(cwd),
 		sandboxState: sb,
 		historyIndex: -1,
+		tickArmed:    true, // Init sends the first tick
 		themeAuto:    wanted == theme.AutoKind,
 		livePerm:     &livePermission{},
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
 	m.livePerm.set(cfg.Permission)
 	m.customCommands, _ = commands.Discover(cwd)
-	m.refreshModifiedFiles()
+	// The side panel's git state is read in the background (see
+	// refreshModifiedFiles); the first frame no longer waits for git.
+	m.lastModifiedRefreshAt = time.Now()
+	m.startupCmds = append(m.startupCmds, refreshModifiedFilesCmd(cwd))
 	// Scan the working directory in the background: walking a large tree
 	// synchronously here would block the first paint (seen: ~56s from $HOME).
 	m.lastRepoScanAt = time.Now()
@@ -754,7 +799,10 @@ func (m Model) currentColor() color.Color {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, tick(), m.spin.Tick}
+	// The first animation tick is armed here (New sets tickArmed to match);
+	// from then on Update re-arms it only while something animates (see
+	// armTimers).
+	cmds := []tea.Cmd{textarea.Blink, tick()}
 	// Only "auto" asks the terminal what colour it is. An explicit selection
 	// must never put an OSC 11 query on the wire, and neither must a
 	// redirected stdout — Bubble Tea writes the sequence whether or not the
@@ -770,8 +818,10 @@ func (m Model) Init() tea.Cmd {
 // textareaStyles adapts bubbles' input chrome — placeholder, cursor line,
 // line numbers, end-of-buffer markers — to the palette. Only the polarity is
 // taken from the theme; the prompt and cursor-line overrides are the same
-// blanking the input box has always done.
-func textareaStyles(p theme.Palette) textarea.Styles {
+// blanking the input box has always done. blink is the cursor_blink setting:
+// a steady cursor (the default) never wakes the TUI, a blinking one repaints
+// the frame every 530 ms.
+func textareaStyles(p theme.Palette, blink bool) textarea.Styles {
 	var s textarea.Styles
 	if p.IsDark() {
 		s = textarea.DefaultDarkStyles()
@@ -787,6 +837,7 @@ func textareaStyles(p theme.Palette) textarea.Styles {
 		// exactly what shipped before themes existed.
 		s.Cursor.Color = p.Text
 	}
+	s.Cursor.Blink = blink
 	s.Focused.CursorLine = lipgloss.NewStyle()
 	s.Focused.Prompt = lipgloss.NewStyle()
 	s.Blurred.Prompt = lipgloss.NewStyle()
@@ -801,7 +852,7 @@ func textareaStyles(p theme.Palette) textarea.Styles {
 // lines" footer is styled at cache-fill time.
 func (m Model) applyTheme(k theme.Kind) Model {
 	pal := theme.Set(k)
-	m.ta.SetStyles(textareaStyles(pal))
+	m.ta.SetStyles(textareaStyles(pal, m.cfg.CursorBlink))
 	m.renderCache = nil
 	if m.pendingQuestion != nil {
 		m.pendingQuestion.previewKey, m.pendingQuestion.previewLines = "", nil
@@ -810,6 +861,11 @@ func (m Model) applyTheme(k theme.Kind) Model {
 	return m
 }
 
+// tick is the 50 ms animation frame: the working indicator, glare, the MAX
+// plan label, onboarding and sign-in spinners, running delegations and
+// in-progress tasks all advance on eyeFrame. It is armed only while one of
+// them is on screen (needsAnimation); an idle TUI used to wake 20 times a
+// second for nothing, most of its 4-5 % idle CPU.
 func tick() tea.Cmd {
 	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
