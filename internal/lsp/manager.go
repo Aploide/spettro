@@ -27,6 +27,11 @@ type ServerConfig struct {
 	Args      []string `json:"args,omitempty"`
 	Enabled   *bool    `json:"enabled,omitempty"`
 	Filetypes []string `json:"filetypes,omitempty"` // extensions like ".go"
+	// SettleMs overrides how long post-edit diagnostics keep listening
+	// after the server's first publish about the edit (see settlePolicy):
+	// the quiet window, or for a staged server the ceiling. nil keeps the
+	// built-in value.
+	SettleMs *int `json:"settle_ms,omitempty"`
 }
 
 func (sc ServerConfig) enabled() bool { return sc.Enabled == nil || *sc.Enabled }
@@ -38,22 +43,30 @@ type Config struct {
 
 // builtinServer lists candidate commands for a server key; the first one found
 // on PATH wins, so e.g. python works with either pyright or pylsp installed.
-// settle overrides defaultSettle for servers known to publish in stages.
+// stages is set for servers that publish several sets per change (see
+// settlePolicy).
 type builtinServer struct {
 	candidates []ServerConfig
 	filetypes  []string
-	settle     time.Duration
+	stages     int
 }
 
+// fastSettleMs is the quiet window of servers that publish one complete set
+// per change: a follow-up publish, if any, comes within milliseconds. (gopls,
+// pyright and clangd also version their publishes, which ends the wait at
+// once; the window covers the unversioned case.) Measured with gopls: a Go
+// file-edit spent 300 ms of its 344 ms in the old one-size window.
+var fastSettleMs = 30
+
 var builtinServers = map[string]builtinServer{
-	"go": {candidates: []ServerConfig{{Command: "gopls"}}, filetypes: []string{".go"}},
+	"go": {candidates: []ServerConfig{{Command: "gopls", SettleMs: &fastSettleMs}}, filetypes: []string{".go"}},
 	// typescript-language-server publishes syntactic diagnostics first and
-	// the semantic (type) errors in a later publish, so listen for longer.
-	"typescript": {candidates: []ServerConfig{{Command: "typescript-language-server", Args: []string{"--stdio"}}}, filetypes: []string{".ts", ".tsx", ".js", ".jsx"}, settle: time.Second},
-	"python":     {candidates: []ServerConfig{{Command: "pyright-langserver", Args: []string{"--stdio"}}, {Command: "pylsp"}}, filetypes: []string{".py"}},
+	// the semantic (type) errors in a later publish: wait for the second.
+	"typescript": {candidates: []ServerConfig{{Command: "typescript-language-server", Args: []string{"--stdio"}}}, filetypes: []string{".ts", ".tsx", ".js", ".jsx"}, stages: 2},
+	"python":     {candidates: []ServerConfig{{Command: "pyright-langserver", Args: []string{"--stdio"}, SettleMs: &fastSettleMs}, {Command: "pylsp"}}, filetypes: []string{".py"}},
 	"rust":       {candidates: []ServerConfig{{Command: "rust-analyzer"}}, filetypes: []string{".rs"}},
-	"c":          {candidates: []ServerConfig{{Command: "clangd"}}, filetypes: []string{".c", ".h"}},
-	"cpp":        {candidates: []ServerConfig{{Command: "clangd"}}, filetypes: []string{".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"}},
+	"c":          {candidates: []ServerConfig{{Command: "clangd", SettleMs: &fastSettleMs}}, filetypes: []string{".c", ".h"}},
+	"cpp":        {candidates: []ServerConfig{{Command: "clangd", SettleMs: &fastSettleMs}}, filetypes: []string{".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"}},
 	"csharp":     {candidates: []ServerConfig{{Command: "csharp-ls"}, {Command: "OmniSharp", Args: []string{"-lsp"}}, {Command: "omnisharp", Args: []string{"-lsp"}}}, filetypes: []string{".cs"}},
 	"swift":      {candidates: []ServerConfig{{Command: "sourcekit-lsp"}}, filetypes: []string{".swift"}},
 }
@@ -181,12 +194,19 @@ func loadConfig(root string) (Config, bool) {
 		}
 		for key, sc := range user.Servers {
 			if strings.TrimSpace(sc.Command) == "" {
-				// no command in the override: keep the detected one, but let
-				// the entry toggle it (e.g. {"enabled": false})
+				// no command in the override: keep the detected one (and
+				// whatever an earlier file set), overriding only the fields
+				// this entry sets. So {"python":{"settle_ms":200}} in the
+				// project keeps {"python":{"enabled":false}} from home.
 				if base, ok := cfg.Servers[key]; ok {
-					base.Enabled = sc.Enabled
+					if sc.Enabled != nil {
+						base.Enabled = sc.Enabled
+					}
 					if len(sc.Filetypes) > 0 {
 						base.Filetypes = sc.Filetypes
+					}
+					if sc.SettleMs != nil {
+						base.SettleMs = sc.SettleMs
 					}
 					cfg.Servers[key] = base
 				}

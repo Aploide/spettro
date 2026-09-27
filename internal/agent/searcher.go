@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,101 +15,98 @@ type SearchAgent interface {
 	Search(ctx context.Context, cwd, query string) (string, error)
 }
 
-// RepoSearcher walks the repo tree and optionally greps file contents. When
-// Index is set and the query looks like a symbol name, ranked definitions
-// from the symbol index are listed before the plain content matches.
+// RepoSearcher answers grep's symbol form: ranked definitions of an
+// identifier from the symbol index (when Index is set and the query looks
+// like one), then its usages from the grep engine.
 type RepoSearcher struct {
 	Index *indexer.SymbolIndex
 }
 
-// NewRepoSearcher returns a searcher backed by the project's symbol index,
-// persisted at <cwd>/.spettro/cache/symbols.json.
+// NewRepoSearcher returns a searcher backed by the project's shared symbol
+// index (one per workspace root per process, see indexer.Shared), persisted
+// at <cwd>/.spettro/cache/symbols.idx, so the TUI's startup warm-up and
+// every session's lookups use the same warm index.
 func NewRepoSearcher(cwd string) RepoSearcher {
-	return RepoSearcher{Index: indexer.NewSymbolIndex(cwd, filepath.Join(cwd, ".spettro", "cache", "symbols.json"))}
+	return RepoSearcher{Index: indexer.Shared(cwd, filepath.Join(cwd, ".spettro", "cache", "symbols.idx"))}
 }
 
 // identifierRE gates symbol lookups: only bare identifier-shaped queries hit
 // the index; phrases, regexes and paths go straight to the grep path.
 var identifierRE = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 
+// maxSymbolUsages caps the usages listed after the definitions: a common
+// name ("Context") used to list every occurrence in the tree (43 MB on a
+// 61k-file repo).
+const maxSymbolUsages = 200
+
+// Search runs the symbol search for cwd with a runtime of its own (no
+// sandbox, nothing recorded as read); the grep tool uses searchWith.
 func (s RepoSearcher) Search(ctx context.Context, cwd, query string) (string, error) {
-	var files []string
-	err := filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries
-		}
-		rel, _ := filepath.Rel(cwd, path)
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			return nil
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".spettro", "vendor", "node_modules", "dist", "build":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		files = append(files, rel)
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("walk: %w", err)
-	}
-
-	if query == "" {
-		return fmt.Sprintf("%d files:\n%s", len(files), strings.Join(files, "\n")), nil
-	}
-
-	q := strings.ToLower(query)
-	var results []string
-	for _, rel := range files {
-		abs := filepath.Join(cwd, rel)
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			continue
-		}
-		for i, line := range strings.Split(string(data), "\n") {
-			if strings.Contains(strings.ToLower(line), q) {
-				results = append(results, fmt.Sprintf("%s:%d: %s", rel, i+1, strings.TrimSpace(line)))
-			}
-		}
-	}
-
-	header := s.symbolHeader(ctx, cwd, query)
-	if len(results) == 0 {
-		if header != "" {
-			return header + fmt.Sprintf("no other matches for %q in %d files", query, len(files)), nil
-		}
-		return fmt.Sprintf("no matches for %q in %d files", query, len(files)), nil
-	}
-	return header + fmt.Sprintf("%d matches:\n%s", len(results), strings.Join(results, "\n")), nil
+	r := &toolRuntime{cwd: cwd, readSet: map[string]struct{}{}, requiredReads: map[string]struct{}{}}
+	return s.searchWith(ctx, r, query)
 }
 
+// searchWith answers a symbol query through r's search tools: the usages
+// are a case-insensitive literal grep (so .gitignore, the binary and size
+// filters and max_results apply, and rg is used when available), and an
+// empty query lists the workspace's files as glob "**" does (capped).
+//
+// The grep runs first: every file defining the name contains it, so the
+// files it matched are handed to the index (Refresh) before the lookup,
+// and the definitions listed are current for all of them even when they
+// changed outside Spettro since the index last synced.
+func (s RepoSearcher) searchWith(ctx context.Context, r *toolRuntime, query string) (string, error) {
+	if query == "" {
+		return r.runGlob(ctx, "**", "")
+	}
+	found, err := r.grepMatches(ctx, grepArgs{Pattern: regexp.QuoteMeta(query), CaseInsensitive: true, MaxResults: maxSymbolUsages})
+	if err != nil {
+		return "", err
+	}
+	header, defs := s.symbolHeader(ctx, query, found.files())
+	usages := r.reportGrep(found)
+	if len(found.results) == 0 && defs > 0 {
+		return header + fmt.Sprintf("no other matches for %q", query), nil
+	}
+	return header + usages, nil
+}
+
+// maxDefs caps the definitions listed, so a common name cannot drown the
+// usages.
+const maxDefs = 20
+
 // symbolHeader returns a "definitions:" block for identifier-shaped queries,
-// ranked best-first by the symbol index, or "" when the index is disabled or
-// has nothing. Capped so a common name can't drown the content matches.
-func (s RepoSearcher) symbolHeader(ctx context.Context, cwd, query string) string {
+// ranked best-first by the symbol index, after re-checking the files the
+// usage grep matched (seen), and how many definitions it found. The block
+// is "" when the index is disabled, the query is not an identifier, or
+// there is nothing to say. When the index was cut short (file cap or time
+// bound) it says so, also when no definition was found, since the
+// definition may be in the part never indexed.
+func (s RepoSearcher) symbolHeader(ctx context.Context, query string, seen []string) (string, int) {
 	if s.Index == nil || !identifierRE.MatchString(query) {
-		return ""
+		return "", 0
 	}
+	s.Index.Refresh(ctx, seen)
 	syms := s.Index.Lookup(ctx, query)
-	if len(syms) == 0 {
-		return ""
-	}
-	const maxDefs = 20
-	total := len(syms)
-	if len(syms) > maxDefs {
-		syms = syms[:maxDefs]
-	}
+	cut := s.Index.Truncated().Describe()
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d definitions:\n", total)
-	for _, sym := range syms {
+	switch {
+	case len(syms) == 0 && cut == "":
+		return "", 0
+	case len(syms) == 0:
+		fmt.Fprintf(&b, "(no definitions of %q in the symbol index, which %s: definitions in the files it did not reach are not listed, but the matches below come from every file)\n\n", query, cut)
+		return b.String(), 0
+	}
+	fmt.Fprintf(&b, "%d definitions:\n", len(syms))
+	for _, sym := range syms[:min(len(syms), maxDefs)] {
 		fmt.Fprintf(&b, "%s:%d  %s %s  %s\n", sym.Path, sym.Line, sym.Kind, sym.Name, sym.Signature)
 	}
-	if total > maxDefs {
-		fmt.Fprintf(&b, "... %d more definitions omitted\n", total-maxDefs)
+	if len(syms) > maxDefs {
+		fmt.Fprintf(&b, "... %d more definitions omitted\n", len(syms)-maxDefs)
+	}
+	if cut != "" {
+		fmt.Fprintf(&b, "(the symbol index %s: definitions in the rest are not listed, but the matches below come from every file)\n", cut)
 	}
 	b.WriteString("\n")
-	return b.String()
+	return b.String(), len(syms)
 }

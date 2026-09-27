@@ -255,6 +255,11 @@ func (m Model) applyRewind(cp checkpoint.Checkpoint, mode int) (tea.Model, tea.C
 			m.showBanner("rewind failed: "+err.Error(), "error")
 			return m, nil
 		}
+		// The restore rewrote files behind the agent's tools: the next
+		// symbol lookup re-syncs the index with the disk.
+		if rs, ok := m.searcher.(agent.RepoSearcher); ok && rs.Index != nil {
+			rs.Index.MarkStale()
+		}
 	}
 	if restoreFiles && len(cp.SkippedLarge) > 0 {
 		m.showBanner(fmt.Sprintf("%d large file(s) were not snapshotted and are unaffected by this rewind", len(cp.SkippedLarge)), "warn")

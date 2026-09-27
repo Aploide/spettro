@@ -15,14 +15,19 @@ import (
 	"unicode/utf8"
 
 	"spettro/internal/lsp/lsptest"
+	"spettro/internal/testhome"
 )
 
 // TestMain lets the test binary double as a scripted language server: the
-// fake-server tests below point the manager at os.Args[0].
+// fake-server tests below point the manager at os.Args[0]. HOME and the XDG directories
+// point at a temporary directory so no test can touch the real ~/.spettro.
 func TestMain(m *testing.M) {
 	lsptest.MaybeServe()
-	os.Exit(m.Run())
+	os.Exit(testhome.Main(m))
 }
+
+// TestHomeIsIsolated fails when the tests would run against the real home.
+func TestHomeIsIsolated(t *testing.T) { testhome.Check(t) }
 
 // fakeManager returns a manager for a fresh workspace whose only server is the
 // scripted one, claiming ".fk" files.
@@ -528,7 +533,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 
 	// nothing published: not fresh, returned at the deadline
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, fresh := c.waitSettled(ctx, d, 50*time.Millisecond); fresh {
+	if _, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 50 * time.Millisecond}); fresh {
 		t.Fatal("no publish should not count as fresh")
 	}
 	cancel()
@@ -541,7 +546,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 	}()
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ds, fresh := c.waitSettled(ctx, d, 200*time.Millisecond)
+	ds, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 200 * time.Millisecond})
 	if !fresh || len(ds) != 1 || ds[0].Message != "semantic error" {
 		t.Fatalf("got %+v fresh=%v, want the later publish", ds, fresh)
 	}
@@ -601,14 +606,14 @@ func TestWaitSettledIgnoresOlderVersions(t *testing.T) {
 	}
 	publish(1, "about v1")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, fresh := c.waitSettled(ctx, d, 20*time.Millisecond); fresh {
+	if _, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 20 * time.Millisecond}); fresh {
 		t.Fatal("a publish for version 1 answered the sync of version 2")
 	}
 	cancel()
 	publish(2, "about v2")
 	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ds, fresh := c.waitSettled(ctx, d, 20*time.Millisecond)
+	ds, fresh := c.waitSettled(ctx, d, settlePolicy{quiet: 20 * time.Millisecond})
 	if !fresh || len(ds) != 1 || ds[0].Message != "about v2" {
 		t.Fatalf("got %+v fresh=%v, want the version 2 publish", ds, fresh)
 	}

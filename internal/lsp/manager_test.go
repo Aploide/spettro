@@ -115,6 +115,29 @@ func TestLoadConfigOverride(t *testing.T) {
 	}
 }
 
+// A project entry that only tunes a server (settle_ms) keeps the user's
+// enabled:false from ~/.spettro/lsp.json: an unset field inherits.
+func TestLoadConfigPartialOverrideKeepsEnabled(t *testing.T) {
+	root := t.TempDir()
+	stubLookPath(t, "gopls")
+	home := t.TempDir() // a home of its own: other tests read ~/.spettro/lsp.json too
+	t.Setenv("HOME", home)
+	writeLspJSON(t, home, Config{Servers: map[string]ServerConfig{"go": {Enabled: new(false)}}})
+	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{"go": {SettleMs: new(200)}}})
+	got, ok := loadConfig(root)
+	if ok || got.Servers["go"].enabled() {
+		t.Fatalf("settle_ms-only project entry re-enabled the server: %+v ok=%v", got.Servers["go"], ok)
+	}
+	if ms := got.Servers["go"].SettleMs; ms == nil || *ms != 200 {
+		t.Fatalf("settle_ms not applied: %v", ms)
+	}
+	// An explicit enabled:true in the project still wins.
+	writeLspJSON(t, root, Config{Servers: map[string]ServerConfig{"go": {Enabled: new(true)}}})
+	if _, ok := loadConfig(root); !ok {
+		t.Fatal("the project's enabled:true did not override the user's enabled:false")
+	}
+}
+
 func TestServerKeyFor(t *testing.T) {
 	m := &Manager{cfg: Config{Servers: map[string]ServerConfig{
 		"go":         {Command: "gopls", Filetypes: []string{".go"}},

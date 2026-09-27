@@ -23,6 +23,10 @@ func newAliasTestRuntime(t *testing.T) (*toolRuntime, string) {
 		t.Fatal(err)
 	}
 	writeTestFile(t, dir, "pkg/use.go", "package pkg\n\nvar _ = HelloWorld\n")
+	searcher := NewRepoSearcher(dir)
+	// The index saves its cache in the background after a sync; let that
+	// finish before t.TempDir's cleanup removes the workspace.
+	t.Cleanup(searcher.Index.Flush)
 	return &toolRuntime{
 		cwd:           dir,
 		permission:    config.PermissionYOLO,
@@ -30,7 +34,7 @@ func newAliasTestRuntime(t *testing.T) (*toolRuntime, string) {
 		requiredReads: map[string]struct{}{},
 		allowedShell:  map[string]struct{}{},
 		toolPolicies:  map[string]config.ToolSpec{},
-		searcher:      NewRepoSearcher(dir),
+		searcher:      searcher,
 		sessionDir:    filepath.Join(t.TempDir(), "sessions", "sess-1"),
 	}, dir
 }

@@ -102,6 +102,9 @@ type Client struct {
 	diagCond *sync.Cond
 	diags    map[string]publishedDiags
 	diagGen  map[string]int
+	// pubGen counts every publish, whatever the document: waitBatch uses
+	// it to tell when a burst of publishes (one diagnosis pass) is over.
+	pubGen int
 
 	openMu   sync.Mutex
 	openDocs map[string]*openDoc // uri → what the server was last told
@@ -395,6 +398,7 @@ func (c *Client) dispatch(msg rpcMessage) {
 		c.diagMu.Lock()
 		c.diags[key] = publishedDiags{path: path, list: params.Diagnostics, version: version}
 		c.diagGen[key]++
+		c.pubGen++
 		c.diagMu.Unlock()
 		c.diagCond.Broadcast()
 	case msg.Method != "":
@@ -687,27 +691,99 @@ func (c *Client) waitDiagnostics(ctx context.Context, d doc) []Diagnostic {
 	return c.diagnosticsFor(d.key)
 }
 
+// versionedBatchQuiet is how long waitSettled keeps listening after a
+// publish marked with the edit's version: that set is final for the edited
+// file, but the same diagnosis pass publishes the files that depend on it
+// (gopls sends a package's reverse dependencies within a millisecond of the
+// file itself, in either order), and the other-files summary needs those.
+const versionedBatchQuiet = 10 * time.Millisecond
+
 // waitSettled waits for the first publish about the synced text and then
-// keeps listening until the server has been quiet for the quiet window,
-// because several servers publish in stages (typescript-language-server
-// sends syntactic errors before semantic ones). fresh reports whether such a
-// publish landed before ctx expired; without one the returned set predates
-// the edit.
-func (c *Client) waitSettled(ctx context.Context, d doc, quiet time.Duration) (ds []Diagnostic, fresh bool) {
+// for as long as policy says later publishes may still complete it (see
+// settlePolicy): several servers publish in stages, and most of the rest
+// mark the publish with the document version, which proves it final once
+// the rest of its batch is in. fresh reports whether such a publish landed
+// before ctx expired; without one the returned set predates the edit.
+func (c *Client) waitSettled(ctx context.Context, d doc, policy settlePolicy) (ds []Diagnostic, fresh bool) {
 	gen, fresh := c.waitGen(ctx, d, d.sinceGen)
 	if !fresh {
 		return c.diagnosticsFor(d.key), false
 	}
-	for ctx.Err() == nil {
-		qctx, cancel := context.WithTimeout(ctx, quiet)
-		next, _ := c.waitGen(qctx, d, gen)
-		cancel()
-		if next <= gen {
-			break
+	switch {
+	case policy.stages > 1:
+		c.waitStages(ctx, d, gen, policy)
+	case c.publishedVersion(d.key) >= d.version:
+		c.waitBatch(ctx, versionedBatchQuiet)
+	default:
+		for ctx.Err() == nil {
+			qctx, cancel := context.WithTimeout(ctx, policy.quiet)
+			next, _ := c.waitGen(qctx, d, gen)
+			cancel()
+			if next <= gen {
+				break
+			}
+			gen = next
 		}
-		gen = next
 	}
 	return c.diagnosticsFor(d.key), true
+}
+
+// waitBatch returns once the server has published nothing, about any
+// document, for quiet (or ctx ends).
+func (c *Client) waitBatch(ctx context.Context, quiet time.Duration) {
+	c.diagMu.Lock()
+	seen := c.pubGen
+	c.diagMu.Unlock()
+	for ctx.Err() == nil {
+		qctx, cancel := context.WithTimeout(ctx, quiet)
+		next := c.waitAnyPublish(qctx, seen)
+		cancel()
+		if next <= seen {
+			return
+		}
+		seen = next
+	}
+}
+
+// waitAnyPublish blocks until the server publishes anything after
+// generation since, ctx ends or the server exits, and returns pubGen then.
+func (c *Client) waitAnyPublish(ctx context.Context, since int) int {
+	stop := context.AfterFunc(ctx, func() {
+		c.diagMu.Lock()
+		defer c.diagMu.Unlock()
+		c.diagCond.Broadcast()
+	})
+	defer stop()
+	c.diagMu.Lock()
+	defer c.diagMu.Unlock()
+	for c.pubGen <= since && ctx.Err() == nil && c.closeErr == nil {
+		c.diagCond.Wait()
+	}
+	return c.pubGen
+}
+
+// waitStages waits, after the first publish at generation gen, for the rest
+// of a staged server's publishes: until it has published policy.stages sets
+// or policy.ceiling has passed since the first.
+func (c *Client) waitStages(ctx context.Context, d doc, gen int, policy settlePolicy) {
+	sctx, cancel := context.WithTimeout(ctx, policy.ceiling)
+	defer cancel()
+	for seen := 1; seen < policy.stages && sctx.Err() == nil; {
+		next, _ := c.waitGen(sctx, d, gen)
+		if next <= gen {
+			return
+		}
+		seen += next - gen
+		gen = next
+	}
+}
+
+// publishedVersion returns the document version of the latest publish for
+// key, 0 when the server did not say.
+func (c *Client) publishedVersion(key string) int {
+	c.diagMu.Lock()
+	defer c.diagMu.Unlock()
+	return c.diags[key].version
 }
 
 // waitGen blocks until the document has a publish newer than generation

@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func writeTree(t *testing.T, root string, files map[string]string) {
+func writeTree(t testing.TB, root string, files map[string]string) {
 	t.Helper()
 	for rel, content := range files {
 		p := filepath.Join(root, filepath.FromSlash(rel))

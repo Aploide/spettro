@@ -16,6 +16,7 @@ Spettro uses both project-local and user-global storage.
 | `update-check.json` | Result of the last GitHub release check, reused for 24 hours by the startup notice (`/update` always checks live). |
 | `hooks.json` | Global runtime hooks fallback/default. |
 | `lsp.json` | Optional [LSP](lsp.md) overrides; servers are auto-detected on PATH with zero config. |
+| `bin/rg`, `bin/rg.version` | ripgrep, downloaded on first use when it is not on PATH (see [Search tools](tools.md#search-tools)); `rg.version` names the pinned release it came from. |
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
 | `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
@@ -155,6 +156,12 @@ macOS).
 | --- | --- | --- |
 | `notifications_disabled` | `false` | Set `true` to turn all notifications off. |
 | `notify_quiet_sec` | `5` | Minimum seconds between notifications; events inside the window are dropped so bursts don't spam. |
+
+## Search
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `ripgrep_download_disabled` | `false` | Set `true` to never download ripgrep into `~/.spettro/bin`; `grep` then uses rg only when it is on PATH and its built-in Go search otherwise. Read once per process (at the first `grep` without rg), so a change applies from the next start. See [Search tools](tools.md#search-tools). |
 
 ## Agent Skills
 

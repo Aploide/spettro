@@ -58,10 +58,22 @@ request that needs it starts a fresh one.
   `diagnostics` op), at most 20 for the edited file, and other files get a one-line count
   — which is how a signature change that breaks callers shows up. A clean
   edit adds nothing. The wait is bounded to ~3s, server start included: the
-  server's first publish after the change is awaited, then a short quiet
-  window catches servers that publish in stages. The edit itself never fails
-  because of the server; when it is still starting or does not answer in
-  time, a one-line note says the file was not checked.
+  server's first publish after the change is awaited, and then:
+
+  - a publish marked with the version of the text just sent (gopls,
+    pyright, clangd) is final; the wait only lets the rest of that
+    diagnosis pass arrive (10 ms of silence), since it carries the files
+    that depend on the edited one;
+  - typescript-language-server publishes syntactic errors first and
+    semantic ones second, so the wait ends at its second publish, or 1 s
+    after the first;
+  - any other server is final once it has been quiet for a window: 30 ms
+    for gopls, pyright and clangd, 300 ms for the rest (`settle_ms` below
+    changes it).
+
+  The edit itself never fails because of the server; when it is still
+  starting or does not answer in time, a one-line note says the file was
+  not checked.
 
   The counts describe the files as they are on disk: before each check,
   files the server holds open are re-sent if they changed behind its back
@@ -113,9 +125,16 @@ Per entry:
 
 - `command` / `args` — replace the detected server for that key. Omitting
   `command` keeps the detected one, so `{ "enabled": false }` alone just turns
-  a language off.
+  a language off. An entry without `command` changes only the fields it
+  sets: a project's `{ "settle_ms": 200 }` keeps an `"enabled": false` from
+  `~/.spettro/lsp.json`.
 - `enabled` — defaults to `true`; set `false` to disable a server.
 - `filetypes` — extensions the server claims (defaults to the built-in list
   for known keys; required for custom keys like `zig` above).
+- `settle_ms` — how long post-edit diagnostics keep listening after the
+  server's first unversioned publish before taking it as final (for
+  `typescript`, the most it waits for the semantic publish). Raise it for a
+  server that reports in several late publishes; like `enabled`, it can be
+  set without `command`, e.g. `"python": { "settle_ms": 200 }`.
 
 Edits to `lsp.json` apply after an `lsp` restart (or a new session).
