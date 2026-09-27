@@ -427,6 +427,14 @@ Spool files are tied to the conversation, not to a single run: they survive
 run end, and are deleted on `/clear` and when the process exits (TUI exit,
 `/exit`).
 
+The files are written in the background, in the order the results were
+produced, so spooling never delays the agent's next step. Until a file is on
+disk, `tool-output` pages through the result from memory; the spool file path a
+truncated shell result names always exists by the time the result is returned.
+`/clear` and a normal exit wait for pending writes before deleting the
+directory. If a write fails (for example, the disk is full), the result stays
+readable through `tool-output` from memory for the rest of the session.
+
 ```text
 # example: model receives truncated grep output with a footer
 [truncated: 12,400 of 13,000 lines omitted; use tool-output {"id":"spool:2","offset":1800} to read more]

@@ -21,8 +21,10 @@ const offloadFloor = 2000
 var spoolFooterIDRe = regexp.MustCompile(`tool-output \{"id":"(spool:\d+)"`)
 
 // ensureSpooled guarantees that a tool result over the offload floor has a
-// spool file backing it and returns the spool ID ("" for small outputs or on
-// spool failure — offloading is best-effort). Outputs already truncated by
+// spool entry backing it and returns the spool ID ("" for small outputs or on
+// spool failure — offloading is best-effort). The file itself is written in
+// the background (jobs.SpoolStore), so this costs the step microseconds, not
+// a file write. Outputs already truncated by
 // spoolResult carry their ID in the footer (the spool holds the full,
 // untruncated text); everything else is written as-is, which is the complete
 // output since it was never cut.
