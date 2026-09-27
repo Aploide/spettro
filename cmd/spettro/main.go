@@ -133,7 +133,7 @@ func main() {
 	}
 	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
-	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb)
+	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb, tui.WithManifest(boot.manifest))
 
 	// Alt screen and mouse mode are declared on the tea.View in Model.View
 	// (bubbletea v2 removed the imperative program options).

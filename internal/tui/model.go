@@ -695,7 +695,10 @@ type Model struct {
 	loopSeq int
 }
 
-func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState) Model {
+// New builds the TUI model for cwd. opts pass state the host already has
+// (see Option); New works without any.
+func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.Manager, sb *agent.SandboxState, opts ...Option) Model {
+	options := collectOptions(opts)
 	// Resolve the palette before anything else: the textarea chrome and the
 	// spinner style below are captured at construction, so a theme installed
 	// after them would leave the input box in the wrong palette for the rest
@@ -719,7 +722,10 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		favs[f] = true
 	}
 
-	manifest, _ := config.LoadAgentManifestForProject(cwd)
+	manifest := options.manifest
+	if !options.hasManifest {
+		manifest, _ = config.LoadAgentManifestForProject(cwd)
+	}
 	defaultMode := manifest.DefaultAgent
 	if defaultMode == "" {
 		defaultMode = "plan"
