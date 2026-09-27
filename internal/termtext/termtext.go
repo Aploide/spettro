@@ -88,6 +88,12 @@ func SanitizeLine(s string) string {
 //     carry a whole payload that decodes to a command), and a no-break
 //     space looks like the space that separates two shell words while
 //     being part of one;
+//   - a letter of another script that is drawn like a Latin one (the
+//     Cyrillic small i, U+0456, in "g\u0456thub.com", a fullwidth or
+//     mathematical "a") is written as a "\u0456"-style escape when it sits
+//     in a word that reads as Latin text, where it can only be posing as
+//     the letter it resembles (see lookalike.go); a word wholly in that
+//     script is left alone;
 //   - a byte that is not valid UTF-8 is written as "\x9b".
 //
 // A trailing "\r" (a CRLF line ending split on "\n") is dropped, since it is
@@ -143,7 +149,8 @@ func EscapeLines(s string) string {
 
 // HasHidden reports whether multi-line text s holds a character that does
 // not show as itself (anything EscapeExact would rewrite, other than a tab or
-// the "\r" of a CRLF line ending). A host that must present s raw, such as an
+// the "\r" of a CRLF line ending), a look-alike letter posing as Latin
+// included. A host that must present s raw, such as an
 // editor's side-by-side diff, uses it to decide whether to show an escaped
 // copy as well.
 func HasHidden(s string) bool {
@@ -162,7 +169,7 @@ func HasHidden(s string) bool {
 		}
 		i += size
 	}
-	return false
+	return len(posingLookalikes(s)) > 0
 }
 
 // escape is EscapeControls, or EscapeExact when exact is set.
@@ -178,11 +185,15 @@ func escape(s string, exact bool) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 8)
+	// The words in which a look-alike letter poses as Latin (lookalike.go).
+	posing, nextPosing := posingLookalikes(s), 0
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
 		case r == utf8.RuneError && size == 1:
 			fmt.Fprintf(&b, "\\x%02x", s[i])
+		case latinLookalike(r) && inSpans(posing, &nextPosing, i):
+			writeCodePoint(&b, r)
 		case r == '\t' && exact:
 			b.WriteString(TabMark)
 			b.WriteString(strings.Repeat(" ", TabWidth-1))
@@ -291,7 +302,9 @@ func isPlainUnicode(s string, mode escapeMode, newlines bool) bool {
 		if newlines && r == '\n' {
 			continue
 		}
-		if isControl(r) || (mode >= modeEscape && Hidden(r)) || (mode == modeExact && r == tabMarkRune) {
+		if isControl(r) || (mode >= modeEscape && (Hidden(r) || latinLookalike(r))) || (mode == modeExact && r == tabMarkRune) {
+			// A look-alike letter only sends the text down the slow path,
+			// which decides whether it poses as Latin there.
 			return false
 		}
 	}
@@ -415,6 +428,15 @@ func HardWrap(s string, width int) []string {
 		pos += max(len(cluster), 1)
 	}
 	return append(rows, s[rowStart:])
+}
+
+// EscapeLen is the length in bytes of the escape EscapeControls or
+// EscapeExact wrote at the start of s ("^M", "\x9b", "\u202e",
+// "\U000e0100"), or 0 when s does not start with one. A caller that cuts
+// escaped text into pieces (a chat message, a row) uses it to keep each
+// escape in one piece: split, "\u" and "202e" would read as two things.
+func EscapeLen(s string) int {
+	return escapeTokenLen(s)
 }
 
 // escapeTokenLen is the length of the escape s starts with, as
