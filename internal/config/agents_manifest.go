@@ -181,6 +181,18 @@ type ToolSpec struct {
 	PermissionRules  []PermissionRule `toml:"permission_rules"`
 }
 
+// IsBuiltin reports whether the tool is one of spettro's own built-ins
+// rather than a tool of the operator's own (kind mcp, script or http). An
+// empty kind counts as built-in, which is how the agent runtime reads tool
+// lists built in code; Validate rejects an empty kind in a manifest file.
+//
+// A tool of the operator's own always owns its ID and aliases, even when one
+// of them is a built-in's name: see docs/tools.md, "Tools of your own with a
+// built-in's name".
+func (t ToolSpec) IsBuiltin() bool {
+	return t.Kind == "" || t.Kind == "builtin"
+}
+
 type AgentSpec struct {
 	ID               string           `toml:"id"`
 	Name             string           `toml:"name"`
@@ -503,12 +515,12 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 			m.Tools[i].RiskLevel = "medium"
 			changed = true
 		}
-		if len(m.Tools[i].Aliases) == 0 {
-			switch m.Tools[i].ID {
-			case "bash":
-				m.Tools[i].Aliases = []string{"bash-output"}
-				changed = true
-			}
+		// The built-in bash has always answered to bash-output. A tool of
+		// the operator's own called bash is not the shell, and a bash-output
+		// of their own keeps its name, so neither case gets the alias.
+		if len(m.Tools[i].Aliases) == 0 && m.Tools[i].ID == "bash" && m.Tools[i].IsBuiltin() && !m.nameTaken("bash-output", i) {
+			m.Tools[i].Aliases = []string{"bash-output"}
+			changed = true
 		}
 	}
 	for i := range m.Agents {
@@ -630,23 +642,24 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 // removed by hand does not get it back.
 //
 // Tools the manifest is missing entirely are dropped from the allow-list,
-// since Validate rejects an agent referencing an unknown tool.
+// since Validate rejects an agent referencing an unknown tool. So are tools
+// of the operator's own that share a built-in's name (a "bash" script): the
+// agent is granted built-ins only, and when the name is taken it gets the
+// built-in under a retired name instead, if the manifest still defines one.
 func (m *AgentManifest) ensureGeneralPurposeAgent() {
 	for _, a := range m.Agents {
 		if a.ID == generalPurposeAgentSpec.ID {
 			return
 		}
 	}
-	known := map[string]bool{}
 	builtin := map[string]bool{}
 	for _, t := range m.Tools {
-		known[t.ID] = true
-		builtin[t.ID] = t.Kind == "builtin"
+		builtin[t.ID] = t.IsBuiltin()
 	}
 	spec := generalPurposeAgentSpec
 	tools := make([]string, 0, len(spec.AllowedTools))
 	for _, id := range spec.AllowedTools {
-		if known[id] {
+		if builtin[id] {
 			tools = append(tools, id)
 			continue
 		}
@@ -742,6 +755,8 @@ func (m *AgentManifest) ensureToolOutputTool() {
 // predates v8: definitions are added when absent, and any agent already
 // holding a shell (shell-exec, or bash, its v12 name) gets all three
 // (identical execute trust level, so deliberate restrictions are preserved).
+// Only the built-in shell counts, and only a built-in pty tool is granted
+// (see holdsBuiltin).
 func (m *AgentManifest) ensurePTYTools() {
 	have := map[string]bool{}
 	for _, t := range m.Tools {
@@ -757,21 +772,32 @@ func (m *AgentManifest) ensurePTYTools() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if !allowed["shell-exec"] && !allowed["bash"] {
+		if !m.holdsBuiltin(m.Agents[i], "shell-exec") && !m.holdsBuiltin(m.Agents[i], "bash") {
 			continue
 		}
 		for _, t := range ptyTools {
-			if !allowed[t.ID] {
+			if !allowed[t.ID] && m.builtinToolNamed(t.ID) {
 				m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, t.ID)
 			}
 		}
 	}
 }
 
+// holdsBuiltin reports whether agent a lists name and name reaches a
+// built-in (builtinToolNamed). The retrofits below grant a new tool to the
+// agents whose tools already show the same trust; a tool of the operator's
+// own that shares a built-in's name (a "grep" script) shows none, since it
+// is not that built-in.
+func (m *AgentManifest) holdsBuiltin(a AgentSpec, name string) bool {
+	return slices.Contains(a.AllowedTools, name) && m.builtinToolNamed(name)
+}
+
 // ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool
 // into a manifest that predates v7: the definition is added when absent, and
 // any agent already holding grep gets repo-search allowed (identical
-// read/search trust level, so deliberate restrictions are preserved).
+// read/search trust level, so deliberate restrictions are preserved). A tool
+// of the operator's own called grep is no sign of that trust, and one called
+// repo-search is never granted in the built-in's place (see holdsBuiltin).
 func (m *AgentManifest) ensureRepoSearchTool() {
 	haveTool := false
 	for _, t := range m.Tools {
@@ -788,7 +814,7 @@ func (m *AgentManifest) ensureRepoSearchTool() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["grep"] && !allowed["repo-search"] {
+		if m.holdsBuiltin(m.Agents[i], "grep") && !allowed["repo-search"] && m.builtinToolNamed("repo-search") {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "repo-search")
 		}
 	}
@@ -805,12 +831,10 @@ func (m *AgentManifest) ensureRepoSearchTool() {
 // definition is added next to it, and an agent holding lsp counts as holding
 // references for rename-symbol.
 func (m *AgentManifest) ensureLSPDeepTools() {
-	// Only the built-in lsp does what references did; a tool of the
-	// operator's own called lsp is no sign of trust.
-	builtinLSP := false
-	if i := m.toolIndex("lsp"); i >= 0 && m.Tools[i].Kind == "builtin" {
-		builtinLSP = true
-	}
+	// Only built-ins count as trust and only built-ins are granted: a tool
+	// of the operator's own called lsp, references or file-edit shows
+	// nothing, and one called hover or rename-symbol is never granted in the
+	// built-in's place (see holdsBuiltin).
 	for _, t := range lspDeepTools {
 		if _, ok := m.toolNamed(t.ID); !ok {
 			m.Tools = append(m.Tools, t)
@@ -821,10 +845,12 @@ func (m *AgentManifest) ensureLSPDeepTools() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["references"] && !allowed["hover"] {
+		a := m.Agents[i]
+		references := m.holdsBuiltin(a, "references")
+		if references && !allowed["hover"] && m.builtinToolNamed("hover") {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "hover")
 		}
-		if (allowed["references"] || (builtinLSP && allowed["lsp"])) && allowed["file-edit"] && !allowed["rename-symbol"] {
+		if (references || m.holdsBuiltin(a, "lsp")) && m.holdsBuiltin(a, "file-edit") && !allowed["rename-symbol"] && m.builtinToolNamed("rename-symbol") {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "rename-symbol")
 		}
 	}

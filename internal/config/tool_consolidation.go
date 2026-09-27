@@ -142,7 +142,8 @@ func canonicalOf(id string) (string, bool) {
 //     action it may take, no permission rule denying it). Only those carry
 //     over.
 //   - Definitions: only built-in tools are touched; a user's own script or
-//     MCP tool that shares a name is left alone. A retired tool whose
+//     MCP tool that shares a name is left alone, and a group whose canonical
+//     name such a tool holds is not folded at all. A retired tool whose
 //     canonical tool is missing becomes it in place (the ID, name and
 //     description change, the operator's settings stay). Otherwise its
 //     settings merge into the canonical tool toward the stricter side:
@@ -179,19 +180,24 @@ func (m *AgentManifest) consolidateBuiltinTools(groups []toolFold, removedIDs []
 	folded := map[string]string{} // retired ID -> canonical ID, for folded definitions
 	created := map[string]bool{}  // canonical IDs that had no definition before
 	for _, g := range groups {
-		ci := m.toolIndex(g.canonical)
-		if ci >= 0 && m.Tools[ci].Kind != "builtin" {
-			// The canonical name belongs to a tool of the operator's own;
-			// folding a built-in into it would change what it is.
+		if m.userToolNamed(g.canonical) {
+			// The canonical name belongs to a tool of the operator's own (its
+			// ID or one of its aliases). Folding a built-in into it would
+			// change what that tool is, and pointing allow-lists at it would
+			// grant the operator's tool in place of a built-in. The group's
+			// built-ins stay tools of their own, under their own names, and
+			// the agent runtime runs them unfolded (see
+			// internal/agent/tool_names.go).
 			continue
 		}
+		ci := m.toolIndex(g.canonical)
 		if ci < 0 {
 			ci = m.renameInPlace(g.canonical, g.retired, folded)
 			created[g.canonical] = ci >= 0
 		}
 		for _, id := range g.retired {
 			ri := m.toolIndex(id)
-			if ri < 0 || ri == ci || m.Tools[ri].Kind != "builtin" {
+			if ri < 0 || ri == ci || !m.Tools[ri].IsBuiltin() {
 				continue
 			}
 			folded[id] = g.canonical
@@ -223,7 +229,7 @@ func (m *AgentManifest) consolidateBuiltinTools(groups []toolFold, removedIDs []
 	}
 	removed := map[string]bool{}
 	for _, id := range removedIDs {
-		if i := m.toolIndex(id); i >= 0 && m.Tools[i].Kind == "builtin" {
+		if i := m.toolIndex(id); i >= 0 && m.Tools[i].IsBuiltin() {
 			m.Tools = slices.Delete(m.Tools, i, i+1)
 			removed[id] = true
 		}
@@ -348,7 +354,7 @@ func (m *AgentManifest) retiredToolsUsable(groups []toolFold) []map[string]bool 
 			}
 			// A tool of the operator's own that shares the name is not the
 			// built-in, and calling it never did the built-in's job.
-			if t, ok := m.toolNamed(id); ok && t.Kind == "builtin" && m.ToolUsableBy(a, t) {
+			if t, ok := m.toolNamed(id); ok && t.IsBuiltin() && m.ToolUsableBy(a, t) {
 				out[i][id] = true
 			}
 		}
@@ -379,7 +385,7 @@ func (m *AgentManifest) renameInPlace(canonical string, retired []string, folded
 	pick := -1
 	for _, id := range retired {
 		ri := m.toolIndex(id)
-		if ri < 0 || m.Tools[ri].Kind != "builtin" || readOnlyRetiredTools[id] {
+		if ri < 0 || !m.Tools[ri].IsBuiltin() || readOnlyRetiredTools[id] {
 			continue
 		}
 		if pick < 0 || (m.Tools[ri].Enabled && !m.Tools[pick].Enabled) {
@@ -396,6 +402,29 @@ func (m *AgentManifest) renameInPlace(canonical string, retired []string, folded
 		t.Name, t.Description = spec.Name, spec.Description
 	}
 	return pick
+}
+
+// userToolNamed reports whether name is the ID or an alias of a tool of the
+// operator's own (kind mcp, script or http). Such a name is theirs: no
+// migration folds a built-in into it, adds it to a built-in's aliases, or
+// grants it to an agent in place of a built-in.
+func (m *AgentManifest) userToolNamed(name string) bool {
+	return slices.ContainsFunc(m.Tools, func(t ToolSpec) bool {
+		return !t.IsBuiltin() && (t.ID == name || slices.Contains(t.Aliases, name))
+	})
+}
+
+// builtinToolNamed reports whether name reaches a built-in tool: it is the
+// ID or an alias of a built-in definition, and no tool of the operator's own
+// claims it. The migrations that grant a tool, or that read an agent holding
+// a tool as trust in a new one, go by this, so a tool of the operator's own
+// that shares a built-in's name never counts as that built-in.
+func (m *AgentManifest) builtinToolNamed(name string) bool {
+	if m.userToolNamed(name) {
+		return false
+	}
+	t, ok := m.toolNamed(name)
+	return ok && t.IsBuiltin()
 }
 
 // toolIndex returns the position of the tool definition with this ID, or -1.
