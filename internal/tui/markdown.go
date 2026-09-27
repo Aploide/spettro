@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -182,6 +184,12 @@ func renderInlineMarkdown(s string) string {
 	return s
 }
 
+// renderCodeBlock draws a fenced code block on its tinted background, one row
+// per source line. Code is not wrapped (a wrapped line reads as two
+// statements); a line wider than the block is cut with "…" instead, which,
+// unlike a plain MaxWidth clip, shows that something was cut. Tabs and
+// control characters are sanitized first so the measured width is the drawn
+// one.
 func renderCodeBlock(code string, width int) string {
 	if strings.TrimSpace(code) == "" {
 		return ""
@@ -190,10 +198,15 @@ func renderCodeBlock(code string, width int) string {
 		Foreground(theme.Current().CodeFg).
 		Background(theme.Current().BgCode).
 		Padding(0, 1)
-	if width > 12 {
-		style = style.MaxWidth(width)
+	lines := strings.Split(code, "\n")
+	for i, line := range lines {
+		line = termtext.SanitizeLine(line)
+		if width > 12 {
+			line = termtext.Fit(line, width-2) // the padding takes a cell each side
+		}
+		lines[i] = line
 	}
-	return style.Render(code)
+	return style.Render(strings.Join(lines, "\n"))
 }
 
 func parseHeading(line string) (int, string, bool) {
@@ -328,14 +341,23 @@ func renderTable(tableLines []string, width int) string {
 		return ""
 	}
 
+	// Cells are measured as drawn: after inline markdown (the "**" of bold
+	// takes no cells) and in display cells, not bytes (a CJK character
+	// takes two).
+	for i := range rows {
+		for j, cell := range rows[i].cells {
+			rows[i].cells[j] = renderInlineMarkdown(termtext.SanitizeLine(cell))
+		}
+	}
 	colWidths := make([]int, ncols)
 	for _, r := range rows {
 		for j := 0; j < ncols; j++ {
-			if j < len(r.cells) && len(r.cells[j]) > colWidths[j] {
-				colWidths[j] = len(r.cells[j])
+			if j < len(r.cells) {
+				colWidths[j] = max(colWidths[j], ansi.StringWidth(r.cells[j]))
 			}
 		}
 	}
+	fitTableColumns(colWidths, width)
 
 	border := styleMuted
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
@@ -361,13 +383,13 @@ func renderTable(tableLines []string, width int) string {
 			if j < len(r.cells) {
 				cell = r.cells[j]
 			}
-			rendered := renderInlineMarkdown(cell)
+			rendered := termtext.Fit(cell, colWidths[j])
+			padding := strings.Repeat(" ", max(colWidths[j]-ansi.StringWidth(rendered), 0))
 			if r.isHeader {
 				rendered = headerStyle.Render(rendered)
 			} else {
 				rendered = styleText.Render(rendered)
 			}
-			padding := strings.Repeat(" ", colWidths[j]-len(cell))
 			b.WriteString(" ")
 			b.WriteString(rendered)
 			b.WriteString(padding)
@@ -386,8 +408,48 @@ func renderTable(tableLines []string, width int) string {
 		}
 	}
 	out = append(out, sepLine("└", "┴", "┘", "─"))
-
+	// Only a table with more columns than the width can hold even at the
+	// narrowest column width is still too wide here; cut it rather than let
+	// the text block wrap its borders onto the next row.
+	if width > 0 {
+		for i, line := range out {
+			out[i] = termtext.Fit(line, width)
+		}
+	}
 	return strings.Join(out, "\n")
+}
+
+// minTableColumnWidth is the narrowest a table column is squeezed to: room
+// for two characters and the "…" that marks the cut.
+const minTableColumnWidth = 3
+
+// fitTableColumns shrinks column widths, in place, until a table drawn with
+// them fits width cells. A row costs one border cell plus, per column, its
+// width, a cell of padding on each side and a border: 1 + sum(w + 3). The
+// widest column gives up a cell at a time, so narrow columns (ids, flags,
+// counts) stay whole while a long description column absorbs the cut.
+// width <= 0 means unlimited.
+func fitTableColumns(widths []int, width int) {
+	if width <= 0 {
+		return
+	}
+	total := 1
+	for _, w := range widths {
+		total += w + 3
+	}
+	for total > width {
+		widest := 0
+		for j := range widths {
+			if widths[j] > widths[widest] {
+				widest = j
+			}
+		}
+		if widths[widest] <= minTableColumnWidth {
+			return // as narrow as it gets; renderTable cuts the rows
+		}
+		widths[widest]--
+		total--
+	}
 }
 
 func prefixBlockWithBullet(bullet, block string) string {
