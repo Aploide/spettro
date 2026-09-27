@@ -73,7 +73,7 @@ func questionFixture(t *testing.T, tr questionTransport, withExtension, withElic
 		bridge:    b,
 		ctx:       context.Background(),
 		sessionID: "sess-q",
-		open:      map[string][]acpsdk.ToolCallId{},
+		open:      map[string][]openToolCall{},
 	}
 }
 
@@ -438,7 +438,7 @@ func TestInitialize_NoExtensionAdvertisementIsSafe(t *testing.T) {
 // connection.
 func TestAskUser_NoTransportFails(t *testing.T) {
 	b := newBridge(Options{})
-	turn := &turnState{bridge: b, ctx: context.Background(), sessionID: "s", open: map[string][]acpsdk.ToolCallId{}}
+	turn := &turnState{bridge: b, ctx: context.Background(), sessionID: "s", open: map[string][]openToolCall{}}
 
 	if _, err := turn.askUser(context.Background(), twoOptionQuestion); !errors.Is(err, errQuestionUnreachable) {
 		t.Fatalf("error = %v, want the guidance error", err)

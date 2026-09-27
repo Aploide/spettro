@@ -639,7 +639,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, toolID string, rawArgs []
 	}
 	// Approval comes after the edit is fully computed so the user can be shown
 	// the exact diff that would be applied.
-	if err := r.authorizeWriteAccess(ctx, toolID, rel, diff.Unified(rel, content, updated)); err != nil {
+	if err := r.authorizeFileChange(ctx, toolID, abs, rel, content, updated, false); err != nil {
 		return "", err
 	}
 	if err := r.recheckBeforeWrite("file-edit", rel, abs, true, raw); err != nil {
@@ -653,6 +653,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, toolID string, rawArgs []
 	r.mu.Unlock()
 	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
+	recordFileChange(ctx, abs, content, updated, false)
 	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
@@ -1108,8 +1109,26 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 // policy. Writes were previously ungated regardless of policy; this makes a
 // manifest's `requires_approval = true` on the write tools actually take
 // effect. When the policy does not require approval (the default) or we are in
-// YOLO mode, writes proceed unchanged.
+// YOLO mode, writes proceed unchanged. diff is what the approval prompt shows.
 func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath, diff string) error {
+	return r.authorizeWrite(ctx, toolID, relPath, diff, nil)
+}
+
+// authorizeFileChange is authorizeWriteAccess for a write that changes one
+// file (absPath, relPath) from oldText to newText (file-write, file-edit).
+// The approval request carries the change itself next to the unified diff,
+// so a host that renders real diffs (an ACP editor) can show it natively.
+// The diff is always computed from the full texts; only the structured
+// change drops them for very large files (newFileChange).
+func (r *toolRuntime) authorizeFileChange(ctx context.Context, toolID, absPath, relPath, oldText, newText string, created bool) error {
+	change := newFileChange(absPath, oldText, newText, created)
+	return r.authorizeWrite(ctx, toolID, relPath, diff.Unified(relPath, oldText, newText), &change)
+}
+
+// authorizeWrite is the check behind authorizeWriteAccess and
+// authorizeFileChange; change is nil when the write is not one known file
+// change (a download, a multi-file rename).
+func (r *toolRuntime) authorizeWrite(ctx context.Context, toolID, relPath, diff string, change *FileChange) error {
 	// The OS sandbox policy is non-negotiable and independent of the approval
 	// flow (it is an operator setting, not a per-command permission). The
 	// in-process file tools must honor the same FS scope the kernel enforces on
@@ -1129,11 +1148,12 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath,
 	if r.shellApproval == nil {
 		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{
+	decision, err := r.askApproval(ctx, ShellApprovalRequest{
 		ToolID:  toolID,
 		Command: toolID + " " + relPath,
 		Reason:  "file modification requires approval",
 		Diff:    diff,
+		Change:  change,
 	})
 	if err != nil {
 		return fmt.Errorf("write approval failed: %w", err)
@@ -1144,6 +1164,17 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath,
 	default:
 		return fmt.Errorf("%s denied by user", toolID)
 	}
+}
+
+// askApproval hands req to the host's approval callback, stamped with who is
+// asking (AgentID) and where that agent works (CWD), so a host running
+// several agents at once can show the request next to the right agent's
+// tool call. Every approval request goes through here; callers check that
+// r.shellApproval is set first.
+func (r *toolRuntime) askApproval(ctx context.Context, req ShellApprovalRequest) (ShellApprovalDecision, error) {
+	req.AgentID = r.traceID()
+	req.CWD = r.cwd
+	return r.shellApproval(ctx, req)
 }
 
 func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target string) error {
@@ -1175,7 +1206,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 	if r.shellApproval == nil {
 		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{Command: "network " + toolID + " " + target})
+	decision, err := r.askApproval(ctx, ShellApprovalRequest{Command: "network " + toolID + " " + target})
 	if err != nil {
 		return fmt.Errorf("network approval failed: %w", err)
 	}

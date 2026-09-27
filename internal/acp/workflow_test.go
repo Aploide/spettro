@@ -26,7 +26,7 @@ func newSilentTurn() *turnState {
 	return &turnState{
 		bridge: newBridge(Options{}),
 		ctx:    ctx,
-		open:   map[string][]acpsdk.ToolCallId{},
+		open:   map[string][]openToolCall{},
 	}
 }
 

@@ -79,6 +79,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 	}
 	spec.Permission = cfg.Permission
 	spec.AllowedTools = appendUnique(spec.AllowedTools, "goal-complete")
+	turn.agentID = spec.ID
 
 	if cfg.Permission != config.PermissionYOLO {
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(fmt.Sprintf(
@@ -157,7 +158,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 				if livePermission() == config.PermissionYOLO {
 					return agent.ShellApprovalAllowOnce, nil
 				}
-				return turn.requestShellApproval(sctx, ar)
+				return turn.requestApproval(sctx, ar)
 			},
 			AskUser: turn.askForm,
 		}
@@ -196,7 +197,9 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 		retries = 0
 		totalTokens += result.TokensUsed
-		if result.Content != "" {
+		// A run that ended with goal-complete and no summary returns its last
+		// step's prose, which the chat already showed as narration.
+		if result.Content != "" && !turn.repeatsNarration(result.Content) {
 			turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content + "\n"))
 		}
 
