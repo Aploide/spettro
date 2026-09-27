@@ -197,7 +197,9 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 		}
 		retries = 0
 		totalTokens += result.TokensUsed
-		if result.Content != "" {
+		// A run that ended with goal-complete and no summary returns its last
+		// step's prose, which the chat already showed as narration.
+		if result.Content != "" && !turn.repeatsNarration(result.Content) {
 			turn.sessionUpdate(acpsdk.UpdateAgentMessageText(result.Content + "\n"))
 		}
 

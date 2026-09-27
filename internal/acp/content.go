@@ -41,6 +41,10 @@ type turnState struct {
 	// awaiting holds the cards currently showing a permission prompt (see
 	// approvalToolCallID and settleApprovalCard).
 	awaiting map[acpsdk.ToolCallId]bool
+	// lastNarration is the most recent narration of the turn's own agent
+	// sent to the chat, so a run's final content that repeats it is not
+	// sent twice (see repeatsNarration).
+	lastNarration string
 	// workflow is the in-flight workflow run whose tool call is rewritten as
 	// the run progresses; nil outside a workflow.
 	workflow *acpWorkflow
@@ -218,25 +222,54 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 //     user ("one short line shown to the user");
 //   - the note that a mid-run steering message reached the model.
 //
-// Narration and comment-tool messages from sub-agents are dropped, like the
-// runtime's own progress notes ("Starting bash (...)"), which repeat what
-// the tool cards already show.
+// Only the turn's own agent speaks in the chat. A sub-agent's narration and
+// comment-tool messages would read as the main agent talking, and its
+// steering notes are not the user's: a sub-agent's private steering queue
+// carries only the runtime's time-limit wrap-up notice. All of those are
+// dropped, like the runtime's own progress notes ("Starting bash (...)"),
+// which repeat what the tool cards already show.
 func (t *turnState) onComment(tr agent.ToolTrace) {
-	own := t.agentID == "" || tr.AgentID == t.agentID
+	text := t.commentChatText(tr)
+	if text == "" {
+		return
+	}
+	if tr.Narration {
+		t.mu.Lock()
+		t.lastNarration = text
+		t.mu.Unlock()
+	}
+	t.sessionUpdate(acpsdk.UpdateAgentMessageText(text + "\n\n"))
+}
+
+// commentChatText is the chat message a "comment" trace becomes, or "" when
+// it stays out of the chat (see onComment for which ones are shown).
+func (t *turnState) commentChatText(tr agent.ToolTrace) string {
+	if t.agentID != "" && tr.AgentID != t.agentID {
+		// A sub-agent's comment: never the turn's own words.
+		return ""
+	}
 	text := ""
 	switch {
 	case strings.HasPrefix(tr.Output, "steering delivered"):
 		text = "✔ " + tr.Output
-	case tr.Narration && own:
+	case tr.Narration:
 		text = tr.Output
-	case tr.Status == "running" && own:
+	case tr.Status == "running":
 		// Only a call of the comment tool announces itself as running; the
 		// runtime's notes arrive already finished.
 		text = decodeToolArgs(tr.Args).str("message")
 	}
-	if text = strings.TrimSpace(text); text != "" {
-		t.sessionUpdate(acpsdk.UpdateAgentMessageText(text + "\n\n"))
-	}
+	return strings.TrimSpace(text)
+}
+
+// repeatsNarration reports whether content is the narration the chat was
+// sent last. A /goal run that ends with goal-complete and no summary
+// returns the prose of its last step as its content, and that prose was
+// already narrated.
+func (t *turnState) repeatsNarration(content string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastNarration != "" && t.lastNarration == strings.TrimSpace(content)
 }
 
 // publishPlanIfTaskTool mirrors the persistent session task graph to the ACP

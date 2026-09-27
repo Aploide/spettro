@@ -464,6 +464,33 @@ func TestACPEndToEnd_RefusalStopReason(t *testing.T) {
 	}
 }
 
+// A /goal iteration whose last step writes its conclusion and calls
+// goal-complete with no summary returns that same prose as the run's content.
+// The prose already reached the editor as narration, so the goal loop must
+// not send it a second time.
+func TestACPEndToEnd_GoalConclusionIsShownOnce(t *testing.T) {
+	const conclusion = "Objective met: the README now has a usage section."
+	llm := newScriptedLLM(t,
+		llmReply{content: conclusion, calls: []llmCall{{"goal-complete", `{"summary":""}`}}},
+	)
+	h := newACPHarness(t, llm, config.PermissionYOLO)
+	h.initialize()
+	sid := h.newSession("coding")
+	if _, err := h.prompt(sid, "/goal add a usage section to the README"); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	messages := answersOf(h, sid)
+	var shown []string
+	for _, m := range strings.Split(messages, "|") {
+		if strings.TrimSpace(m) == conclusion {
+			shown = append(shown, m)
+		}
+	}
+	if len(shown) != 1 {
+		t.Errorf("the conclusion was sent as its own message %d times, want once; messages: %q", len(shown), messages)
+	}
+}
+
 // todo-write, under its own name and a retired task-* name, keeps the
 // editor's plan equal to the session task list: replace, merge, delete.
 func TestACPEndToEnd_PlanFollowsTodoWrite(t *testing.T) {

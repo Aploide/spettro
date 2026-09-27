@@ -9,6 +9,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"spettro/internal/agent"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 )
@@ -119,5 +120,32 @@ func TestPlanEntriesFromTodos(t *testing.T) {
 	}
 	if entries[2].Content != "ship (blocked)" || entries[2].Status != acpsdk.PlanEntryStatusPending || entries[2].Priority != acpsdk.PlanEntryPriorityMedium {
 		t.Fatalf("unexpected third entry: %#v", entries[2])
+	}
+}
+
+// Only the session agent's own words reach the chat: a sub-agent's
+// narration, comment-tool messages and steering notices stay on its cards.
+func TestCommentChatText(t *testing.T) {
+	turn := newSilentTurn()
+	turn.agentID = "coding"
+	cases := []struct {
+		what string
+		tr   agent.ToolTrace
+		want string
+	}{
+		{"own narration", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "success", Output: "Looking.", Narration: true}, "Looking."},
+		{"sub-agent narration", agent.ToolTrace{AgentID: "explore", Name: "comment", Status: "success", Output: "Looking.", Narration: true}, ""},
+		{"own comment tool", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "running", Args: `{"message":"halfway"}`}, "halfway"},
+		{"sub-agent comment tool", agent.ToolTrace{AgentID: "code#2", Name: "comment", Status: "running", Args: `{"message":"halfway"}`}, ""},
+		{"own steering", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "success", Output: "steering delivered: use sqlite"}, "✔ steering delivered: use sqlite"},
+		// A sub-agent's private steering queue carries only the runtime's
+		// time-limit wrap-up notice; the user sent nothing.
+		{"sub-agent steering", agent.ToolTrace{AgentID: "code#2", Name: "comment", Status: "success", Output: "steering delivered: wrap up now"}, ""},
+		{"runtime note", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "success", Output: "Starting bash (ls)"}, ""},
+	}
+	for _, tc := range cases {
+		if got := turn.commentChatText(tc.tr); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.what, got, tc.want)
+		}
 	}
 }
