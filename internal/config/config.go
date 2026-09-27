@@ -61,6 +61,19 @@ type UserConfig struct {
 	// Toggleable at runtime via /ultra (TUI) or the "ultra" ACP config option.
 	Ultra bool `json:"ultra,omitempty"`
 
+	// SkillsCompatDisabled switches off skill discovery in other agents'
+	// directories (.agents/skills, .claude/skills, .codex/skills,
+	// .openai/skills, in the project and the home directory), leaving only
+	// Spettro's own .spettro/skills. The zero value keeps it on, so skills
+	// installed for Claude Code or Codex work out of the box. See
+	// docs/skills.md.
+	SkillsCompatDisabled bool `json:"skills_compat_disabled,omitempty"`
+	// DisabledSkills names skills hidden from both the model and the slash
+	// menu (case-insensitive). /skill disable and /skill enable edit it; it
+	// is kept here rather than as a file in the skill's folder so the
+	// Claude Code and Codex directories are never written to.
+	DisabledSkills []string `json:"disabled_skills,omitempty"`
+
 	// Spettro Subscription state. The ep_ API key itself lives in the encrypted
 	// keys store under the "spettro" provider; these fields cache the last-known
 	// plan info so the top bar can render it before the network refresh lands.

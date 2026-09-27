@@ -83,7 +83,10 @@ func TestLegacyToolCallsMatchCanonicalCalls(t *testing.T) {
 		{toolCall{Tool: "ls", Args: json.RawMessage(`{"path":"pkg"}`)}, toolCall{Tool: "glob", Args: json.RawMessage(`{"path":"pkg"}`)}},
 		{toolCall{Tool: "ls", Args: json.RawMessage(`{}`)}, toolCall{Tool: "glob", Args: json.RawMessage(`{}`)}},
 		{toolCall{Tool: "task-list", Args: json.RawMessage(`{}`)}, toolCall{Tool: "todo-write", Args: json.RawMessage(`{}`)}},
-		{toolCall{Tool: "skill-activate", Args: json.RawMessage(`{"name":"none"}`)}, toolCall{Tool: "skill-read", Args: json.RawMessage(`{"name":"none"}`)}},
+		{toolCall{Tool: "skill-activate", Args: json.RawMessage(`{"name":"none"}`)}, toolCall{Tool: "skill", Args: json.RawMessage(`{"name":"none"}`)}},
+		{toolCall{Tool: "activate-skill", Args: json.RawMessage(`{"name":"none"}`)}, toolCall{Tool: "skill", Args: json.RawMessage(`{"name":"none"}`)}},
+		{toolCall{Tool: "skill-read", Args: json.RawMessage(`{"skill":"none"}`)}, toolCall{Tool: "skill", Args: json.RawMessage(`{"skill":"none"}`)}},
+		{toolCall{Tool: "skill-list", Args: json.RawMessage(`{"query":"x"}`)}, toolCall{Tool: "skill", Args: json.RawMessage(`{"query":"x"}`)}},
 	}
 	for _, c := range cases {
 		r, _ := newAliasTestRuntime(t)

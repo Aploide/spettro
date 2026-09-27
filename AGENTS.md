@@ -21,7 +21,7 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `13`. Older manifests
+- `version` (int, required): schema version, currently `14`. Older manifests
   are migrated on load (with a `.bak` backup): v3 rewrites the previously
   inert `sandbox_mode = "workspace-write"` default to `full-access` (the
   field is now enforced — re-set it explicitly if you want the OS sandbox);
@@ -92,6 +92,19 @@ This file lets you define, in one place:
   the four built-ins stay tools of their own, under their own names. The
   stock agents held all four, so they get no rules. `lsp` is low-risk and
   needs no approval, as the four tools were.
+- v14 folds the two skill tools into one `skill` tool, which loads a skill
+  when given a `name` and lists the skills when not (see
+  [docs/skills.md](docs/skills.md)):
+
+  | Canonical | Retired (hidden aliases) |
+  |---|---|
+  | `skill` | `skill-read` (and its old aliases `activate-skill`, `skill-activate`), `skill-list` |
+
+  The migration works like v12's. An agent that held only `skill-list`
+  gets `skill`, which can also load a skill: both halves only read the
+  SKILL.md files the catalog already shows, so no new kind of access is
+  granted. A tool of your own called `skill` stops the fold, and the two
+  built-ins keep their names.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.

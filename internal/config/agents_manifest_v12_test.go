@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,7 +12,7 @@ import (
 )
 
 // latestManifestVersion is the version every migration ends at.
-const latestManifestVersion = 13
+const latestManifestVersion = 14
 
 // decodeV12 migrates a manifest (through v12 and every later migration) and
 // fails the test unless the result validates: TUI and headless runs ignore a
@@ -358,7 +359,7 @@ func TestV12MigrationWritesBackup(t *testing.T) {
 		t.Fatal("backup must hold the original manifest")
 	}
 	rewritten, _ := os.ReadFile(path)
-	if !strings.Contains(string(rewritten), "version = 13") || strings.Contains(string(rewritten), "id = 'shell-exec'") {
+	if !strings.Contains(string(rewritten), fmt.Sprintf("version = %d", latestManifestVersion)) || strings.Contains(string(rewritten), "id = 'shell-exec'") {
 		t.Fatalf("manifest not rewritten at the latest version:\n%s", rewritten)
 	}
 }

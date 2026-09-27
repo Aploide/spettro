@@ -1155,8 +1155,7 @@ var concurrentTools = map[string]bool{
 	"web-fetch":          true,
 	"web-search":         true,
 	"view-image":         true,
-	"skill-read":         true,
-	"skill-list":         true,
+	"skill":              true,
 	"tool-search":        true,
 	"job-output":         true,
 	"tool-output":        true,
@@ -1634,10 +1633,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runGoalComplete(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
-	case "skill-read":
-		return r.runSkillRead(call.Args)
-	case "skill-list":
-		return r.runSkillList(call.Args)
+	case "skill":
+		return r.runSkill(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
 	case "lsp":

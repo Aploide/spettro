@@ -7,6 +7,7 @@ import (
 
 	"spettro/internal/lsp"
 	"spettro/internal/provider"
+	"spettro/internal/skills"
 )
 
 // Deferred tools. Every request carries the schema of every advertised tool,
@@ -315,11 +316,11 @@ func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *to
 			}
 		}
 	}
-	// A skills catalog in the system prompt tells the model to call
-	// skill-read, so it is advertised whenever there is one.
-	hasSkills := len(r.skillsCatalog.Active()) > 0
+	// A skill list in the system prompt tells the model to call the skill
+	// tool, so it is advertised whenever the model may load any skill.
+	hasSkills := len(r.skillsCatalog.ForModel()) > 0
 	isCore := func(name string) bool {
-		return coreTools[name] || (name == "skill-read" && hasSkills) || strings.Contains(prompt, "`"+name+"`")
+		return coreTools[name] || (name == skills.ToolName && hasSkills) || strings.Contains(prompt, "`"+name+"`")
 	}
 	return newToolSurface(specs, isCore, hidden)
 }

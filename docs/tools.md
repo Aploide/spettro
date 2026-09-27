@@ -15,7 +15,7 @@ only carries the schemas of the tools that agent may use.
 | Web | `web-search`, `web-fetch`, `download` ([web tools](web-tools.md)) |
 | Delegation | `agent`, `ultra` ([ultra](ultra.md)), `workflow` ([workflows](workflows.md)), `send-message` |
 | User and session | `ask-user`, `comment`, `save-memory`, `config`, `enter-plan-mode`, `exit-plan-mode`, `enter-worktree`, `exit-worktree` |
-| Skills and tools | `skill-list`, `skill-read`, `tool-search` |
+| Skills and tools | `skill` (load a skill by `name`, or list them; see [skills](skills.md)), `tool-search` |
 | MCP | `mcp-list-resources`, `mcp-read-resource`, `mcp-auth` |
 
 ## Deferred tools
@@ -24,11 +24,11 @@ An agent holding `tool-search` gets only its core tools advertised up front:
 `agent`, `glob`, `grep`, `file-read`, `file-write`, `file-edit`, `bash`,
 `job-output`, `job-kill`, `tool-output`, `todo-write`, `web-fetch`, `lsp`,
 `ask-user`, `comment`, `tool-search`, `goal-complete`, the plan-mode tools,
-`ultra`, `workflow` and the MCP resource tools (plus `skill-read` when there
-are skills), and any tool it holds that its prompt names in backticks (the
+`ultra`, `workflow` and the MCP resource tools (plus `skill` when the model
+may load any skill), and any tool it holds that its prompt names in backticks (the
 coding agent's prompt names `view-image`, the ask agent's `web-search`).
 Its other tools (`send-message`, `save-memory`, `config`, `download`,
-`skill-list`, `task-stop`, the `pty-*` tools, `rename-symbol`, `mcp-auth`,
+`task-stop`, the `pty-*` tools, `rename-symbol`, `mcp-auth`,
 the worktree tools, ...) are deferred: the system prompt names them in one
 line, and a `tool-search` for a name or keyword returns the matching tools'
 descriptions and schemas and advertises them from the next step on. A
@@ -65,7 +65,8 @@ canonical tool is advertised to the model or listed by `tool-search`.
 | `todo-write` | `task-create`, `task-update` | One task, merged by `id`. |
 | | `task-delete` | `delete: [id]`, or `clear_completed`. |
 | | `task-get`, `task-list` | A read; returns the whole list. |
-| `skill-read` | `activate-skill`, `skill-activate` | Same arguments. |
+| `skill` | `skill-read`, `activate-skill`, `skill-activate` | Same arguments (`name`, or `skill`). |
+| | `skill-list` | Same arguments (`query`); no `name`, so it lists. |
 | `lsp` | `diagnostics` | Same arguments, with `op: "diagnostics"`. |
 | | `references` | `op: "references"`, or `op: "definition"` for `kind: "definition"`. |
 | | `hover` | Same arguments, with `op: "hover"`. |
@@ -94,5 +95,9 @@ removes the former `grok-image`/`grok-video` generators; v13 does the same
 for the language-server tools, and gives an agent that held only some of
 them an `lsp-op` rule denying each of the other ops, so it gains none. Other
 permission rules are left as written. With a tool of your own called `lsp`,
-v13 folds nothing: the built-ins keep their own names. See the v12 and v13 notes in
+v13 folds nothing: the built-ins keep their own names. v14 folds `skill-read`
+and `skill-list` into `skill` the same way (an agent that held only
+`skill-list` gets `skill`, which also loads skills: both only read the
+SKILL.md files the catalog exposes), and folds nothing when a tool of your
+own is called `skill`. See the v12, v13 and v14 notes in
 [AGENTS.md](../AGENTS.md#root-fields).

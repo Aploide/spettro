@@ -70,7 +70,7 @@ func TestCodingAgentAdvertisesCoreToolsOnly(t *testing.T) {
 		"view-image",
 	}
 	wantDeferred := []string{
-		"task-stop", "config", "send-message", "skill-read", "skill-list", "save-memory",
+		"task-stop", "config", "send-message", "skill", "save-memory",
 		"download", "rename-symbol", "pty-start", "pty-write", "pty-kill",
 	}
 	got := specNames(r.surface.specs())
@@ -192,12 +192,12 @@ func TestRunToolLoopDeferredTools(t *testing.T) {
 	stubLSPAvailable(t, true)
 	pm, url, ls := newLoopServer(t,
 		loopReply{toolName: "tool-search", toolArgs: `{"query":"save-memory"}`},
-		loopReply{toolName: "skill-list", toolArgs: `{}`},
+		loopReply{toolName: "skill", toolArgs: `{}`},
 		loopReply{content: "done"},
 		loopReply{content: "again"},
 	)
 	cfg := loopCfg(t, pm, url)
-	cfg.AllowedTools = []string{"file-read", "tool-search", "skill-list", "save-memory", "comment"}
+	cfg.AllowedTools = []string{"file-read", "tool-search", "skill", "save-memory", "comment"}
 	res, err := runToolLoop(context.Background(), cfg)
 	if err != nil || res.content != "done" {
 		t.Fatalf("res = %q, err = %v", res.content, err)
@@ -207,23 +207,23 @@ func TestRunToolLoopDeferredTools(t *testing.T) {
 		t.Errorf("first request tools = %v", got)
 	}
 	system := fmt.Sprint(requestMessages(reqs[0])[0]["content"])
-	if !strings.Contains(system, "# More tools") || !strings.Contains(system, "skill-list, save-memory") {
+	if !strings.Contains(system, "# More tools") || !strings.Contains(system, "skill, save-memory") {
 		t.Errorf("system prompt does not name the deferred tools:\n%s", system)
 	}
 	if got := requestToolNames(reqs[1]); !slices.Equal(got, []string{"file-read", "tool-search", "comment", "save-memory"}) {
 		t.Errorf("after tool-search tools = %v", got)
 	}
 	for _, tr := range res.traces {
-		if tr.Name == "skill-list" && tr.Status != "success" {
+		if tr.Name == "skill" && tr.Status != "success" {
 			t.Errorf("deferred tool called by name was refused: %s", tr.Output)
 		}
 	}
 	// Activated tools stand in allow-list order, whatever order they were
 	// loaded in, and the conversation records them.
-	if got := requestToolNames(reqs[2]); !slices.Equal(got, []string{"file-read", "tool-search", "comment", "skill-list", "save-memory"}) {
+	if got := requestToolNames(reqs[2]); !slices.Equal(got, []string{"file-read", "tool-search", "comment", "skill", "save-memory"}) {
 		t.Errorf("after the direct call tools = %v", got)
 	}
-	if got := res.messages[0].LoadedTools; !slices.Equal(got, []string{"skill-list", "save-memory"}) {
+	if got := res.messages[0].LoadedTools; !slices.Equal(got, []string{"skill", "save-memory"}) {
 		t.Errorf("recorded loaded tools = %v", got)
 	}
 	if s2 := fmt.Sprint(requestMessages(reqs[2])[0]["content"]); s2 != system {
