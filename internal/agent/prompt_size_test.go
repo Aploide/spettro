@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,8 +49,8 @@ func fullEstimate(system string, msgs []provider.Message, tools []provider.ToolS
 // trigger, the input budget and the usage calibration all depend on the
 // exact value. The history is mutated every way the run loop (and
 // compaction) can: appends, replaced and truncated messages, in-place edits
-// of a tool output or of tool-call argument bytes, new tools, a new system
-// prompt.
+// of a tool output, replaced tool-call arguments (never edited in place; see
+// promptSizer), new tools, a new system prompt.
 func TestPromptSizerMatchesFullEstimate(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	var s promptSizer
@@ -82,16 +85,20 @@ func TestPromptSizerMatchesFullEstimate(t *testing.T) {
 				}
 			}
 		case 6:
-			op = "edit argument bytes in place"
+			op = "replace argument bytes"
 			for i := range msgs {
 				if len(msgs[i].ToolCalls) > 0 && len(msgs[i].ToolCalls[0].Args) > 3 {
-					// Same length, one rune fewer: "pa" <-> "é".
-					args := msgs[i].ToolCalls[0].Args
+					// Same length, one rune fewer: "pa" <-> "é". The
+					// message keeps its position; only the slice changes.
+					args := bytes.Clone(msgs[i].ToolCalls[0].Args)
 					if args[2] == 'p' {
 						args[2], args[3] = 0xC3, 0xA9
 					} else {
 						args[2], args[3] = 'p', 'a'
 					}
+					calls := slices.Clone(msgs[i].ToolCalls)
+					calls[0].Args = args
+					msgs[i].ToolCalls = calls
 					break
 				}
 			}
@@ -123,5 +130,35 @@ func TestPromptSizerSteadyStateAllocs(t *testing.T) {
 	s.requestTokens("system", msgs, sizerTestTools)
 	if allocs := testing.AllocsPerRun(20, func() { s.requestTokens("system", msgs, sizerTestTools) }); allocs != 0 {
 		t.Fatalf("steady-state requestTokens allocates %.0f times, want 0", allocs)
+	}
+}
+
+// writeHeavyHistory is n file-write calls, each carrying size bytes of
+// content in its arguments, with short results.
+func writeHeavyHistory(n, size int) []provider.Message {
+	msgs := []provider.Message{{Role: provider.RoleUser, Content: "Task:\nwrite the files"}}
+	body := strings.Repeat("x", size)
+	for i := range n {
+		id := fmt.Sprintf("call_%d", i)
+		args, _ := json.Marshal(map[string]string{"path": fmt.Sprintf("f%d.go", i), "content": body})
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.NativeTool{{ID: id, Name: "file-write", Args: args}}},
+			provider.Message{Role: provider.RoleUser, ToolResults: []provider.ToolResult{{ID: id, Name: "file-write", Output: "wrote f.go"}}},
+		)
+	}
+	return msgs
+}
+
+// The sizer keeps no copy of the tool-call arguments it counted: a history
+// heavy with file-write content is held once, by the conversation.
+func TestPromptSizerRetainsNoArgumentCopies(t *testing.T) {
+	msgs := writeHeavyHistory(50, 20<<10) // 1 MB of arguments
+	var s promptSizer
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	s.requestTokens("system", msgs, sizerTestTools)
+	runtime.ReadMemStats(&after)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 256<<10 {
+		t.Fatalf("first measurement of 1 MB of arguments allocated %d bytes, want no copies", allocated)
 	}
 }

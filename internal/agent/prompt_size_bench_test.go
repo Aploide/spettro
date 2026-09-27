@@ -49,3 +49,16 @@ func BenchmarkPromptSizerUnchanged(b *testing.B) {
 		_ = s.requestTokens("system", msgs, sizerTestTools)
 	}
 }
+
+// BenchmarkPromptSizerWriteHeavy re-measures an unchanged history of 200
+// file-write calls carrying 20 KB of content each: the history whose
+// argument bytes the sizer must re-check on every measurement.
+func BenchmarkPromptSizerWriteHeavy(b *testing.B) {
+	msgs := writeHeavyHistory(200, 20<<10)
+	var s promptSizer
+	s.requestTokens("system", msgs, sizerTestTools)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = s.requestTokens("system", msgs, sizerTestTools)
+	}
+}

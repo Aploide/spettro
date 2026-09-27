@@ -26,10 +26,17 @@ import (
 // Key and invalidation: an entry is reused only when the message at the same
 // position still carries equal values. Strings are compared with ==, which
 // is O(1) when both sides share storage (the common case: the loop appends
-// and never copies) and a plain comparison otherwise; tool-call arguments
-// (a mutable []byte) are compared against a private copy. So compaction,
-// truncation or an in-place edit of any counted value re-counts exactly the
-// messages it touched, and the result always equals a full count.
+// and never copies) and a plain comparison otherwise. Tool-call arguments
+// are a []byte, and are compared by identity: the same backing array and
+// length. Neither the run loop nor compaction ever edits a message's
+// argument bytes in place (they build new messages or new slices), so
+// identity implies equal content; comparing the bytes instead would mean
+// keeping a private copy of every argument for the whole run (file-write
+// calls carry whole files) or hashing them all on every measurement, which
+// measured 4x slower than the 110 µs a byte comparison of 4 MB takes (see
+// BenchmarkPromptSizerWriteHeavy). So compaction, truncation, a replaced
+// message or a replaced value re-counts exactly the messages it touched, and
+// the result equals a full count.
 //
 // Owner: the run loop goroutine (runToolLoop). Not safe for concurrent use.
 type promptSizer struct {
@@ -47,7 +54,8 @@ type promptSizer struct {
 type sizedMessage struct {
 	// texts are the counted strings in countedTexts order.
 	texts []string
-	// args are private copies of the tool calls' arguments.
+	// args are the tool calls' arguments as counted (the caller's slices,
+	// compared by identity; see promptSizer).
 	args  [][]byte
 	runes int
 }
@@ -145,7 +153,7 @@ func newSizedMessage(m *provider.Message) sizedMessage {
 	if len(m.ToolCalls) > 0 {
 		rec.args = make([][]byte, len(m.ToolCalls))
 		for i, tc := range m.ToolCalls {
-			rec.args[i] = bytes.Clone(tc.Args)
+			rec.args[i] = tc.Args
 			rec.runes += utf8.RuneCount(tc.Args)
 		}
 	}
@@ -163,9 +171,15 @@ func (rec *sizedMessage) matches(m *provider.Message) bool {
 		}
 	}
 	for i, a := range rec.args {
-		if !bytes.Equal(a, m.ToolCalls[i].Args) {
+		if !sameSlice(a, m.ToolCalls[i].Args) {
 			return false
 		}
 	}
 	return true
+}
+
+// sameSlice reports whether a and b are the same bytes in memory: equal
+// length and, when not empty, the same first element.
+func sameSlice(a, b []byte) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
 }
