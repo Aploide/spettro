@@ -322,3 +322,66 @@ func TestHangupRunsExtraCleanups(t *testing.T) {
 		t.Fatal("extra hangup cleanup did not run")
 	}
 }
+
+// liveTreeCount returns how many commands liveTrees currently records.
+func liveTreeCount() int {
+	n := 0
+	liveTrees.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
+// reopenProcessTrees undoes shutDownProcessTrees so later tests in this
+// process can start commands again.
+func reopenProcessTrees() {
+	treesMu.Lock()
+	treesClosed = false
+	treesMu.Unlock()
+}
+
+// After the hangup sweep no command may start: one started later would run
+// on, unkilled, once spettro is gone. Callers keep starting commands while the
+// sweep happens (the agent reacting to its killed command); every one of them
+// must either be killed by the sweep or be refused with ErrShuttingDown, so
+// every caller returns promptly. A command slipping past the sweep would keep
+// its caller blocked for the whole sleep.
+func TestShutDownProcessTreesLeavesNoCommandBehind(t *testing.T) {
+	t.Cleanup(reopenProcessTrees)
+	const callers = 8
+	finished := make(chan error, callers)
+	for range callers {
+		go func() {
+			for {
+				cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30")
+				ConfigureProcessTree(cmd)
+				if _, err := CombinedOutput(cmd); errors.Is(err, ErrShuttingDown) {
+					finished <- nil
+					return
+				} else if err == nil {
+					finished <- errors.New("a command meant to be killed exited successfully")
+					return
+				}
+				// Killed by the sweep: start another, as an agent retrying would.
+			}
+		}()
+	}
+	// Sweep while commands are running, so the sweep has something to kill.
+	deadline := time.Now().Add(5 * time.Second)
+	for liveTreeCount() < callers/2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	shutDownProcessTrees()
+	for range callers {
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			KillAllProcessTrees()
+			t.Fatal("a command started after the shutdown sweep was left running")
+		}
+	}
+}

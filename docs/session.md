@@ -385,6 +385,13 @@ Terminates every running job at once.
   stdout/stderr, oldest bytes dropped when exceeded).
 - When the session ends (TUI exit, `/exit`), all remaining jobs are killed
   automatically.
+- When the terminal or tmux pane spettro runs in is closed (SIGHUP), spettro
+  kills every foreground shell command, background job and PTY session before
+  it exits. From that moment it also refuses to start new foreground shell
+  commands (they fail with "spettro is shutting down; command not started"), so
+  an agent reacting to its killed command cannot leave a new one running.
+  Under `nohup` the hangup
+  is ignored and everything keeps running.
 - Jobs survive `/clear` (which only resets the conversation). Use `/jobs kill all`
   to clean up explicitly.
 
