@@ -165,7 +165,11 @@ func readCache(path, root string) (map[string]*fileSymbols, error) {
 		return nil, err
 	}
 	defer f.Close()
-	r := cacheReader{r: bufio.NewReaderSize(f, 256<<10)}
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	r := cacheReader{r: bufio.NewReaderSize(f, 256<<10), size: info.Size()}
 	files := r.decode(root)
 	if r.err != nil {
 		return nil, r.err
@@ -175,10 +179,17 @@ func readCache(path, root string) (map[string]*fileSymbols, error) {
 
 // cacheReader reads the cache format; the first error sticks and later
 // reads return zero values.
+//
+// The file sits in the project directory, so it is untrusted input (a
+// repository could ship one). Every count is checked against the file's
+// size before anything is allocated for it, so a small file cannot make
+// the reader allocate much more than its own size, and every path must be
+// a clean relative path inside the root (see validRel).
 type cacheReader struct {
-	r   *bufio.Reader
-	buf []byte
-	err error
+	r    *bufio.Reader
+	size int64 // the file's size: no count can exceed it
+	buf  []byte
+	err  error
 }
 
 func (c *cacheReader) decode(root string) map[string]*fileSymbols {
@@ -187,17 +198,20 @@ func (c *cacheReader) decode(root string) map[string]*fileSymbols {
 		return nil
 	}
 	// The file's kind ids are mapped to this process's ids.
-	nKinds := c.count(0xffff + 1)
+	nKinds := c.count(0xffff+1, 1)
 	kindIDs := make([]uint16, nKinds)
 	for i := range kindIDs {
 		kindIDs[i] = kindID(c.string())
 	}
-	n := c.count(1 << 24)
+	n := c.count(1<<24, 5) // a file entry takes at least 5 bytes
 	files := make(map[string]*fileSymbols, n)
 	for range n {
 		path := c.string()
+		if c.err == nil && !validRel(path) {
+			c.fail(errBadCache)
+		}
 		e := &fileSymbols{modTime: unzigzag(c.uint()), size: int64(c.uint()), text: c.string()}
-		e.syms = make([]packedSymbol, c.count(maxCacheString))
+		e.syms = make([]packedSymbol, c.count(maxCacheString, 6)) // a symbol takes at least 6 bytes
 		for i := range e.syms {
 			p := packedSymbol{line: int32(c.uint())}
 			p.sigStart = uint32(c.uint())
@@ -244,10 +258,11 @@ func (c *cacheReader) uint() uint64 {
 	return v
 }
 
-// count reads a length and checks it against limit.
-func (c *cacheReader) count(limit int) int {
+// count reads a length and checks it against limit and against what the
+// file could hold if each item took at least minBytes.
+func (c *cacheReader) count(limit, minBytes int) int {
 	v := c.uint()
-	if v > uint64(limit) {
+	if v > uint64(limit) || v > uint64(c.size)/uint64(minBytes) {
 		c.fail(errBadCache)
 		return 0
 	}
@@ -272,5 +287,5 @@ func (c *cacheReader) raw(n int) string {
 }
 
 func (c *cacheReader) string() string {
-	return c.raw(c.count(maxCacheString))
+	return c.raw(c.count(maxCacheString, 1))
 }

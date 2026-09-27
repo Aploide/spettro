@@ -1,10 +1,12 @@
 package indexer
 
 import (
+	"bufio"
 	"context"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -412,5 +414,77 @@ func TestPackedEntriesStayCompact(t *testing.T) {
 	}
 	if !slices.Equal(e.syms, newFileSymbols(1, 2, syms).syms) {
 		t.Fatal("packing is not deterministic")
+	}
+}
+
+func TestValidRel(t *testing.T) {
+	for rel, want := range map[string]bool{
+		"a.go": true, "pkg/a.go": true, ".hidden/a.go": true, "a..b.go": true,
+		"": false, ".": false, "..": false, "../a.go": false, "a/../../b.go": false,
+		"/etc/passwd.go": false, "a//b.go": false, "./a.go": false, "a/./b.go": false, "a/": false,
+	} {
+		if got := validRel(rel); got != want {
+			t.Errorf("validRel(%q) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
+// The cache is untrusted input (it lives in the project): a path leaving
+// the root, or counts larger than the file could hold, reject it without
+// allocating for the claimed counts.
+func TestCacheRejectsHostileInput(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	write := func(name string, fill func(w *cacheWriter)) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		f, err := os.Create(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := cacheWriter{w: bufio.NewWriter(f)}
+		w.raw(cacheMagic)
+		w.uint(cacheVersion)
+		w.string(filepath.Clean(root))
+		fill(&w)
+		if err := w.w.Flush(); err != nil || w.err != nil {
+			t.Fatal(err, w.err)
+		}
+		f.Close()
+		return p
+	}
+	escape := write("escape.idx", func(w *cacheWriter) {
+		w.uint(0) // kinds
+		w.uint(1) // files
+		w.string("../outside.go")
+		w.uint(0)
+		w.uint(0)
+		w.string("")
+		w.uint(0)
+		w.string(cacheEnd)
+	})
+	huge := write("huge.idx", func(w *cacheWriter) {
+		w.uint(0)
+		w.uint(1 << 24) // claims 16M files in a few bytes
+	})
+	hugeSyms := write("hugesyms.idx", func(w *cacheWriter) {
+		w.uint(0)
+		w.uint(1)
+		w.string("a.go")
+		w.uint(0)
+		w.uint(0)
+		w.string("")
+		w.uint(maxCacheString) // claims 64M symbols
+	})
+	for _, p := range []string{escape, huge, hugeSyms} {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		if _, err := readCache(p, filepath.Clean(root)); err == nil {
+			t.Errorf("%s was accepted", filepath.Base(p))
+		}
+		runtime.ReadMemStats(&after)
+		if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+			t.Errorf("%s: the reader allocated %d bytes for a tiny file", filepath.Base(p), grew)
+		}
 	}
 }

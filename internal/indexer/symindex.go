@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -226,7 +227,8 @@ func (x *SymbolIndex) Refresh(ctx context.Context, relPaths []string) {
 // Warm builds (or refreshes) the index and persists its cache without
 // running a query, so hosts can pay the first-scan cost in the background at
 // startup instead of on the first symbol search. It waits for the sync and
-// for the cache write, if the state differs from the disk.
+// for the cache write, if the state differs from the disk, unless ctx ends
+// first.
 func (x *SymbolIndex) Warm(ctx context.Context) {
 	x.mu.Lock()
 	x.loadLocked()
@@ -235,6 +237,10 @@ func (x *SymbolIndex) Warm(ctx context.Context) {
 		x.startSyncLocked()
 	}
 	x.waitSyncLocked(ctx)
+	if ctx.Err() != nil { // the sync and its save carry on in the background
+		x.mu.Unlock()
+		return
+	}
 	if x.gen != x.savedGen {
 		x.requestSaveLocked()
 	}
@@ -417,6 +423,9 @@ func (x *SymbolIndex) reparseDirtyLocked() {
 // is gone, no longer a small regular file, or (with a filter) excluded. It
 // reports whether the entry changed. Callers hold mu.
 func (x *SymbolIndex) refreshFileLocked(rel string, f *indexFilter, force bool) bool {
+	if !validRel(rel) {
+		return false
+	}
 	prev := x.files[rel]
 	ext, ok := x.byExt[strings.ToLower(filepath.Ext(rel))]
 	if ok && f != nil {
@@ -508,12 +517,10 @@ type indexFilter struct {
 
 func (x *SymbolIndex) newFilter() *indexFilter { return &indexFilter{w: x.newWalker()} }
 
-// includes reports whether a sync would reach and keep rel: no directory
-// on its path is skipped or ignored, and the file itself is not ignored.
+// includes reports whether a sync would reach and keep rel (a validRel
+// path): no directory on its path is skipped or ignored, and the file
+// itself is not ignored.
 func (f *indexFilter) includes(rel string) bool {
-	if rel == "." || strings.HasPrefix(rel, "../") || filepath.IsAbs(filepath.FromSlash(rel)) {
-		return false
-	}
 	dirs := strings.Split(rel, "/")
 	for _, d := range dirs[:len(dirs)-1] {
 		if skipDir(d) {
@@ -521,4 +528,23 @@ func (f *indexFilter) includes(rel string) bool {
 		}
 	}
 	return !f.w.IgnoredBelow(".", rel)
+}
+
+// validRel reports whether rel is a path the index can hold: slash
+// separated, clean, relative and inside the root. Paths from callers and
+// from the disk cache are checked, so neither can make the index read a
+// file outside the root.
+func validRel(rel string) bool {
+	if rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+		return false
+	}
+	if path.Clean(rel) != rel {
+		return false
+	}
+	native := filepath.FromSlash(rel)
+	if filepath.IsAbs(native) || filepath.VolumeName(native) != "" {
+		return false
+	}
+	// On Windows a backslash is a separator too: a\..\..\x climbs out.
+	return filepath.Separator != '\\' || !strings.Contains(rel, "\\")
 }
