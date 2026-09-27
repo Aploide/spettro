@@ -162,6 +162,12 @@ func (m Model) filterCommands(query string) []commandDef {
 		catalog = append(catalog, commandDef{"/" + c.Name, desc})
 	}
 	catalog = append(catalog, m.skillMenuEntries()...)
+	// The query is trimmed because completing a command leaves the input as
+	// "/clear " (name plus a space, ready for an argument), and the menu is
+	// filtered again from that text. Untrimmed, "clear " matches no name, so
+	// /clear fell to a description match and the next Enter ran whichever
+	// command's description contains "clear " (/memory) instead.
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return catalog
 	}

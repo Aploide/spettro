@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // Found in a VHS run: typing "/skills" and pressing Enter opened the "/skill"
@@ -46,5 +48,41 @@ func TestSlashMenuRanksTheExactNameFirst(t *testing.T) {
 	m.syncInputSuggestions()
 	if m.cmdItems[m.cmdCursor].name != "/skills" {
 		t.Fatalf("highlighted %s after typing /skills", m.cmdItems[m.cmdCursor].name)
+	}
+}
+
+// Found in review: Enter on a suggestion completes the input to the command
+// name plus a space ("/clear "), and the menu is filtered again from that
+// text. The trailing space made the typed name match no command name, so a
+// command whose description contains the word ("/memory": "show/edit/clear
+// ...") took the highlight and the second Enter opened its sub-menu instead
+// of running the command. Typing a prefix, then Enter, Enter must run the
+// completed command.
+func TestSlashMenuEnterEnterRunsTheCompletedCommand(t *testing.T) {
+	cases := []struct{ typed, want string }{
+		{"/cle", "/clear"},
+		{"/task", "/tasks"},
+		{"/approv", "/approve"},
+		{"/hel", "/help"},
+	}
+	for _, tc := range cases {
+		m := footerModel(80, 24)
+		m.ta.SetValue(tc.typed)
+		m.syncInputSuggestions()
+		nm, _ := m.updateMain(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = nm.(Model)
+		if got := m.ta.Value(); got != tc.want+" " {
+			t.Fatalf("%s + Enter: input is %q, want %q", tc.typed, got, tc.want+" ")
+		}
+		if len(m.cmdItems) == 0 || m.cmdItems[m.cmdCursor].name != tc.want {
+			t.Fatalf("%s + Enter: highlighted %v, want %s", tc.typed, m.cmdItems, tc.want)
+		}
+		nm, _ = m.updateMain(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = nm.(Model)
+		// Running a command empties the input; completing another one
+		// would leave its name there.
+		if got := m.ta.Value(); got != "" {
+			t.Fatalf("%s + Enter + Enter: input is %q, want the command run", tc.typed, got)
+		}
 	}
 }
