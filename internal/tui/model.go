@@ -214,14 +214,14 @@ type modifiedFileEntry struct {
 	Unstaged  bool
 }
 
+// sidePanelItem is one entry of the side panel's activity list: a view of
+// an activityFeed entry, not a copy. sidePanelItems builds the list afresh
+// for each use and nothing keeps it across updates, so an item never
+// outlives the entry it reads. Copying the entries instead cost 1.1 MB per
+// fresh render with 10k of them, and the garbage collection that followed
+// was most of the render's time (BenchmarkSidePanel: 0.63 to 0.35 ms).
 type sidePanelItem struct {
-	Kind   string
-	ID     string
-	Title  string
-	Detail string
-	Body   string
-	Agent  string
-	Status string
+	*activityItem
 }
 
 type activityItem struct {

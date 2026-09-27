@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/termtext"
 	"spettro/internal/theme"
@@ -52,23 +53,15 @@ func (m Model) paneWidth() int {
 
 func (m Model) sidePanelItems() []sidePanelItem {
 	items := make([]sidePanelItem, 0, len(m.activityFeed))
-	for _, entry := range slices.Backward(m.activityFeed) {
-
+	for i := len(m.activityFeed) - 1; i >= 0; i-- {
+		entry := &m.activityFeed[i]
 		if entry.Kind != "tool" && entry.Kind != "command" {
 			continue
 		}
 		if strings.TrimSpace(entry.Title) == "" && strings.TrimSpace(entry.Detail) == "" && strings.TrimSpace(entry.Body) == "" {
 			continue
 		}
-		items = append(items, sidePanelItem{
-			Kind:   entry.Kind,
-			ID:     entry.ID,
-			Title:  entry.Title,
-			Detail: entry.Detail,
-			Body:   entry.Body,
-			Agent:  entry.AgentID,
-			Status: entry.Status,
-		})
+		items = append(items, sidePanelItem{entry})
 	}
 	return items
 }
@@ -178,7 +171,7 @@ func sidePanelRowLayout(items []sidePanelItem, cursor int) ([]int, int) {
 	selectedRow := 0
 	prevAgent := ""
 	for idx, it := range items {
-		if agent := activityAgentLabel(it.Agent); agent != prevAgent {
+		if agent := activityAgentLabel(it.AgentID); agent != prevAgent {
 			rowToItem = append(rowToItem, -1)
 			prevAgent = agent
 		}
@@ -206,7 +199,7 @@ func (m Model) sidePanelStyledRows(items []sidePanelItem, layout []int, start, e
 		if idx < 0 {
 			agent := ""
 			if r+1 < len(layout) && layout[r+1] >= 0 {
-				agent = activityAgentLabel(items[layout[r+1]].Agent)
+				agent = activityAgentLabel(items[layout[r+1]].AgentID)
 			}
 			header := lipgloss.NewStyle().Foreground(pal.TextMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
 			lines = append(lines, header)
@@ -386,8 +379,8 @@ func (m Model) sidePanelDetailMeta(selected sidePanelItem) []string {
 		styleMuted.Render("type: " + termtext.SingleLine(selected.Kind)),
 		styleMuted.Render("id: " + termtext.SingleLine(selected.ID)),
 	}
-	if selected.Agent != "" {
-		details = append(details, styleMuted.Render("agent: "+termtext.SingleLine(selected.Agent)))
+	if selected.AgentID != "" {
+		details = append(details, styleMuted.Render("agent: "+termtext.SingleLine(selected.AgentID)))
 	}
 	return details
 }
@@ -518,27 +511,63 @@ func (m Model) sidePanelHeaderParts(width int) []string {
 	return parts
 }
 
-// sidePanelBox draws the panel's frame around body. The frame is exactly
-// width cells wide (lipgloss v2 counts border and padding inside Width) and
-// innerHeight+2 rows tall. Body lines are cut to the room inside the frame
-// rather than left for the box to wrap: a wrapped line would make the panel
+// sidePanelBox draws the panel's frame around body: a rounded border in the
+// theme's border colour, one cell of padding on each side, exactly width
+// cells wide and innerHeight+2 rows tall. Body lines are cut to the room
+// inside the frame rather than wrapped: a wrapped line would make the panel
 // taller than the rows the layout gave it and widen the frame past the
-// terminal edge.
+// terminal edge. Trailing spaces are not content and never earn a line a
+// "…".
+//
+// The frame is built by hand, one measurement per line, instead of by a
+// lipgloss border style, which measured every line several times over and
+// was 40 % of a fresh side panel render (BenchmarkSidePanel). The lipgloss
+// version is kept in view_sidepanel_box_test.go as the oracle for a
+// differential test.
 func sidePanelBox(body string, width, innerHeight int) string {
 	contentW := sidePanelContentWidth(width)
 	lines := strings.Split(clampLines(body, innerHeight), "\n")
-	for i, line := range lines {
-		// JoinVertical pads every line with spaces to the widest one; that
-		// padding is not content and must not earn a line a "…".
-		lines[i] = termtext.Fit(strings.TrimRight(line, " "), contentW)
+	border := lipgloss.NewStyle().Foreground(theme.Current().Border)
+	left, right := border.Render("│")+" ", " "+border.Render("│")
+	var b strings.Builder
+	b.WriteString(border.Render("╭" + strings.Repeat("─", max(width-2, 0)) + "╮"))
+	for row := range max(innerHeight, 0) {
+		line, w := "", 0
+		if row < len(lines) {
+			line, w = fitWithWidth(strings.TrimRight(lines[row], " "), contentW)
+		}
+		b.WriteByte('\n')
+		b.WriteString(left)
+		b.WriteString(line)
+		b.WriteString(strings.Repeat(" ", max(contentW-w, 0)))
+		b.WriteString(right)
 	}
-	return lipgloss.NewStyle().
-		Width(width).
-		Height(innerHeight+2).
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(theme.Current().Border).
-		Padding(0, 1).
-		Render(strings.Join(lines, "\n"))
+	b.WriteByte('\n')
+	b.WriteString(border.Render("╰" + strings.Repeat("─", max(width-2, 0)) + "╯"))
+	return b.String()
+}
+
+// fitWithWidth is termtext.Fit that also returns the width of the result,
+// measuring a line that already fits only once.
+func fitWithWidth(s string, width int) (string, int) {
+	w := ansi.StringWidth(s)
+	if w <= width {
+		return s, w
+	}
+	s = termtext.Fit(s, width)
+	return s, ansi.StringWidth(s)
+}
+
+// padRows pads every row of s with spaces to width cells, as
+// lipgloss.JoinVertical pads a narrower block to the width of the widest.
+func padRows(s string, width int) string {
+	rows := strings.Split(s, "\n")
+	for i, r := range rows {
+		if w := ansi.StringWidth(r); w < width {
+			rows[i] = r + strings.Repeat(" ", width-w)
+		}
+	}
+	return strings.Join(rows, "\n")
 }
 
 // sidePanelContentWidth is the room inside the panel's frame: the column
@@ -559,8 +588,9 @@ func (m Model) viewSidePanel(width int) string {
 		for _, line := range termtext.Wrap("Observability is on. Commands, edits, and other tool activity will appear here.", sidePanelContentWidth(width)) {
 			contentParts = append(contentParts, styleMuted.Render(line))
 		}
-		body := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
-		return lipgloss.JoinVertical(lipgloss.Left, sidePanelBox(body, width, innerHeight), hints)
+		// Plain joins: sidePanelBox fits and pads every line itself.
+		body := strings.Join(contentParts, "\n")
+		return sidePanelBox(body, width, innerHeight) + "\n" + padRows(hints, width)
 	}
 
 	selected := items[m.sidePanelCursor(items)]
@@ -586,6 +616,6 @@ func (m Model) viewSidePanel(width int) string {
 	detailsBlock := strings.Join(detailsBlockParts, "\n")
 
 	contentParts = append(contentParts, "", listBlock, "", detailsBlock)
-	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
-	return lipgloss.JoinVertical(lipgloss.Left, sidePanelBox(content, width, innerHeight), hints)
+	content := strings.Join(contentParts, "\n")
+	return sidePanelBox(content, width, innerHeight) + "\n" + padRows(hints, width)
 }

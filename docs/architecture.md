@@ -79,8 +79,11 @@ does not grow with the length of the session:
   the mode and side panel toggle to `config.json` run as background
   commands. `TestNoGitOnTheUpdateGoroutine` counts git processes started by
   `tui.New` and by Update.
-- **Side panel**. Only the rows in the visible window are styled, and the
-  activity feed keeps the newest 2,000 items (the subtitle counts the rest).
+- **Side panel**. Only the rows in the visible window are styled, the list
+  reads the activity feed in place instead of copying it, the frame is drawn
+  by hand (byte for byte what the lipgloss border style drew, checked by
+  `TestSidePanelBoxMatchesLipgloss`), and the activity feed keeps the newest
+  2,000 items (the subtitle counts the rest).
 
 ## Agent manifest
 

@@ -43,9 +43,9 @@ func TestSidePanelHeaderAtTheWindowEdgeNamesItsAgent(t *testing.T) {
 	m := footerModel(160, 40)
 	var items []sidePanelItem
 	for i := 0; i < 6; i++ {
-		items = append(items, sidePanelItem{Kind: "tool", Title: "a", Agent: "coding"})
+		items = append(items, sidePanelItem{&activityItem{Kind: "tool", Title: "a", AgentID: "coding"}})
 	}
-	items = append(items, sidePanelItem{Kind: "tool", Title: "b", Agent: "explorer"})
+	items = append(items, sidePanelItem{&activityItem{Kind: "tool", Title: "b", AgentID: "explorer"}})
 	// Rows: header, six coding items, header, the explorer item. A window
 	// of eight rows around the first item ends on the second header.
 	visible, rowToItem := m.sidePanelList(items, 40, 8)
