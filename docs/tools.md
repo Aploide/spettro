@@ -81,8 +81,8 @@ the model calls it (see [hooks](hooks.md#matcher-syntax)). Which `lsp` ops an
 agent may call is set by `lsp-op` permission rules, with the op as the
 pattern (`{ permission = "lsp-op", pattern = "restart", action = "deny" }`);
 rules naming the former tools no longer decide anything. A tool of your own
-that shares a former name (a `hover` script, say) is yours: calls, hooks and
-rules under that name are its, never the `lsp` op's.
+that shares a canonical or retired name is not an alias of anything: see
+[below](#tools-of-your-own-with-a-built-ins-name).
 
 `task-update` keeps its old contract: an unknown `id` is an error rather
 than a new task, and an empty `dependencies` list leaves the stored ones as
@@ -93,6 +93,68 @@ Manifests are migrated on load. v12 replaces the old names in
 removes the former `grok-image`/`grok-video` generators; v13 does the same
 for the language-server tools, and gives an agent that held only some of
 them an `lsp-op` rule denying each of the other ops, so it gains none. Other
-permission rules are left as written. With a tool of your own called `lsp`,
-v13 folds nothing: the built-ins keep their own names. See the v12 and v13 notes in
-[AGENTS.md](../AGENTS.md#root-fields).
+permission rules are left as written. Neither migration folds anything into
+a canonical name a tool of your own holds (see below). See the v12 and v13
+notes in [AGENTS.md](../AGENTS.md#root-fields).
+
+## Tools of your own with a built-in's name
+
+A tool you define in the manifest (`kind` `mcp`, `script` or `http`) may use
+any `id` or alias, a built-in's included: a canonical name (`bash`,
+`file-edit`, `grep`, `glob`, `todo-write`, `skill-read`, `lsp`) or a retired
+one (`shell-exec`, `bash-output`, `multi-edit`, `repo-search`, `ls`,
+`task-*`, `activate-skill`, `skill-activate`, `diagnostics`, `references`,
+`hover`, `lsp-restart`). One rule covers every such name.
+
+**Your tool wins every call made by its name.** A call under that name is
+never turned into a call of a built-in and never runs a built-in's code, and
+your tool is never advertised with a built-in's description or schema.
+Permission rules and hooks written for the name apply to your tool's calls.
+Spettro does not run `mcp`, `script` or `http` tools yet: a call of one is
+checked against the allow-list, permission rules and hooks like any other
+call, then fails with an error saying nothing was run.
+
+**The built-ins your tool shadows stay reachable under their own names.**
+
+- Your tool takes a retired name (an `ls` script): the canonical built-in
+  (`glob`) is unaffected. Hooks and rules written for `ls` are your tool's
+  and never apply to `glob`, not even for `shell-exec` and `bash-output`,
+  whose hooks otherwise also fire on every `bash` call.
+- Your tool takes a canonical name (a `bash` script): that tool's retired
+  names stop being aliases and stand *unfolded*. An agent that holds a
+  built-in under a retired name (a `shell-exec` tool of kind `builtin`)
+  calls it by that name: the built-in's code runs (here, the shell), and the
+  allow-list, permission rules, approval (the `shell-exec` entry's
+  `requires_approval` and rules), hooks, traces and loop detection all see
+  `shell-exec`. It is advertised under its own name, and is deferred or
+  core as its canonical tool is. A retired tool whose arguments differ from
+  its canonical tool's (`repo-search`, `task-*`, `diagnostics`,
+  `references`, `hover`, `lsp-restart`) is advertised with its old
+  description and schema, which Spettro converts to the canonical tool's
+  arguments. The others (`shell-exec`, `bash-output`, `multi-edit`, `ls`,
+  `activate-skill`, `skill-activate`) are carried out by the canonical tool
+  on their arguments unchanged, so they are advertised with the canonical
+  tool's description and schema: an unfolded `ls` is described as `glob`,
+  not as the old directory listing, because `glob`'s code is what runs.
+  A retired name the agent does not hold is refused as not allowed: it never
+  becomes a call of your tool. Hooks and rules written for `bash` are your
+  tool's and do not apply to `shell-exec`.
+
+In a manifest written from today's defaults, the retired names live only as
+aliases on the canonical built-in's definition, and taking a canonical name
+means replacing that definition (tool IDs are unique). Its retired names
+then answer to nothing. Unfolded built-ins matter for manifests migrated
+from before v12 or v13 that already had such a tool.
+
+**Migrations never hand your tool out in a built-in's place.** v12 and v13
+fold nothing into a canonical name your tool holds (as its `id` or an
+alias): that group's built-ins keep their own definitions and allow-list
+entries. Your tool is never folded into a built-in, never given a
+built-in's aliases, never added to a built-in's aliases, and no allow-list
+entry is ever rewritten to point at it. The earlier retrofits follow the same
+rule: the v11 `general-purpose` agent is granted built-ins only (a built-in
+under a retired name when your tool holds the canonical one), and the v6-v8
+retrofits read only built-ins as trust (holding a `grep` script of yours does
+not earn `repo-search`) and grant only built-ins. The built-in `bash` gets
+its long-standing `bash-output` alias only while no other tool uses that
+name.

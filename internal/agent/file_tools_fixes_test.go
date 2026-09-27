@@ -21,14 +21,14 @@ func TestFileEditWhitespaceOnlyOldString(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"path": "p.txt", "edits": []map[string]any{
 		{"old_string": "\n\n\n", "new_string": "\n"}, {"old_string": "c", "new_string": "d"},
 	}})
-	if _, err := r.runFileEdit(context.Background(), args); err != nil {
+	if _, err := r.runFileEdit(context.Background(), "file-edit", args); err != nil {
 		t.Fatal(err)
 	}
 	if got := readTestFile(t, p); got != "a\n\nb\nd\n" {
 		t.Fatalf("edits[] with a whitespace-only old_string: %q", got)
 	}
 	q := writeTestFile(t, dir, "q.txt", "a\n\n\n\nb\n")
-	if _, err := r.runFileEdit(context.Background(), editArgs("q.txt", "\n\n\n", "\n")); err != nil {
+	if _, err := r.runFileEdit(context.Background(), "file-edit", editArgs("q.txt", "\n\n\n", "\n")); err != nil {
 		t.Fatalf("single whitespace-only old_string: %v", err)
 	}
 	if got := readTestFile(t, q); got != "a\n\nb\n" {
@@ -37,7 +37,7 @@ func TestFileEditWhitespaceOnlyOldString(t *testing.T) {
 	args, _ = json.Marshal(map[string]any{"path": "q.txt", "edits": []map[string]any{
 		{"old_string": "b", "new_string": "B"}, {"old_string": "", "new_string": "prefix"},
 	}})
-	if _, err := r.runFileEdit(context.Background(), args); err == nil || !strings.Contains(err.Error(), "edit 2") {
+	if _, err := r.runFileEdit(context.Background(), "file-edit", args); err == nil || !strings.Contains(err.Error(), "edit 2") {
 		t.Fatalf("empty old_string in edits[] must fail the call, got %v", err)
 	}
 	if got := readTestFile(t, q); got != "a\n\nb\n" {
@@ -104,10 +104,10 @@ func TestFileStampsFollowSymlinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := r.runFileEdit(context.Background(), editArgs("link/a.txt", "hello", "HELLO")); err != nil {
+	if _, err := r.runFileEdit(context.Background(), "file-edit", editArgs("link/a.txt", "hello", "HELLO")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.runFileEdit(context.Background(), editArgs("real/a.txt", "world", "WORLD")); err != nil {
+	if _, err := r.runFileEdit(context.Background(), "file-edit", editArgs("real/a.txt", "world", "WORLD")); err != nil {
 		t.Fatalf("the agent's own edit through the link blocked an edit through the real path: %v", err)
 	}
 }

@@ -82,11 +82,15 @@ only when the model calls that name, not on every `file-edit`, `grep`, `glob`
 or `todo-write`. The former language-server tools are the `lsp` tool's ops,
 so a rule for one fires on that op whatever name the model used: one for
 `lsp-restart` on `lsp` with `op: "restart"`, one for `references` on ops
-`references` and `definition`, and neither on `op: "hover"`. A former name
-that a tool of your own now answers to (a `hover` script) is that tool's: its
-hooks do not fire on the op. The `tool_id` the hook receives is always the canonical ID
-(`bash`, never `shell-exec`): a script that checks `tool_id` itself must
-test the canonical name.
+`references` and `definition`, and neither on `op: "hover"`. A name a tool of
+your own answers to (a `hover` or `bash` script) is that tool's: rules for it
+fire on its calls and on no built-in, and while your tool holds a canonical
+name, the built-ins standing unfolded under their retired names match only
+those names (see [Built-in tools](tools.md#tools-of-your-own-with-a-built-ins-name)).
+The `tool_id` the hook receives is the ID the call runs under: the canonical
+ID for a call made under a retired name (`bash`, never `shell-exec`), so a
+script that checks `tool_id` itself must test the canonical name; only an
+unfolded built-in keeps its retired name.
 
 ### What the hook receives on stdin
 

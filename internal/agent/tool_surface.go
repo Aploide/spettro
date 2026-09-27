@@ -39,12 +39,8 @@ var coreTools = map[string]bool{
 	"todo-write": true,
 	"web-fetch":  true,
 	"lsp":        true,
-	// The retired language-server built-ins, when they stand unfolded (see
-	// unfoldedLSPTool), are the lsp tool under its old names.
-	"diagnostics":   true,
-	"references":    true,
-	"hover":         true,
-	"lsp-restart":   true,
+	// A retired built-in standing unfolded (see tool_names.go) is core when
+	// its canonical tool is: it is that tool's code under its old name.
 	"tool-output":   true,
 	"job-output":    true,
 	"job-kill":      true,
@@ -247,15 +243,6 @@ func parseToolSearchActivated(output string) []string {
 	return nil
 }
 
-// canonicalName is the tool a call under name runs: the canonical tool for a
-// retired built-in name, else name itself.
-func (r *toolRuntime) canonicalName(name string) string {
-	if r.userToolNamed(name) || r.unfoldedLSPTool(name) {
-		return name
-	}
-	return CanonicalToolName(name)
-}
-
 // noteCalls activates the deferred tools called by name (the call ran: the
 // tool is allowed). Once the model uses a tool it gets its schema.
 func (r *toolRuntime) noteCalls(names []string) {
@@ -305,8 +292,11 @@ func (r *toolRuntime) recordActivations(msgs []provider.Message) {
 // (`view-image`) is one the prompt tells the model to use, so it is
 // advertised up front rather than deferred.
 func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *toolSurface {
-	specs := buildToolSpecs(allowedTools)
-	specs = append(specs, r.unfoldedLSPToolSpecs(allowedTools)...)
+	// A held tool of the operator's own is never advertised with the schema of
+	// the built-in whose name it shares; the retired built-ins that stand
+	// unfolded because of it are advertised under their own names.
+	specs := buildToolSpecs(r.builtinNames(allowedTools))
+	specs = append(specs, r.unfoldedToolSpecs(allowedTools)...)
 	hidden := map[string]bool{}
 	if slices.ContainsFunc(specs, func(t provider.ToolSpec) bool { return slices.Contains(lspBuiltinTools, t.Name) }) && !lspAvailable(r.cwd) {
 		for _, name := range lspBuiltinTools {
@@ -319,7 +309,11 @@ func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *to
 	// skill-read, so it is advertised whenever there is one.
 	hasSkills := len(r.skillsCatalog.Active()) > 0
 	isCore := func(name string) bool {
-		return coreTools[name] || (name == "skill-read" && hasSkills) || strings.Contains(prompt, "`"+name+"`")
+		builtin := name
+		if r.unfoldedTool(name) {
+			builtin = legacyTools[name].canonical
+		}
+		return coreTools[builtin] || (builtin == "skill-read" && hasSkills) || strings.Contains(prompt, "`"+name+"`")
 	}
 	return newToolSurface(specs, isCore, hidden)
 }

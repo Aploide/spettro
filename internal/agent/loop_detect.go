@@ -133,7 +133,7 @@ func callSignature(name string, args json.RawMessage, status, output string) str
 // signs. A call whose arguments could not be decoded carries "{}" and a fixed
 // error text, so it is signed by its raw argument text instead: truncated
 // writes to different files are different calls.
-func loopCalls(tcs []provider.NativeTool) []toolCall {
+func (r *toolRuntime) loopCalls(tcs []provider.NativeTool) []toolCall {
 	out := make([]toolCall, len(tcs))
 	for i, tc := range tcs {
 		args := tc.Args
@@ -144,8 +144,10 @@ func loopCalls(tcs []provider.NativeTool) []toolCall {
 		}
 		call := toolCall{Tool: tc.Name, Args: args}
 		// A retired name and its canonical tool are one action: shell-exec
-		// then bash with the same command is a repeat.
-		if canon, err := canonicalToolCall(call); err == nil {
+		// then bash with the same command is a repeat. A name that is not
+		// an alias in this run (a tool of the operator's own, an unfolded
+		// built-in; see tool_names.go) is signed under its own name.
+		if canon, err := r.canonicalCall(call); err == nil {
 			call = canon
 		}
 		out[i] = call

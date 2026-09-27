@@ -60,9 +60,14 @@ This file lets you define, in one place:
   tool could be called, which the allow-lists now carry. An agent that could
   only read tasks (`task-get`/`task-list`) loses them instead of gaining
   `todo-write`; an agent left with no tools keeps `comment` and is disabled. Tools of another
-  kind that share a retired name are left alone. The retired names stay
+  kind that share a retired name are left alone, and a tool of your own that
+  holds a canonical name (a `bash` script) folds nothing of its group: those
+  built-ins keep their own names (see [Built-in tools](docs/tools.md#tools-of-your-own-with-a-built-ins-name)). Folded retired names stay
   callable, but are never advertised to the model and cannot be listed in
-  `allowed_tools`.
+  `allowed_tools`. A built-in left under its own name because a tool of your
+  own holds its canonical name is the exception: it stays in `allowed_tools`
+  and is advertised under that name (it stands unfolded; see the same
+  section of docs/tools.md).
 - v13 folds the read-only language-server tools into one `lsp` tool whose
   `op` argument picks the operation:
 
@@ -127,7 +132,12 @@ This file lets you define, in one place:
 
 ### `[[tools]]`
 
-- `id` (required, unique)
+- `id` (required, unique). A tool of kind `mcp`, `script` or `http` may take
+  a built-in's name (`bash`, `ls`, `hover`, ...); it then owns every call made
+  by that name, and the built-ins it shadows stay reachable under their own
+  names (see [Built-in tools](docs/tools.md#tools-of-your-own-with-a-built-ins-name)).
+  Spettro does not run tools of those kinds yet: a call of one fails without
+  running anything.
 - `name` (required)
 - `description`
 - `kind`: `builtin`, `mcp`, `script`, `http`

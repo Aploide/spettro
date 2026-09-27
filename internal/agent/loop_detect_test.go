@@ -277,7 +277,7 @@ func TestLoopDetectorDistinguishesTruncatedCallsByRawArgs(t *testing.T) {
 	for i := range 8 {
 		tcs := []provider.NativeTool{{ID: "c", Name: "file-write", Args: json.RawMessage(`{}`), ArgsError: errText,
 			RawArgs: fmt.Sprintf(`{"path":"f%d.go","content":"package f%d ...`, i, i)}}
-		got := d.observe(loopCalls(tcs), []parallelResult{{status: "error", output: errText}}, "")
+		got := d.observe((&toolRuntime{}).loopCalls(tcs), []parallelResult{{status: "error", output: errText}}, "")
 		if got != loopOK {
 			t.Fatalf("truncated write %d: got %v", i+1, got)
 		}

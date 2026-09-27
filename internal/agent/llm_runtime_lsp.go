@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
 	"spettro/internal/diff"
 	"spettro/internal/lsp"
-	"spettro/internal/provider"
 )
 
 // lspDiagnosticsWait bounds how long a file-write/file-edit result waits for
@@ -263,56 +261,6 @@ func (r *toolRuntime) lspRestart(server string) (string, error) {
 		return "", errors.New(noLSPServer)
 	}
 	return m.Restart(strings.TrimSpace(server)), nil
-}
-
-// runUnfoldedLSPTool runs a retired language-server built-in under its own
-// name, which happens only while the operator's own tool holds the name lsp
-// (see toolRuntime.unfoldedLSPTool): the built-in the agent holds, not the
-// operator's lsp, does the work.
-func (r *toolRuntime) runUnfoldedLSPTool(ctx context.Context, call toolCall) (string, error) {
-	if !r.unfoldedLSPTool(call.Tool) || r.userToolNamed(call.Tool) {
-		return "", fmt.Errorf("unsupported tool %q", call.Tool)
-	}
-	args, err := legacyTools[call.Tool].args(call.Args)
-	if err != nil {
-		return "", fmt.Errorf("%s args: %w", call.Tool, err)
-	}
-	return r.runLSP(ctx, args, call.Tool)
-}
-
-// unfoldedLSPToolDescs and unfoldedLSPToolSchemas advertise the retired
-// language-server built-ins while they stand unfolded (the operator owns the
-// name lsp), as the tools were advertised before v13.
-var unfoldedLSPToolDescs = map[string]string{
-	"diagnostics": "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
-	"references":  "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
-	"hover":       "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
-	"lsp-restart": "Restart a wedged language server (all servers when none named).",
-}
-
-var unfoldedLSPToolSchemas = map[string]json.RawMessage{
-	"diagnostics": json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
-	"references":  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
-	"hover":       json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
-	"lsp-restart": json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
-}
-
-// unfoldedLSPToolSpecs returns the native tool specs of the unfolded
-// language-server built-ins this agent holds.
-func (r *toolRuntime) unfoldedLSPToolSpecs(allowedTools []string) []provider.ToolSpec {
-	var out []provider.ToolSpec
-	for _, name := range allowedTools {
-		name = strings.TrimSpace(name)
-		spec, ok := r.toolPolicies[name]
-		if !ok || spec.ID != name || !isBuiltinTool(spec) || !r.unfoldedLSPTool(name) {
-			continue
-		}
-		if slices.ContainsFunc(out, func(t provider.ToolSpec) bool { return t.Name == name }) {
-			continue
-		}
-		out = append(out, provider.ToolSpec{Name: name, Description: unfoldedLSPToolDescs[name], Schema: unfoldedLSPToolSchemas[name]})
-	}
-	return out
 }
 
 func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string, error) {

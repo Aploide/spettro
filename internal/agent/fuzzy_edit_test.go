@@ -349,7 +349,7 @@ func runTool(t *testing.T, rt *toolRuntime, tool string, args map[string]any) (s
 func TestRunFileEditFuzzyTierReported(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	path := writeTestFile(t, dir, "f.go", "func f() {\n\treturn  1\n}\n")
-	out, err := rt.runFileEdit(context.Background(), editArgs("f.go", "\treturn 1", "\treturn 2"))
+	out, err := rt.runFileEdit(context.Background(), "file-edit", editArgs("f.go", "\treturn 1", "\treturn 2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestRunFileEditFuzzyTierReported(t *testing.T) {
 func TestRunFileEditReturnsDiffSummary(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	writeTestFile(t, dir, "f.go", "package f\n\nfunc f() int {\n\treturn 1\n}\n")
-	out, err := rt.runFileEdit(context.Background(), editArgs("f.go", "\treturn 1", "\tx := 2\n\treturn x"))
+	out, err := rt.runFileEdit(context.Background(), "file-edit", editArgs("f.go", "\treturn 1", "\tx := 2\n\treturn x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestRunFileEditRejectsAmbiguousExactMatch(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	orig := "x := 1\nfoo()\nx := 1\n"
 	path := writeTestFile(t, dir, "a.go", orig)
-	_, err := rt.runFileEdit(context.Background(), editArgs("a.go", "x := 1", "x := 2"))
+	_, err := rt.runFileEdit(context.Background(), "file-edit", editArgs("a.go", "x := 1", "x := 2"))
 	if err == nil || !strings.Contains(err.Error(), "lines 1, 3") {
 		t.Fatalf("err=%v", err)
 	}
@@ -395,7 +395,7 @@ func TestRunFileEditLineRangeReportsAbsoluteLines(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	writeTestFile(t, dir, "a.go", "x\nx\nq\nx\nq\nx\n")
 	args, _ := json.Marshal(map[string]any{"path": "a.go", "old_string": "x", "new_string": "y", "start_line": 3, "end_line": 6})
-	_, err := rt.runFileEdit(context.Background(), args)
+	_, err := rt.runFileEdit(context.Background(), "file-edit", args)
 	if err == nil || !strings.Contains(err.Error(), "lines 4, 6") {
 		t.Fatalf("err=%v", err)
 	}
@@ -404,7 +404,7 @@ func TestRunFileEditLineRangeReportsAbsoluteLines(t *testing.T) {
 func TestRunFileEditIdenticalStrings(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	writeTestFile(t, dir, "a.go", "x\n")
-	if _, err := rt.runFileEdit(context.Background(), editArgs("a.go", "x", "x")); err == nil || !strings.Contains(err.Error(), "identical") {
+	if _, err := rt.runFileEdit(context.Background(), "file-edit", editArgs("a.go", "x", "x")); err == nil || !strings.Contains(err.Error(), "identical") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -412,7 +412,7 @@ func TestRunFileEditIdenticalStrings(t *testing.T) {
 func TestRunFileEditCRLFRoundTrip(t *testing.T) {
 	rt, dir := newEditTestRuntime(t)
 	path := writeTestFile(t, dir, "w.txt", "one\r\ntwo\r\nthree\r\n")
-	if _, err := rt.runFileEdit(context.Background(), editArgs("w.txt", "two\nthree", "2\n3\n4")); err != nil {
+	if _, err := rt.runFileEdit(context.Background(), "file-edit", editArgs("w.txt", "two\nthree", "2\n3\n4")); err != nil {
 		t.Fatal(err)
 	}
 	if got := readTestFile(t, path); got != "one\r\n2\r\n3\r\n4\r\n" {
@@ -421,7 +421,7 @@ func TestRunFileEditCRLFRoundTrip(t *testing.T) {
 	// A one-line range has no line break of its own; the file's style wins.
 	path = writeTestFile(t, dir, "r.txt", "one\r\ntwo\r\nthree\r\n")
 	args, _ := json.Marshal(map[string]any{"path": "r.txt", "old_string": "two", "new_string": "2\n2b", "start_line": 2, "end_line": 2})
-	if _, err := rt.runFileEdit(context.Background(), args); err != nil {
+	if _, err := rt.runFileEdit(context.Background(), "file-edit", args); err != nil {
 		t.Fatal(err)
 	}
 	if got := readTestFile(t, path); got != "one\r\n2\r\n2b\r\nthree\r\n" {
@@ -435,22 +435,22 @@ func TestStaleReadGuard(t *testing.T) {
 	path := writeTestFile(t, dir, "s.go", "a := 1\nb := 2\n")
 
 	// A file the agent never read can still be edited when old_string matches.
-	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "a := 1", "a := 10")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("s.go", "a := 1", "a := 10")); err != nil {
 		t.Fatalf("edit of unread file: %v", err)
 	}
 	// The agent's own edit refreshes the stamp, so a follow-up edit passes.
-	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "b := 2", "b := 20")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("s.go", "b := 2", "b := 20")); err != nil {
 		t.Fatalf("second edit: %v", err)
 	}
 
 	// Someone else changes the file: edits are refused until it is re-read.
 	writeTestFile(t, dir, "s.go", "a := 10\nb := 20\nc := 3\n")
-	_, err := rt.runFileEdit(ctx, editArgs("s.go", "c := 3", "c := 30"))
+	_, err := rt.runFileEdit(ctx, "file-edit", editArgs("s.go", "c := 3", "c := 30"))
 	if err == nil || !strings.Contains(err.Error(), "modified on disk since you last read it") {
 		t.Fatalf("stale edit err=%v", err)
 	}
 	multi, _ := json.Marshal(map[string]any{"path": "s.go", "edits": []map[string]any{{"old_string": "c := 3", "new_string": "c := 30"}}})
-	if _, err := rt.runFileEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "modified on disk") {
+	if _, err := rt.runFileEdit(ctx, "file-edit", multi); err == nil || !strings.Contains(err.Error(), "modified on disk") {
 		t.Fatalf("stale edits[] err=%v", err)
 	}
 	if got := readTestFile(t, path); got != "a := 10\nb := 20\nc := 3\n" {
@@ -460,12 +460,12 @@ func TestStaleReadGuard(t *testing.T) {
 	if _, err := runTool(t, rt, "file-read", map[string]any{"path": "s.go", "start_line": 3, "end_line": 3}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "c := 3", "c := 30")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("s.go", "c := 3", "c := 30")); err != nil {
 		t.Fatalf("edit after re-read: %v", err)
 	}
 	// A touch that leaves the content alone doesn't count as a change.
 	writeTestFile(t, dir, "s.go", readTestFile(t, path))
-	if _, err := rt.runFileEdit(ctx, editArgs("s.go", "c := 30", "c := 31")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("s.go", "c := 30", "c := 31")); err != nil {
 		t.Fatalf("edit after same-content rewrite: %v", err)
 	}
 }
@@ -502,7 +502,7 @@ func TestFileWriteNeedsFullReadAndFreshContent(t *testing.T) {
 		t.Fatalf("write after re-read: %v", err)
 	}
 	// Its own write keeps the stamp current, so an edit right after passes.
-	if _, err := rt.runFileEdit(context.Background(), editArgs("w.go", "fresh", "fresher")); err != nil {
+	if _, err := rt.runFileEdit(context.Background(), "file-edit", editArgs("w.go", "fresh", "fresher")); err != nil {
 		t.Fatalf("edit after own write: %v", err)
 	}
 }
@@ -518,7 +518,7 @@ func TestParallelEditsOnOneFileBothLand(t *testing.T) {
 	errs := make([]error, 20)
 	for i := range 20 {
 		wg.Go(func() {
-			_, errs[i] = rt.runFileEdit(context.Background(), editArgs("p.go", fmt.Sprintf("v%d := %d\n", i, i), fmt.Sprintf("v%d := %d\n", i, i*100+1)))
+			_, errs[i] = rt.runFileEdit(context.Background(), "file-edit", editArgs("p.go", fmt.Sprintf("v%d := %d\n", i, i), fmt.Sprintf("v%d := %d\n", i, i*100+1)))
 		})
 	}
 	wg.Wait()
@@ -546,7 +546,7 @@ func TestRunFileEditEditsRollBackOnFuzzyAmbiguity(t *testing.T) {
 			{"old_string": "\t foo()", "new_string": "\t bar()"}, // fuzzy-ambiguous
 		},
 	})
-	_, err := rt.runFileEdit(context.Background(), args)
+	_, err := rt.runFileEdit(context.Background(), "file-edit", args)
 	if err == nil || !strings.Contains(err.Error(), "edit 2") {
 		t.Fatalf("err=%v", err)
 	}
@@ -565,7 +565,7 @@ func TestRunFileEditEditsFuzzySucceeds(t *testing.T) {
 			{"old_string": "c", "new_string": "C"},
 		},
 	})
-	out, err := rt.runFileEdit(context.Background(), args)
+	out, err := rt.runFileEdit(context.Background(), "file-edit", args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +584,7 @@ func TestRunFileEditEditsNotFoundShowsClosestMatch(t *testing.T) {
 		"path":  "n.go",
 		"edits": []map[string]any{{"old_string": "return compute(2)", "new_string": "return 0"}},
 	})
-	_, err := rt.runFileEdit(context.Background(), args)
+	_, err := rt.runFileEdit(context.Background(), "file-edit", args)
 	if err == nil || !strings.Contains(err.Error(), "2. \treturn compute(1)") {
 		t.Fatalf("err=%v", err)
 	}
@@ -607,23 +607,23 @@ func TestRunFileEditLineHintTrustedOnlyWhileFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Straight after the read the numbers name the second copy.
-	if _, err := rt.runFileEdit(ctx, editArgs("h.go", "9. \treturn nil\n10. }", "9. \treturn err\n10. }")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("h.go", "9. \treturn nil\n10. }", "9. \treturn err\n10. }")); err != nil {
 		t.Fatalf("fresh hint: %v", err)
 	}
 	if got := readTestFile(t, path); !strings.Contains(got, "\treturn nil\n}\nline 7") || !strings.Contains(got, "\treturn err\n}\nline 11") {
 		t.Fatalf("hint picked the wrong copy:\n%s", got)
 	}
 	// Lines move after the agent's own edit; the stale numbers must not pick.
-	if _, err := rt.runFileEdit(ctx, editArgs("h.go", "line 1\n", "line 0\nline 1\n")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("h.go", "line 1\n", "line 0\nline 1\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rt.runFileEdit(ctx, editArgs("h.go", "7. \treturn nil\n8. }", "7. \treturn nil // x\n8. }")); err != nil {
+	if _, err := rt.runFileEdit(ctx, "file-edit", editArgs("h.go", "7. \treturn nil\n8. }", "7. \treturn nil // x\n8. }")); err != nil {
 		t.Fatalf("unique match still applies: %v", err)
 	}
 	multi, _ := json.Marshal(map[string]any{"path": "h.go", "edits": []map[string]any{
 		{"old_string": "6. }\n", "new_string": "6. }\n\n"},
 	}})
-	if _, err := rt.runFileEdit(ctx, multi); err == nil || !strings.Contains(err.Error(), "locations") {
+	if _, err := rt.runFileEdit(ctx, "file-edit", multi); err == nil || !strings.Contains(err.Error(), "locations") {
 		t.Fatalf("stale hint on ambiguous match err=%v", err)
 	}
 }

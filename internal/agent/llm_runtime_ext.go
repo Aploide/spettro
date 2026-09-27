@@ -197,7 +197,9 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		if hasSpec && spec.ID != "" && spec.ID != id {
 			continue
 		}
-		if _, retired := legacyTools[id]; retired && (!hasSpec || isBuiltinTool(spec)) && !r.unfoldedLSPTool(id) {
+		// A retired built-in name is listed only while it stands unfolded
+		// (tool_names.go): otherwise it is an alias of a listed tool.
+		if _, retired := legacyTools[id]; retired && (!hasSpec || spec.IsBuiltin()) && !r.unfoldedTool(id) {
 			continue
 		}
 		if r.surface.isHidden(id) {
@@ -219,8 +221,16 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 			requiresApproval = spec.RequiresApproval
 			acts = strings.Join(spec.PermittedActions, ",")
 		}
-		if full, ok := toolDescription(id); ok && (!hasSpec || isBuiltinTool(spec)) {
-			desc = full
+		switch {
+		case hasSpec && !spec.IsBuiltin():
+			// A tool of the operator's own keeps its own description, even
+			// under a built-in's name.
+		case r.unfoldedTool(id):
+			desc, _ = unfoldedSurface(id)
+		default:
+			if full, ok := toolDescription(id); ok {
+				desc = full
+			}
 		}
 		lowID, lowLabel := strings.ToLower(id), strings.ToLower(label)
 		hay := strings.ToLower(id + " " + label + " " + acts + " " + desc)
@@ -502,7 +512,10 @@ func (r *toolRuntime) runMCPAuth(ctx context.Context, rawArgs []byte) (string, e
 	return fmt.Sprintf("mcp auth updated for %s", state.ServerID), nil
 }
 
-func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, error) {
+// runFileEdit is the file-edit built-in. toolID is the tool the call runs as
+// (file-edit, or multi-edit standing unfolded; see tool_names.go): its
+// manifest entry decides whether the write needs approval.
+func (r *toolRuntime) runFileEdit(ctx context.Context, toolID string, rawArgs []byte) (string, error) {
 	args, err := decodeFileEditArgs(rawArgs)
 	if err != nil {
 		return "", err
@@ -626,7 +639,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	}
 	// Approval comes after the edit is fully computed so the user can be shown
 	// the exact diff that would be applied.
-	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+	if err := r.authorizeWriteAccess(ctx, toolID, rel, diff.Unified(rel, content, updated)); err != nil {
 		return "", err
 	}
 	if err := r.recheckBeforeWrite("file-edit", rel, abs, true, raw); err != nil {
