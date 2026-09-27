@@ -515,19 +515,14 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		req = stripImages(req)
 	}
 
-	var allParts []string
-	if len(req.Messages) > 0 {
-		allParts = append(allParts, req.System)
-		for _, m := range req.Messages {
-			allParts = append(allParts, m.Content)
-		}
-	} else {
-		allParts = append(allParts, req.Prompt)
-	}
 	// The input budget (config token_budget) caps the PROMPT: estimate the
 	// whole request, tool results and tool schemas included — they are most
 	// of a coding session's context. The output cap is a separate field.
-	promptTokens := EstimateRequestTokens(req)
+	// A caller that already estimated this request passes the estimate.
+	promptTokens := req.PromptTokens
+	if promptTokens <= 0 {
+		promptTokens = EstimateRequestTokens(req)
+	}
 	if req.InputBudget > 0 {
 		if err := budget.CheckTokens(req.InputBudget, promptTokens); err != nil {
 			return Response{}, err
@@ -554,7 +549,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	if req.OnStream != nil || anthropicAPI || streamAll {
 		resp, err := sendWithFantasyStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
-			return finalizeResponse(resp, providerName, modelName, allParts), nil
+			return finalizeResponse(resp, providerName, modelName, req), nil
 		}
 		if !shouldFallbackToLegacy(err) {
 			// Streaming failed. Only a failure that could be specific to the
@@ -568,14 +563,14 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 			noStream := req
 			noStream.OnStream = nil
 			if resp, rerr := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, noStream); rerr == nil {
-				return finalizeResponse(resp, providerName, modelName, allParts), nil
+				return finalizeResponse(resp, providerName, modelName, req), nil
 			}
 			return Response{}, err
 		}
 	} else {
 		resp, err := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
-			return finalizeResponse(resp, providerName, modelName, allParts), nil
+			return finalizeResponse(resp, providerName, modelName, req), nil
 		}
 		if !shouldFallbackToLegacy(err) {
 			return Response{}, err
@@ -590,7 +585,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	if err != nil {
 		return Response{}, err
 	}
-	return finalizeResponse(resp, providerName, modelName, allParts), nil
+	return finalizeResponse(resp, providerName, modelName, req), nil
 }
 
 // worthNonStreamingRetry reports whether a failed streaming request should
@@ -849,11 +844,23 @@ func resolveOpenAICompatibleBaseURL(providerName, baseURL string) (string, error
 	return "", fmt.Errorf("no API endpoint configured for provider %q", providerName)
 }
 
-func finalizeResponse(resp Response, providerName, modelName string, allParts []string) Response {
+// finalizeResponse stamps resp with the model that produced it and, when
+// the provider reported no usage, estimates the tokens from the system
+// prompt and message texts of req.
+func finalizeResponse(resp Response, providerName, modelName string, req Request) Response {
 	resp.Provider = providerName
 	resp.Model = modelName
 	if resp.EstimatedTokens == 0 {
-		resp.EstimatedTokens = budget.EstimateTokens(allParts...)
+		var parts []string
+		if len(req.Messages) > 0 {
+			parts = append(parts, req.System)
+			for _, m := range req.Messages {
+				parts = append(parts, m.Content)
+			}
+		} else {
+			parts = append(parts, req.Prompt)
+		}
+		resp.EstimatedTokens = budget.EstimateTokens(parts...)
 	}
 	return resp
 }

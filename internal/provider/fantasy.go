@@ -3,7 +3,6 @@ package provider
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -759,8 +758,8 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 	if len(req.Tools) > 0 {
 		call.Tools = make([]fantasy.Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			var schema map[string]any
-			if err := json.Unmarshal(t.Schema, &schema); err != nil || schema == nil {
+			schema := toolSchemas.parse(t.Schema)
+			if schema == nil {
 				schema = map[string]any{"type": "object", "additionalProperties": true}
 			}
 			call.Tools = append(call.Tools, fantasy.FunctionTool{
@@ -841,13 +840,14 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 // loadToolResultMedia reads an image file into a media tool-result output
 // (base64 + mime), keeping the tool's text output alongside it. Returns false
 // when the file cannot be read so the caller falls back to a text-only result.
+// The encoding comes from the media cache.
 func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedia, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := requestMedia.base64(path)
+	if !ok {
 		return fantasy.ToolResultOutputContentMedia{}, false
 	}
 	return fantasy.ToolResultOutputContentMedia{
-		Data:      base64.StdEncoding.EncodeToString(data),
+		Data:      data,
 		MediaType: mediaTypeFromPath(path),
 		Text:      text,
 	}, true
@@ -855,12 +855,13 @@ func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedi
 
 // fantasyImageParts loads image files into fantasy FileParts. Unreadable
 // paths are skipped (matching the legacy adapters) so a vanished temp file
-// degrades to a text-only turn instead of failing the whole request.
+// degrades to a text-only turn instead of failing the whole request. The
+// bytes come from the media cache and are shared: fantasy only reads them.
 func fantasyImageParts(paths []string) []fantasy.FilePart {
 	var parts []fantasy.FilePart
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
+		data, ok := requestMedia.bytes(p)
+		if !ok {
 			continue
 		}
 		parts = append(parts, fantasy.FilePart{
