@@ -12,23 +12,65 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/pty"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
-func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Color) string {
-	// Line caps for tool outputs; lifted when the user toggled full output
-	// with ctrl+g (0 = unlimited, scrollback handles the length).
-	singleCap, groupCap := 20, 8
-	if fullOutput {
-		singleCap, groupCap = 0, 0
-	}
+// Tool output line caps: a lone tool call shows more of its output than each
+// member of a group of same-named calls. ctrl+g (fullOutput) lifts both.
+const (
+	toolOutputCapSingle = 20
+	toolOutputCapGroup  = 8
+)
+
+// toolOutputIndent is the gutter in front of every tool output row, so the
+// output reads as belonging to the "●" header above it.
+const toolOutputIndent = "       "
+
+// toolDetailIndent prefixes the per-call rows of an expanded tool group and
+// the path row of a single file tool.
+const toolDetailIndent = "    ⎿  "
+
+// renderToolGroups renders an assistant turn's tool calls as the transcript
+// shows them: one "●" header row per call, or per run of consecutive calls of
+// the same tool, followed (when showTools is on) by paths, diffs and output.
+//
+// width is the number of cells the block may occupy. Every row is fitted to
+// it here, because the viewport that displays the transcript silently cuts
+// anything wider: a 50k-character heredoc or a 10k-character minified line
+// would otherwise lose its tail with no sign anything was hidden. Labels are
+// folded onto one line and cut with "…"; output rows are sanitized (escape
+// sequences, tabs, carriage returns) and either cut with "…" or, in the
+// ctrl+g full-output view, wrapped so nothing is lost.
+func renderToolGroups(tools []ToolItem, width int, showTools, fullOutput bool, mc color.Color) string {
 	if len(tools) == 0 {
 		return ""
 	}
+	width = max(width, 20)
+	singleCap, groupCap := toolOutputCapSingle, toolOutputCapGroup
+	if fullOutput {
+		singleCap, groupCap = 0, 0 // 0 = unlimited, the scrollback handles the length
+	}
 	bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
+	bulletW := lipgloss.Width(bullet) + 1 // the bullet and the space after it
 	errStyle := lipgloss.NewStyle().Foreground(theme.Current().Error)
 	outputStyle := lipgloss.NewStyle().Foreground(theme.Current().TextFaint).Italic(true)
 	var lines []string
+
+	// header fits a label into the row after the bullet.
+	header := func(label string, style lipgloss.Style) string {
+		return bullet + " " + style.Render(termtext.Fit(termtext.SingleLine(label), width-bulletW))
+	}
+	// detail fits an indented sub-row (a path or a group member's label).
+	detail := func(text string) string {
+		return styleMuted.Render(termtext.Fit(toolDetailIndent+termtext.SingleLine(text), width))
+	}
+	// output appends styled output rows.
+	output := func(rows []string) {
+		for _, row := range rows {
+			lines = append(lines, outputStyle.Render(row))
+		}
+	}
 
 	i := 0
 	for i < len(tools) {
@@ -37,90 +79,52 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 			j++
 		}
 		group := tools[i:j]
-		count := len(group)
 		name := group[0].Name
 
-		if count == 1 {
+		if len(group) == 1 {
 			item := group[0]
-			label := formatToolLabel(name, item.Args)
-			if item.Status == "running" {
-				label = formatRunningLabel(name, item.Args)
-				label = styleMuted.Render(label)
-			} else if item.Status == "error" {
-				label = errStyle.Render(label)
-			} else {
-				label = styleMuted.Render(label)
-			}
-			lines = append(lines, bullet+" "+label)
-			if item.Status == "running" {
-				for _, tl := range renderPtyLiveTail(name, item.Args, fullOutput) {
-					lines = append(lines, outputStyle.Render("       "+tl))
-				}
+			switch item.Status {
+			case "running":
+				lines = append(lines, header(formatRunningLabel(name, item.Args), styleMuted))
+				output(liveTailRows(renderPtyLiveTail(name, item.Args, fullOutput), width))
+			case "error":
+				lines = append(lines, header(formatToolLabel(name, item.Args), errStyle))
+			default:
+				lines = append(lines, header(formatToolLabel(name, item.Args), styleMuted))
 			}
 			if showTools {
 				if p := extractToolPath(name, item.Args); p != "" {
-					icon := "✓"
-					if item.Status == "running" {
-						icon = ""
-					} else if item.Status == "error" {
-						icon = "✗"
-					}
-					line := fmt.Sprintf("    ⎿  %s", p)
-					if icon != "" {
-						line += " " + icon
-					}
-					lines = append(lines, styleMuted.Render(line))
+					lines = append(lines, detail(p+toolStatusIcon(item.Status)))
 				}
 			}
 			if item.Diff != "" && item.Status != "running" {
-				if block := renderDiffBlock(item.Diff, showTools); block != "" {
+				if block := renderDiffBlock(item.Diff, width, showTools); block != "" {
 					lines = append(lines, block)
 				}
 			} else if showTools && item.Status != "running" {
-				if out := trimToolOutput(item.Output, singleCap); out != "" {
-					for ol := range strings.SplitSeq(out, "\n") {
-						lines = append(lines, outputStyle.Render("       "+ol))
-					}
-				}
+				output(toolOutputRows(item.Output, singleCap, width, fullOutput))
 			}
 		} else {
 			label := formatToolGroupLabel(name, group)
 			if !showTools {
-				label += "  " + styleMuted.Render("(ctrl+o to expand)")
+				label += "  (ctrl+o to expand)"
 			}
-			lines = append(lines, bullet+" "+styleMuted.Render(label))
+			lines = append(lines, header(label, styleMuted))
 			if showTools {
 				for _, gt := range group {
-					var detail string
-					if p := extractToolPath(gt.Name, gt.Args); p != "" {
-						icon := "✓"
-						if gt.Status == "running" {
-							icon = ""
-						} else if gt.Status == "error" {
-							icon = "✗"
-						}
-						detail = "    ⎿  " + p
-						if icon != "" {
-							detail += " " + icon
-						}
-					} else {
-						if gt.Status == "running" {
-							detail = "    ⎿  " + formatRunningLabel(gt.Name, gt.Args)
-						} else {
-							detail = "    ⎿  " + formatToolLabel(gt.Name, gt.Args)
-						}
+					// Arguments can be a whole file; parse them once per row.
+					switch p := extractToolPath(gt.Name, gt.Args); {
+					case p != "":
+						lines = append(lines, detail(p+toolStatusIcon(gt.Status)))
+					case gt.Status == "running":
+						lines = append(lines, detail(formatRunningLabel(gt.Name, gt.Args)))
+					default:
+						lines = append(lines, detail(formatToolLabel(gt.Name, gt.Args)))
 					}
-					lines = append(lines, styleMuted.Render(detail))
 					if gt.Status == "running" {
-						for _, tl := range renderPtyLiveTail(gt.Name, gt.Args, fullOutput) {
-							lines = append(lines, outputStyle.Render("       "+tl))
-						}
+						output(liveTailRows(renderPtyLiveTail(gt.Name, gt.Args, fullOutput), width))
 					} else {
-						if out := trimToolOutput(gt.Output, groupCap); out != "" {
-							for ol := range strings.SplitSeq(out, "\n") {
-								lines = append(lines, outputStyle.Render("       "+ol))
-							}
-						}
+						output(toolOutputRows(gt.Output, groupCap, width, fullOutput))
 					}
 				}
 			}
@@ -129,6 +133,84 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 		i = j
 	}
 	return strings.Join(lines, "\n")
+}
+
+// toolStatusIcon is the suffix of a file tool's path row: a check once it
+// succeeded, a cross when it failed, nothing while it runs.
+func toolStatusIcon(status string) string {
+	switch status {
+	case "running":
+		return ""
+	case "error":
+		return " ✗"
+	default:
+		return " ✓"
+	}
+}
+
+// toolOutputRows turns a tool's raw output into indented display rows no
+// wider than width cells, keeping at most maxLines source lines (0 = all).
+//
+// Tool output is untrusted text: every line is sanitized first (see
+// termtext.SanitizeLine). A line still wider than the row is wrapped when
+// wrap is set (the ctrl+g full-output view, which promises everything) and
+// cut with "…" otherwise. Whatever was left out is owned up to in one footer
+// row, together with the key that brings it back, so a capped view never
+// reads as the whole output.
+func toolOutputRows(outputText string, maxLines, width int, wrap bool) []string {
+	outputText = strings.TrimSpace(outputText)
+	if outputText == "" {
+		return nil
+	}
+	textW := max(width-len(toolOutputIndent), 8)
+	source := strings.Split(outputText, "\n")
+	hidden := 0
+	if maxLines > 0 && len(source) > maxLines {
+		hidden = len(source) - maxLines
+		source = source[:maxLines]
+	}
+	rows := make([]string, 0, len(source)+1)
+	cut := false
+	for _, line := range source {
+		line = termtext.SanitizeLine(line)
+		if wrap {
+			for _, part := range termtext.Wrap(line, textW) {
+				rows = append(rows, toolOutputIndent+part)
+			}
+			continue
+		}
+		if fitted := termtext.Fit(line, textW); fitted != line {
+			line, cut = fitted, true
+		}
+		rows = append(rows, toolOutputIndent+line)
+	}
+	var notes []string
+	if hidden > 0 {
+		notes = append(notes, fmt.Sprintf("… %d more lines", hidden))
+	}
+	if cut {
+		notes = append(notes, "long lines cut")
+	}
+	if len(notes) > 0 {
+		footer := strings.Join(notes, " · ") + " · ctrl+g for full output"
+		rows = append(rows, termtext.Fit(toolOutputIndent+footer, width))
+	}
+	return rows
+}
+
+// liveTailRows fits the live scrollback tail of a running pty tool to the
+// row width. A terminal session's screen is full of escape sequences and
+// carriage returns, so each line is sanitized before it is measured.
+func liveTailRows(tail []string, width int) []string {
+	if len(tail) == 0 {
+		return nil
+	}
+	textW := max(width-len(toolOutputIndent), 8)
+	rows := make([]string, 0, len(tail))
+	for _, line := range tail {
+		rows = append(rows, toolOutputIndent+termtext.Fit(termtext.SanitizeLine(line), textW))
+	}
+	return rows
 }
 
 // renderPtyLiveTail returns the last few settled scrollback lines of the pty
@@ -181,6 +263,9 @@ func formatRunningToolGroupLabel(name string, group []ToolItem) string {
 	count := len(group)
 	if desc := formatDetailedGroupLabel(name, true, group); desc != "" {
 		return desc
+	}
+	if isLSPTool(name) || isSkillTool(name) {
+		return runningVerb(name) + " " + toolNounCount(name, count) + "…"
 	}
 	switch name {
 	case "file-read":
@@ -368,7 +453,7 @@ func toolDescriptor(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
-			return truncateLabel(args.Path, 36)
+			return termtext.FitLeft(termtext.SingleLine(args.Path), 36)
 		}
 	case "repo-search", "tool-search", "web-search", "grep":
 		var args struct {
@@ -403,7 +488,7 @@ func toolDescriptor(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Command) != "" {
-			return "$ " + truncateLabel(args.Command, 36)
+			return "$ " + labelCommand(args.Command, 36)
 		}
 	case "pty-write", "pty-kill":
 		var args struct {
@@ -442,6 +527,12 @@ func toolDescriptor(name, argsJSON string) string {
 }
 
 func runningVerb(name string) string {
+	switch {
+	case isLSPTool(name):
+		return "Querying"
+	case isSkillTool(name):
+		return "Loading"
+	}
 	switch name {
 	case "file-read":
 		return "Reading"
@@ -556,12 +647,20 @@ func formatApprovalCommandLabel(command string) string {
 	return "$ " + command
 }
 
-func renderDiffBlock(diffText string, expanded bool) string {
+// renderDiffBlock renders the diff a file tool produced, under its "●" row.
+// Collapsed it shows the first 20 lines; expanded (ctrl+o) all of them.
+//
+// Every row is cut to width. The diff stays in the unified layout even on a
+// wide terminal: a transcript block switching to two columns at some width
+// would make the same edit look different after a resize, so the width
+// handed to diff.Render is kept below diff.SideBySideMinWidth.
+func renderDiffBlock(diffText string, width int, expanded bool) string {
 	maxLines := 20
 	if expanded {
 		maxLines = 0
 	}
 	return diff.Render(diffText, diff.Options{
+		Width:      min(max(width, 20), diff.SideBySideMinWidth-1),
 		MaxLines:   maxLines,
 		ExpandHint: "(ctrl+o to expand)",
 		Indent:     "       ",

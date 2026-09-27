@@ -65,12 +65,12 @@ func TestTranscriptExpansionKeys(t *testing.T) {
 func TestTranscriptFullOutputExpansion(t *testing.T) {
 	tools := []ToolItem{{Name: "shell", Status: "done", Args: `{"command":"ls"}`, Output: longOutput(30)}}
 
-	collapsed := renderToolGroups(tools, false, false, theme.Current().BgHeader)
+	collapsed := renderToolGroups(tools, 120, false, false, theme.Current().BgHeader)
 	if strings.Contains(collapsed, "line1\n") || strings.Contains(collapsed, "line30") {
 		t.Fatalf("collapsed transcript should not show tool output:\n%s", collapsed)
 	}
 
-	trimmed := renderToolGroups(tools, true, false, theme.Current().BgHeader)
+	trimmed := renderToolGroups(tools, 120, true, false, theme.Current().BgHeader)
 	if !strings.Contains(trimmed, "line1") {
 		t.Fatalf("expanded transcript should show output start:\n%s", trimmed)
 	}
@@ -81,7 +81,7 @@ func TestTranscriptFullOutputExpansion(t *testing.T) {
 		t.Fatalf("trimmed output should mention hidden lines:\n%s", trimmed)
 	}
 
-	full := renderToolGroups(tools, true, true, theme.Current().BgHeader)
+	full := renderToolGroups(tools, 120, true, true, theme.Current().BgHeader)
 	if !strings.Contains(full, "line30") {
 		t.Fatalf("full state should show the entire output:\n%s", full)
 	}
@@ -98,12 +98,12 @@ func TestTranscriptGroupFullOutputExpansion(t *testing.T) {
 		{Name: "shell", Status: "done", Args: `{"command":"b"}`, Output: longOutput(12)},
 	}
 
-	trimmed := renderToolGroups(tools, true, false, theme.Current().BgHeader)
+	trimmed := renderToolGroups(tools, 120, true, false, theme.Current().BgHeader)
 	if strings.Contains(trimmed, "line12") {
 		t.Fatalf("grouped trimmed output should cap at 8 lines:\n%s", trimmed)
 	}
 
-	full := renderToolGroups(tools, true, true, theme.Current().BgHeader)
+	full := renderToolGroups(tools, 120, true, true, theme.Current().BgHeader)
 	if strings.Count(full, "line12") != 2 {
 		t.Fatalf("grouped full state should show both outputs in full:\n%s", full)
 	}

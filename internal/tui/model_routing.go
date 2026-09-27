@@ -488,6 +488,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.thinking {
 			m.pendingAuth = &msg
 			m.approvalCursor = 0
+			m.approvalPreviewExpanded = false
+			m.approvalScroll = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
 			m.notifyIfUnfocused("Agent is waiting for command approval")

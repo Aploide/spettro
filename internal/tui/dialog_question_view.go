@@ -17,9 +17,9 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -49,7 +49,7 @@ func (m Model) questionBlockBudget() int {
 		2 + // the separators bracketing the conversation pane
 		lipgloss.Height(m.viewStatusBar(paneW)) +
 		3 // the input box's border plus the agent label inside it
-	if m.sidePanelWidth() <= 0 {
+	if m.showsParallelFooter() {
 		if pa := m.renderParallelAgents(); pa != "" {
 			fixed += lipgloss.Height(pa)
 		}
@@ -124,15 +124,14 @@ func (m Model) renderQuestionForm() string {
 
 	// A line wider than the box wraps inside it, and the wrap is a row the
 	// layout did not reserve — the input box would then hang off the bottom of
-	// the terminal. Cut instead: the tail of a hint is worth less than the frame.
+	// the terminal. Cut instead, with a "…" so the cut reads as one: the tail
+	// of a hint is worth less than the frame.
 	// Split first: a block like the answer list arrives as one multi-line entry,
 	// and cutting that as a single string would eat its newlines with it.
 	boxW := max(m.paneWidth()-4, 12)
 	out := strings.Split(strings.Join(joined, "\n"), "\n")
 	for i, line := range out {
-		if ansi.StringWidth(line) > boxW {
-			out[i] = ansi.Cut(line, 0, boxW)
-		}
+		out[i] = termtext.Fit(line, boxW)
 	}
 	return strings.Join(out, "\n")
 }

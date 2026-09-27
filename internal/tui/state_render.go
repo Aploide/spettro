@@ -3,9 +3,8 @@ package tui
 import (
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
+	"hash/maphash"
 	"image/color"
-	"io"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 
 	"spettro/internal/diff"
 	"spettro/internal/session"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -142,7 +142,7 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
 
 	var bodyParts []string
 	if len(msg.Tools) > 0 {
-		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, m.showTools, m.showFullOutput, mc))
+		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, innerW, m.showTools, m.showFullOutput, mc))
 	}
 	bodyParts = append(bodyParts, renderMarkdown(strings.TrimSpace(msg.Content), innerW))
 
@@ -247,13 +247,13 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		body := renderMarkdown(msg.Content, m.paneWidth()-8)
 		var entryLines []string
 		if len(msg.Tools) > 0 {
-			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, m.showFullOutput, mc))
+			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.transcriptWidth(), m.showTools, m.showFullOutput, mc))
 		}
 		if strings.TrimSpace(msg.Content) != "" {
 			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
 		}
 		if msg.Meta != "" {
-			entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
+			entryLines = append(entryLines, styleMuted.Render(termtext.Fit("  "+termtext.SingleLine(msg.Meta), m.transcriptWidth())))
 		}
 		return strings.Join(entryLines, "\n")
 	case RoleSystem:
@@ -272,17 +272,29 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	return ""
 }
 
+// renderKeySeed seeds messageRenderKey. The keys only ever live in this
+// process's render cache, so a per-process random seed is all that is needed.
+var renderKeySeed = maphash.MakeSeed()
+
 // messageRenderKey hashes every field that influences how a message renders.
 // Length prefixes guard against boundary collisions (e.g. "ab"+"c" vs
 // "a"+"bc"). The layout params (width/showTools/color) are NOT folded in here —
 // they scope the whole cache and invalidate it wholesale on change.
+//
+// This runs for every message on every refresh, cache hit or not, so it has
+// to stay cheap on a transcript full of huge tool calls (a file-write carries
+// the whole file). maphash hashes a string in place; the FNV hasher it
+// replaced copied every field into a new byte slice first, which made one
+// refresh of 200 such messages cost tens of milliseconds and megabytes of
+// garbage, on every streamed token.
 func messageRenderKey(msg ChatMessage) uint64 {
-	h := fnv.New64a()
+	var h maphash.Hash
+	h.SetSeed(renderKeySeed)
 	writeHashField := func(s string) {
 		var buf [8]byte
 		binary.LittleEndian.PutUint64(buf[:], uint64(len(s)))
 		_, _ = h.Write(buf[:])
-		_, _ = io.WriteString(h, s)
+		_, _ = h.WriteString(s)
 	}
 	writeHashField(string(msg.Role))
 	writeHashField(msg.Kind)
@@ -355,11 +367,18 @@ func (m *Model) renderMessages() string {
 	return strings.Join(parts, "\n\n")
 }
 
+// transcriptWidth is the width of the conversation viewport: the pane minus
+// a column of margin on each side. Anything placed in the transcript must fit
+// in it; the viewport cuts wider rows without a trace.
+func (m Model) transcriptWidth() int {
+	return max(m.paneWidth()-2, 10)
+}
+
 // eyesBanner is the static logo block that opens the scrollback. It is sized
-// to the viewport rather than the pane (recalcLayout's vpW), because that is
-// the width it is centred inside.
+// to the viewport rather than the pane, because that is the width it is
+// centred inside.
 func (m Model) eyesBanner() string {
-	return renderEyesStatic(m.mode, max(m.paneWidth()-2, 10))
+	return renderEyesStatic(m.mode, m.transcriptWidth())
 }
 
 func (m Model) recalcLayout() Model {
@@ -367,45 +386,31 @@ func (m Model) recalcLayout() Model {
 	sepH := 2
 	statusH := 1
 
-	inputH := 6
-	if len(m.attachments) > 0 {
-		inputH++
-	}
-	if m.showPlanApproval {
-		inputH += 2 + len(planApprovalOptions)
-	} else if m.pendingQuestion != nil {
-		// The form replaces the textarea and grows with the answer list, so
-		// reserve what it actually renders instead of the fixed textarea
-		// height. renderQuestionForm keeps itself inside questionBlockBudget,
-		// so this can never squeeze the conversation pane away.
-		inputH = 3 + lipgloss.Height(m.renderQuestionForm())
-	} else if m.pendingAuth != nil {
-		inputH += 2 + len(shellApprovalOptions)
-		if block := m.approvalDiffView(m.paneWidth()); block != "" {
-			inputH += lipgloss.Height(block)
-		}
-	}
-	if palette := m.viewMentionPalette(m.paneWidth()); palette != "" {
-		// Reserve what the palette actually renders (border, title, rows,
-		// hint): a fixed estimate was one row short and pushed the frame
-		// past the bottom of the terminal whenever the palette was open.
-		inputH += lipgloss.Height(palette)
-	}
+	// The input area is measured, not estimated. It holds the textarea or,
+	// in its place, the plan/steer/approval picker or the question form,
+	// plus attachment chips and the @mention palette; each of those used to
+	// have a hand-kept row estimate here, and every one of them drifted from
+	// what viewInput draws at some point (a wrapped command, a palette one
+	// row taller), pushing the frame past the bottom of the terminal. The
+	// dialogs keep themselves inside the terminal (questionBlockBudget,
+	// approvalLayout), so measuring can never squeeze the conversation away.
+	m.ta.SetWidth(m.paneWidth() - 6)
+	inputH := lipgloss.Height(m.viewInput(m.paneWidth()))
 
 	parallelH := 0
-	if m.sidePanelWidth() <= 0 {
+	if m.showsParallelFooter() {
 		if pa := m.renderParallelAgents(); pa != "" {
 			parallelH = lipgloss.Height(pa)
 		}
 	}
 
 	fixed := headerH + sepH + inputH + statusH + parallelH + m.workingIndicatorHeight()
-	contentH := max(m.height-fixed, 3)
-	vpW := max(m.paneWidth()-2, 10)
-
-	m.vp.SetWidth(vpW)
+	// At least one transcript row, even when the chrome alone fills the
+	// terminal: a larger floor would only push the frame further past the
+	// bottom edge on a tiny window.
+	contentH := max(m.height-fixed, 1)
+	m.vp.SetWidth(m.transcriptWidth())
 	m.vp.SetHeight(contentH)
-	m.ta.SetWidth(m.paneWidth() - 6)
 
 	return m
 }

@@ -12,7 +12,7 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth == nil {
 		return m, nil
 	}
-	if m.approvalCursor == 3 {
+	if m.approvalCursor == approvalInsteadOption {
 		switch msg.String() {
 		case "enter":
 			raw := strings.TrimSpace(m.ta.Value())
@@ -37,10 +37,18 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	n := len(shellApprovalOptions)
 	switch msg.String() {
 	case "ctrl+o":
-		if m.pendingAuth.request.Diff != "" {
-			m.approvalDiffExpanded = !m.approvalDiffExpanded
+		// Expand or collapse the preview (a file change's diff or a long
+		// command); the scroll position is kept and re-clamped on render.
+		if len(m.approvalPreviewLines(m.approvalContentWidth())) > 0 {
+			m.approvalPreviewExpanded = !m.approvalPreviewExpanded
 		}
 		return m, nil
+	case "pgdown":
+		lay := m.approvalLayout(m.approvalContentWidth())
+		return m.scrollApprovalPreview(max(lay.previewRows-1, 1)), nil
+	case "pgup":
+		lay := m.approvalLayout(m.approvalContentWidth())
+		return m.scrollApprovalPreview(-max(lay.previewRows-1, 1)), nil
 	case "up":
 		if m.approvalCursor > 0 {
 			m.approvalCursor--
@@ -61,7 +69,7 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.resolveShellApproval(agent.ShellApprovalDeny, "command denied")
 			m.interruptRun("Command denied by user.", true)
 			return m, nil
-		case 3:
+		case approvalInsteadOption:
 			m.ta.Reset()
 			m.showBanner("type what the agent should do instead, then press enter", "info")
 			return m, nil
@@ -83,7 +91,8 @@ func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner
 	}
 	m.pendingAuth = nil
 	m.approvalCursor = 0
-	m.approvalDiffExpanded = false
+	m.approvalPreviewExpanded = false
+	m.approvalScroll = 0
 	m.ta.Reset()
 	m.showBanner(banner, "info")
 	m.refreshViewport()
