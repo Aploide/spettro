@@ -12,7 +12,6 @@ import (
 	"spettro/internal/agent"
 	"spettro/internal/config"
 	"spettro/internal/jobs"
-	"spettro/internal/lsp"
 	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/pty"
@@ -173,19 +172,8 @@ func main() {
 	// (bubbletea v2 removed the imperative program options).
 	p := tea.NewProgram(m)
 	final, err := p.Run()
-	// Background shell jobs are detached into their own process groups, so
-	// they would outlive spettro unless killed explicitly on session exit.
-	jobs.Default().KillAll()
-	// So do foreground commands still running when the TUI quits (SIGTERM,
-	// or a quit while a tool call is in flight).
-	shell.KillAllProcessTrees()
-	// Interactive PTY sessions are session state for the same reason.
-	pty.Default().KillAll()
-	// Spooled tool outputs are session state too; delete them with the session.
-	jobs.Spool().Cleanup()
-	// Language servers hold handles on workspace files; stop them before the
-	// /update relaunch below tries to replace anything.
-	lsp.ShutdownAll()
+	// Before the /update relaunch below, which may replace files.
+	releaseSessionResources()
 	if err != nil {
 		fatal("runtime error: %v", err)
 	}
@@ -201,9 +189,11 @@ func main() {
 	}
 }
 
+// fatal reports an error and exits with status 1, releasing whatever the
+// session started first (see exitSession).
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+	exitSession(1)
 }
 
 // resolveSandboxPolicy merges CLI overrides and the project manifest into the

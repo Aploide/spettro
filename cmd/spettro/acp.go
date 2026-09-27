@@ -25,6 +25,9 @@ import (
 func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	// The editor closing the connection (or SIGTERM) ends Serve; whatever
+	// the sessions started must not outlive the agent process.
+	defer releaseSessionResources()
 
 	store, err := storage.New(cwd)
 	if err != nil {

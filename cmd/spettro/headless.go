@@ -24,6 +24,8 @@ import (
 func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	// Whatever the submissions started must not outlive the server.
+	defer releaseSessionResources()
 
 	store, err := storage.New(cwd)
 	if err != nil {
@@ -398,7 +400,7 @@ func handleHeadlessCommand(
 		return "permission: " + string(perm), "permission updated"
 
 	case "/exit", "/quit":
-		os.Exit(0)
+		exitSession(0)
 		return "", ""
 
 	default:

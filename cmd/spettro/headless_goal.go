@@ -12,11 +12,8 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/jobs"
-	"spettro/internal/lsp"
 	"spettro/internal/models"
 	"spettro/internal/provider"
-	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
 	"spettro/internal/spettro"
@@ -29,24 +26,21 @@ import (
 func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	// Kill detached background shell jobs on exit; they are in their own
-	// process groups and would otherwise outlive the run.
-	defer jobs.Default().KillAll()
-	defer pty.Default().KillAll()
-	defer jobs.Spool().Cleanup()
-	// Language servers keep workspace files open for as long as they run.
-	defer lsp.ShutdownAll()
+	// Background jobs, PTY sessions and language servers the run started
+	// must not outlive it. Every exit below goes through exitSession,
+	// because os.Exit would skip this deferred call.
+	defer releaseSessionResources()
 
 	store, err := storage.New(cwd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "storage error: %v\n", err)
-		os.Exit(1)
+		exitSession(1)
 	}
 
 	cfg, err := config.LoadFull()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
+		exitSession(1)
 	}
 
 	// Headless goal mode defaults to yolo permission for unattended operation
@@ -85,7 +79,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox error: %v\n", err)
-		os.Exit(1)
+		exitSession(1)
 	}
 	sb := agent.NewSandboxState(sandboxPolicy)
 
@@ -109,7 +103,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	spec, ok := manifest.AgentByID("coding")
 	if !ok {
 		fmt.Fprintf(os.Stderr, "coding agent not found in manifest\n")
-		os.Exit(1)
+		exitSession(1)
 	}
 
 	// Append goal-complete to allowed tools
@@ -143,7 +137,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 		select {
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "\nInterrupted\n")
-			os.Exit(1)
+			exitSession(1)
 		default:
 		}
 
@@ -201,7 +195,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			if ctx.Err() != nil {
 				// Context cancelled, exit
 				fmt.Fprintf(os.Stderr, "\nInterrupted during execution\n")
-				os.Exit(1)
+				exitSession(1)
 			}
 			// Continue to next iteration on transient errors, but count a
 			// strike so a persistently failing provider still terminates
@@ -209,7 +203,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			errorStrikes++
 			if errorStrikes >= state.NoProgressLimit {
 				fmt.Fprintf(os.Stderr, "\n✗ Goal stopped: %d consecutive iterations failed. Last error: %v\n", errorStrikes, err)
-				os.Exit(1)
+				exitSession(1)
 			}
 			fmt.Fprintf(os.Stderr, "Agent error: %v — continuing (%d/%d strikes)\n", err, errorStrikes, state.NoProgressLimit)
 			continue
@@ -231,15 +225,15 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 		case agent.GoalDecisionComplete:
 			fmt.Printf("\n✓ Goal complete: %s\n", reason)
 			fmt.Printf("Iterations: %d, Duration: %s\n", state.Iteration, time.Since(state.StartedAt).Round(time.Second))
-			os.Exit(0)
+			exitSession(0)
 
 		case agent.GoalDecisionMaxIterations:
 			fmt.Fprintf(os.Stderr, "\n✗ Goal stopped: %s (limit: %d)\n", reason, state.MaxIterations)
-			os.Exit(1)
+			exitSession(1)
 
 		case agent.GoalDecisionStalled:
 			fmt.Fprintf(os.Stderr, "\n✗ Goal stalled: %s (no progress for %d iterations)\n", reason, state.NoProgress)
-			os.Exit(1)
+			exitSession(1)
 
 		case agent.GoalDecisionContinue:
 			fmt.Printf("Continuing (no-progress: %d/%d)...\n", state.NoProgress, state.NoProgressLimit)
