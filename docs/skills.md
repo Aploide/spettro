@@ -245,7 +245,7 @@ Claude Code's `{"skill": "<name>"}` spelling, still work as hidden aliases
 | `/skill info <name>` | Metadata, bundled files, warnings and the start of the instructions. |
 | `/skill disable <name>` / `enable <name>` | Hide or show a skill everywhere. Stored in `~/.spettro/config.json` as `disabled_skills`, so nothing is written into the skill's folder. `enable` also deletes a `.spettro-disabled` file an older Spettro left in the skill's folder (in any family's folder: it is Spettro's own file). A skill whose `SKILL.md` says `disabled: true` stays off, and `enable` tells you to edit that file. |
 | `/skill where` | The discovery folders for the current directory, in priority order. |
-| `/skill reload` | Re-scan the skill folders (see below). |
+| `/skill reload` | Force a re-scan of the skill folders; changes on disk are otherwise picked up by themselves (see below). |
 
 ACP clients get `/skills` and one command per runnable skill; installing
 and managing skills is TUI-only.
