@@ -451,10 +451,12 @@ type Model struct {
 	lastRepoScanAt time.Time
 	// toolSeq is the monotonic counter handed to completed ToolItems so an
 	// async file diff can be matched back to its entry.
-	toolSeq         int
-	showSidePanel   bool
-	sessionEdits    map[string]struct{}
-	activityFeed    []activityItem
+	toolSeq       int
+	showSidePanel bool
+	sessionEdits  map[string]struct{}
+	activityFeed  []activityItem
+	// activityDropped counts feed items dropped by the maxActivityItems cap.
+	activityDropped int
 	currentRunKey   string
 	recentApprovals []session.AgentEvent
 

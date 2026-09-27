@@ -148,22 +148,114 @@ func (m Model) sidePanelListBudget(width int) int {
 	return listBudget
 }
 
-// sidePanelList renders the full activity list (agent-group headers included)
-// and returns the visible window of display lines, centered on the cursor's
-// rendered row like the model selector, plus the row→item mapping for mouse
-// clicks. Windowing over display lines — not item indices — is what keeps the
-// cursor on screen when headers make the two diverge.
+// sidePanelList returns the visible window of the activity list's display
+// lines (agent-group headers included), centered on the cursor's row like
+// the model selector, plus the row→item mapping for mouse clicks (-1 for a
+// header). Windowing over display lines — not item indices — is what keeps
+// the cursor on screen when headers make the two diverge.
+//
+// The layout pass is plain bookkeeping; only the rows in the window are
+// styled. Styling every item on every frame cost 64 ms per frame at 10k
+// items (BenchmarkSidePanelScale in the perf harness).
 func (m Model) sidePanelList(items []sidePanelItem, width, maxRows int) (visible []string, rowToItem []int) {
-	lines, rowMap, selectedRow := m.sidePanelLines(items, width)
-	if len(lines) > maxRows && maxRows > 0 {
-		start := max(selectedRow-maxRows/2, 0)
-		if start+maxRows > len(lines) {
-			start = len(lines) - maxRows
+	rowToItem, selectedRow := sidePanelRowLayout(items, m.sidePanelCursor(items))
+	start, end := 0, len(rowToItem)
+	if len(rowToItem) > maxRows && maxRows > 0 {
+		start = max(selectedRow-maxRows/2, 0)
+		if start+maxRows > len(rowToItem) {
+			start = len(rowToItem) - maxRows
 		}
-		lines = lines[start : start+maxRows]
-		rowMap = rowMap[start : start+maxRows]
+		end = start + maxRows
 	}
-	return lines, rowMap
+	rowToItem = rowToItem[start:end]
+	return m.sidePanelStyledRows(items, rowToItem, width), rowToItem
+}
+
+// sidePanelRowLayout lays the activity list out as display rows: a header
+// row (-1) whenever the agent changes, then one row per item. It returns the
+// row→item mapping and the row of the item at cursor.
+func sidePanelRowLayout(items []sidePanelItem, cursor int) ([]int, int) {
+	rowToItem := make([]int, 0, len(items)+4)
+	selectedRow := 0
+	prevAgent := ""
+	for idx, it := range items {
+		if agent := activityAgentLabel(it.Agent); agent != prevAgent {
+			rowToItem = append(rowToItem, -1)
+			prevAgent = agent
+		}
+		if idx == cursor {
+			selectedRow = len(rowToItem)
+		}
+		rowToItem = append(rowToItem, idx)
+	}
+	return rowToItem, selectedRow
+}
+
+// sidePanelStyledRows renders the rows of a sidePanelRowLayout window. A
+// header row (-1) names the agent of the item on the row below it.
+func (m Model) sidePanelStyledRows(items []sidePanelItem, rowToItem []int, width int) []string {
+	cursor := m.sidePanelCursor(items)
+	// A row is the 4-cell cursor prefix plus up to rowBudget cells of
+	// "└ title detail", which has to fit the room inside the panel frame.
+	rowBudget := max(12, sidePanelContentWidth(width)-4)
+	pal := theme.Current()
+	lines := make([]string, 0, len(rowToItem))
+	for r, idx := range rowToItem {
+		if idx < 0 {
+			agent := ""
+			if r+1 < len(rowToItem) && rowToItem[r+1] >= 0 {
+				agent = activityAgentLabel(items[rowToItem[r+1]].Agent)
+			}
+			header := lipgloss.NewStyle().Foreground(pal.TextMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
+			lines = append(lines, header)
+			continue
+		}
+		lines = append(lines, m.sidePanelItemRow(items[idx], idx == cursor, rowBudget))
+	}
+	return lines
+}
+
+// sidePanelItemRow renders one activity row: the cursor mark, the title and
+// the status-coloured detail, cut to rowBudget cells after the prefix.
+func (m Model) sidePanelItemRow(it sidePanelItem, selected bool, rowBudget int) string {
+	pal := theme.Current()
+	prefix := "    "
+	titleStyle := lipgloss.NewStyle().Foreground(pal.TextMuted)
+	if selected {
+		prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("›   ")
+		titleStyle = lipgloss.NewStyle().Foreground(pal.Text).Bold(true)
+	}
+	detailColor := pal.TextDim
+	switch it.Status {
+	case "running":
+		detailColor = m.currentColor()
+	case "error", "failed":
+		detailColor = pal.Error
+	case "changed":
+		detailColor = pal.SuccessBright
+	default:
+		if it.Kind == "file" {
+			detailColor = pal.SuccessBright
+		}
+		if it.Kind == "command" {
+			detailColor = pal.Info
+		}
+	}
+	// Titles and details carry tool arguments (a command, a path) and are
+	// folded onto the row as plain text: see termtext.SingleLine.
+	titleRaw := termtext.SingleLine(it.Title)
+	detailRaw := termtext.SingleLine(it.Detail)
+	labelBudget := max(4, rowBudget-3)
+	label := truncateLabel(titleRaw, labelBudget)
+	row := prefix + "└ " + titleStyle.Render(label)
+	if detailRaw != "" {
+		baseWidth := lipgloss.Width("└ "+label) + 1
+		if detailBudget := rowBudget - baseWidth; detailBudget > 0 {
+			detail := lipgloss.NewStyle().Foreground(detailColor).Render(truncateLabel(detailRaw, detailBudget))
+			row += " " + detail
+		}
+	}
+	return row
 }
 
 // swarmSpecID strips the per-instance suffix from a swarm member name
@@ -243,71 +335,6 @@ func activityAgentLabel(agent string) string {
 		return "session"
 	}
 	return agent
-}
-
-// sidePanelLines renders every item as display lines with agent-group
-// headers, returning the row→item mapping (-1 for headers) and the rendered
-// row index of the cursor.
-func (m Model) sidePanelLines(items []sidePanelItem, width int) ([]string, []int, int) {
-	cursor := m.sidePanelCursor(items)
-	lines := make([]string, 0, len(items)+4)
-	rowToItem := make([]int, 0, len(items)+4)
-	selectedRow := 0
-	// A row is the 4-cell cursor prefix plus up to rowBudget cells of
-	// "└ title detail", which has to fit the room inside the panel frame.
-	rowBudget := max(12, sidePanelContentWidth(width)-4)
-	prevAgent := ""
-	pal := theme.Current()
-	for idx, it := range items {
-		agent := activityAgentLabel(it.Agent)
-		if agent != prevAgent {
-			header := lipgloss.NewStyle().Foreground(pal.TextMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
-			lines = append(lines, header)
-			rowToItem = append(rowToItem, -1)
-			prevAgent = agent
-		}
-		prefix := "    "
-		titleStyle := lipgloss.NewStyle().Foreground(pal.TextMuted)
-		if idx == cursor {
-			selectedRow = len(lines)
-			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("›   ")
-			titleStyle = lipgloss.NewStyle().Foreground(pal.Text).Bold(true)
-		}
-		detailColor := pal.TextDim
-		switch it.Status {
-		case "running":
-			detailColor = m.currentColor()
-		case "error", "failed":
-			detailColor = pal.Error
-		case "changed":
-			detailColor = pal.SuccessBright
-		default:
-			if it.Kind == "file" {
-				detailColor = pal.SuccessBright
-			}
-			if it.Kind == "command" {
-				detailColor = pal.Info
-			}
-		}
-		// Titles and details carry tool arguments (a command, a path) and
-		// are folded onto the row as plain text: see termtext.SingleLine.
-		titleRaw := termtext.SingleLine(it.Title)
-		detailRaw := termtext.SingleLine(it.Detail)
-		labelBudget := max(4, rowBudget-3)
-		label := truncateLabel(titleRaw, labelBudget)
-		row := prefix + "└ " + titleStyle.Render(label)
-		if detailRaw != "" {
-			baseWidth := lipgloss.Width("└ "+label) + 1
-			detailBudget := rowBudget - baseWidth
-			if detailBudget > 0 {
-				detail := lipgloss.NewStyle().Foreground(detailColor).Render(truncateLabel(detailRaw, detailBudget))
-				row += " " + detail
-			}
-		}
-		lines = append(lines, row)
-		rowToItem = append(rowToItem, idx)
-	}
-	return lines, rowToItem, selectedRow
 }
 
 func clampLines(s string, maxLines int) string {
@@ -464,6 +491,9 @@ func (m Model) sidePanelHeaderParts(width int) []string {
 		subtitle = "Workflow · phase-by-phase progress"
 	case m.cfg.UltraActive():
 		subtitle = "Ultra swarm · per-agent activity"
+	}
+	if m.activityDropped > 0 {
+		subtitle += fmt.Sprintf(" · %d earlier dropped", m.activityDropped)
 	}
 	parts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
