@@ -39,7 +39,10 @@ through a symlink is refused too.
 `.spettro`, `vendor`, `node_modules`, `dist` and `build` are skipped below the
 search root, and every `.gitignore` from the filesystem root down applies
 with git's rules (a nested file overrides its parent, the last matching rule
-wins, `!` re-includes, an ignored directory hides everything in it).
+wins, `!` re-includes, an ignored directory hides everything in it). Rules
+match case-sensitively, as git does with `core.ignorecase=false` (git on
+macOS and Windows defaults to `true`, so there a rule `Build/` would also
+hide `build/` for git but not for these tools).
 Symlinked directories are not followed; `glob` lists symlinks to files,
 `grep` skips them unless named as `path`.
 
@@ -62,7 +65,10 @@ itself stays sorted, and the footer says the result was truncated).
 
 `glob` starts its walk at the directory prefix its pattern names
 (`internal/agent/**/*.go` reads only `internal/agent`), so a narrow pattern
-is fast on any tree size.
+is fast on any tree size. The prefix must name the directories exactly as
+they are spelled on disk, also on a case-insensitive filesystem. With
+`path` naming a file, the pattern is matched against the file's name and
+its workspace path (`*` and `*.go` both list `sub/b.go`).
 
 ## Deferred tools
 
