@@ -42,7 +42,10 @@ project-specific hash combined with a timestamp:
 Session tasks form a persistent dependency graph, not just a flat list. The
 agent manages it with the `todo-write` tool (the retired `task-create`,
 `task-update`, `task-get`, `task-list` and `task-delete` names still work as
-aliases of it):
+aliases of it). The tool's description tells the model to use it only for
+genuinely multi-step work and never as the only call in a step: a step spent
+on the list alone does not advance the task. It is advertised in every host,
+headless goal runs included; ACP clients show the list as the session plan.
 
 - `todos` replaces the whole list; with `merge: true` it inserts or updates
   only the given tasks by `id`, and fields left out keep their stored value.

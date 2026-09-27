@@ -191,6 +191,60 @@ func TestCodingPromptReadsNarrowly(t *testing.T) {
 	}
 }
 
+// TestCodingPromptVerificationScope: the round-5 bench showed extra steps
+// spent on checks the project never set up (tsc in repos without a tsconfig,
+// which always failed on missing types) and on new tests for areas nothing
+// tested yet. The prompt must scope verification to the project's own checks
+// and add tests where the project already tests the area or the task asks.
+func TestCodingPromptVerificationScope(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	for _, needle := range []string{
+		"the checks the project itself configures",
+		"Don't invent checks it doesn't set up",
+		"where the project already tests that area",
+		"or when the task asks for them",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("coding prompt missing %q", needle)
+		}
+	}
+	for _, banned := range []string{"(and the project's linters or type-checkers)", "in a project that has tests, add or update tests"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("coding prompt still carries %q", banned)
+		}
+	}
+}
+
+// TestTodoWriteIsNeverAStandaloneStep: the round-5 bench counted 55 Kimi
+// steps whose only call was todo-write. Both the coding prompt and the tool
+// description must say to skip it for small tasks and never call it alone,
+// and the description must not invite it for any work "of 3+ steps".
+func TestTodoWriteIsNeverAStandaloneStep(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	for _, needle := range []string{"only for genuinely multi-step work", "skip it for small tasks", "Never spend a step on it alone"} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("coding prompt missing %q", needle)
+		}
+	}
+	desc := builtinNativeToolDescs["todo-write"]
+	for _, needle := range []string{"only for genuinely multi-step work", "skip it for small tasks", "never make it the only call in a step", "together with real tool calls"} {
+		if !strings.Contains(desc, needle) {
+			t.Errorf("todo-write description missing %q", needle)
+		}
+	}
+	if strings.Contains(desc, "3+ steps") {
+		t.Error("todo-write description still invites it for any work of 3+ steps")
+	}
+}
+
 // TestCodingPromptFinalAnswerIsShort keeps the report guidance brief: a few
 // lines covering change, verification and caveats.
 func TestCodingPromptFinalAnswerIsShort(t *testing.T) {

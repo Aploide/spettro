@@ -36,6 +36,12 @@ var coreTools = map[string]bool{
 	"file-write": true,
 	"file-edit":  true,
 	"bash":       true,
+	// todo-write stays core in every host, headless goal runs included. The
+	// round-5 bench found its cost in standalone steps (a step whose only
+	// call was todo-write), which its description now forbids; deferring it
+	// would not remove those steps, the coding prompt names it (so it would
+	// be advertised anyway, see buildToolSurface), and ACP clients show the
+	// list as the session plan.
 	"todo-write": true,
 	"web-fetch":  true,
 	"lsp":        true,
