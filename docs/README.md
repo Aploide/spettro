@@ -8,6 +8,7 @@
 - [Windows notes](windows.md) — install, shell dialect, sandbox and PTY differences
 - [Interactive PTY sessions](pty.md) — pty-start/pty-write/pty-kill: the agent drives REPLs, debuggers, ssh through a real terminal
 - [Architecture overview](architecture.md)
+- [Performance](performance.md) — measured start-up, CPU, memory and tool timings, how to reproduce them, targets not met
 - [Session Lifecycle](session.md) — auto-save, resume, compact, clear, auto-compact
 - [Goal Mode](goal.md) — autonomous `/goal` runs
 - [Agent Skills](skills.md)
