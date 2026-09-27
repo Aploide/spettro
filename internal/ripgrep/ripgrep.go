@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,7 +32,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"spettro/internal/config"
@@ -85,7 +85,9 @@ const (
 // Concurrency: every method may be called from any goroutine; mu guards the
 // state, and the download runs on a goroutine of its own.
 type Installer struct {
-	// BinDir is where rg is installed (~/.spettro/bin).
+	// BinDir is where rg is installed. Empty means ~/.spettro/bin, resolved
+	// on first use (not at package initialisation, so a test binary that
+	// moves HOME in TestMain never sees the real home).
 	BinDir string
 	// BaseURL is the release download URL without the version.
 	BaseURL string
@@ -96,45 +98,60 @@ type Installer struct {
 	// Client makes the download request.
 	Client *http.Client
 	// Enabled reports whether a download may start (the config opt-out).
+	// It is asked at most once per process: the answer, either way, stands
+	// until the next process (a user who opted out does not pay a config
+	// read on every grep).
 	Enabled func() bool
 
 	pathOnce sync.Once
 	onPath   string
 
 	mu        sync.Mutex
+	binDir    string        // BinDir, or the resolved default
 	managed   string        // installed binary, once verified present
-	started   bool          // a download was started in this process
+	started   bool          // a download was started, or declined, in this process
 	done      chan struct{} // closed when that download ends
 	lastError error         // why it failed, for diagnostics
 }
 
 // Default is the installer the grep tool uses: ~/.spettro/bin, the pinned
 // release, and the config.json opt-out. Under `go test` it never downloads.
-var Default = newDefault()
-
-func newDefault() *Installer {
-	binDir := ""
-	if home, err := homedir.Dir(); err == nil {
-		binDir = filepath.Join(home, ".spettro", "bin")
-	}
-	return &Installer{
-		BinDir:   binDir,
-		BaseURL:  releaseURL,
-		Assets:   assets,
-		Platform: runtime.GOOS + "/" + runtime.GOARCH,
-		Client:   &http.Client{Timeout: downloadTimeout},
-		Enabled:  downloadEnabled,
-	}
+var Default = &Installer{
+	BaseURL:  releaseURL,
+	Assets:   assets,
+	Platform: runtime.GOOS + "/" + runtime.GOARCH,
+	Client:   &http.Client{Timeout: downloadTimeout},
+	Enabled:  downloadEnabled,
 }
 
 // downloadEnabled is the default opt-out check: config.json's
 // ripgrep_download_disabled, and never inside a test binary.
 func downloadEnabled() bool {
-	if testing.Testing() {
+	if inTestBinary() {
 		return false
 	}
 	cfg, err := config.Load()
 	return err == nil && !cfg.RipgrepDownloadDisabled
+}
+
+// inTestBinary reports whether this process is a `go test` binary, which
+// registers the test.v flag before any test runs. It avoids importing the
+// testing package, which testing.Testing() would link into the release
+// binary (+154 KB).
+func inTestBinary() bool { return flag.Lookup("test.v") != nil }
+
+// dirLocked returns BinDir, resolving the default ~/.spettro/bin once; ""
+// when there is no home directory. Callers hold mu.
+func (in *Installer) dirLocked() string {
+	if in.binDir == "" {
+		in.binDir = in.BinDir
+		if in.binDir == "" {
+			if home, err := homedir.Dir(); err == nil {
+				in.binDir = filepath.Join(home, ".spettro", "bin")
+			}
+		}
+	}
+	return in.binDir
 }
 
 // binaryName is rg's file name on the platform.
@@ -146,7 +163,8 @@ func (in *Installer) binaryName() string {
 }
 
 // markerPath records which release the installed binary came from.
-func (in *Installer) markerPath() string { return filepath.Join(in.BinDir, "rg.version") }
+// Callers hold mu.
+func (in *Installer) markerPathLocked() string { return filepath.Join(in.dirLocked(), "rg.version") }
 
 // Path returns the rg to run: the one on PATH, else the downloaded one when
 // it is installed. It never starts a download (see EnsureDownload).
@@ -157,8 +175,8 @@ func (in *Installer) Path() (string, bool) {
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	if in.managed == "" && in.BinDir != "" && in.installedLocked() {
-		in.managed = filepath.Join(in.BinDir, in.binaryName())
+	if in.managed == "" && in.dirLocked() != "" && in.installedLocked() {
+		in.managed = filepath.Join(in.dirLocked(), in.binaryName())
 	}
 	return in.managed, in.managed != ""
 }
@@ -170,11 +188,11 @@ func (in *Installer) installedLocked() bool {
 	if !ok {
 		return false
 	}
-	marker, err := os.ReadFile(in.markerPath())
+	marker, err := os.ReadFile(in.markerPathLocked())
 	if err != nil || strings.TrimSpace(string(marker)) != markerText(asset) {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(in.BinDir, in.binaryName()))
+	info, err := os.Stat(filepath.Join(in.dirLocked(), in.binaryName()))
 	return err == nil && info.Mode().IsRegular()
 }
 
@@ -183,25 +201,26 @@ func markerText(a Asset) string { return Version + " " + a.Name + " " + a.SHA256
 // EnsureDownload starts the background download when rg is neither on PATH
 // nor installed, the platform has a pinned asset and the download is
 // enabled. It returns at once; at most one download runs per Installer and
-// process, and a failed one is not retried.
+// process, a failed one is not retried, and a declined one (opted out) is
+// not reconsidered.
 func (in *Installer) EnsureDownload() {
 	if _, ok := in.Path(); ok {
 		return
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	if in.started || in.BinDir == "" {
+	if in.started || in.dirLocked() == "" {
 		return
 	}
 	if _, ok := in.Assets[in.Platform]; !ok {
 		return
 	}
+	in.started = true
 	if in.Enabled != nil && !in.Enabled() {
 		return
 	}
-	in.started = true
 	in.done = make(chan struct{})
-	go in.download()
+	go in.download(in.dirLocked())
 }
 
 // Wait blocks until a started download ends or ctx is done, and returns the
@@ -224,42 +243,42 @@ func (in *Installer) Wait(ctx context.Context) error {
 	return in.lastError
 }
 
-// download fetches, verifies and installs the pinned archive.
-func (in *Installer) download() {
-	err := in.install()
+// download fetches, verifies and installs the pinned archive into dir.
+func (in *Installer) download(dir string) {
+	err := in.install(dir)
 	in.mu.Lock()
 	in.lastError = err
 	if err == nil {
-		in.managed = filepath.Join(in.BinDir, in.binaryName())
+		in.managed = filepath.Join(dir, in.binaryName())
 	}
 	close(in.done)
 	in.mu.Unlock()
 }
 
-func (in *Installer) install() error {
+func (in *Installer) install(dir string) error {
 	asset := in.Assets[in.Platform]
-	if err := os.MkdirAll(in.BinDir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	archive, err := in.fetch(asset)
+	archive, err := in.fetch(dir, asset)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(archive)
-	tmpBin, err := in.extract(archive, asset.Name)
+	tmpBin, err := in.extract(dir, archive, asset.Name)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmpBin) // gone after the rename; cleans up a failure
-	if err := safeio.Replace(tmpBin, filepath.Join(in.BinDir, in.binaryName())); err != nil {
+	if err := safeio.Replace(tmpBin, filepath.Join(dir, in.binaryName())); err != nil {
 		return err
 	}
-	return os.WriteFile(in.markerPath(), []byte(markerText(asset)+"\n"), 0o644)
+	return os.WriteFile(filepath.Join(dir, "rg.version"), []byte(markerText(asset)+"\n"), 0o644)
 }
 
-// fetch downloads the archive into BinDir and verifies its checksum,
+// fetch downloads the archive into dir and verifies its checksum,
 // returning the temporary file's path.
-func (in *Installer) fetch(asset Asset) (string, error) {
+func (in *Installer) fetch(dir string, asset Asset) (string, error) {
 	url := strings.TrimSuffix(in.BaseURL, "/") + "/" + Version + "/" + asset.Name
 	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
 	defer cancel()
@@ -279,7 +298,7 @@ func (in *Installer) fetch(asset Asset) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download %s: %s", asset.Name, resp.Status)
 	}
-	f, err := os.CreateTemp(in.BinDir, ".rg-download-*")
+	f, err := os.CreateTemp(dir, ".rg-download-*")
 	if err != nil {
 		return "", err
 	}
@@ -303,9 +322,9 @@ func (in *Installer) fetch(asset Asset) (string, error) {
 }
 
 // extract copies the rg binary out of the archive into an executable
-// temporary file in BinDir.
-func (in *Installer) extract(archive, name string) (string, error) {
-	out, err := os.CreateTemp(in.BinDir, ".rg-*")
+// temporary file in dir.
+func (in *Installer) extract(dir, archive, name string) (string, error) {
+	out, err := os.CreateTemp(dir, ".rg-*")
 	if err != nil {
 		return "", err
 	}

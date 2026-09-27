@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -208,10 +209,16 @@ func TestDownloadRespectsOptOutAndPlatform(t *testing.T) {
 	name := "ripgrep-" + Version + "-test.tar.gz"
 	archive := tarGz(t, map[string]string{"ripgrep-" + Version + "-test/rg": "x"})
 	in, rel := newTestInstaller(t, "linux/amd64", name, archive, sum(archive))
-	in.Enabled = func() bool { return false }
-	in.EnsureDownload()
+	asked := 0
+	in.Enabled = func() bool { asked++; return false }
+	for range 3 {
+		in.EnsureDownload()
+	}
 	if err := waitDownload(t, in); err != nil || rel.requests.Load() != 0 {
 		t.Fatalf("opted out, yet requests=%d err=%v", rel.requests.Load(), err)
+	}
+	if asked != 1 {
+		t.Fatalf("the opt-out was read %d times, want once per process", asked)
 	}
 
 	in2, rel2 := newTestInstaller(t, "plan9/amd64", name, archive, sum(archive))
@@ -273,7 +280,7 @@ func TestStaleVersionIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(in.BinDir, "rg"), []byte("old"), 0o755)
-	_ = os.WriteFile(in.markerPath(), []byte("14.1.1 old.tar.gz abc\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(in.BinDir, "rg.version"), []byte("14.1.1 old.tar.gz abc\n"), 0o644)
 	if _, ok := in.Path(); ok {
 		t.Fatal("a stale install was used")
 	}
@@ -289,8 +296,36 @@ func TestStaleVersionIsReplaced(t *testing.T) {
 // The default installer never downloads inside a test binary, whatever the
 // config says: agent tests that fall back to the Go grep must not fetch.
 func TestDefaultNeverDownloadsUnderTest(t *testing.T) {
-	if downloadEnabled() {
+	if !inTestBinary() || downloadEnabled() {
 		t.Fatal("downloads enabled under go test")
+	}
+}
+
+// The default install directory is resolved from HOME when first needed,
+// not when the package is initialised (before TestMain moved HOME).
+func TestDefaultBinDirFollowsHome(t *testing.T) {
+	in := &Installer{Assets: assets, Platform: "linux/amd64"}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	in.mu.Lock()
+	dir := in.dirLocked()
+	in.mu.Unlock()
+	if want := filepath.Join(home, ".spettro", "bin"); dir != want {
+		t.Fatalf("bin dir %q, want %q", dir, want)
+	}
+}
+
+// The release binary must not link the testing package (inTestBinary
+// exists to avoid testing.Testing()).
+func TestPackageDoesNotImportTesting(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", "spettro/internal/ripgrep").Output()
+	if err != nil {
+		t.Skip("go list unavailable:", err)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if dep == "testing" {
+			t.Fatal("internal/ripgrep depends on the testing package")
+		}
 	}
 }
 

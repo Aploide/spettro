@@ -99,7 +99,7 @@ macOS).
 
 | `config.json` key | Default | Meaning |
 | --- | --- | --- |
-| `ripgrep_download_disabled` | `false` | Set `true` to never download ripgrep into `~/.spettro/bin`; `grep` then uses rg only when it is on PATH and its built-in Go search otherwise. See [Search tools](tools.md#search-tools). |
+| `ripgrep_download_disabled` | `false` | Set `true` to never download ripgrep into `~/.spettro/bin`; `grep` then uses rg only when it is on PATH and its built-in Go search otherwise. Read once per process (at the first `grep` without rg), so a change applies from the next start. See [Search tools](tools.md#search-tools). |
 
 ## Agent Skills
 
