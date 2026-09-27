@@ -30,6 +30,42 @@ type bootstrap struct {
 	sandboxPolicy sandbox.Policy
 	cfg           config.UserConfig
 	providers     *provider.Manager
+	// modelsChanged is signalled after the background catalog refresh
+	// changed the provider manager's catalog (see modelsChangedSignal).
+	modelsChanged modelsChangedSignal
+}
+
+// modelsChangedSignal tells a front-end that a background goroutine changed
+// the provider manager's model lists, so it can redraw what shows them (the
+// TUI waits on it through tui.WithModelUpdates; the other front-ends read the
+// manager when they need it and ignore it).
+//
+// Ordering guarantee: a sender applies its change to the provider manager
+// before it signals. The channel holds one pending signal; a signal sent
+// while one is pending is dropped, which loses nothing, because the pending
+// signal has not been received yet and the receiver reads the manager, with
+// every change applied so far, only after receiving it.
+type modelsChangedSignal chan struct{}
+
+// newModelsChangedSignal returns an empty signal with room for one pending
+// notification.
+func newModelsChangedSignal() modelsChangedSignal { return make(chan struct{}, 1) }
+
+// notify records a change without ever blocking the sender.
+func (s modelsChangedSignal) notify() {
+	select {
+	case s <- struct{}{}:
+	default: // one is already pending; see the type comment
+	}
+}
+
+// discard drops a pending signal. Used once the front-end has not been built
+// yet, so it will read the manager's current lists anyway.
+func (s modelsChangedSignal) discard() {
+	select {
+	case <-s:
+	default:
+	}
 }
 
 // bootstrapSession runs the startup steps the front-ends share, in the order
@@ -68,13 +104,23 @@ func bootstrapSession(cwd string, overrides sandbox.Overrides) (*bootstrap, erro
 	pm.SetStreamAll(true)
 	pm.SetWireMode(cfg.ProviderWire)
 	pm.SetAPIKeys(cfg.APIKeys)
-	models.LoadAndRefresh(pm.SetCatalog)
+	modelsChanged := newModelsChangedSignal()
+	models.LoadAndRefresh(func(cat models.Catalog) {
+		pm.SetCatalog(cat)
+		modelsChanged.notify()
+	})
+	// The catalog LoadAndRefresh applied before returning is what every
+	// front-end starts with; only later changes need announcing. Dropping a
+	// signal the background refresh raised meanwhile is safe too: its catalog
+	// is already in the manager, which no front-end has read yet.
+	modelsChanged.discard()
 	return &bootstrap{
 		store:         store,
 		manifest:      manifest,
 		sandboxPolicy: policy,
 		cfg:           cfg,
 		providers:     pm,
+		modelsChanged: modelsChanged,
 	}, nil
 }
 
@@ -127,8 +173,12 @@ type modelDiscovery struct {
 // immediately (no network), so inference with a subscription model resolves
 // before its model list arrives. It must be called before the front-end can
 // change the provider manager's model lists, since it reads their change
-// counts as the baseline.
-func startModelDiscovery(ctx context.Context, cfg config.UserConfig, pm *provider.Manager, discoverSubscription bool) *modelDiscovery {
+// counts as the baseline. notify, when not nil, is called after each change
+// discovery applies to the manager (the TUI passes its modelsChangedSignal).
+func startModelDiscovery(ctx context.Context, cfg config.UserConfig, pm *provider.Manager, discoverSubscription bool, notify func()) *modelDiscovery {
+	if notify == nil {
+		notify = func() {}
+	}
 	d := &modelDiscovery{done: make(chan struct{})}
 	subscriptionKey := strings.TrimSpace(cfg.APIKeys[spettro.ProviderID])
 	discoverSubscription = discoverSubscription && subscriptionKey != ""
@@ -157,21 +207,31 @@ func startModelDiscovery(ctx context.Context, cfg config.UserConfig, pm *provide
 				}
 				if gen, ok := pm.AddLocalModelsIfUnchanged(localModels, startGen[i]); ok {
 					applied[i], appliedGen[i] = localModels, gen
+					notify()
 				}
 			})
 		}
 		if discoverSubscription {
 			wg.Go(func() {
 				if infos, err := spettro.ListModels(ctx, subscriptionKey); err == nil {
-					pm.SetSpettroIfUnchanged(spettro.InferenceBaseURL(), spettro.ProviderModels(infos), subscriptionGen)
+					if pm.SetSpettroIfUnchanged(spettro.InferenceBaseURL(), spettro.ProviderModels(infos), subscriptionGen) {
+						notify()
+					}
 				}
 			})
 		}
 		wg.Wait()
+		reapplied := 0
 		for i, localModels := range applied {
 			if localModels != nil {
-				pm.AddLocalModelsIfUnchanged(localModels, appliedGen[i])
+				if _, ok := pm.AddLocalModelsIfUnchanged(localModels, appliedGen[i]); ok {
+					reapplied++
+				}
 			}
+		}
+		// A single endpoint cannot change places; two or more may have.
+		if reapplied > 1 {
+			notify()
 		}
 	}()
 	return d

@@ -121,9 +121,11 @@ func main() {
 	if err != nil {
 		fatal("%v", err)
 	}
-	// Local endpoints answer in the background; the TUI reads the provider
-	// manager on every frame, so their models show up as they arrive.
-	discovery := startModelDiscovery(context.Background(), boot.cfg, boot.providers, false)
+	// Local endpoints answer in the background. Each answer, and each
+	// catalog the background refresh applies, signals boot.modelsChanged,
+	// which the TUI waits on (tui.WithModelUpdates) to redraw the model
+	// lists and the header.
+	discovery := startModelDiscovery(context.Background(), boot.cfg, boot.providers, false, boot.modelsChanged.notify)
 	// tui.New replaces a configured model that cannot run with the best
 	// connected one and saves that choice. When only a local endpoint can
 	// supply it, give the probes a bounded chance to answer first, or the
@@ -133,7 +135,9 @@ func main() {
 	}
 	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
-	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb, tui.WithManifest(boot.manifest))
+	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb,
+		tui.WithManifest(boot.manifest),
+		tui.WithModelUpdates(boot.modelsChanged))
 
 	// Alt screen and mouse mode are declared on the tea.View in Model.View
 	// (bubbletea v2 removed the imperative program options).

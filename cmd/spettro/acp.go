@@ -28,7 +28,7 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	// initialize must not wait for the network: local endpoints and the
 	// subscription model list load in the background, and the bridge waits
 	// for them (bounded) only where it reports a model list.
-	discovery := startModelDiscovery(ctx, boot.cfg, boot.providers, true)
+	discovery := startModelDiscovery(ctx, boot.cfg, boot.providers, true, nil)
 	cfg := boot.cfg
 	resolveActiveModel(&cfg, boot.providers)
 

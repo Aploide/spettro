@@ -615,6 +615,10 @@ type Model struct {
 	// into it so the restart is seamless.
 	relaunchBinary string
 
+	// modelUpdates is the host's model-change signal (WithModelUpdates);
+	// nil when the host sends none.
+	modelUpdates <-chan struct{}
+
 	// startupCmds are tea.Cmds that need to fire on Init. Populated by
 	// New() when initial state requires background work (e.g. autostarting
 	// the Telegram relay) before the first tea event is processed.
@@ -770,6 +774,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		},
 		searcher:     agent.NewRepoSearcher(cwd),
 		sandboxState: sb,
+		modelUpdates: options.modelUpdates,
 		historyIndex: -1,
 		tickArmed:    true, // Init sends the first tick
 		themeAuto:    wanted == theme.AutoKind,
@@ -777,6 +782,9 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
 	m.livePerm.set(cfg.Permission)
+	if m.modelUpdates != nil {
+		m.startupCmds = append(m.startupCmds, waitForModelsChanged(m.modelUpdates))
+	}
 	m.customCommands, _ = commands.Discover(cwd)
 	// The side panel's git state is read in the background (see
 	// refreshModifiedFiles); the first frame no longer waits for git.

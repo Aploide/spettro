@@ -11,6 +11,8 @@ type newOptions struct {
 	// manifest is the project's agent manifest, when the host loaded it.
 	manifest    config.AgentManifest
 	hasManifest bool
+	// modelUpdates is the host's model-change signal (WithModelUpdates).
+	modelUpdates <-chan struct{}
 }
 
 // WithManifest hands New the project's agent manifest, as
@@ -24,6 +26,20 @@ func WithManifest(m config.AgentManifest) Option {
 		o.manifest = m
 		o.hasManifest = true
 	}
+}
+
+// WithModelUpdates hands New a channel the host signals after a background
+// source (the catalog refresh, a local endpoint probe) has changed the
+// provider manager's model lists. The TUI waits on it and redraws what shows
+// models (see modelsChangedMsg).
+//
+// The host must apply each change to the provider manager before it signals,
+// and should signal without blocking into a channel with a buffer of one:
+// a signal sent while one is still pending can be dropped, because the
+// pending one already makes the TUI read the manager, which by then holds
+// both changes.
+func WithModelUpdates(updates <-chan struct{}) Option {
+	return func(o *newOptions) { o.modelUpdates = updates }
 }
 
 // collectOptions applies opts in order; a later option overrides an earlier

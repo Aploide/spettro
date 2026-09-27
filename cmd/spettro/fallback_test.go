@@ -35,7 +35,7 @@ func TestFallbackNeedsDiscovery(t *testing.T) {
 	// discovery moved to the background.
 	cfg := cases[3].cfg
 	pm := provider.NewManager()
-	d := startModelDiscovery(context.Background(), cfg, pm, false)
+	d := startModelDiscovery(context.Background(), cfg, pm, false, nil)
 	if fallbackNeedsDiscovery(cfg, pm) {
 		d.Wait(sessionModelsWait)
 	}

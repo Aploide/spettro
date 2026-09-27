@@ -43,7 +43,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	// A goal run starts working at once and needs the full model list (the
 	// context window of a local or subscription model), so it waits for the
 	// discovery; each request is bounded by its own client timeout.
-	<-startModelDiscovery(ctx, cfg, pm, true).Done()
+	<-startModelDiscovery(ctx, cfg, pm, true, nil).Done()
 	resolveActiveModel(&cfg, pm)
 	sb := agent.NewSandboxState(boot.sandboxPolicy)
 

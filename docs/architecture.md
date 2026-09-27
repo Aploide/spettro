@@ -7,6 +7,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 - `cmd/spettro/main.go` initializes config, encrypted keys, provider manager, model catalog, manifest validation, and TUI.
 - `internal/tui` is the active runtime: command dispatch, dialogs, rendering, approval flows, and agent execution.
 - Project manifest loading is handled by `internal/config` (`LoadAgentManifestForProject`). Every front-end loads it once, in `bootstrapSession` (`cmd/spettro/bootstrap.go`); the TUI host hands that copy to `tui.New` with `tui.WithManifest`, so the file is not parsed twice before the first frame.
+- Model lists that need the network (local endpoint probes, the Spettro Subscription list, the catalog refresh) arrive in the background (`startModelDiscovery`, `models.LoadAndRefresh`). Each change is applied to the provider manager first and then signalled on a one-slot channel (`modelsChangedSignal`); the TUI waits on it (`tui.WithModelUpdates`) and refreshes an open `/models` selector or onboarding picker, keeping the cursor on its model, and redraws the header. The idle TUI runs no timer, so without the signal a model that arrived in the background would appear only after the next keystroke.
 
 ## Core packages
 

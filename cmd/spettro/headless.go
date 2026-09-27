@@ -31,7 +31,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 	// The server reports ready without waiting for the network; the first
 	// submission waits (bounded) for local endpoints and the subscription
 	// model list instead.
-	discovery := startModelDiscovery(ctx, boot.cfg, pm, true)
+	discovery := startModelDiscovery(ctx, boot.cfg, pm, true, nil)
 	cfg := boot.cfg
 	resolveActiveModel(&cfg, pm)
 

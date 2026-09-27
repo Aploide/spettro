@@ -42,7 +42,7 @@ func TestModelDiscoveryKeepsConfigOrder(t *testing.T) {
 	pm := provider.NewManager()
 
 	start := time.Now()
-	d := startModelDiscovery(context.Background(), cfg, pm, false)
+	d := startModelDiscovery(context.Background(), cfg, pm, false, nil)
 	if time.Since(start) > 50*time.Millisecond {
 		t.Fatal("startModelDiscovery blocked on the network")
 	}
@@ -59,7 +59,7 @@ func TestModelDiscoveryKeepsConfigOrder(t *testing.T) {
 func TestModelDiscoveryWaitIsBounded(t *testing.T) {
 	hung := fakeModelsServer(t, "never", 500*time.Millisecond)
 	cfg := config.UserConfig{LocalEndpoints: []string{hung}, APIKeys: map[string]string{}}
-	d := startModelDiscovery(context.Background(), cfg, provider.NewManager(), false)
+	d := startModelDiscovery(context.Background(), cfg, provider.NewManager(), false, nil)
 	start := time.Now()
 	if d.Wait(50 * time.Millisecond) {
 		t.Fatal("Wait reported a hung probe as finished")
@@ -78,7 +78,7 @@ func TestModelDiscoveryDoesNotUndoRemoval(t *testing.T) {
 	cfg := config.UserConfig{LocalEndpoints: []string{fast, slow, slower}, APIKeys: map[string]string{}}
 	pm := provider.NewManager()
 
-	d := startModelDiscovery(context.Background(), cfg, pm, false)
+	d := startModelDiscovery(context.Background(), cfg, pm, false, nil)
 	deadline := time.Now().Add(2 * time.Second)
 	for len(localModelNames(pm)) == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -92,5 +92,70 @@ func TestModelDiscoveryDoesNotUndoRemoval(t *testing.T) {
 	}
 	if got := localModelNames(pm); len(got) != 1 || got[0] != "slow" {
 		t.Fatalf("local models = %v, want only the endpoint nobody removed", got)
+	}
+}
+
+// Each probe that answers signals the front-end, and by the time the signal
+// arrives its models are in the provider manager.
+func TestModelDiscoverySignalsAfterApplying(t *testing.T) {
+	endpoint := fakeModelsServer(t, "arrived", 0)
+	cfg := config.UserConfig{LocalEndpoints: []string{endpoint}, APIKeys: map[string]string{}}
+	pm := provider.NewManager()
+	signal := newModelsChangedSignal()
+
+	d := startModelDiscovery(context.Background(), cfg, pm, false, signal.notify)
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no signal after the probe answered")
+	}
+	if got := localModelNames(pm); len(got) != 1 || got[0] != "arrived" {
+		t.Fatalf("local models at the signal = %v, want the probe's", got)
+	}
+	if !d.Wait(5 * time.Second) {
+		t.Fatal("discovery did not finish")
+	}
+	// One endpoint: the config-order pass has nothing to reorder.
+	select {
+	case <-signal:
+		t.Fatal("a second signal for a single endpoint")
+	default:
+	}
+}
+
+// A probe that fails changes nothing and signals nothing.
+func TestModelDiscoveryFailedProbeDoesNotSignal(t *testing.T) {
+	cfg := config.UserConfig{LocalEndpoints: []string{"http://127.0.0.1:1/v1"}, APIKeys: map[string]string{}}
+	signal := newModelsChangedSignal()
+	d := startModelDiscovery(context.Background(), cfg, provider.NewManager(), false, signal.notify)
+	if !d.Wait(10 * time.Second) {
+		t.Fatal("discovery did not finish")
+	}
+	select {
+	case <-signal:
+		t.Fatal("a failed probe signalled a change")
+	default:
+	}
+}
+
+// notify never blocks, and signals raised while one is pending collapse
+// into it.
+func TestModelsChangedSignalCoalesces(t *testing.T) {
+	signal := newModelsChangedSignal()
+	for range 3 {
+		signal.notify()
+	}
+	<-signal
+	select {
+	case <-signal:
+		t.Fatal("three notifications left more than one pending signal")
+	default:
+	}
+	signal.notify()
+	signal.discard()
+	select {
+	case <-signal:
+		t.Fatal("discard left the signal pending")
+	default:
 	}
 }

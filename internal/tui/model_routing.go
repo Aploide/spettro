@@ -555,6 +555,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case localProbeDoneMsg:
 		newModel, cmd := m.handleLocalProbeDone(msg)
 		return newModel, cmd
+	case modelsChangedMsg:
+		return m.handleModelsChanged()
 	case loginInitiatedMsg:
 		return m.handleLoginInitiated(msg)
 	case loginPolledMsg:
