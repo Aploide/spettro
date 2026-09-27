@@ -201,6 +201,8 @@ func formatToolLabel(name, argsJSON string) string {
 		return lspLabel(name, argsJSON, false)
 	case isSkillTool(name):
 		return skillLabel(name, argsJSON, false)
+	case name == "approval":
+		return approvalLabel(argsJSON)
 	}
 	switch name {
 	case "file-read":
@@ -569,7 +571,7 @@ func formatRunningLabel(name, argsJSON string) string {
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
 			cmd := labelCommand(args.Command, 60)
-			return "Running $ " + cmd + "…"
+			return inProgress("Running $ " + cmd)
 		}
 		return "Running…"
 	case "pty-start":
@@ -577,7 +579,7 @@ func formatRunningLabel(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
-			return "Starting terminal $ " + labelCommand(args.Command, 60) + "…"
+			return inProgress("Starting terminal $ " + labelCommand(args.Command, 60))
 		}
 		return "Starting terminal session…"
 	case "pty-write":

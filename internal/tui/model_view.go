@@ -655,6 +655,57 @@ func (m Model) showsParallelFooter() bool {
 	return m.sidePanelWidth() <= 0 && len(m.mentionItems) == 0
 }
 
+// parallelFooterHeight is the number of rows the footer block occupies in
+// the frame right now (0 when it is not drawn). Every layout budget that has
+// to leave room for it asks this rather than rendering the block itself.
+func (m Model) parallelFooterHeight() int {
+	if !m.showsParallelFooter() {
+		return 0
+	}
+	if pa := m.renderParallelAgents(); pa != "" {
+		return lipgloss.Height(pa)
+	}
+	return 0
+}
+
+// dialogMinTranscriptRows is how much of the conversation stays visible
+// above an open dialog (an approval or a question): three rows on a normal
+// terminal, down to one on a very short one, where the dialog needs every
+// row it can get.
+func dialogMinTranscriptRows(height int) int {
+	return min(max(height/8, 1), 3)
+}
+
+// dialogMinInputRows is the smallest input area the open dialog can be drawn
+// in with its essentials, or 0 when no size-adaptive dialog is open. For an
+// approval: the box border, the summary row, the preview footer and the
+// picker (or the "instead" field). For a question: the box border and agent
+// label plus the rows renderQuestionForm cannot do without.
+func (m Model) dialogMinInputRows() int {
+	switch {
+	case m.pendingAuth != nil:
+		return 2 + 1 + 1 + m.approvalControlRows()
+	case m.pendingQuestion != nil:
+		return 3 + questionMinBlockRows
+	}
+	return 0
+}
+
+// parallelFooterBudget is the row budget renderParallelAgents spends. It is
+// footerBudget, except that while an approval or a question is open the
+// footer yields to it: on a short terminal the dialog keeps the rows its
+// essentials need (dialogMinInputRows) and the footer gets what is left,
+// down to nothing. On a normal terminal that leaves the footer untouched.
+func (m Model) parallelFooterBudget() int {
+	budget := footerBudget(m.height)
+	if need := m.dialogMinInputRows(); need > 0 {
+		chrome := 1 + 2 + 1 + m.workingIndicatorHeight() // header, separators, status bar, indicator
+		room := m.height - chrome - need - dialogMinTranscriptRows(m.height)
+		budget = min(budget, max(room, 0))
+	}
+	return budget
+}
+
 // renderParallelAgents draws everything that sits between the transcript and
 // the input: the workflow summary, the Ultra swarm, ordinary delegations, and
 // the todo list. Swarms and workflows get their own bordered blocks — a
@@ -667,7 +718,7 @@ func (m Model) showsParallelFooter() bool {
 // ones before it left.
 func (m Model) renderParallelAgents() string {
 	paneW := m.paneWidth()
-	remaining := footerBudget(m.height)
+	remaining := m.parallelFooterBudget()
 	var blocks []string
 
 	// A bordered block costs its lines plus the border.
@@ -988,8 +1039,9 @@ func (m Model) viewStatusBar(width int) string {
 	leftWidth := max(width-lipgloss.Width(right)-2, 0)
 	// A banner can be anything, a provider's error message included; the
 	// Width style would wrap it onto a second row the layout never reserved,
-	// so it is cut to the one row the bar has.
-	leftPadded := lipgloss.NewStyle().Width(leftWidth).Render(termtext.Fit(left, leftWidth))
+	// so it is cut to the one row the bar has, one cell short of the right
+	// cluster so the two never run together.
+	leftPadded := lipgloss.NewStyle().Width(leftWidth).Render(termtext.Fit(left, leftWidth-1))
 
 	bar := leftPadded + right + " "
 	return lipgloss.NewStyle().

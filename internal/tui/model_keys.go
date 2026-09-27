@@ -33,6 +33,15 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(5*time.Second, func(time.Time) tea.Msg { return quitWarningMsg{} })
 	case "ctrl+q":
 		return m, tea.Quit
+	case "pgup":
+		// Keyboard scrolling of the transcript, for terminals (and users)
+		// without a mouse wheel. Scrolling up stops the view following new
+		// output; scrolling back to the bottom resumes it (refreshViewport).
+		m.vp.PageUp()
+		return m, nil
+	case "pgdown":
+		m.vp.PageDown()
+		return m, nil
 	case "up":
 		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
 			if m.cmdCursor > 0 {

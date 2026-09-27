@@ -23,16 +23,17 @@ import (
 	"spettro/internal/theme"
 )
 
-// questionMinContentH is the smallest conversation pane the question block is
-// allowed to leave behind.
-const questionMinContentH = 3
+// questionMinBlockRows is the smallest block the form is drawn in: the
+// question, one answer, the "… N more" marker and the key hint. The footer
+// yields rows to keep this much on a short terminal (parallelFooterBudget).
+const questionMinBlockRows = 4
 
 // questionBlockBudget is how many lines the form may occupy inside the input
 // box. Everything else on screen — header, separators, status bar, the
 // box's own border and agent label, the parallel-agent strip — keeps its space,
-// and the conversation pane keeps a minimum. The renderer windows its answer
-// list to fit this; without it a question with many options pushes the input
-// box off the bottom of the terminal.
+// and the conversation pane keeps a minimum (dialogMinTranscriptRows). The
+// renderer windows its answer list to fit this; without it a question with
+// many options pushes the input box off the bottom of the terminal.
 func (m Model) questionBlockBudget() int {
 	if m.height <= 0 {
 		// No WindowSizeMsg yet: nothing is on screen to overflow, and guessing
@@ -48,13 +49,9 @@ func (m Model) questionBlockBudget() int {
 		m.workingIndicatorHeight() +
 		2 + // the separators bracketing the conversation pane
 		lipgloss.Height(m.viewStatusBar(paneW)) +
-		3 // the input box's border plus the agent label inside it
-	if m.showsParallelFooter() {
-		if pa := m.renderParallelAgents(); pa != "" {
-			fixed += lipgloss.Height(pa)
-		}
-	}
-	return max(m.height-fixed-questionMinContentH, 4)
+		3 + // the input box's border plus the agent label inside it
+		m.parallelFooterHeight()
+	return max(m.height-fixed-dialogMinTranscriptRows(m.height), questionMinBlockRows)
 }
 
 // questionSpacedMinBudget is the block height from which the form can afford a

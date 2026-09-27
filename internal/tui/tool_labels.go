@@ -27,6 +27,16 @@ func labelCommand(cmd string, n int) string {
 	return truncateLabel(termtext.SingleLine(cmd), n)
 }
 
+// inProgress marks a label as describing a call still running by ending it
+// with "…", unless it already ends with one because its argument was cut
+// (a doubled "……" reads as a rendering glitch).
+func inProgress(label string) string {
+	if strings.HasSuffix(label, "…") {
+		return label
+	}
+	return label + "…"
+}
+
 // lspLabelArgs is the subset of the lsp tool's arguments a label shows. The
 // retired tools it replaced (diagnostics, references, hover, lsp-restart)
 // took the same fields minus op, which their name implied.
@@ -129,6 +139,28 @@ func skillLabel(name, argsJSON string, running bool) string {
 		return "Loading skill " + skill + "…"
 	}
 	return "Loaded skill " + skill
+}
+
+// approvalLabel describes the "approval" trace the agent emits after a
+// permission decision (see agent emitApprovalTrace): what was decided, by
+// whom, and why, e.g. "Approval: allowed by user (approved once)".
+func approvalLabel(argsJSON string) string {
+	var args struct {
+		Decision string `json:"decision"`
+		Source   string `json:"source"`
+		Reason   string `json:"reason"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil || strings.TrimSpace(args.Decision) == "" {
+		return "Approval"
+	}
+	label := "Approval: " + termtext.SingleLine(args.Decision)
+	if source := strings.TrimSpace(args.Source); source != "" {
+		label += " by " + termtext.SingleLine(source)
+	}
+	if reason := strings.TrimSpace(args.Reason); reason != "" {
+		label += " (" + truncateLabel(termtext.SingleLine(reason), 40) + ")"
+	}
+	return label
 }
 
 // isLSPTool reports whether name is the lsp tool or one of the retired

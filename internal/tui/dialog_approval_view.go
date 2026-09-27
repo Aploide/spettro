@@ -122,18 +122,12 @@ type approvalLayout struct {
 	canExpand    bool // ctrl+o would show more of the preview
 }
 
-// approvalMinTranscriptRows is how much of the conversation stays visible
-// above an open approval: three rows on a normal terminal, down to one on a
-// very short one, where the dialog needs every row it can get.
-func approvalMinTranscriptRows(height int) int {
-	return min(max(height/8, 1), 3)
-}
-
 // approvalLayout decides which optional rows of the dialog get space, for a
 // dialog whose content area is contentW cells wide.
 //
 // The rows available to the dialog are the terminal height minus the header,
-// the two separators, the status bar, the working indicator, the input box
+// the two separators, the status bar, the working indicator, the footer
+// block (which yields to the dialog, see parallelFooterBudget), the input box
 // border and a minimum of transcript. The summary row and the picker always
 // get theirs. What is left goes, in order, to: the preview footer (so a
 // preview is never hidden without saying so), the reason, the agent label,
@@ -148,7 +142,8 @@ func (m Model) approvalLayout(contentW int) approvalLayout {
 	preview := m.approvalPreviewLines(contentW)
 	lay.previewTotal = len(preview)
 
-	fixedChrome := 1 + 2 + 1 + m.workingIndicatorHeight() + approvalMinTranscriptRows(m.height) + 2
+	fixedChrome := 1 + 2 + 1 + m.workingIndicatorHeight() + m.parallelFooterHeight() +
+		dialogMinTranscriptRows(m.height) + 2
 	rows := m.height - fixedChrome - 1 - m.approvalControlRows()
 	take := func() bool {
 		if rows < 1 {

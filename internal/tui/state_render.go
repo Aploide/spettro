@@ -397,20 +397,24 @@ func (m Model) recalcLayout() Model {
 	m.ta.SetWidth(m.paneWidth() - 6)
 	inputH := lipgloss.Height(m.viewInput(m.paneWidth()))
 
-	parallelH := 0
-	if m.showsParallelFooter() {
-		if pa := m.renderParallelAgents(); pa != "" {
-			parallelH = lipgloss.Height(pa)
-		}
-	}
-
-	fixed := headerH + sepH + inputH + statusH + parallelH + m.workingIndicatorHeight()
+	fixed := headerH + sepH + inputH + statusH + m.parallelFooterHeight() + m.workingIndicatorHeight()
 	// At least one transcript row, even when the chrome alone fills the
 	// terminal: a larger floor would only push the frame further past the
 	// bottom edge on a tiny window.
 	contentH := max(m.height-fixed, 1)
+	// A transcript that was following the latest output keeps following it
+	// through a resize of the pane. Without this, anything that shrinks the
+	// pane (an approval dialog opening, the todo list or the working
+	// indicator appearing) left the old offset behind: the view stopped at
+	// the bottom of the old height, the newest rows sat below it, and since
+	// refreshViewport only follows a view already at the bottom, nothing
+	// new was shown again until the user scrolled.
+	follow := m.vp.AtBottom() && len(m.messages) > 0
 	m.vp.SetWidth(m.transcriptWidth())
 	m.vp.SetHeight(contentH)
+	if follow {
+		m.vp.GotoBottom()
+	}
 
 	return m
 }

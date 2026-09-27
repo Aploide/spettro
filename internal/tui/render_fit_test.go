@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -220,6 +221,123 @@ func TestToolLabelsCanonicalAndRetiredNames(t *testing.T) {
 	}
 }
 
+// The trace the agent emits after a permission decision reads as one.
+func TestApprovalTraceLabel(t *testing.T) {
+	got := formatToolLabel("approval", `{"decision":"allowed","source":"user","tool_id":"bash","reason":"approved once"}`)
+	if got != "Approval: allowed by user (approved once)" {
+		t.Fatalf("approval label = %q", got)
+	}
+}
+
+// A transcript that follows the latest output keeps following it when the
+// pane shrinks: an approval dialog opening used to leave the view stuck at
+// the old bottom, and nothing new was shown until the user scrolled.
+func TestTranscriptKeepsFollowingWhenThePaneShrinks(t *testing.T) {
+	m := footerModel(100, 30)
+	for i := range 60 {
+		m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: fmt.Sprintf("message %d", i)})
+	}
+	m = m.recalcLayout()
+	m.refreshViewport()
+	if !m.vp.AtBottom() {
+		t.Fatal("the transcript should start at the bottom")
+	}
+	m.pendingAuth = &shellApprovalRequestMsg{
+		request:  agent.ShellApprovalRequest{ToolID: "bash", Command: "cat <<'EOF'\n" + strings.Repeat("x\n", 200) + "EOF"},
+		response: make(chan shellApprovalResponse, 1),
+	}
+	m = m.recalcLayout()
+	if !m.vp.AtBottom() || !strings.Contains(m.vp.View(), "message 59") {
+		t.Fatalf("the latest message scrolled out of view when the dialog opened:\n%s", ansi.Strip(m.vp.View()))
+	}
+
+	// A user who scrolled up keeps their place.
+	m.pendingAuth = nil
+	m = m.recalcLayout()
+	m.vp.SetYOffset(0)
+	m.pendingAuth = &shellApprovalRequestMsg{request: agent.ShellApprovalRequest{ToolID: "bash", Command: "ls"}, response: make(chan shellApprovalResponse, 1)}
+	m = m.recalcLayout()
+	if m.vp.YOffset() != 0 {
+		t.Fatalf("a scrolled-up transcript jumped to offset %d", m.vp.YOffset())
+	}
+}
+
+// PgUp/PgDn scroll the transcript from the keyboard; back at the bottom the
+// view follows new output again.
+func TestPageKeysScrollTheTranscript(t *testing.T) {
+	m := footerModel(100, 30)
+	for i := range 80 {
+		m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: fmt.Sprintf("message %d", i)})
+	}
+	m = m.recalcLayout()
+	m.refreshViewport()
+	next, _ := m.updateMain(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = next.(Model)
+	if m.vp.AtBottom() {
+		t.Fatal("pgup did not scroll the transcript")
+	}
+	for range 20 {
+		next, _ = m.updateMain(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = next.(Model)
+	}
+	if !m.vp.AtBottom() {
+		t.Fatal("pgdown did not return to the bottom")
+	}
+	m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: "newest"})
+	m.refreshViewport()
+	if !strings.Contains(m.vp.View(), "newest") {
+		t.Fatal("back at the bottom, the transcript should follow new output")
+	}
+}
+
+// A file diff computed in the background lands on an earlier tool row after
+// later output is already on screen. The transcript has to stay at the
+// bottom as that row grows, or following stops for the rest of the run.
+func TestTranscriptKeepsFollowingWhenADiffArrives(t *testing.T) {
+	m := footerModel(100, 30)
+	m.showTools = true
+	m.messages = append(m.messages, ChatMessage{Role: RoleAssistant, Tools: []ToolItem{{Name: "file-write", Status: "success", Args: `{"path":"a.go"}`, Seq: 7}}})
+	for i := range 40 {
+		m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: fmt.Sprintf("message %d", i)})
+	}
+	m = m.recalcLayout()
+	m.refreshViewport()
+	diff := "--- /dev/null\n+++ b/a.go\n@@ -0,0 +1,15 @@\n" + strings.Repeat("+line\n", 15)
+	next, _ := m.update(toolDiffMsg{seq: 7, diff: diff})
+	m = next.(Model)
+	if !m.vp.AtBottom() || !strings.Contains(m.vp.View(), "message 39") {
+		t.Fatalf("the transcript stopped following when a diff arrived:\n%s", ansi.Strip(m.vp.View()))
+	}
+}
+
+// Markdown tables and code blocks wider than the transcript are fitted, not
+// wrapped: a wrapped table border or code line lands on a row of its own and
+// the table falls apart.
+func TestMarkdownTablesAndCodeFit(t *testing.T) {
+	md := "```go\n\tfunc long() { return \"" + strings.Repeat("L", 300) + "\" }\n```\n\n" +
+		"| id | **description** | 宽 |\n|---|---|---|\n| 1 | " + strings.Repeat("cell ", 60) + " | 中文中文 |\n"
+	for _, width := range []int{20, 40, 80, 118} {
+		out := renderMarkdown(md, width)
+		lines := strings.Split(out, "\n")
+		for i, line := range lines {
+			if w := ansi.StringWidth(line); w > width {
+				t.Fatalf("width %d: row %d is %d cells: %q", width, i, w, ansi.Strip(line))
+			}
+		}
+		plain := ansi.Strip(out)
+		if !strings.Contains(plain, "…") {
+			t.Fatalf("width %d: a cut must be marked:\n%s", width, plain)
+		}
+		// Every table row is one row: it starts and ends with a border.
+		for _, line := range strings.Split(plain, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "│") && !strings.HasSuffix(line, "│") && width >= 40 {
+				t.Fatalf("width %d: a table row was split: %q", width, line)
+			}
+		}
+	}
+}
+
 // A resumed session replays its tool events into the activity panel under
 // whatever names they were recorded with; retired names and huge arguments
 // must render inside the panel like any other.
@@ -305,6 +423,49 @@ func TestApprovalDialogFitsWithHugeArguments(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// A dialog opened mid-run shares the screen with the working indicator and
+// the todo/agent footer. On a short terminal the footer yields to the dialog
+// (it was drawn at full size and pushed the dialog's bottom rows, then the
+// status bar, off the screen).
+func TestDialogsFitAlongsideTheRunFooter(t *testing.T) {
+	var options []agent.AskUserOption
+	for i := range 8 {
+		options = append(options, agent.AskUserOption{Label: fmt.Sprintf("option %d %s", i, strings.Repeat("label ", 8))})
+	}
+	form := agent.AskUserForm{Questions: []agent.AskUserQuestion{{
+		Question: strings.Repeat("Which one should the agent take next? ", 12), Options: options,
+	}}}
+	for _, size := range [][2]int{{40, 15}, {50, 18}, {80, 24}, {120, 40}} {
+		base := func() Model {
+			m := footerModel(size[0], size[1])
+			m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: "go"})
+			footerTodos(&m, 10)
+			footerWorkers(&m, 3)
+			m.thinking = true
+			m.agentStartAt = time.Now()
+			return m
+		}
+		for name, req := range approvalRequests() {
+			m := base()
+			m.pendingAuth = &shellApprovalRequestMsg{request: req, response: make(chan shellApprovalResponse, 1)}
+			m = m.recalcLayout()
+			frame := m.View().Content
+			assertFrameFits(t, "approval "+name+" during a run", frame, size[0], size[1])
+			if !strings.Contains(ansi.Strip(frame), "Tell the agent") {
+				t.Fatalf("%v %s: the picker lost an option:\n%s", size, name, ansi.Strip(frame))
+			}
+		}
+		m := base()
+		m.SetPendingAskUserFormForTesting(form)
+		m = m.recalcLayout()
+		frame := m.View().Content
+		assertFrameFits(t, "question during a run", frame, size[0], size[1])
+		if !strings.Contains(ansi.Strip(frame), "pick") {
+			t.Fatalf("%v: the question's key hint is missing:\n%s", size, ansi.Strip(frame))
 		}
 	}
 }

@@ -380,7 +380,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		m.vp.SetContent(m.renderMessages())
+		m.refreshViewport()
 	case toolProgressMsg:
 		if m.thinking {
 			t := msg.trace
@@ -482,7 +482,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolDiffMsg:
 		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
 			m.attachToolDiff(msg.seq, msg.diff)
-			m.vp.SetContent(m.renderMessages())
+			// The diff lands on an earlier tool row after later output may
+			// already be on screen; refreshViewport keeps a view that was
+			// following the latest output at the bottom as the row grows.
+			m.refreshViewport()
 		}
 	case shellApprovalRequestMsg:
 		if m.thinking {
