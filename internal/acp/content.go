@@ -38,6 +38,9 @@ type turnState struct {
 	// repeats agent, name and args, updates the right card. Identical calls
 	// running at once share a key and complete in announcement order.
 	open map[string][]openToolCall
+	// awaiting holds the cards currently showing a permission prompt (see
+	// approvalToolCallID and settleApprovalCard).
+	awaiting map[acpsdk.ToolCallId]bool
 	// workflow is the in-flight workflow run whose tool call is rewritten as
 	// the run progresses; nil outside a workflow.
 	workflow *acpWorkflow
@@ -49,10 +52,12 @@ type openToolCall struct {
 	// seq orders calls by announcement; the most recent call wins when a
 	// permission request cannot tell candidates apart (approvalToolCallID).
 	seq int
+	// agentID is the agent that made the call, as its trace names it;
 	// name is the tool's canonical name and args its decoded arguments (nil
-	// when not JSON); the approval flow matches on them.
-	name string
-	args toolArgs
+	// when not JSON). The approval flow matches on all three.
+	agentID string
+	name    string
+	args    toolArgs
 }
 
 // sessionUpdate sends a session/update notification, dropping it silently if
@@ -127,10 +132,11 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 	if tr.Status == "running" {
 		t.mu.Lock()
 		call := openToolCall{
-			id:   t.nextToolCallIDLocked("call"),
-			seq:  t.seq,
-			name: agent.CanonicalToolName(tr.Name),
-			args: decodeToolArgs(tr.Args),
+			id:      t.nextToolCallIDLocked("call"),
+			seq:     t.seq,
+			agentID: tr.AgentID,
+			name:    agent.CanonicalToolName(tr.Name),
+			args:    decodeToolArgs(tr.Args),
 		}
 		if t.open == nil {
 			t.open = map[string][]openToolCall{}
