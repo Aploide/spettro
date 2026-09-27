@@ -148,12 +148,23 @@ func renderMarkdown(content string, width int) string {
 // row the viewport shows without the ones above it keeps its colour. When
 // width is unknown (<= 0) or too narrow to be worth indenting, the body is
 // left on one row for the caller's wrap.
+//
+// body already carries the inline spans' escape sequences, and a span can
+// cross a row break ("**a long bold phrase**"). The body is therefore wrapped
+// with lipgloss.Wrap, which closes the open style at the end of a row and
+// reopens it on the next, rather than termtext.Wrap, which only splits the
+// bytes: with it the wrapped half of a bold phrase or a code span lost its
+// style, because each row is rendered on its own and the escape that opened
+// the span stays on the row above.
 func hangIndent(body, first, rest string, width int, style lipgloss.Style) string {
 	textW := width - ansi.StringWidth(first)
 	if width <= 0 || textW < minHangingTextWidth {
 		return first + style.Render(body)
 	}
-	rows := termtext.Wrap(body, textW)
+	rows := []string{body}
+	if ansi.StringWidth(body) > textW {
+		rows = strings.Split(lipgloss.Wrap(body, textW, ""), "\n")
+	}
 	var b strings.Builder
 	for i, row := range rows {
 		if i > 0 {
