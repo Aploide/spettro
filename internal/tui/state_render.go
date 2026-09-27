@@ -107,7 +107,16 @@ func (m *Model) autoSave() {
 // scroll back down (or send a new prompt, see scrollToBottom).
 func (m *Model) refreshViewport() {
 	follow := m.vp.AtBottom()
+	// A view scrolled up keeps showing the same content, not the same row
+	// number: re-rendered blocks above it (a resize or the side panel
+	// rewrapping the transcript, ctrl+o, a budgeted render filling in) change
+	// how many rows lie above it.
+	var anchor viewAnchor
+	if !follow {
+		anchor = m.vp.topAnchor()
+	}
 	m.vp.SetBlocks(m.renderTranscript(renderFrameBudget))
+	m.vp.restoreAnchor(anchor, m.paneWidth())
 	if len(m.messages) == 0 {
 		// A fresh session is nothing but the logo and the hint; scrolling to
 		// the bottom of that would crop the art from the top on a short
@@ -125,6 +134,7 @@ func (m *Model) refreshViewport() {
 // conversation back into view.
 func (m *Model) scrollToBottom() {
 	m.vp.SetBlocks(m.renderTranscript(renderFrameBudget))
+	m.vp.restoreAnchor(viewAnchor{}, m.paneWidth())
 	if len(m.messages) == 0 {
 		m.vp.GotoTop()
 		return

@@ -49,3 +49,10 @@ func (v *lineView) SetBlocks(blocks [][]string) {
 	}
 	v.vp.SetContent(strings.Join(parts, "\n\n"))
 }
+
+// viewAnchor, in this build, holds nothing: the bubbles viewport keeps the
+// row number across a refresh, as it always did (see lineview.go).
+type viewAnchor struct{}
+
+func (v lineView) topAnchor() viewAnchor          { return viewAnchor{} }
+func (v *lineView) restoreAnchor(viewAnchor, int) {}

@@ -47,6 +47,9 @@ type lineView struct {
 	// the total row count plus one, so block i spans
 	// [starts[i], starts[i+1]-1).
 	starts []int
+	// blocksWidth is the width the blocks were rendered for, as the last
+	// restoreAnchor was told (see viewAnchor).
+	blocksWidth int
 }
 
 // newLineView returns an empty viewport of the given size.
@@ -184,6 +187,73 @@ func (v *lineView) PageDown() {
 	if !v.AtBottom() {
 		v.ScrollDown(v.height)
 	}
+}
+
+// viewAnchor records what the top row on screen shows, as a place in the
+// content rather than a row number: row within block, of rows in the
+// block, when the blocks were rendered width cells wide. A refresh that
+// re-renders the blocks above it (a resize or the side panel rewrapping the
+// transcript, ctrl+o expanding tool output, a budgeted render filling in
+// placeholders) changes how many rows lie above that place, so keeping the
+// row number would show different content: restoreAnchor finds the place
+// again instead. The transcript is rendered for the pane width, which can
+// change before the viewport's own width does, so the render width is
+// passed in rather than read from the view.
+type viewAnchor struct {
+	ok     bool
+	blocks int // number of blocks when captured
+	block  int
+	row    int // row within block; len(block) is the separator after it
+	rows   int // len(block) when captured
+	width  int
+}
+
+// topAnchor captures the place shown in the top row. It is not ok for an
+// empty view.
+func (v lineView) topAnchor() viewAnchor {
+	if len(v.blocks) == 0 {
+		return viewAnchor{}
+	}
+	b := sort.Search(len(v.blocks), func(k int) bool { return v.starts[k+1] > v.yOffset })
+	if b >= len(v.blocks) {
+		return viewAnchor{}
+	}
+	return viewAnchor{
+		ok:     true,
+		blocks: len(v.blocks),
+		block:  b,
+		row:    v.yOffset - v.starts[b],
+		rows:   len(v.blocks[b]),
+		width:  v.blocksWidth,
+	}
+}
+
+// restoreAnchor scrolls so the top row shows the place a captures. Blocks
+// are matched by index, which holds while the transcript only grows (the
+// logo, then one block per message); when it has fewer blocks than when a
+// was captured the content was replaced (/clear, a rewind, compaction) and
+// the offset is left as SetBlocks clamped it. When the width changed, the
+// block was rewrapped and the row is scaled to its new height; otherwise
+// the row is kept, so a block growing at its end (a streamed answer being
+// read while it arrives) does not move the view. width is the width the
+// current blocks were rendered for; it is recorded for the next anchor even
+// when a is not ok.
+func (v *lineView) restoreAnchor(a viewAnchor, width int) {
+	v.blocksWidth = width
+	if !a.ok || len(v.blocks) < a.blocks || a.block >= len(v.blocks) {
+		return
+	}
+	rows := len(v.blocks[a.block])
+	row := a.row
+	switch {
+	case a.row >= a.rows:
+		row = rows // the separator after the block
+	case a.width != v.blocksWidth && a.rows > 0:
+		row = a.row * rows / a.rows
+	default:
+		row = min(row, rows)
+	}
+	v.SetYOffset(v.starts[a.block] + row)
 }
 
 // line returns content row i (0 <= i < TotalLineCount).
