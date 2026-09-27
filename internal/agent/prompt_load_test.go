@@ -192,10 +192,17 @@ func TestCodingPromptReadsNarrowly(t *testing.T) {
 }
 
 // TestCodingPromptVerificationScope: the round-5 bench showed extra steps
-// spent on checks the project never set up (tsc in repos without a tsconfig,
-// which always failed on missing types) and on new tests for areas nothing
-// tested yet. The prompt must scope verification to the project's own checks
-// and add tests where the project already tests the area or the task asks.
+// spent on tooling the project never set up (tsc in repos without a
+// tsconfig, which always failed on missing types), so the prompt scopes the
+// linters and type-checkers it runs to the ones the project configures. The
+// round-7 bench showed what happens when that scoping reaches the checks
+// themselves ("the checks the project itself configures", tests only "where
+// the project already tests that area"): ts-05 failed in every SuperFast and
+// GLM run, the model comparing huge numeric identifiers through Number() and
+// validating against npm's semver, which shares the precision bug. The prompt
+// must limit tools, not checks: each requirement and the spec's boundary
+// cases get a check of their own, in a scratch script when nothing tests
+// them, and a reference library is never the oracle.
 func TestCodingPromptVerificationScope(t *testing.T) {
 	raw, ok := agentprompts.Prompt("agents/coding.md")
 	if !ok {
@@ -203,16 +210,21 @@ func TestCodingPromptVerificationScope(t *testing.T) {
 	}
 	body := stripFrontmatter(raw)
 	for _, needle := range []string{
-		"the checks the project itself configures",
-		"Don't invent checks it doesn't set up",
-		"where the project already tests that area",
-		"or when the task asks for them",
+		"the linters or type-checkers the project configures",
+		"Don't invent tooling it doesn't set up",
+		"That limits tools, not checks",
+		"write the check yourself",
+		"a scratch script run through `bash`",
+		"with exact expected values",
+		"huge numbers past float precision",
+		"not the spec or the oracle",
+		"in a project that has tests, add or update tests",
 	} {
 		if !strings.Contains(body, needle) {
 			t.Errorf("coding prompt missing %q", needle)
 		}
 	}
-	for _, banned := range []string{"(and the project's linters or type-checkers)", "in a project that has tests, add or update tests"} {
+	for _, banned := range []string{"the checks the project itself configures", "where the project already tests that area"} {
 		if strings.Contains(body, banned) {
 			t.Errorf("coding prompt still carries %q", banned)
 		}
