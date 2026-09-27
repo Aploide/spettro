@@ -16,7 +16,9 @@ import (
 // Repo is the GitHub "owner/name" this CLI publishes releases to.
 const Repo = "aploide/spettro"
 
-const apiLatestURL = "https://api.github.com/repos/" + Repo + "/releases/latest"
+// apiLatestURL is the GitHub API endpoint for the newest release; a variable
+// so tests can point it at a local server.
+var apiLatestURL = "https://api.github.com/repos/" + Repo + "/releases/latest"
 
 // Asset is a single downloadable file attached to a GitHub release.
 type Asset struct {
@@ -32,8 +34,9 @@ type Release struct {
 
 func httpClient() *http.Client { return &http.Client{Timeout: 15 * time.Second} }
 
-// LatestRelease fetches the newest published GitHub release for Repo.
-func LatestRelease(ctx context.Context) (*Release, error) {
+// FetchLatestRelease asks GitHub for the newest published release of Repo,
+// bypassing the release-check cache (see LatestRelease).
+func FetchLatestRelease(ctx context.Context) (*Release, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiLatestURL, nil)
 	if err != nil {
 		return nil, err
