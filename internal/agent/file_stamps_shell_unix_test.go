@@ -175,3 +175,73 @@ func TestShellRestampSkipsBackgroundJobs(t *testing.T) {
 		t.Fatalf("background job change not guarded: %v", err)
 	}
 }
+
+// rewriteKeepingMtime changes a file's content in place to same-size text
+// and puts its mtime back, as touch -r, rsync -t --inplace or tar -x do:
+// size, mtime and inode all stay the same.
+func rewriteKeepingMtime(t *testing.T, path, content string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(content)) != fi.Size() {
+		t.Fatalf("rewrite must keep the size: %d != %d", len(content), fi.Size())
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte(content), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An outside edit that keeps size, mtime and inode is still caught when a
+// later command of the agent also writes the file. Here the file was read
+// moments ago, so the snapshot hashes it (the racy window).
+func TestShellRestampCatchesMtimePreservingEdit(t *testing.T) {
+	r, dir := newStampShellRuntime(t)
+	path := writeTestFile(t, dir, "g.go", "x := 1\n")
+	stampRead(t, r, "g.go")
+	rewriteKeepingMtime(t, path, "x := 9\n")
+	stampShell(t, r, "printf 'y := 1\\n' >> g.go")
+	if err := stampEdit(r, "g.go", "y := 1", "y := 2"); err == nil || !strings.Contains(err.Error(), "modified on disk") {
+		t.Fatalf("mtime-preserving outside edit absorbed: %v", err)
+	}
+}
+
+// The same edit on a file whose identity is trusted (verified long after
+// its last change) is caught by the ctime, which no rewrite can set back.
+func TestShellSnapshotComparesCtime(t *testing.T) {
+	r, dir := newStampShellRuntime(t)
+	path := writeTestFile(t, dir, "g.go", "x := 1\n")
+	stampRead(t, r, "g.go")
+	key := r.stampKey("g.go")
+	r.mu.Lock()
+	si := r.stampIDs[key]
+	si.verifiedAt = max(si.id.mtime, si.id.ctime) + stampRacyWindow
+	r.stampIDs[key] = si
+	r.mu.Unlock()
+	if si.id.ctime == 0 {
+		t.Skip("no ctime read on this platform: every snapshot hashes")
+	}
+	if !identityTrusted(si) {
+		t.Fatalf("identity %+v not trusted", si)
+	}
+	if snap := r.snapshotStampsForShell(); len(snap) != 1 {
+		t.Fatalf("trusted, unchanged file not eligible: %d", len(snap))
+	}
+
+	time.Sleep(10 * time.Millisecond) // let the ctime move on filesystems with coarse clocks
+	rewriteKeepingMtime(t, path, "x := 9\n")
+	if snap := r.snapshotStampsForShell(); len(snap) != 0 {
+		t.Fatalf("mtime-preserving outside edit left the file eligible: %+v", snap)
+	}
+}

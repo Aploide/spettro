@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -103,6 +104,7 @@ func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, 
 	}
 	// Stat the open file before reading it: the identity stamped with the
 	// content must never be newer than the content (file_stamps.go).
+	statAt := time.Now()
 	opened, _ := f.Stat()
 	pg, err := readFilePage(ctx, f, start, end, budget)
 	f.Close()
@@ -118,7 +120,7 @@ func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, 
 	r.readSet[rel] = struct{}{}
 	delete(r.requiredReads, rel)
 	r.mu.Unlock()
-	r.recordReadStampSum(rel, pg.sum, opened)
+	r.recordReadStampSum(rel, pg.sum, opened, statAt)
 	unlock()
 	r.warmLSP(abs)
 

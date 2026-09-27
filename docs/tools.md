@@ -87,20 +87,34 @@ touch or a same-content rewrite does not count, and it is carried in the
 conversation, so a file read in an earlier turn still counts as read.
 
 Changes the agent's own foreground `bash` commands make (a formatter, a code
-generator, `sed -i`) do not trip the guard. Just before such a command runs,
-Spettro stats the files it holds a hash for; right after, it re-hashes those
-whose size, modification time or inode the command changed, and the
+generator, `sed -i`) do not trip the guard. Just before such a
+command runs, Spettro checks which files it holds a hash for still hold
+exactly that content; right after, it re-hashes those whose size,
+modification time, change time (ctime) or inode the command changed, and the
 command's output ends with a note naming them (`note: this command changed
 files you had read (...)`), since their line numbers moved. A file that had
 already changed from outside before the command started is left alone, so
-that change is still caught. A file whose hash was carried from an earlier
-turn is re-read once to confirm it still matches before it is tracked this
-way. The work is bounded (a stat of at most 1024 files per command, never a
-directory walk, and at most 32 MiB re-read), and a file past a bound keeps
-its old hash, which errs on the side of the guard. Two cases are not told
-apart: a change another process makes to such a file while the agent's
-command runs counts as the command's, and changes made by background jobs
-(`run_in_background`) are never treated as the agent's own.
+that change is still caught.
+
+The check before the command is a `stat` when the file's identity can vouch
+for its content: the platform records a ctime (Linux and macOS; no user
+program can set it back, so an edit that restores the old mtime, as
+`touch -r`, `rsync -t --inplace` or `tar -x` do, still moves it), and the
+file last changed at least 2 seconds before its content was last confirmed,
+so a second change within the same timestamp tick (1 s on HFS+, 2 s on FAT)
+cannot hide behind an unchanged identity. Otherwise (a file written or read
+moments ago, a hash carried from an earlier turn, a file whose identity
+moved, or Windows, where Spettro reads no ctime) the file is re-read and its
+hash compared, and once confirmed long enough after its last change it needs
+only a `stat` from then on.
+
+The work is bounded (a stat of at most 1024 files per command, never a
+directory walk, at most 32 files and 8 MiB hashed before it and 32 MiB
+re-read after it), and a file past a bound keeps its old hash, which errs on
+the side of the guard. Two cases are not told apart: a change another
+process makes to such a file while the agent's command runs counts as the
+command's, and changes made by background jobs (`run_in_background`) are
+never treated as the agent's own.
 
 ## Retired names
 
