@@ -168,15 +168,12 @@ func (m Model) viewHeader() string {
 
 	modelLabel := m.cfg.ActiveModel
 	provLabel := m.cfg.ActiveProvider
-	for _, mod := range m.providers.Models() {
-		if mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel {
-			if mod.DisplayName != "" {
-				modelLabel = mod.DisplayName
-			}
-			if mod.ProviderName != "" {
-				provLabel = mod.ProviderName
-			}
-			break
+	if mod, ok := m.providers.Lookup(m.cfg.ActiveProvider, m.cfg.ActiveModel); ok {
+		if mod.DisplayName != "" {
+			modelLabel = mod.DisplayName
+		}
+		if mod.ProviderName != "" {
+			provLabel = mod.ProviderName
 		}
 	}
 	if len(modelLabel) > 12 {
@@ -986,13 +983,14 @@ func todoRow(td session.Todo, status string, frame int) string {
 	}
 }
 
+// contextWindow is the active model's context window from the model
+// metadata, 0 when the model is unknown. It runs on every status bar render
+// (the context gauge), so it uses the manager's index (Lookup, no
+// allocation) rather than copying the model list: 20 us and 80 KB per call
+// with the embedded catalog before (BenchmarkContextWindow).
 func (m Model) contextWindow() int {
-	for _, mod := range m.providers.Models() {
-		if mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel {
-			return mod.Context
-		}
-	}
-	return 0
+	mod, _ := m.providers.Lookup(m.cfg.ActiveProvider, m.cfg.ActiveModel)
+	return mod.Context
 }
 
 // evaluateCompact is the single source of truth for context-pressure
