@@ -241,11 +241,11 @@ func (m Model) approvalDialogLines(label string, contentW int) []string {
 
 // approvalSummaryRow is the dialog's summary row, at most contentW cells,
 // indented by two. A command too long for it is cut at the end (the preview
-// shows it whole). A file change ("$ file-write <path>") is cut in the
-// middle of its path instead, keeping the tool name and the path's end: cut
-// at the end, a deep path lost its file name, and on a terminal too short
-// for the diff preview (40x15) the dialog asked to approve a write without
-// naming the file.
+// shows it whole). A file change ("$ file-write <path>") keeps the tool
+// name and cuts the start of its path instead ("$ file-write …/dir/name.go"),
+// so the file name survives: cut at the end, a deep path lost its file name,
+// and on a terminal too short for the diff preview (40x15) the dialog asked
+// to approve a write without naming the file.
 func approvalSummaryRow(req agent.ShellApprovalRequest, contentW int) string {
 	summary := approvalSummary(formatApprovalCommandLabel(req.Command))
 	isFileChange := req.Change != nil || strings.TrimSpace(req.Diff) != ""
