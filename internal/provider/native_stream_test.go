@@ -295,7 +295,7 @@ func TestNativeStreamMatchesFantasy(t *testing.T) {
 	}
 }
 
-// The one deliberate difference from fantasy: a delta carrying both text
+// A deliberate difference from fantasy: a delta carrying both text
 // and a tool-call fragment keeps both (fantasy drops the fragment, which
 // then corrupts the call's arguments).
 func TestNativeStreamKeepsToolFragmentsSharingATextDelta(t *testing.T) {
@@ -311,6 +311,22 @@ func TestNativeStreamKeepsToolFragmentsSharingATextDelta(t *testing.T) {
 	}
 	if tc := native.resp.ToolCalls[0]; tc.ArgsError != "" || string(tc.Args) != `{"q":"x"}` {
 		t.Fatalf("tool call = %+v", tc)
+	}
+}
+
+// A deliberate difference from fantasy (docs/configuration.md lists it): a
+// final choice without a "delta" member ends the reply instead of failing
+// the request.
+func TestNativeStreamAcceptsAChoiceWithoutDelta(t *testing.T) {
+	handler := sseReply(
+		sseData(chunkWith(map[string]any{"content": "hi"}, nil)),
+		sseData(`{"id":"c","choices":[{"index":0,"finish_reason":"stop"}]}`))
+	native, fantasy := sendBothWires(t, false, Request{Messages: []Message{{Role: RoleUser, Content: "go"}}}, handler)
+	if native.err != nil || native.resp.Content != "hi" {
+		t.Fatalf("native: resp = %+v, err = %v", native.resp, native.err)
+	}
+	if fantasy.err == nil {
+		t.Fatal("fantasy accepted the reply: the difference is gone, update docs/configuration.md")
 	}
 }
 
@@ -410,6 +426,42 @@ func TestNativeStreamIdleTimeout(t *testing.T) {
 	_, err := pm.Send(context.Background(), srv.URL, "m", req)
 	if !errors.Is(err, ErrStreamIdle) {
 		t.Fatalf("err = %v, want ErrStreamIdle", err)
+	}
+}
+
+// A request cancelled before the reply's headers arrive fails with the
+// bare context error on both clients (the SDK returns ctx.Err(), not the
+// *url.Error around it).
+func TestNativeCancelBeforeHeadersMatchesFantasy(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The server notices a closed connection only once the body is
+		// read; release covers a client that keeps it open.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs before srv.Close
+	errs := map[WireMode]error{}
+	for _, mode := range []WireMode{WireNative, WireFantasy} {
+		pm := NewManager()
+		pm.SetWireMode(string(mode))
+		pm.AddLocalModels([]Model{{Provider: srv.URL, Name: "m", Local: true}})
+		ctx, cancel := context.WithCancel(context.Background())
+		timer := time.AfterFunc(100*time.Millisecond, cancel)
+		_, errs[mode] = pm.Send(ctx, srv.URL, "m", streamReq())
+		timer.Stop()
+		cancel()
+	}
+	native, fantasy := errs[WireNative], errs[WireFantasy]
+	if !errors.Is(native, context.Canceled) || !errors.Is(fantasy, context.Canceled) {
+		t.Fatalf("errors: native %v, fantasy %v; want context.Canceled", native, fantasy)
+	}
+	if native.Error() != fantasy.Error() {
+		t.Fatalf("error text: native %q, fantasy %q", native, fantasy)
 	}
 }
 

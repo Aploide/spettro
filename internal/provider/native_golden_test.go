@@ -270,6 +270,27 @@ func TestNativeBodyMatchesFantasyForCatalogAndSpettro(t *testing.T) {
 	}
 }
 
+// OPENAI_ORG_ID and OPENAI_PROJECT_ID reach the server as the SDK's
+// organization and project headers on both clients, so billing and routing
+// by project do not change with the wire mode.
+func TestNativeSendsOpenAIEnvHeadersLikeFantasy(t *testing.T) {
+	t.Setenv("OPENAI_ORG_ID", "org-123")
+	t.Setenv("OPENAI_PROJECT_ID", "proj-9")
+	rec := newBodyRecorder(t)
+	req := Request{Messages: []Message{{Role: RoleUser, Content: "hi"}}}
+	sent := map[WireMode]string{}
+	for _, mode := range []WireMode{WireNative, WireFantasy} {
+		sentBody(t, wireManager(rec, mode), rec, rec.srv.URL, "m", req)
+		rec.mu.Lock()
+		h := rec.headers[len(rec.headers)-1]
+		rec.mu.Unlock()
+		sent[mode] = h.Get("OpenAI-Organization") + "|" + h.Get("OpenAI-Project")
+	}
+	if want := "org-123|proj-9"; sent[WireNative] != want || sent[WireFantasy] != want {
+		t.Fatalf("organization|project headers: native %q, fantasy %q, want %q", sent[WireNative], sent[WireFantasy], want)
+	}
+}
+
 // The encoder cache must never serve a stale encoding: a growing history,
 // an in-place edit of a tool result, a compaction that rewrites the prefix,
 // a model switch and interleaved conversations all still produce fantasy's

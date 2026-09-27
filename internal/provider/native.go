@@ -156,6 +156,26 @@ func chatCompletionsURL(baseURL string) (string, error) {
 // nativeUserAgent is the User-Agent of native chat-completions requests.
 func nativeUserAgent() string { return "Spettro/" + version.App }
 
+// openAIEnvHeaders maps the environment variables the OpenAI SDK reads on
+// every client it builds (openai.DefaultClientOptions, which fantasy's
+// OpenAI-compatible provider uses) to the headers it sends from them.
+var openAIEnvHeaders = [...]struct{ env, header string }{
+	{"OPENAI_ORG_ID", "OpenAI-Organization"},
+	{"OPENAI_PROJECT_ID", "OpenAI-Project"},
+}
+
+// setOpenAIEnvHeaders sets the organization and project headers from the
+// environment as the SDK does, so a user whose OPENAI_PROJECT_ID routes
+// billing keeps that routing on the native client. Like the SDK it sets a
+// header whenever the variable is present, even when it is empty.
+func setOpenAIEnvHeaders(h http.Header) {
+	for _, e := range openAIEnvHeaders {
+		if v, ok := os.LookupEnv(e.env); ok {
+			h.Set(e.header, v)
+		}
+	}
+}
+
 // sendNativeStream is sendWithFantasyStream on Spettro's own
 // chat-completions client: the same request JSON, the same watchdog, and
 // the same Response, errors included (see TestNativeStreamMatchesFantasy).
@@ -188,6 +208,7 @@ func sendNativeStream(ctx context.Context, enc *chatEncoder, providerName, model
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", nativeUserAgent())
+	setOpenAIEnvHeaders(httpReq.Header)
 
 	collector := newStreamCollector(req.OnStream)
 	streamErr := doNativeStream(httpReq, watchdog, collector)
@@ -202,6 +223,15 @@ func sendNativeStream(ctx context.Context, enc *chatEncoder, providerName, model
 // It returns the error that ended the stream, or nil when it ended cleanly.
 func doNativeStream(httpReq *http.Request, watchdog *streamWatchdog, collector *streamCollector) error {
 	resp, err := activityHTTPClient{onRead: watchdog.touch}.Do(httpReq)
+	if ctxErr := httpReq.Context().Err(); ctxErr != nil {
+		// A request cancelled (by the user or the watchdog) before the
+		// reply's headers were handled fails with the bare context error,
+		// not the *url.Error wrapping it, as the SDK reports it.
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ctxErr
+	}
 	if err != nil {
 		return err
 	}

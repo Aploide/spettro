@@ -29,8 +29,16 @@ import (
 //     as tool-calls whenever the reply contained a tool call fragment (see
 //     observeForFinish).
 //
-// One deliberate difference: fantasy drops tool-call fragments that share a
-// delta with text, while this handles both.
+// Deliberate differences, where fantasy fails or loses data on input a
+// server may send (docs/configuration.md lists them for users):
+//
+//   - fantasy drops tool-call fragments that share a delta with text; this
+//     handles both;
+//   - fantasy fails the stream on a choice without "delta" (it unmarshals
+//     the missing member's empty raw JSON); this reads it as an empty
+//     delta, so a final {"index":0,"finish_reason":"stop"} ends the reply;
+//   - reasoning_content of several choices is kept per choice (Spettro
+//     never asks for more than one).
 //
 // It is used by the goroutine reading the stream.
 type compatStream struct {
