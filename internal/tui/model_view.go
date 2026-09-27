@@ -872,7 +872,7 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 		lines = append(lines, m.delegationRow(a))
 	}
 	if hidden := len(active) - shown; hidden > 0 {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more · ctrl+b for all of them", hidden)))
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more%s", hidden, m.panelKeyHint(" · ", "all of them"))))
 	}
 	// When the listed form does not fit, the count does — better one honest
 	// line than a truncated list that reads as the whole story.

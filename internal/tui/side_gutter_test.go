@@ -53,3 +53,25 @@ func TestSidePanelBannerOnASmallTerminal(t *testing.T) {
 		}
 	}
 }
+
+// Found in a VHS screenshot at 40x15: the delegation footer ended with
+// "… 2 more · ctrl+b for all of them", but the panel cannot be drawn below
+// 110x15, so ctrl+b showed nothing. Footers point at ctrl+b only where it
+// works.
+func TestFooterPointsAtThePanelOnlyWhereItFits(t *testing.T) {
+	for _, tc := range []struct {
+		w, h int
+		want bool
+	}{{40, 15, false}, {80, 24, false}, {120, 40, true}} {
+		m := footerModel(tc.w, tc.h)
+		footerWorkers(&m, 12)
+		m = m.recalcLayout()
+		plain := ansi.Strip(m.View().Content)
+		if !strings.Contains(plain, "more") {
+			t.Fatalf("%dx%d: expected a \"… N more\" row:\n%s", tc.w, tc.h, plain)
+		}
+		if got := strings.Contains(plain, "ctrl+b for"); got != tc.want {
+			t.Errorf("%dx%d: ctrl+b hint shown = %v, want %v:\n%s", tc.w, tc.h, got, tc.want, plain)
+		}
+	}
+}

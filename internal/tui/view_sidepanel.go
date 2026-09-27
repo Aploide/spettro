@@ -29,7 +29,7 @@ func (m Model) sidePanelWidth() int {
 	if !m.showSidePanel {
 		return 0
 	}
-	if m.width < sidePanelMinTerminalWidth || m.height < sidePanelMinTerminalHeight {
+	if !m.sidePanelFits() {
 		return 0
 	}
 	w := max(m.width/3, 34)
@@ -37,6 +37,22 @@ func (m Model) sidePanelWidth() int {
 		w = 54
 	}
 	return w
+}
+
+// sidePanelFits reports whether the terminal is large enough to draw the
+// side panel (sidePanelMinTerminalWidth x sidePanelMinTerminalHeight).
+func (m Model) sidePanelFits() bool {
+	return m.width >= sidePanelMinTerminalWidth && m.height >= sidePanelMinTerminalHeight
+}
+
+// panelKeyHint is the "<sep>ctrl+b for <what>" tail of a footer or banner
+// that points at the side panel, or "" on a terminal too small to draw it,
+// where ctrl+b would show nothing (it only says where the panel shows).
+func (m Model) panelKeyHint(sep, what string) string {
+	if !m.sidePanelFits() {
+		return ""
+	}
+	return sep + "ctrl+b for " + what
 }
 
 // sidePanelEnabledBanner is the banner ctrl+b shows when it turns the panel

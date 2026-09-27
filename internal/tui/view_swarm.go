@@ -163,7 +163,7 @@ func (m Model) swarmSummaryLines(width, rows int) []string {
 		lines = append(lines, "  "+m.swarmMemberRow(a, budget-2))
 	}
 	if hidden := len(live) - shown; hidden > 0 {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running · ctrl+b for the whole swarm", hidden)))
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running%s", hidden, m.panelKeyHint(" · ", "the whole swarm"))))
 	}
 	return lines
 }
