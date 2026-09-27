@@ -60,10 +60,11 @@ func TestResizeKeepsTheScrolledUpPlace(t *testing.T) {
 	for _, size := range [][2]int{{70, 30}, {200, 50}, {45, 14}, {120, 40}} {
 		m := footerModel(120, 40)
 		anchorTranscript(&m, 30)
-		m.refreshViewport()
+		settledRefresh(&m)
 		scrolledToMessage(t, &m, 12)
 		nm, _ := m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 		m = nm.(Model)
+		settledRefresh(&m)
 		if got := topMessage(m); got != "m12w" {
 			t.Errorf("after a resize to %dx%d the top row shows %q, want m12w:\n%s", size[0], size[1], got, ansi.Strip(m.vp.View()))
 		}
@@ -78,11 +79,12 @@ func TestResizeKeepsTheScrolledUpPlace(t *testing.T) {
 func TestSidePanelToggleKeepsTheScrolledUpPlace(t *testing.T) {
 	m := footerModel(160, 40)
 	anchorTranscript(&m, 30)
-	m.refreshViewport()
+	settledRefresh(&m)
 	scrolledToMessage(t, &m, 9)
 	for i := 0; i < 2; i++ {
 		nm, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 		m = nm.(Model)
+		settledRefresh(&m)
 		if got := topMessage(m); got != "m09w" {
 			t.Fatalf("after ctrl+b #%d (panel width %d) the top row shows %q, want m09w", i+1, m.sidePanelWidth(), got)
 		}
@@ -95,7 +97,7 @@ func TestGrowingBlockDoesNotMoveTheScrolledUpView(t *testing.T) {
 	m := footerModel(100, 30)
 	anchorTranscript(&m, 20)
 	m.messages[19].Content = strings.TrimSpace(strings.Repeat("m19w ", 800))
-	m.refreshViewport()
+	settledRefresh(&m)
 	scrolledToMessage(t, &m, 19)
 	before := ansi.Strip(m.vp.View())
 	m.messages[19].Content += strings.Repeat(" m19w", 80)

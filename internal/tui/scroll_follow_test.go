@@ -16,6 +16,18 @@ func longTranscript(m *Model, n int) {
 	}
 }
 
+// settledRefresh refreshes the viewport until the budgeted render has filled
+// in every placeholder (see renderFrameBudget). Under -race or on a loaded
+// machine one refresh of a long transcript can run out of budget and leave
+// older messages as one-row placeholders, so their height, and every
+// scroll offset below them, is only final once the fill is done.
+func settledRefresh(m *Model) {
+	m.refreshViewport()
+	for m.renderCache != nil && m.renderCache.fillPending {
+		m.refreshViewport()
+	}
+}
+
 // Streaming output keeps the viewport pinned to the bottom while the user is
 // following it.
 func TestRefreshFollowsWhenAtBottom(t *testing.T) {
@@ -36,7 +48,7 @@ func TestRefreshFollowsWhenAtBottom(t *testing.T) {
 func TestRefreshKeepsPositionWhenScrolledUp(t *testing.T) {
 	m := footerModel(120, 30)
 	longTranscript(&m, 40)
-	m.refreshViewport()
+	settledRefresh(&m)
 	m.vp.ScrollUp(20)
 	offset := m.vp.YOffset()
 	m.messages = append(m.messages, ChatMessage{Role: RoleAssistant, Content: "streamed\nstreamed\nstreamed"})
