@@ -15,14 +15,19 @@ import (
 	"unicode/utf8"
 
 	"spettro/internal/lsp/lsptest"
+	"spettro/internal/testhome"
 )
 
 // TestMain lets the test binary double as a scripted language server: the
-// fake-server tests below point the manager at os.Args[0].
+// fake-server tests below point the manager at os.Args[0]. HOME and the XDG directories
+// point at a temporary directory so no test can touch the real ~/.spettro.
 func TestMain(m *testing.M) {
 	lsptest.MaybeServe()
-	os.Exit(m.Run())
+	os.Exit(testhome.Main(m))
 }
+
+// TestHomeIsIsolated fails when the tests would run against the real home.
+func TestHomeIsIsolated(t *testing.T) { testhome.AssertIsolated(t) }
 
 // fakeManager returns a manager for a fresh workspace whose only server is the
 // scripted one, claiming ".fk" files.
