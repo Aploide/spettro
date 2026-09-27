@@ -27,6 +27,14 @@ func renderMarkdown(content string, width int) string {
 
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
+	// Everything rendered here is text the TUI did not write: a model's
+	// reply, or tool output in the side panel. An escape sequence or a
+	// carriage return in it would reach the terminal raw and move the
+	// cursor (a "\r" sends the rest of the row to column 0, over whatever
+	// is drawn there), so every line is made plain before it is styled.
+	for i, line := range lines {
+		lines[i] = termtext.SanitizeLine(line)
+	}
 
 	out := make([]string, 0, len(lines))
 	inCode := false

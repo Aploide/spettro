@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"spettro/internal/agent"
 )
 
 // runningFooterModel is a model in the middle of a run with a long todo list
@@ -101,6 +103,72 @@ func TestCommandOverlayFitsWithAnAttachment(t *testing.T) {
 		}
 		m = m.recalcLayout()
 		assertFrameFits(t, "command overlay with an attachment", m.View().Content, size[0], size[1])
+	}
+}
+
+// With the side panel open, a short but wide terminal (a horizontal tmux
+// split) still gets a frame no taller than itself. 11 rows is the least the
+// main pane itself needs (header, separators, input box, status bar and one
+// transcript row); below sidePanelMinTerminalHeight the panel is not drawn.
+func TestSidePanelOnShortWideTerminals(t *testing.T) {
+	for _, size := range [][2]int{{150, 12}, {110, 14}, {250, 11}, {120, 15}, {120, 16}} {
+		m := hugeTranscriptModel(size[0], size[1])
+		m.showSidePanel = true
+		m = m.recalcLayout()
+		m.refreshViewport()
+		name := fmt.Sprintf("side panel at %dx%d", size[0], size[1])
+		frame := m.View().Content
+		assertFrameFits(t, name, frame, size[0], size[1])
+		assertStatusBarOnScreen(t, name, frame)
+	}
+}
+
+// Tool output shown in the side panel's detail pane is sanitized like the
+// transcript's: an escape sequence or a carriage return from a progress
+// meter would otherwise reach the renderer, which moves to column 0 on "\r"
+// and writes the rest of the row over the transcript.
+func TestSidePanelDetailIsSanitized(t *testing.T) {
+	hostile := "before\x1b[2J\x1b[1;1Hclear\tTAB\rprogress 100%\nquote \x9btext"
+	for _, showTools := range []bool{false, true} {
+		m := footerModel(150, 40)
+		m.showSidePanel = true
+		m.showTools = showTools
+		m.applyToolTraceToObservability(agent.ToolTrace{
+			Name: "bash", Status: "success",
+			Args:   mustJSON(map[string]any{"command": "npm\tinstall \x1b[31mred\x1b[0m\rsneaky"}),
+			Output: hostile,
+		})
+		m = m.recalcLayout()
+		frame := m.View().Content
+		name := fmt.Sprintf("side panel detail showTools=%v", showTools)
+		assertFrameFits(t, name, frame, 150, 40)
+		for _, raw := range []string{"\x1b[2J", "\x1b[1;1H", "\x1b[31m", "\x9b"} {
+			if strings.Contains(frame, raw) {
+				t.Fatalf("%s: the frame holds the raw sequence %q", name, raw)
+			}
+		}
+		if showTools && !strings.Contains(ansi.Strip(frame), "progress 100%") {
+			t.Fatalf("%s: the output's final state is missing:\n%s", name, ansi.Strip(frame))
+		}
+	}
+}
+
+// A model's reply is rendered as markdown, and markdown is made plain first:
+// an escape sequence in the reply never reaches the terminal.
+func TestMarkdownReplyIsSanitized(t *testing.T) {
+	m := footerModel(80, 24)
+	m.messages = append(m.messages,
+		ChatMessage{Role: RoleUser, Content: "go"},
+		ChatMessage{Role: RoleAssistant, Content: "done\x1b[2J\x1b[1;1H here\tand\rthere\n\n**bold\x1b[31m**"},
+	)
+	m = m.recalcLayout()
+	m.refreshViewport()
+	frame := m.View().Content
+	assertFrameFits(t, "markdown reply", frame, 80, 24)
+	for _, raw := range []string{"\x1b[2J", "\x1b[1;1H", "\x1b[31m"} {
+		if strings.Contains(frame, raw) {
+			t.Fatalf("the frame holds the raw sequence %q", raw)
+		}
 	}
 }
 

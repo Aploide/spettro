@@ -12,11 +12,23 @@ import (
 	"spettro/internal/theme"
 )
 
+// Terminal size the side panel needs. Below either, the panel is not drawn
+// (ctrl+b still toggles the setting, and the panel comes back when the
+// terminal grows): the transcript needs the width, and the panel's frame,
+// its sections and its three rows of key hints cannot be squeezed into
+// fewer rows without pushing the frame past the bottom of the terminal.
+const (
+	sidePanelMinTerminalWidth  = 110
+	sidePanelMinTerminalHeight = 15
+)
+
+// sidePanelWidth is the width of the side panel column, or 0 when it is not
+// drawn: switched off, or a terminal below the size the panel needs.
 func (m Model) sidePanelWidth() int {
 	if !m.showSidePanel {
 		return 0
 	}
-	if m.width < 110 {
+	if m.width < sidePanelMinTerminalWidth || m.height < sidePanelMinTerminalHeight {
 		return 0
 	}
 	w := max(m.width/3, 34)
@@ -105,9 +117,12 @@ func (m Model) sideListGeometry() (startY, rows int) {
 	return 5 + reserved, rows
 }
 
+// sidePanelInnerHeight is the number of rows of the side panel column below
+// the header, less the frame's border and one row of slack: the panel is
+// drawn only on a terminal at least sidePanelMinTerminalHeight rows tall
+// (sidePanelWidth), so this is never below 11.
 func (m Model) sidePanelInnerHeight() int {
-	h := max(m.height-4, 12)
-	return h
+	return m.height - 4
 }
 
 // sidePanelCursor clamps the stored cursor to the current item list.
@@ -274,8 +289,10 @@ func (m Model) sidePanelLines(items []sidePanelItem, width int) ([]string, []int
 				detailColor = pal.Info
 			}
 		}
-		titleRaw := strings.ReplaceAll(strings.TrimSpace(it.Title), "\n", " ")
-		detailRaw := strings.ReplaceAll(strings.TrimSpace(it.Detail), "\n", " ")
+		// Titles and details carry tool arguments (a command, a path) and
+		// are folded onto the row as plain text: see termtext.SingleLine.
+		titleRaw := termtext.SingleLine(it.Title)
+		detailRaw := termtext.SingleLine(it.Detail)
 		labelBudget := max(4, rowBudget-3)
 		label := truncateLabel(titleRaw, labelBudget)
 		row := prefix + "└ " + titleStyle.Render(label)
@@ -337,22 +354,28 @@ func scrollBlock(content string, height, offset int) (string, int, int) {
 func (m Model) sidePanelDetailMeta(selected sidePanelItem) []string {
 	details := []string{
 		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("Details"),
-		styleMuted.Render("type: " + selected.Kind),
-		styleMuted.Render("id: " + selected.ID),
+		styleMuted.Render("type: " + termtext.SingleLine(selected.Kind)),
+		styleMuted.Render("id: " + termtext.SingleLine(selected.ID)),
 	}
 	if selected.Agent != "" {
-		details = append(details, styleMuted.Render("agent: "+selected.Agent))
+		details = append(details, styleMuted.Render("agent: "+termtext.SingleLine(selected.Agent)))
 	}
 	return details
 }
 
+// sidePanelDetailBody is the detail pane of the selected activity entry:
+// the entry's full body (arguments and output) while ctrl+o is on, else a
+// two-row summary of it. The body is raw tool output; renderMarkdown makes
+// every line of it plain text (no escape sequences, tabs or carriage
+// returns) before styling it, and the collapsed summary is folded the same
+// way by termtext.SingleLine.
 func (m Model) sidePanelDetailBody(selected sidePanelItem, width int) string {
 	detailsBody := strings.TrimSpace(selected.Detail)
 	if m.showTools && strings.TrimSpace(selected.Body) != "" {
 		detailsBody = strings.TrimSpace(selected.Body)
 	}
 	if !m.showTools && strings.TrimSpace(selected.Body) != "" {
-		detailsBody = truncateLabel(strings.ReplaceAll(strings.TrimSpace(selected.Body), "\n", " "), max(24, width*2))
+		detailsBody = truncateLabel(termtext.SingleLine(selected.Body), max(24, width*2))
 	}
 	lines := []string{}
 	if detailsBody != "" {
