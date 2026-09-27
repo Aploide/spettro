@@ -75,9 +75,27 @@ const skillsHelp = `skills commands:
   /skill where                             show discovery roots
   /skill reload                            force a re-scan of the skill directories`
 
-// skillCatalog returns the session's skill catalog under the current config.
+// skillCatalog returns the session's skill catalog under the skill
+// settings as they are now (see skillConfig).
 func (m Model) skillCatalog() skills.Catalog {
-	return agent.SkillCatalogFor(m.cwd, m.cfg)
+	return agent.SkillCatalogFor(m.cwd, m.skillConfig())
+}
+
+// skillConfig returns m.cfg with its skill settings (skills_compat_disabled
+// and disabled_skills) read from config.json as it is now. m.cfg is loaded
+// once at startup and refreshed only by this TUI's own changes, while the
+// agent reads the file on every run (agent.SkillCatalog). Reading it here
+// too keeps the / menu, /name and $ mentions in agreement with what the
+// agent sees after the file is edited by hand or by another spettro
+// process. The read is a small JSON file; skill discovery itself stays
+// cached (skills.Shared).
+func (m Model) skillConfig() config.UserConfig {
+	cfg := m.cfg
+	if disk, err := config.Load(); err == nil {
+		cfg.SkillsCompatDisabled = disk.SkillsCompatDisabled
+		cfg.DisabledSkills = disk.DisabledSkills
+	}
+	return cfg
 }
 
 // runSkillsList renders /skills: every discovered skill with how it can be
@@ -165,13 +183,36 @@ func (m Model) runSkillsInstall(args []string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.showBanner(fmt.Sprintf("installing skill from %s ...", opts.Source), "info")
-	ctx, cancel := context.WithTimeout(context.Background(), skills.InstallTimeout)
-	defer cancel()
-	res, err := skills.Install(ctx, opts)
-	if err != nil {
-		m.showBanner("install failed: "+err.Error(), "error")
-		return m, nil
+	return m, installSkillCmd(opts)
+}
+
+// skillInstalledMsg carries the result of a /skill install that ran in the
+// background (installSkillCmd) back to Update.
+type skillInstalledMsg struct {
+	res skills.InstallResult
+	err error
+}
+
+// installSkillCmd runs skills.Install off the UI goroutine. A git clone
+// can take up to skills.InstallTimeout, and running it inside Update froze
+// the TUI (no redraw, no keys) for that long, with the "installing" banner
+// never drawn.
+func installSkillCmd(opts skills.InstallOptions) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), skills.InstallTimeout)
+		defer cancel()
+		res, err := skills.Install(ctx, opts)
+		return skillInstalledMsg{res: res, err: err}
 	}
+}
+
+// finishSkillInstall reports a background install's result.
+func (m Model) finishSkillInstall(msg skillInstalledMsg) Model {
+	if msg.err != nil {
+		m.showBanner("install failed: "+msg.err.Error(), "error")
+		return m
+	}
+	res := msg.res
 	agent.ReloadSkills()
 	verb := "installed"
 	if res.Replaced {
@@ -182,7 +223,7 @@ func (m Model) runSkillsInstall(args []string) (tea.Model, tea.Cmd) {
 		verb, res.Skill.Name, res.Source, res.Destination, truncateLabel(res.Skill.Description, 200), res.Skill.Name,
 	))
 	m.showBanner(fmt.Sprintf("skill %q %s", res.Skill.Name, verb), "success")
-	return m, nil
+	return m
 }
 
 func (m Model) runSkillsUninstall(args []string) (tea.Model, tea.Cmd) {
@@ -349,7 +390,7 @@ func (m Model) runSkillsWhere() (tea.Model, tea.Cmd) {
 	rows := []string{"skill discovery roots (in priority order; the first skill of a name wins):"}
 	rows = append(rows, m.skillRootRows()...)
 	rows = append(rows, "", "* the directory exists; (read-only) roots belong to other agents and are never written to.")
-	if m.cfg.SkillsCompatDisabled {
+	if m.skillConfig().SkillsCompatDisabled {
 		rows = append(rows, "Claude Code / Codex roots are off (skills_compat_disabled in config.json).")
 	}
 	m.pushSystemMsg(strings.Join(rows, "\n"))
@@ -359,7 +400,7 @@ func (m Model) runSkillsWhere() (tea.Model, tea.Cmd) {
 // skillRootRows lists the discovery roots, marking the ones that exist.
 func (m Model) skillRootRows() []string {
 	var rows []string
-	for _, r := range skills.SearchRoots(m.cwd, agent.SkillLookupOptions(m.cfg)) {
+	for _, r := range skills.SearchRoots(m.cwd, agent.SkillLookupOptions(m.skillConfig())) {
 		marker := " "
 		if _, err := os.Stat(r.Path); err == nil {
 			marker = "*"

@@ -382,6 +382,11 @@ func skillDirs(root Root, cat *Catalog, stamps *[]pathStamp) []string {
 				continue
 			}
 			for _, ent := range entries {
+				// Hidden folders (".draft", ".system", ".git") are never
+				// skills and are not searched.
+				if strings.HasPrefix(ent.Name(), ".") {
+					continue
+				}
 				dir := filepath.Join(parent, ent.Name())
 				if !isDir(ent, dir) {
 					continue
@@ -395,9 +400,7 @@ func skillDirs(root Root, cat *Catalog, stamps *[]pathStamp) []string {
 					found = append(found, dir)
 					continue
 				}
-				if !strings.HasPrefix(ent.Name(), ".") {
-					next = append(next, dir)
-				}
+				next = append(next, dir)
 			}
 		}
 		level = next

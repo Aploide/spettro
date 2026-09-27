@@ -78,7 +78,7 @@ description: Extract PDF text, fill PDF forms, merge PDFs. Use when handling PDF
 | `name` | the folder name | What the skill is called: `/name`, `$name`, and the name the agent loads it by. Lowercase letters, digits and hyphens per the spec (other names still load, with a warning in `/skills`). A name with spaces could never be typed as a command, so the folder name is used instead (or, if that has spaces too, the name with its spaces turned into hyphens), with a warning. |
 | `description` | the first line of the body | What the skill does and when to use it. This is all the agent sees before loading the skill, so put the trigger ("Use when ...") in it. |
 | `when_to_use` | none | Extra trigger text, appended to the description in the agent's list (Claude Code). |
-| `argument-hint` | none | Shown in the `/` menu and to ACP clients, e.g. `[issue-number]`. |
+| `argument-hint` | none | Shown in the `/` menu and to ACP clients, e.g. `[issue-number]`. Kept exactly as written: bare brackets (`[add\|remove] [id]`) are text here, not a YAML list. |
 | `arguments` | none | Names for positional arguments, so the body can say `$component` instead of `$0`. A list (`[component, from-lang]`) or a space-separated string. |
 | `disable-model-invocation` | `false` | `true`: only you can run it (`/name`, `$name`). The agent is not told about it and the `skill` tool refuses it. For skills with side effects: deploy, release, send. |
 | `user-invocable` | `true` | `false`: only the agent can load it; it is hidden from the `/` menu and `$` completion. For background knowledge. |

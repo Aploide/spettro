@@ -577,6 +577,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalFocused = true
 	case tea.BlurMsg:
 		m.terminalFocused = false
+	case skillInstalledMsg:
+		m = m.finishSkillInstall(msg)
+		m.refreshViewport()
 	case bannerClearMsg:
 		m.banner = ""
 		m.bannerKind = ""

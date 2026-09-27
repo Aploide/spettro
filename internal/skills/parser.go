@@ -27,12 +27,13 @@ func splitFrontmatter(content string) (string, string) {
 	if !strings.HasPrefix(rest, "\n") {
 		return "", content
 	}
-	rest = rest[1:]
+	// The closing fence is searched for with the opening newline put back,
+	// so an empty block ("---\n---\n") closes on its very first line.
 	before, after, ok := strings.Cut(rest, "\n---")
 	if !ok {
 		return "", content
 	}
-	front := before
+	front := strings.TrimPrefix(before, "\n")
 	body := strings.TrimLeft(after, " \t\n")
 	return front, body
 }
@@ -193,7 +194,10 @@ func parseFrontmatter(front string) Skill {
 			}
 			i += 1 + consumed
 			assignField(&skill, key, strings.Join(items, " "))
-		case strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]"):
+		case key != "argument-hint" && strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]"):
+			// argument-hint is display text that Claude Code documents
+			// with bare brackets ("[issue-number]", "[add|remove] [id]"),
+			// so it is read as the scalar below, never as a list.
 			assignField(&skill, key, strings.Join(splitInlineList(rest), " "))
 			i++
 		default:
@@ -233,12 +237,22 @@ func splitKey(line string) (string, string, bool) {
 	return key, rest, true
 }
 
+// unquote returns a scalar's value: the inside of a quoted value (also when
+// a "# comment" follows the closing quote), or a plain value without its
+// trailing comment. Escapes inside quotes are kept as written.
 func unquote(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 {
 		first, last := s[0], s[len(s)-1]
 		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
 			return s[1 : len(s)-1]
+		}
+		if first == '"' || first == '\'' {
+			if end := strings.IndexByte(s[1:], first); end >= 0 {
+				if tail := strings.TrimSpace(s[end+2:]); strings.HasPrefix(tail, "#") {
+					return s[1 : end+1]
+				}
+			}
 		}
 	}
 	// Strip trailing comments only when preceded by a space (best-effort).

@@ -50,8 +50,18 @@ func TestHandleCommand_SkillInstallFromLocalPath(t *testing.T) {
 	}
 
 	m := tui.NewModelForTesting()
-	next, _ := m.HandleCommandForTesting("/skill install " + skillDir)
+	// The install runs as a command off the UI goroutine (a git clone can
+	// take a while): nothing is installed until its result comes back.
+	next, cmd := m.HandleCommandForTesting("/skill install " + skillDir)
 	got := next.(tui.Model)
+	if !strings.Contains(got.BannerForTesting(), "installing") || cmd == nil {
+		t.Fatalf("install must start in the background: banner %q, cmd %v", got.BannerForTesting(), cmd != nil)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".spettro", "skills", "pdf-processing")); !os.IsNotExist(err) {
+		t.Fatalf("install ran inside the command handler (err=%v)", err)
+	}
+	next, _ = got.UpdateForTesting(cmd())
+	got = next.(tui.Model)
 
 	if !strings.Contains(strings.ToLower(got.BannerForTesting()), "installed") {
 		t.Errorf("expected install banner, got %q", got.BannerForTesting())
@@ -84,7 +94,8 @@ func TestHandleCommand_SkillUninstallRemovesSkill(t *testing.T) {
 	}
 
 	m := tui.NewModelForTesting()
-	next, _ := m.HandleCommandForTesting("/skill install " + skillDir)
+	next, cmd := m.HandleCommandForTesting("/skill install " + skillDir)
+	next, _ = next.(tui.Model).UpdateForTesting(cmd())
 	got := next.(tui.Model)
 
 	next2, _ := got.HandleCommandForTesting("/skill uninstall pdf-processing")

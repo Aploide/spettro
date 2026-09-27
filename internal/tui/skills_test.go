@@ -357,3 +357,29 @@ func TestSkillMentionsExpandOnEveryPath(t *testing.T) {
 		}
 	})
 }
+
+// The / menu, /name and $ mentions go by the skill settings in config.json
+// as they are now, like the agent does on every run: a skill disabled by
+// editing the file (or from another spettro process) disappears from the
+// menu without a restart.
+func TestSkillMenuFollowsConfigOnDisk(t *testing.T) {
+	m := newSkillModel(t)
+	if _, ok := m.findUserSkill("/greet"); !ok {
+		t.Fatal("precondition: greet runs")
+	}
+	home := os.Getenv("HOME")
+	if err := os.MkdirAll(filepath.Join(home, ".spettro"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".spettro", "config.json"), []byte(`{"disabled_skills":["greet"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.findUserSkill("/greet"); ok {
+		t.Error("/greet still runs after it was disabled in config.json")
+	}
+	for _, c := range m.filterCommands("gre") {
+		if c.name == "/greet" {
+			t.Error("the / menu still offers /greet")
+		}
+	}
+}
