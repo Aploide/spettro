@@ -64,6 +64,20 @@
 - To force a palette without saving it, set `SPETTRO_THEME=light` (or `dark`).
 - See [Themes](theme.md) for the full precedence and detection rules.
 
+## Some emoji look different in the transcript
+
+Terminals disagree on how many cells some emoji take: a sequence joined
+with U+200D (ZERO WIDTH JOINER), such as "woman technologist", is two cells
+in a terminal that clusters graphemes and four in one that does not
+(xterm.js, Terminal.app), and a symbol followed by the emoji variation
+selector U+FE0F is one cell or two. Spettro rewrites those in model text,
+tool output and prompts to a form every terminal measures alike, so table
+borders and the side panel stay in line: a joined sequence shows as its
+parts side by side, the variation selector and skin-tone modifiers are
+dropped, a flag shows as its two letters (Italy's flag becomes `IT`) and a
+keycap as its digit. The stored session and the text sent to the model are
+unchanged.
+
 ## The agent stops early or ends without doing anything
 
 The run loop does not accept every reply without tool calls as the final

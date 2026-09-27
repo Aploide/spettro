@@ -229,7 +229,9 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	switch msg.Role {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(msg.Content)
+		// StableWidth: a prompt pasted with an emoji ZWJ sequence would
+		// otherwise measure differently here and in the terminal.
+		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(termtext.StableWidth(msg.Content))
 		var entry strings.Builder
 		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
