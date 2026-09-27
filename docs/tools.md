@@ -31,7 +31,14 @@ directory from the shell. A `bash` `cwd` outside the workspace gets its own
 error instead, saying to `cd` there in the command itself. Commands run through `bash` are governed by the
 shell's approval rules and the [sandbox](sandbox.md), not by this check.
 Under an active sandbox, a path whose real target leaves the workspace
-through a symlink is refused too.
+through a symlink is refused too. Without one, a `file-write`, `file-edit`,
+`download` or `rename-symbol` through a symlink is allowed, but its approval
+names the file actually written (`file-edit notes.md (through a symlink:
+writes /home/me/.zshrc)`), and if the symlink is pointed elsewhere while the
+approval is on screen the write fails instead of landing in the new target.
+A `bash` call with a `cwd` is approved as `cd <dir> && <command>`, since the
+same command does different things in different directories (`make
+install` runs the Makefile it finds there).
 
 ## Deferred tools
 

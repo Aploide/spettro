@@ -212,8 +212,11 @@ payload inside what reads as `""`. When one is present,
 `command_hidden_chars`/`diff_hidden_chars` is `true` and
 `command_visible`/`diff_visible` holds the same text with each such
 character written out the way the TUI shows it (`^M`, `^[`, `\u202e`,
-`\U000e0100`, a tab as `⇥`). A client that shows the text to a person
-should show the `_visible` field whenever there is one.
+`\U000e0100`, a tab as `⇥`, a look-alike letter posing as Latin as
+`\u0456`). A client that shows the text to a person should show the
+`_visible` field whenever there is one. `segments` (what `allow-always`
+remembers) comes with `segments_visible`, the same list written out, when
+one of them holds such a character.
 
 In a headless run (`spettro --headless`), where a client answers approvals, each
 event also carries an `approval_id` (`"a-7"`), and the answer names it:
@@ -227,10 +230,15 @@ POST /approval
 optional `instead` tells the agent what to do instead. Sub-agents run in
 parallel, so two approvals can be pending at once, often of the same tool
 (two `bash` calls), and every network approval has an empty `tool_id`. An
-answer carrying only `tool_id` (the form older clients send) is accepted
-while exactly one approval of that tool is pending, and refused with `409`
-when there are several, rather than given to one of them; an unknown
-`approval_id` gets `404`, and a second answer to the same approval `409`.
+allow must carry the `approval_id` of the request it approves; without one
+it is refused with `409`. A `tool_id` alone cannot say which request the
+client showed: the one on its screen may have been withdrawn (its time ran
+out, the run was cancelled) and another call of the same tool asked since,
+so "allow" on a stale card would approve a command nobody saw. An answer
+carrying only `tool_id` (the form older clients send) is still accepted for
+`deny`, while exactly one approval of that tool is pending, and refused with
+`409` when there are several; an unknown `approval_id` gets `404`, and a
+second answer to the same approval `409`.
 
 ### Ask-user forms
 

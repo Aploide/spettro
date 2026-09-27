@@ -108,7 +108,13 @@ boundaries and sent as a sequence of chunks with `(...cont)` / `…
 
 An approval notice never shows part of a command or diff as if it were the
 whole. One that fits in about three messages (roughly 11 KB) is sent whole,
-split as above. A longer one is sent as its beginning (up to 40 lines or
+split without losing a character: unlike other long messages, no blank is
+dropped at a break, so `./build/ ~/` and `./build/~/` never split into the
+same messages. A break falls at a line break where it can, and the message
+ends with `... (continued in the next message)`; otherwise inside a line,
+between two characters that are not blanks and never inside a `\u202e`-style
+escape, and the message ends with `... (this line continues in the next
+message)`. Each following message starts with `(...cont)`. A longer one is sent as its beginning (up to 40 lines or
 2 KB) followed by `[not the whole command: only its first N of M bytes are
 shown here. The full command is attached as approval-bash-command.txt]`,
 and the whole text follows as a file in the same chat (`sendDocument`, up

@@ -269,9 +269,15 @@ card already on screen, set to `pending`. The runtime says which agent asks
 and in which directory it works, because the main agent and its sub-agents
 run tools at the same time: only that agent's cards of the asking tool are
 candidates, a card already showing a prompt is skipped (its call is waiting
-on that prompt), and among the rest the one naming the approval's command,
-file (a relative path resolved against that agent's directory, which is a
-worktree for an isolated sub-agent) or network target wins, else the newest.
+on that prompt), and of the rest only a card naming exactly the approval's
+command, file (a relative path resolved against that agent's directory,
+which is a worktree for an isolated sub-agent) or network target qualifies;
+among several, the newest wins. A card of another call is never used: the
+editor shows the prompt under the card's title, which would then name a
+command or file other than the one approved. With no card qualifying (a
+`bash` call with a `cwd`, approved as `cd <dir> && <command>`, or a write
+through a symlink, approved as the file it lands in) the request gets a card
+of its own, titled after what it approves.
 The request carries:
 
 - for a file change, a `diff` block of the exact change (for a file too
@@ -285,10 +291,13 @@ The request carries:
   not the whole text]` line follows the block, so a cut text never reads as
   the whole;
 - every character that would not show as itself written out, as the TUI
-  does: in the command or target block, the text diff and the card title, a
+  does: in the command or target block, the text diff and every card title
+  (the prompt's own and the title of the tool call card it is shown on), a
   carriage return is `^M`, an escape `^[`, a tab `⇥`, and a bidi override,
   zero-width character, variation selector, no-break space or other
-  invisible character a `\u202e`-style escape (`\U000e0100` past U+FFFF).
+  invisible character a `\u202e`-style escape (`\U000e0100` past U+FFFF),
+  and so is a letter of another script posing as a Latin one in a Latin
+  word (`g\u0456thub.com`).
   The editor draws the prompt, but it would hide those just as a terminal
   does. A structured `diff` block shows the file's own text and cannot be
   escaped, so when that text holds such a character the prompt adds a line
