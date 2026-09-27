@@ -123,7 +123,14 @@ func main() {
 	}
 	// Local endpoints answer in the background; the TUI reads the provider
 	// manager on every frame, so their models show up as they arrive.
-	startModelDiscovery(context.Background(), boot.cfg, boot.providers, false)
+	discovery := startModelDiscovery(context.Background(), boot.cfg, boot.providers, false)
+	// tui.New replaces a configured model that cannot run with the best
+	// connected one and saves that choice. When only a local endpoint can
+	// supply it, give the probes a bounded chance to answer first, or the
+	// saved choice would be "no model" on every launch.
+	if fallbackNeedsDiscovery(boot.cfg, boot.providers) {
+		discovery.Wait(sessionModelsWait)
+	}
 	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
 	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb)

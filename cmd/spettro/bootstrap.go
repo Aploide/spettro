@@ -190,6 +190,20 @@ func (d *modelDiscovery) Wait(timeout time.Duration) bool {
 	}
 }
 
+// fallbackNeedsDiscovery reports whether resolving cfg's active model
+// (provider.Manager.ResolveActive) can pick a model that discovery has not
+// delivered yet. That is the case only when the configured provider has no
+// credentials, local endpoints are configured, and no connected model is
+// known now: local models come last in the preference order, so any model
+// already connected would be chosen over them anyway.
+func fallbackNeedsDiscovery(cfg config.UserConfig, pm *provider.Manager) bool {
+	if len(cfg.LocalEndpoints) == 0 || provider.HasCredentials(cfg.APIKeys, cfg.ActiveProvider) {
+		return false
+	}
+	_, known := pm.PreferredModel(cfg.APIKeys)
+	return !known
+}
+
 // resolveActiveModel replaces a configured model whose provider has no
 // credentials (fresh install, removed key) with the best connected model
 // the provider manager knows now. It does not wait for model discovery: ACP
