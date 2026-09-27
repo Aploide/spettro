@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -43,6 +44,40 @@ func TestAskUserQuestionWrapsWithItsIndent(t *testing.T) {
 			if lead := len(row) - len(strings.TrimLeft(row, "│ ")); lead != col {
 				t.Fatalf("at %v a wrapped question row starts at column %d, the first at %d:\n%s",
 					size, lead, col, strings.Join(rows[first:last+1], "\n"))
+			}
+		}
+	}
+}
+
+// Found in a VHS screenshot at 40x15: the ask-user key legend was one row
+// cut to "↑↓ or 1-9 pick  enter records  n …", so "esc declines" (the way
+// out) and "tab/←→ switch" were never on screen. The legend now packs into
+// as many rows as it needs, every key whole, and the frame still fits.
+func TestAskUserLegendShowsEveryKeyWhenNarrow(t *testing.T) {
+	form := agent.AskUserForm{Questions: []agent.AskUserQuestion{
+		{Header: "Architecture", Question: "Which architecture should we use for the new storage layer? " + strings.Repeat("Consider latency and cost. ", 6),
+			Options: []agent.AskUserOption{{Label: "Keep SQLite", Description: "WAL mode"}, {Label: "Postgres"}, {Label: "Append-only log"}}},
+		{Header: "Scope", Question: "How far?", Options: []agent.AskUserOption{{Label: "Minimal"}, {Label: "Full"}}},
+	}}
+	for _, size := range [][2]int{{40, 15}, {50, 16}, {80, 24}} {
+		for _, running := range []bool{false, true} {
+			m := footerModel(size[0], size[1])
+			m.SetPendingAskUserFormForTesting(form)
+			if running {
+				m.thinking = true
+				m.agentStartAt = time.Now()
+			}
+			m = m.recalcLayout()
+			frame := m.View().Content
+			assertFrameFits(t, "ask-user legend", frame, size[0], size[1])
+			plain := ansi.Strip(frame)
+			for _, key := range []string{"enter records", "n notes", "tab/←→ switch", "esc declines"} {
+				if !strings.Contains(plain, key) {
+					t.Errorf("%v running=%v: %q is not on screen:\n%s", size, running, key, plain)
+				}
+			}
+			if !strings.Contains(plain, "Keep SQLite") {
+				t.Errorf("%v running=%v: no option left on screen:\n%s", size, running, plain)
 			}
 		}
 	}

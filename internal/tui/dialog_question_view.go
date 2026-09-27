@@ -147,9 +147,10 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 	questionLines := len(head)
 	head = append(head, wrapIndentedLines(strings.TrimSpace(q.form.Context), "  ", width)...)
 
-	// Reserve the footer, one option row, and the line the "… N more" marker
-	// takes when the list has to be windowed.
-	head = clampTextLines(head, max(budget-3, 1), width)
+	// Reserve the key legend, one option row, and the line the "… N more"
+	// marker takes when the list has to be windowed.
+	hints := m.questionHintRows(width)
+	head = clampTextLines(head, max(budget-2-len(hints), 1), width)
 	headLines := m.styleQuestionHead(head, questionLines)
 	if question.MultiSelect {
 		// The checkboxes say the question takes more than one answer; this says
@@ -157,8 +158,8 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 		headLines = append(headLines, styleMuted.Render("  select all that apply"))
 	}
 
-	body := m.renderQuestionBody(question, width, budget-len(headLines)-1)
-	return [][]string{headLines, body, {styleMuted.Render("  " + m.questionHint())}}
+	body := m.renderQuestionBody(question, width, budget-len(headLines)-len(hints))
+	return [][]string{headLines, body, hints}
 }
 
 // renderQuestionBody is the answer list plus everything that sits with it: the
@@ -523,25 +524,36 @@ func (m Model) styleQuestionHead(head []string, questionLines int) []string {
 	return out
 }
 
-// questionHint is the key legend under the answer list; it names only the keys
-// that do something on the page being shown.
-func (m Model) questionHint() string {
+// questionHints is the key legend under the answer list, one entry per key;
+// it names only the keys that do something on the page being shown.
+func (m Model) questionHints() []string {
 	q := m.pendingQuestion
 	switch {
 	case q.editing:
-		return "enter sends  esc goes back"
+		return []string{"enter sends", "esc goes back"}
 	case q.notesEditing:
-		return "enter attaches the note  esc keeps what you typed"
+		return []string{"enter attaches the note", "esc keeps what you typed"}
 	case q.onSubmitTab():
-		return "↑↓ or 1-2 pick  enter confirms  ctrl+d sends  esc goes back"
+		return []string{"↑↓ or 1-2 pick", "enter confirms", "ctrl+d sends", "esc goes back"}
 	case q.singlePage():
-		return "↑↓ or 1-9 pick  enter answers  n notes  esc declines"
+		return []string{"↑↓ or 1-9 pick", "enter answers", "n notes", "esc declines"}
 	default:
 		if question, ok := q.question(); ok && question.MultiSelect {
-			return "space or 1-9 toggle  " + questionSubmitRow + " records  n notes  tab/←→ switch  esc declines"
+			return []string{"space or 1-9 toggle", questionSubmitRow + " records", "n notes", "tab/←→ switch", "esc declines"}
 		}
-		return "↑↓ or 1-9 pick  enter records  n notes  tab/←→ switch  esc declines"
+		return []string{"↑↓ or 1-9 pick", "enter records", "n notes", "tab/←→ switch", "esc declines"}
 	}
+}
+
+// questionHintRows is the key legend packed into rows of the dialog's
+// width (packKeyHints), indented and styled: a narrow dialog gets a second
+// row with every key rather than one row cut before "esc declines".
+func (m Model) questionHintRows(width int) []string {
+	rows := packKeyHints(m.questionHints(), max(width-2, 8))
+	for i, row := range rows {
+		rows[i] = styleMuted.Render("  " + row)
+	}
+	return rows
 }
 
 // renderQuestionSubmitPage is the review page behind the ✓ Submit chip: what
@@ -561,7 +573,8 @@ func (m Model) renderQuestionSubmitPage(width, budget int) [][]string {
 	// go first — the strip's ✓ Submit chip already says where the user is, and
 	// the rows say what they do — leaving the summary, which is the only part
 	// carrying information the rest of the form does not.
-	room := budget - len(actions) - 1
+	hints := m.questionHintRows(width)
+	room := budget - len(actions) - len(hints)
 	headings := room >= 3
 	bodyBudget := room
 	if headings {
@@ -579,7 +592,7 @@ func (m Model) renderQuestionSubmitPage(width, budget int) [][]string {
 	if headings {
 		sections = append(sections, []string{title.Render("  " + truncateLabel("Ready to submit your answers?", max(width-2, 8)))})
 	}
-	return append(sections, actions, []string{styleMuted.Render("  " + m.questionHint())})
+	return append(sections, actions, hints)
 }
 
 // renderQuestionReview is the middle of the review page: one bullet per
