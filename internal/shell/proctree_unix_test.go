@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -351,9 +352,26 @@ func TestShutDownProcessTreesLeavesNoCommandBehind(t *testing.T) {
 	t.Cleanup(reopenProcessTrees)
 	const callers = 8
 	finished := make(chan error, callers)
+	// stop tells the callers to quit instead of starting another command. It
+	// only matters when the test fails: then some callers are still looping,
+	// and without it they would keep starting commands once reopenProcessTrees
+	// lets them, leaving the last batch running after the test binary exits.
+	stop := make(chan struct{})
+	var workers sync.WaitGroup
+	// Registered after reopenProcessTrees, so it runs before it (cleanups run
+	// last-in first-out): every caller has returned before commands may start
+	// again.
+	t.Cleanup(func() { stopCallers(stop, &workers) })
 	for range callers {
+		workers.Add(1)
 		go func() {
+			defer workers.Done()
 			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30")
 				ConfigureProcessTree(cmd)
 				if _, err := CombinedOutput(cmd); errors.Is(err, ErrShuttingDown) {
@@ -380,8 +398,31 @@ func TestShutDownProcessTreesLeavesNoCommandBehind(t *testing.T) {
 				t.Fatal(err)
 			}
 		case <-time.After(10 * time.Second):
-			KillAllProcessTrees()
 			t.Fatal("a command started after the shutdown sweep was left running")
+		}
+	}
+}
+
+// stopCallers makes the command-starting goroutines of
+// TestShutDownProcessTreesLeavesNoCommandBehind return, and waits for them.
+// Closing stop keeps each caller from starting another command, and the
+// repeated sweeps kill whatever command a caller is blocked on. A caller that
+// checked stop just before it was closed can still start one more command
+// after a sweep, so the sweep repeats until every caller has returned; treesMu
+// guarantees each sweep sees every command whose start has completed.
+func stopCallers(stop chan struct{}, workers *sync.WaitGroup) {
+	close(stop)
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	for {
+		KillAllProcessTrees()
+		select {
+		case <-done:
+			return
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
