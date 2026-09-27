@@ -17,6 +17,12 @@ func TestLooksLikeAnnouncement(t *testing.T) {
 		"I'm going to read the parser and then fix the bug.",
 		"First, let me inspect the Makefile.",
 		"Now I'll run the tests.",
+		"I'll take a look at the parser.",
+		"I'll first read the Makefile, then run the tests.",
+		"I'll start with reading the failing test.",
+		"I'm starting by reading the config loader.",
+		"I'll need to check the lock file first.",
+		"Let me look at internal/agent/foo.go:42 first.",
 	}
 	for _, s := range yes {
 		if !looksLikeAnnouncement(s) {
@@ -32,6 +38,22 @@ func TestLooksLikeAnnouncement(t *testing.T) {
 		"I'll keep it. Running the tests showed nothing new.",
 		"The bug is in parse.go: I'll note that the fix is a one-liner.",
 		"I'll start by exploring " + strings.Repeat("the repository ", 30),
+		// Questions and replies waiting on the user: nudging them would push
+		// the model to act without the answer it asked for.
+		"I'll help you fix that. Could you paste the full error message?",
+		"I'll run the migration once you confirm which environment to target: staging or production?",
+		"I'll need to look at the config file. Where is it?",
+		"I need to know which branch you want me to review before I start.",
+		"I need to look at the actual error output to diagnose this. Could you paste it?",
+		"Let me check one thing first: do you want the v1 or the v2 endpoint changed?",
+		"I'll run the migration once you confirm.",
+		// Short final answers that open like an announcement.
+		"Let me explain how to run the tests: use `make test`.",
+		"Let me start with the short answer: no, the cache is never invalidated.",
+		"Let me start with the short answer, which is no.",
+		"Let's look at it differently: the function is O(n), which is fine here.",
+		"Let me check... Actually no: the config already sets the timeout to 30s.",
+		"I'm ready to run the tests whenever needed.",
 	}
 	for _, s := range no {
 		if looksLikeAnnouncement(s) {
@@ -78,6 +100,25 @@ func TestRunToolLoopAnnounceOnlyNudgeIsBounded(t *testing.T) {
 	}
 	if n := len(ls.requests()); n != 2 {
 		t.Fatalf("requests = %d, want 2 (one nudge only)", n)
+	}
+}
+
+// A clarifying question is a legitimate end of turn: the user must answer
+// it, so the loop returns it instead of nudging the model to go on alone.
+func TestRunToolLoopQuestionIsNotNudged(t *testing.T) {
+	question := "I'll run the migration once you confirm which environment to target: staging or production?"
+	pm, url, ls := newLoopServer(t,
+		loopReply{content: question},
+		loopReply{content: "never reached"})
+	res, err := runToolLoop(context.Background(), loopCfg(t, pm, url))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ls.requests()); n != 1 {
+		t.Fatalf("requests = %d, want 1 (no nudge)", n)
+	}
+	if res.content != question {
+		t.Fatalf("content = %q, want the question", res.content)
 	}
 }
 
@@ -154,6 +195,32 @@ func TestRunToolLoopDroppedToolCallIsNudgedOnce(t *testing.T) {
 	}
 	if !sawFirst {
 		t.Fatal("the first reply's text must stay in the history ahead of the nudge")
+	}
+}
+
+// A second dropped-call reply with no text is an empty reply: it is not
+// ended on, but handed to the bounded empty-reply nudges.
+func TestRunToolLoopTextlessDroppedCallFallsBackToEmptyReply(t *testing.T) {
+	pm, url, ls := newLoopServer(t,
+		loopReply{finish: "tool_calls"},
+		loopReply{finish: "tool_calls"},
+		loopReply{content: "done"})
+	res, err := runToolLoop(context.Background(), loopCfg(t, pm, url))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := ls.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d, want 3", len(reqs))
+	}
+	if got := lastUserText(reqs[1]); got != droppedToolCallNudge {
+		t.Fatalf("second request: last user text = %q, want the dropped-call nudge", got)
+	}
+	if got := lastUserText(reqs[2]); got != emptyReplyNudge {
+		t.Fatalf("third request: last user text = %q, want the empty-reply nudge", got)
+	}
+	if res.content != "done" {
+		t.Fatalf("content = %q, want done", res.content)
 	}
 }
 

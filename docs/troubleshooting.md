@@ -73,11 +73,17 @@ the model to go on), reported in the transcript as a note:
 - An empty reply is nudged up to twice; a third ends the turn with an error.
 - A short reply that only announces work ("I'll start by exploring the
   repository...") before the turn has made any tool call is nudged once.
+  A reply that asks the user something (it contains `?` or the word "you")
+  or introduces an answer with a colon ("Let me explain: ...") is never
+  treated as an announcement, so a clarifying question still ends the turn
+  and waits for the user.
 - A reply whose finish reason says it stopped for tool calls, but which
   carries none, is nudged once to send the call again.
 
-A second announce-only or dropped-call reply in the same turn ends it, so
-none of these can loop. To see what the provider actually returned, set
+A second announce-only reply in the same turn ends it, and so does a second
+dropped-call reply that carries text. A second dropped-call reply with no
+text is an empty reply, so it gets the empty-reply nudges above. None of
+these can loop. To see what the provider actually returned, set
 `SPETTRO_DEBUG_LOG` to a file path before starting spettro (TUI, `--acp` or
 `--goal`):
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"log/slog"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"spettro/internal/provider"
@@ -23,9 +24,11 @@ import (
 //     no tool call reached the loop. Something between the model and the
 //     loop lost it; asking again is the only recovery.
 //
-// Both nudges are bounded to one per turn, so a model that keeps answering
-// the same way ends the turn on its next reply exactly as it did before
-// these nudges existed. Neither can loop.
+// Both nudges are bounded to one per turn. A second announce-only reply, or
+// a second dropped-call reply that carries text, ends the turn exactly as it
+// did before these nudges existed. A second dropped-call reply with no text
+// is an empty reply, so it goes on to the empty-reply handling in
+// runToolLoop (bounded by maxEmptyReplies). Neither nudge can loop.
 const (
 	announceOnlyNudge    = "You described what you will do but made no tool call. Continue by calling tools, or give your final answer."
 	droppedToolCallNudge = "Your last response stopped for a tool call, but no tool call arrived. Send the tool call again, or give your final answer."
@@ -36,21 +39,35 @@ const (
 // (they report what was done); a bare announcement is one or two sentences.
 const announceMaxChars = 300
 
+// announceLeadIns may open the reply ahead of an announce prefix, as in
+// "First, let me ..." or "Now I'll ...". They are matched case-insensitively.
+var announceLeadIns = []string{"first, ", "first ", "now, ", "now ", "next, ", "next "}
+
 // announcePrefixes open a sentence that promises work instead of reporting
-// it. They are matched case-insensitively at the start of the reply.
+// it. They are matched case-insensitively, after any lead-in.
 var announcePrefixes = []string{
-	"i'll ", "i will ", "i'm going to ", "i am going to ", "let me ", "let's ",
-	"first, i'll ", "first, let me ", "first i'll ", "first let me ",
-	"now i'll ", "now let me ", "next, i'll ", "next i'll ", "i need to ",
-	"i'm starting ", "i am starting ", "starting by ",
+	"i'll need to ", "i'll ", "i will ", "i'm going to ", "i am going to ", "let me ", "let's ",
+	"i need to ",
+}
+
+// startingPrefixes open a sentence in the progressive form ("I'm starting by
+// reading ..."). The start verb is already part of the prefix, so what
+// follows must say what the start is, exactly as after "I'll start" (see
+// followsStart).
+var startingPrefixes = []string{"i'm starting ", "i am starting ", "starting "}
+
+// announceFillers are words allowed between the prefix and its verb:
+// "I'll first read", "Let me quickly check", "I'll take a look", "I'll go
+// ahead and run", "Let me have a look".
+var announceFillers = map[string]bool{
+	"first": true, "now": true, "quickly": true, "just": true, "also": true,
+	"then": true, "briefly": true, "go": true, "ahead": true, "and": true,
+	"take": true, "have": true, "a": true,
 }
 
 // announceVerbs are the actions an announcement promises: the kind of work
-// that needs tools. Requiring one after the prefix keeps ordinary answers
-// such as "Let me explain: ..." or "I'll leave it as is, the code is
-// correct." from being mistaken for announcements. Entries are stems
-// matched at the start of a word, so "explor" covers "explore" and
-// "exploring".
+// that needs tools. Entries are stems matched at the start of a word, so
+// "explor" covers "explore" and "exploring".
 var announceVerbs = []string{
 	"start", "begin", "explor", "look", "check", "read", "examin", "inspect",
 	"investigat", "search", "find", "open", "run", "review", "analy",
@@ -59,10 +76,27 @@ var announceVerbs = []string{
 }
 
 // looksLikeAnnouncement reports whether text is a short promise of future
-// tool work rather than an answer: at most announceMaxChars characters,
-// opening with one of announcePrefixes followed (within the same sentence)
-// by a word that starts with one of announceVerbs. The check is deliberately
-// narrow; a miss only means the turn ends as it always did.
+// tool work rather than an answer or a question. All of these must hold:
+//
+//   - it is at most announceMaxChars characters long;
+//   - it asks the user nothing and waits on nothing from them: it has no '?'
+//     and no word "you" ("Could you paste the error?", "I'll run it once
+//     you confirm." are legitimate ends of a turn, and nudging them would
+//     push the model to act without the answer it asked for);
+//   - it has no colon followed by more text, which introduces an answer
+//     ("Let me explain: ...", "Let's look at it differently: the function
+//     is O(n).");
+//   - it opens with one of announcePrefixes (after an optional lead-in), and
+//     the first word after the prefix, skipping announceFillers, is one of
+//     announceVerbs. "start" and "begin" count only when followed by what is
+//     being started ("start by exploring", not "start with the short
+//     answer").
+//
+// Requiring the verb right after the prefix is what keeps "Let me explain
+// how to run the tests" or "I'll leave it as is; the code is correct." out:
+// a tool-work word later in the sentence does not make it a promise. The
+// check is deliberately narrow and English-only; a miss only means the turn
+// ends as it always did.
 func looksLikeAnnouncement(text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" || utf8.RuneCountInString(text) > announceMaxChars {
@@ -71,29 +105,82 @@ func looksLikeAnnouncement(text string) bool {
 	lower := strings.ToLower(text)
 	// Typographic apostrophes are common in model output.
 	lower = strings.ReplaceAll(lower, "’", "'")
-	// "Let me know if you want me to run the tests." closes an answer.
-	if strings.HasPrefix(lower, "let me know") {
+	if addressesUser(lower) || strings.Contains(lower, ": ") || strings.Contains(lower, ":\n") {
 		return false
 	}
+	for _, leadIn := range announceLeadIns {
+		if rest, ok := strings.CutPrefix(lower, leadIn); ok {
+			lower = rest
+			break
+		}
+	}
+	for _, prefix := range startingPrefixes {
+		if rest, ok := strings.CutPrefix(lower, prefix); ok {
+			return followsStart(announceWords(rest))
+		}
+	}
 	for _, prefix := range announcePrefixes {
-		rest, ok := strings.CutPrefix(lower, prefix)
-		if !ok {
-			continue
+		if rest, ok := strings.CutPrefix(lower, prefix); ok {
+			return promisesToolWork(announceWords(rest))
 		}
-		// Only the first clause counts: in "I'll keep it. Running the tests
-		// showed nothing new." or "Let me explain: the list is empty" the
-		// verb-like words after the break belong to the answer, not to the
-		// promise. A trailing "..." is not a break ("Let me check...").
-		if i := strings.IndexAny(rest, ".!?:;,\n"); i >= 0 && !strings.HasPrefix(rest[i:], "...") {
-			rest = rest[:i]
+	}
+	return false
+}
+
+// addressesUser reports whether lower (lower-cased reply text) asks the user
+// something or waits on them: it contains a question mark or the word "you"
+// (also as "you'll", "you're", "you've", "you'd"). "Your" alone does not
+// count: "Let me look at your config." is an ordinary announcement.
+func addressesUser(lower string) bool {
+	if strings.Contains(lower, "?") {
+		return true
+	}
+	for _, w := range announceWords(lower) {
+		if w == "you" || strings.HasPrefix(w, "you'") {
+			return true
 		}
-		// Match verbs at a word start only, so "run" does not match inside
-		// "rerun" and "list" not inside "specialist".
-		rest = " " + rest
-		for _, verb := range announceVerbs {
-			if strings.Contains(rest, " "+verb) {
-				return true
-			}
+	}
+	return false
+}
+
+// announceWords splits lower-cased text into words: runs of letters and
+// apostrophes. Punctuation, digits and path characters are separators.
+func announceWords(lower string) []string {
+	return strings.FieldsFunc(lower, func(r rune) bool {
+		return !unicode.IsLetter(r) && r != '\''
+	})
+}
+
+// promisesToolWork reports whether words (the text after an announce prefix)
+// start with an announce verb, after skipping announceFillers.
+func promisesToolWork(words []string) bool {
+	for len(words) > 0 && announceFillers[words[0]] {
+		words = words[1:]
+	}
+	if len(words) == 0 || !isAnnounceVerb(words[0]) {
+		return false
+	}
+	if strings.HasPrefix(words[0], "start") || strings.HasPrefix(words[0], "begin") {
+		return followsStart(words[1:])
+	}
+	return true
+}
+
+// followsStart reports whether the words after "start"/"begin" name tool
+// work: "by exploring", "with reading", "off by checking" or a verb directly
+// ("start exploring"). "Let me start with the short answer" does not.
+func followsStart(words []string) bool {
+	for len(words) > 0 && (words[0] == "by" || words[0] == "with" || words[0] == "off") {
+		words = words[1:]
+	}
+	return promisesToolWork(words)
+}
+
+// isAnnounceVerb reports whether word starts with one of announceVerbs.
+func isAnnounceVerb(word string) bool {
+	for _, verb := range announceVerbs {
+		if strings.HasPrefix(word, verb) {
+			return true
 		}
 	}
 	return false
