@@ -21,6 +21,7 @@ deleted.
 | `~/.spettro/sessions/session-*/` | Saved conversations, tasks, events | history | Yes — loses `/resume` for that session |
 | `~/.spettro/sessions/session-*/workflows/wf_*/` | [Workflow](workflows.md) run transcripts: `script.js`, `meta.json`, `journal.jsonl`, `result.json` | history | Yes — loses the ability to resume that run from its journal |
 | `~/.spettro/catalog.json` | Model catalog cache | cache | Yes — the embedded snapshot is used until the background refresh fetches a new copy |
+| `~/.spettro/catalog-meta.json` | Validators and last confirmation time for `catalog.json` | cache | Yes — the next refresh downloads the catalog once instead of revalidating it |
 | `~/.spettro/update-check.json` | Last GitHub release check | cache | Yes — checked again on the next start |
 | `~/.spettro/memory-inbox.json` | Mined-fact candidates | cache | Yes — loses pending `/memory review` items (not preselected) |
 | `~/.spettro/skills/` | Installed skills | user | Only via `/skill uninstall` |

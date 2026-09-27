@@ -158,6 +158,7 @@ var knownGlobalEntries = map[string]Class{
 	"history":               ClassHistory,
 	"sessions":              ClassHistory,
 	"catalog.json":          ClassCache,
+	"catalog-meta.json":     ClassCache,
 	"memory-inbox.json":     ClassCache,
 	"update-check.json":     ClassCache,
 	"skills":                ClassUser,

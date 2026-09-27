@@ -67,10 +67,7 @@ func bootstrapSession(cwd string, overrides sandbox.Overrides) (*bootstrap, erro
 	pm := provider.NewManager()
 	pm.SetStreamAll(true)
 	pm.SetAPIKeys(cfg.APIKeys)
-	if cat, err := models.Load(); err == nil {
-		pm.SetCatalog(cat)
-	}
-	models.RefreshBackground(pm.SetCatalog)
+	models.LoadAndRefresh(pm.SetCatalog)
 	return &bootstrap{
 		store:         store,
 		manifest:      manifest,

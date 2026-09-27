@@ -12,6 +12,7 @@ Spettro uses both project-local and user-global storage.
 | `master.key` | Random secret `keys.enc` is encrypted under (created on first use). |
 | `trusted.json` | Permanently trusted project paths. |
 | `catalog.json` | Cached provider/model catalog (see [Model catalog](#model-catalog)). |
+| `catalog-meta.json` | When the server last confirmed `catalog.json`, and the server's `ETag`/`Last-Modified` for it. |
 | `update-check.json` | Result of the last GitHub release check, reused for 24 hours. |
 | `hooks.json` | Global runtime hooks fallback/default. |
 | `lsp.json` | Optional [LSP](lsp.md) overrides; servers are auto-detected on PATH with zero config. |
@@ -57,9 +58,16 @@ The model picker is built from the Spettro provider catalog
 - Otherwise (first run, cache deleted, offline or behind a broken proxy) the
   snapshot embedded in the binary at build time is used.
 - A background refresh then asks the server for a newer catalog only when
-  the cache is older than 6 hours, with a conditional request, so an
-  unchanged catalog is not downloaded again. Long sessions re-check hourly
-  under the same rule.
+  the server last confirmed the cached copy more than 6 hours ago. The
+  request is conditional: it carries the `ETag` and `Last-Modified` the server
+  sent with that copy (kept in `catalog-meta.json`), so an unchanged catalog
+  is not downloaded again. A cache without that file (written by an older
+  build, or left behind after `spettro clean`) is downloaded again once
+  stale.
+- Long sessions re-check hourly under the same rule. The cache is shared by
+  every spettro process: when another one (an ACP server, a second TUI) has
+  downloaded a newer catalog, a running session switches to it at its next
+  hourly check, without a request of its own.
 
 Local endpoints (`local_endpoints` in `config.json`) and the Spettro
 Subscription model list are also fetched in the background. Their models
