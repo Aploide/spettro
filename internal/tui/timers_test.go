@@ -1,11 +1,17 @@
 package tui
 
 import (
+	"io"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"spettro/internal/jobs"
 	"spettro/internal/session"
 	"spettro/internal/spettro"
 	"spettro/internal/theme"
@@ -106,4 +112,86 @@ func TestCursorBlinkSetting(t *testing.T) {
 	if s := textareaStyles(theme.Dark(), true); !s.Cursor.Blink {
 		t.Fatal("cursor_blink=true does not blink")
 	}
+}
+
+// Status bar values that change with no message reaching the TUI (a /loop
+// counting down, a background job that ends) are redrawn by the 1 s clock
+// tick, which runs only while one of them is on screen.
+func TestClockElementsKeepTicking(t *testing.T) {
+	t.Run("loop countdown", func(t *testing.T) {
+		m := footerModel(120, 40)
+		m.activeLoop = &loopState{ID: 1, Interval: 5 * time.Minute, Prompt: "x", StartedAt: time.Now(), NextAt: time.Now().Add(5 * time.Minute)}
+		nm, _ := m.Update(tea.FocusMsg{})
+		m = nm.(Model)
+		if !m.clockArmed {
+			t.Fatal("an idle /loop armed no clock tick")
+		}
+		if view := ansi.Strip(m.View().Content); !strings.Contains(view, "next in 5m0s") {
+			t.Fatalf("the countdown is not on screen:\n%s", view)
+		}
+		// Ten seconds pass; the clock tick redraws the memoized status bar.
+		m.activeLoop.NextAt = m.activeLoop.NextAt.Add(-10 * time.Second)
+		nm, _ = m.Update(clockTickMsg(time.Now()))
+		m = nm.(Model)
+		if view := ansi.Strip(m.View().Content); !strings.Contains(view, "next in 4m50s") {
+			t.Fatalf("the countdown did not move:\n%s", view)
+		}
+		if !m.clockArmed {
+			t.Fatal("the clock stopped while the loop is active")
+		}
+		m.activeLoop = nil
+		nm, _ = m.Update(clockTickMsg(time.Now()))
+		if nm.(Model).clockArmed {
+			t.Fatal("the clock kept ticking after the loop ended")
+		}
+	})
+	t.Run("background job counter", func(t *testing.T) {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestClockHelperProcess$")
+		cmd.Env = append(os.Environ(), "SPETTRO_TUI_CLOCK_HELPER=1")
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, err := jobs.Default().Start(cmd, "helper")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := footerModel(120, 40)
+		nm, _ := m.Update(tea.FocusMsg{})
+		m = nm.(Model)
+		if !m.clockArmed {
+			stdin.Close()
+			t.Fatal("a running background job armed no clock tick")
+		}
+		if view := ansi.Strip(m.View().Content); !strings.Contains(view, "1 bg job") {
+			stdin.Close()
+			t.Fatalf("the job counter is not on screen:\n%s", view)
+		}
+		stdin.Close() // the helper exits
+		deadline := time.Now().Add(10 * time.Second)
+		for job.Running() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if job.Running() {
+			t.Fatal("the helper process did not exit")
+		}
+		nm, _ = m.Update(clockTickMsg(time.Now()))
+		m = nm.(Model)
+		if view := ansi.Strip(m.View().Content); strings.Contains(view, "bg job") {
+			t.Fatalf("the ended job is still counted:\n%s", view)
+		}
+		if m.clockArmed {
+			t.Fatal("the clock kept ticking with no job running")
+		}
+	})
+}
+
+// TestClockHelperProcess is the background job of TestClockElementsKeepTicking:
+// it runs until its stdin is closed.
+func TestClockHelperProcess(t *testing.T) {
+	if os.Getenv("SPETTRO_TUI_CLOCK_HELPER") != "1" {
+		return
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	os.Exit(0)
 }

@@ -335,6 +335,8 @@ type Model struct {
 	// tickArmed records that a tickMsg is on its way, so armTimers never
 	// starts a second tick chain (which would double the animation speed).
 	tickArmed bool
+	// clockArmed records that a clockTickMsg is on its way (see armTimers).
+	clockArmed bool
 
 	showSelector bool
 	selItems     []provider.Model

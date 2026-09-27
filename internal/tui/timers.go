@@ -7,12 +7,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
+	"spettro/internal/jobs"
+	"spettro/internal/pty"
 )
 
 // armTimers returns the timers the model needs after an update, marking
 // them armed so each is scheduled once:
 //
 //   - the 50 ms animation tick, while needsAnimation holds;
+//   - the 1 s clock tick, while needsClock holds;
 //   - a one-shot timer for a banner that clears itself (bannerClearAt).
 //
 // Nothing else wakes an idle TUI but the input cursor's blink.
@@ -21,6 +24,10 @@ func (m *Model) armTimers() tea.Cmd {
 	if !m.tickArmed && m.needsAnimation() {
 		m.tickArmed = true
 		cmds = append(cmds, tick())
+	}
+	if !m.clockArmed && m.needsClock() {
+		m.clockArmed = true
+		cmds = append(cmds, clockTick())
 	}
 	if m.banner != "" && !m.bannerClearAt.IsZero() && !m.bannerClearAt.Equal(m.bannerTimerAt) {
 		at := m.bannerClearAt
@@ -56,6 +63,29 @@ func (m Model) needsAnimation() bool {
 		return true
 	}
 	return false
+}
+
+// clockTickInterval is how often the clock tick redraws the status bar.
+// The values it shows (a /loop's countdown, rounded to the second, and the
+// background job and pty counters) never need more.
+const clockTickInterval = time.Second
+
+// clockTickMsg redraws the chrome for a value that changes with the wall
+// clock or with work outside the TUI rather than with eyeFrame. It is not
+// transcriptOnly, so its Update re-renders the memoized status bar.
+type clockTickMsg time.Time
+
+func clockTick() tea.Cmd {
+	return tea.Tick(clockTickInterval, func(t time.Time) tea.Msg { return clockTickMsg(t) })
+}
+
+// needsClock reports whether the status bar shows something that changes
+// while the TUI receives no message at all: an idle /loop counting down to
+// its next iteration, or a background job or pty session, which can end at
+// any moment and must then leave the counter. Each case is covered by
+// TestClockElementsKeepTicking.
+func (m Model) needsClock() bool {
+	return m.activeLoop != nil || jobs.Default().RunningCount() > 0 || pty.Default().RunningCount() > 0
 }
 
 // hasRunningDelegation reports whether a sub-agent or a workflow phase is

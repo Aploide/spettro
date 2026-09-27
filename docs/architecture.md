@@ -66,9 +66,12 @@ does not grow with the length of the session:
   is joined from rows measured once.
 - **Idle**. The 50 ms animation tick runs only while something animates
   (a run, onboarding and sign-in spinners, the MAX plan label, a goal's clock,
-  running delegations, in-progress tasks, glowing input keywords); banners
-  clear with a one-shot timer; the input cursor is steady unless
-  `cursor_blink` is set. An idle TUI does no work between keystrokes.
+  running delegations, in-progress tasks, glowing input keywords); a 1 s
+  clock tick redraws the status bar while a `/loop` counts down or a
+  background job or pty session runs (either can end with no message
+  reaching the TUI); banners clear with a one-shot timer; the input cursor
+  is steady unless `cursor_blink` is set. Otherwise an idle TUI does no work
+  between keystrokes.
 - **Off the Update goroutine**. The side panel's git state (`git status`,
   `git diff --numstat`), `/diff`, and the save of the mode and side panel
   toggle to `config.json` run as background commands.

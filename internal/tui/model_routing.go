@@ -114,6 +114,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.applyTheme(theme.Resolve(theme.AutoKind, msg.Color))
 			m.themeDetected = msg.Color != nil
 		}
+	case clockTickMsg:
+		// Only re-renders the chrome (clockTickMsg is not transcriptOnly);
+		// Update re-arms the next one while needsClock holds.
+		m.clockArmed = false
 	case tickMsg:
 		// Update re-arms the next tick only while something animates (see
 		// armTimers).
