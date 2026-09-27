@@ -158,17 +158,16 @@ func (m Model) sidePanelListBudget(width int) int {
 // styled. Styling every item on every frame cost 64 ms per frame at 10k
 // items (BenchmarkSidePanelScale in the perf harness).
 func (m Model) sidePanelList(items []sidePanelItem, width, maxRows int) (visible []string, rowToItem []int) {
-	rowToItem, selectedRow := sidePanelRowLayout(items, m.sidePanelCursor(items))
-	start, end := 0, len(rowToItem)
-	if len(rowToItem) > maxRows && maxRows > 0 {
+	layout, selectedRow := sidePanelRowLayout(items, m.sidePanelCursor(items))
+	start, end := 0, len(layout)
+	if len(layout) > maxRows && maxRows > 0 {
 		start = max(selectedRow-maxRows/2, 0)
-		if start+maxRows > len(rowToItem) {
-			start = len(rowToItem) - maxRows
+		if start+maxRows > len(layout) {
+			start = len(layout) - maxRows
 		}
 		end = start + maxRows
 	}
-	rowToItem = rowToItem[start:end]
-	return m.sidePanelStyledRows(items, rowToItem, width), rowToItem
+	return m.sidePanelStyledRows(items, layout, start, end, width), layout[start:end]
 }
 
 // sidePanelRowLayout lays the activity list out as display rows: a header
@@ -191,20 +190,23 @@ func sidePanelRowLayout(items []sidePanelItem, cursor int) ([]int, int) {
 	return rowToItem, selectedRow
 }
 
-// sidePanelStyledRows renders the rows of a sidePanelRowLayout window. A
-// header row (-1) names the agent of the item on the row below it.
-func (m Model) sidePanelStyledRows(items []sidePanelItem, rowToItem []int, width int) []string {
+// sidePanelStyledRows renders rows start..end of a sidePanelRowLayout. A
+// header row (-1) names the agent of the item on the row below it, which is
+// looked up in the whole layout: a window can end on a header whose item is
+// just out of view.
+func (m Model) sidePanelStyledRows(items []sidePanelItem, layout []int, start, end, width int) []string {
 	cursor := m.sidePanelCursor(items)
 	// A row is the 4-cell cursor prefix plus up to rowBudget cells of
 	// "└ title detail", which has to fit the room inside the panel frame.
 	rowBudget := max(12, sidePanelContentWidth(width)-4)
 	pal := theme.Current()
-	lines := make([]string, 0, len(rowToItem))
-	for r, idx := range rowToItem {
+	lines := make([]string, 0, end-start)
+	for r := start; r < end; r++ {
+		idx := layout[r]
 		if idx < 0 {
 			agent := ""
-			if r+1 < len(rowToItem) && rowToItem[r+1] >= 0 {
-				agent = activityAgentLabel(items[rowToItem[r+1]].Agent)
+			if r+1 < len(layout) && layout[r+1] >= 0 {
+				agent = activityAgentLabel(items[layout[r+1]].Agent)
 			}
 			header := lipgloss.NewStyle().Foreground(pal.TextMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
 			lines = append(lines, header)
@@ -493,7 +495,8 @@ func (m Model) sidePanelHeaderParts(width int) []string {
 		subtitle = "Ultra swarm · per-agent activity"
 	}
 	if m.activityDropped > 0 {
-		subtitle += fmt.Sprintf(" · %d earlier dropped", m.activityDropped)
+		// The count leads: a narrow panel cuts the end of the subtitle.
+		subtitle = fmt.Sprintf("%d earlier dropped · %s", m.activityDropped, subtitle)
 	}
 	parts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
