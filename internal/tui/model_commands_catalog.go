@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"spettro/internal/commands"
@@ -164,14 +165,39 @@ func (m Model) filterCommands(query string) []commandDef {
 	if query == "" {
 		return catalog
 	}
+	// Matches are ranked, catalog order kept within a rank: the command
+	// named exactly as typed first, then names starting with the query,
+	// then names containing it, then commands matched only by their
+	// description. Enter runs the highlighted entry, so without the ranking
+	// typing "/skills" highlighted "/skill" (its description says "Agent
+	// Skills" and it comes first in the catalog) and Enter opened the wrong
+	// command's sub-menu.
 	q := strings.ToLower(query)
-	var out []commandDef
+	var ranked [4][]commandDef
 	for _, c := range catalog {
-		if strings.Contains(strings.ToLower(c.name), q) || strings.Contains(strings.ToLower(c.desc), q) {
-			out = append(out, c)
+		if rank, ok := commandMatchRank(c, q); ok {
+			ranked[rank] = append(ranked[rank], c)
 		}
 	}
-	return out
+	return slices.Concat(ranked[0], ranked[1], ranked[2], ranked[3])
+}
+
+// commandMatchRank ranks how well command c matches the lowercase query q
+// (see filterCommands): 0 exact name, 1 name prefix, 2 name substring,
+// 3 description substring. ok is false when c does not match at all.
+func commandMatchRank(c commandDef, q string) (rank int, ok bool) {
+	name := strings.TrimPrefix(strings.ToLower(c.name), "/")
+	switch {
+	case name == q:
+		return 0, true
+	case strings.HasPrefix(name, q):
+		return 1, true
+	case strings.Contains(name, q):
+		return 2, true
+	case strings.Contains(strings.ToLower(c.desc), q):
+		return 3, true
+	}
+	return 0, false
 }
 
 // skillMenuEntries lists the user-invocable skills as /name entries for the

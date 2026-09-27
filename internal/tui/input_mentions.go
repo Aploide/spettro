@@ -11,6 +11,12 @@ import (
 
 func (m *Model) syncInputSuggestions() tea.Cmd {
 	val := m.ta.Value()
+	if val != m.cmdQuery {
+		// A new query: highlight the best match again (see cmdQuery).
+		m.cmdQuery = val
+		m.cmdCursor = 0
+		m.mentionCursor = 0
+	}
 	if strings.HasPrefix(val, "/") {
 		if items, ok := m.slashSubMenu(val); ok {
 			m.cmdItems = items
