@@ -615,6 +615,15 @@ func humanizeToolID(name string) string {
 	return strings.Join(parts, " ")
 }
 
+// formatApprovalCommandLabel is the text of the approval dialog's summary
+// row for an approval request's Command: "$ <command>" for a command, or a
+// sentence naming the target of a network call ("network <tool> <target>").
+//
+// The target is never shortened here. The dialog cuts the row to the
+// terminal and, when anything is cut, shows the whole label in its preview
+// (buildApprovalPreview): the end of a URL (the real domain after a long
+// host name, a query string carrying data out) is what the user has to see
+// before allowing the call.
 func formatApprovalCommandLabel(command string) string {
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -629,19 +638,19 @@ func formatApprovalCommandLabel(command string) string {
 		}
 		switch toolID {
 		case "web-search":
-			return fmt.Sprintf("Searching web for %q", truncateLabel(target, 60))
+			return fmt.Sprintf("Searching web for %q", target)
 		case "web-fetch":
-			return fmt.Sprintf("Fetching %s", truncateLabel(target, 60))
+			return fmt.Sprintf("Fetching %s", target)
 		case "download":
-			return fmt.Sprintf("Downloading %s", truncateLabel(target, 60))
+			return fmt.Sprintf("Downloading %s", target)
 		case "mcp-list-resources":
-			return fmt.Sprintf("Listing MCP resources for %s", truncateLabel(target, 40))
+			return fmt.Sprintf("Listing MCP resources for %s", target)
 		case "mcp-read-resource":
-			return fmt.Sprintf("Reading MCP resource %s", truncateLabel(target, 50))
+			return fmt.Sprintf("Reading MCP resource %s", target)
 		case "mcp-auth":
-			return fmt.Sprintf("Updating MCP auth for %s", truncateLabel(target, 40))
+			return fmt.Sprintf("Updating MCP auth for %s", target)
 		default:
-			return fmt.Sprintf("Using network tool %s on %s", humanizeToolID(toolID), truncateLabel(target, 50))
+			return fmt.Sprintf("Using network tool %s on %s", humanizeToolID(toolID), target)
 		}
 	}
 	return "$ " + command

@@ -21,8 +21,9 @@ import (
 //	  why: non-whitelisted command    reason (and, with permission debug on,
 //	                                  the segments that needed approval)
 //	    …                             preview: the diff of a file change, or
-//	    …                             the full text of a command too long
-//	  lines 1-8 of 3002 · …           for the summary row; scrollable
+//	    …                             the full text of a command or network
+//	  lines 1-8 of 3002 · …           target too long for the summary row;
+//	                                  scrollable
 //	  allow this command?             picker (or the "instead" text field)
 //	  › Allow once
 //	    …
@@ -74,9 +75,11 @@ func (m Model) approvalPreviewLines(width int) []string {
 
 // buildApprovalPreview renders the preview rows for one approval request:
 // the diff when the request carries one (file-write, file-edit), otherwise
-// the full command when it does not fit the summary row. Control characters
-// are made visible, not interpreted (termtext.EscapeControls): the preview
-// is what the user approves, so no character of the command may be hidden.
+// the full text of the summary row when it does not fit that row: the whole
+// command, or for a network call the whole sentence naming its target.
+// Control characters are made visible, not interpreted
+// (termtext.EscapeControls): the preview is what the user approves, so no
+// character of it may be hidden.
 func buildApprovalPreview(req agent.ShellApprovalRequest, width int) []string {
 	if strings.TrimSpace(req.Diff) != "" {
 		// Stay in the unified layout: the side-by-side one halves the room
@@ -87,16 +90,19 @@ func buildApprovalPreview(req agent.ShellApprovalRequest, width int) []string {
 		})
 		return strings.Split(rendered, "\n")
 	}
-	if !strings.HasPrefix(formatApprovalCommandLabel(req.Command), "$ ") {
-		return nil // a network approval: the summary row names the target
+	label := formatApprovalCommandLabel(req.Command)
+	text := strings.TrimSpace(req.Command)
+	if !strings.HasPrefix(label, "$ ") {
+		// A network call: the label is one line (its target has no
+		// newlines, see formatApprovalCommandLabel), previewed whole.
+		text = label
 	}
-	command := strings.TrimSpace(req.Command)
-	if !strings.Contains(command, "\n") && approvalSummaryFits(command, width) {
+	if !strings.Contains(text, "\n") && approvalSummaryFits(label, width) {
 		return nil
 	}
 	textW := max(width-len(approvalPreviewIndent), 8)
 	var lines []string
-	for _, raw := range strings.Split(command, "\n") {
+	for _, raw := range strings.Split(text, "\n") {
 		for _, part := range termtext.Wrap(termtext.EscapeControls(raw), textW) {
 			lines = append(lines, styleMuted.Render(approvalPreviewIndent+part))
 		}
@@ -104,10 +110,11 @@ func buildApprovalPreview(req agent.ShellApprovalRequest, width int) []string {
 	return lines
 }
 
-// approvalSummaryFits reports whether a one-line command is shown whole on
-// the summary row ("  $ " plus the command).
-func approvalSummaryFits(command string, width int) bool {
-	return ansi.StringWidth(termtext.EscapeControls(command))+4 <= width
+// approvalSummaryFits reports whether a one-line summary label (see
+// formatApprovalCommandLabel) is shown whole on the summary row, which is
+// indented by two cells.
+func approvalSummaryFits(label string, width int) bool {
+	return ansi.StringWidth(approvalSummary(label))+2 <= width
 }
 
 // approvalLayout is the approval dialog cut to the rows the terminal has.

