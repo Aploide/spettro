@@ -346,6 +346,9 @@ func mergeStamps(msgs []provider.Message) []provider.FileStamp {
 			cur.Path = fs.Path
 			if fs.Seen != "" {
 				cur.Seen = fs.Seen
+				// A record with Seen is the path's whole state, so its
+				// Shell mark (false included) replaces the earlier one.
+				cur.Shell = fs.Shell
 			}
 			if fs.Read != "" {
 				cur.Read = fs.Read

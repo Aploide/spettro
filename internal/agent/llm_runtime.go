@@ -272,7 +272,11 @@ type toolRuntime struct {
 	// held at the time, the file's identity then and when that was known:
 	// the cheap check that lets a foreground shell command re-stamp the
 	// files it changed itself (restampAfterShell).
-	stampIDs      map[string]stampedIdentity
+	stampIDs map[string]stampedIdentity
+	// shellStamped holds the stamp keys whose stamp a shell re-stamp set:
+	// content the agent's own command wrote but the model was never shown,
+	// so a file-write overwrite needs a file-read first (file_stamps.go).
+	shellStamped  map[string]struct{}
 	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
@@ -1673,6 +1677,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			if err := r.checkFileStamp("file-write", rel, oldRaw); err != nil {
 				return "", err
 			}
+			if err := r.checkOverwriteSeen(rel); err != nil {
+				return "", err
+			}
 		}
 		newContent := args.Content
 		if args.Append {
@@ -1704,10 +1711,18 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
-		if !args.Append || !exists || stampedBefore {
+		switch {
+		case !args.Append || !exists:
+			// The model supplied every byte of the file.
+			r.recordFullWriteStamp(rel, []byte(newContent))
+		case stampedBefore:
+			// An append keeps what was there, so a file the model has
+			// not seen since its own bash command changed it stays
+			// marked (checkOverwriteSeen).
+			r.recordFileStamp(rel, []byte(newContent))
+		default:
 			// An append to a file the agent had not seen in full leaves it
 			// unstamped: the model still has not read what was there.
-			r.recordFileStamp(rel, []byte(newContent))
 		}
 		r.invalidateSymbolIndex(rel)
 		recordFileChange(ctx, abs, oldContent, newContent, !exists)

@@ -87,7 +87,7 @@ touch or a same-content rewrite does not count, and it is carried in the
 conversation, so a file read in an earlier turn still counts as read.
 
 Changes the agent's own foreground `bash` commands make (a formatter, a code
-generator, `sed -i`) do not trip the guard. Just before such a
+generator, `sed -i`) do not trip the guard for `file-edit`. Just before such a
 command runs, Spettro checks which files it holds a hash for still hold
 exactly that content; right after, it re-hashes those whose size,
 modification time, change time (ctime) or inode the command changed, and the
@@ -108,13 +108,21 @@ moved, or Windows, where Spettro reads no ctime) the file is re-read and its
 hash compared, and once confirmed long enough after its last change it needs
 only a `stat` from then on.
 
+The model has not seen what its command wrote, so a file re-hashed this way
+cannot be overwritten whole with `file-write` until it is read again
+(`changed by one of your bash commands since you last read it`): writing a
+file computed from the old read would revert the command's output. An
+append or a `file-edit` (whose `old_string` must match the current text)
+still works, and the mark is carried in the conversation like the hashes.
+
 The work is bounded (a stat of at most 1024 files per command, never a
 directory walk, at most 32 files and 8 MiB hashed before it and 32 MiB
 re-read after it), and a file past a bound keeps its old hash, which errs on
 the side of the guard. Two cases are not told apart: a change another
 process makes to such a file while the agent's command runs counts as the
-command's, and changes made by background jobs (`run_in_background`) are
-never treated as the agent's own.
+command's (though the `file-write` rule above keeps it from being
+overwritten unseen), and changes made by background jobs
+(`run_in_background`) are never treated as the agent's own.
 
 ## Retired names
 

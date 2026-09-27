@@ -51,7 +51,12 @@ import (
 //   - Right after the command, restampAfterShell stats the eligible files
 //     again and re-stamps each whose identity changed, with its new content.
 //     The read stamp is left alone: the model has not seen the new lines, so
-//     line numbers from its last file-read no longer hold.
+//     line numbers from its last file-read no longer hold. The file is also
+//     marked shellStamped: file-edit may change it (old_string must still
+//     match the current text), but a file-write overwrite is refused until
+//     the model reads it again, since writing a whole file over content the
+//     model never saw would silently revert that content, and with it any
+//     change another process slipped in while the command ran (below).
 //
 // When a stat is enough. Size, mtime and inode alone miss a same-size edit
 // in place that keeps the old mtime (touch -r, rsync -t --inplace, tar -x)
@@ -76,8 +81,9 @@ import (
 // the side of the guard. Background jobs are not covered: they outlive the
 // call, so their changes cannot be told apart from anyone else's. What the
 // rule cannot tell apart is a change another process makes to an eligible
-// file while the command runs: it is taken for the command's own. Outside
-// that window (between calls, or while an approval prompt is open, which is
+// file while the command runs: it is taken for the command's own (and the
+// shellStamped mark keeps a blind file-write from dropping it). Outside that
+// window (between calls, or while an approval prompt is open, which is
 // before the snapshot) every outside change is still caught.
 
 // Bounds on the work around one foreground shell command (see above).
@@ -164,11 +170,31 @@ func resolveExistingPath(abs string) string {
 	}
 }
 
-// setStampLocked records sum as key's stamp (and, with read, its read
-// stamp). si is the file's identity when it held exactly that content
-// (hasID false when unknown, and then any identity recorded earlier is
-// dropped, since it described other content).
-func (r *toolRuntime) setStampLocked(key string, sum [32]byte, read bool, si stampedIdentity, hasID bool) {
+// stampSource says where a new stamp's content came from, which decides
+// what else the stamp changes.
+type stampSource int
+
+const (
+	// stampFromWrite: an agent write the model knows only part of (a
+	// file-edit, an append, a hook's or language server's rewrite, a
+	// download). The shellStamped mark, if any, stays.
+	stampFromWrite stampSource = iota
+	// stampFromFullWrite: a file-write whose whole content the model
+	// supplied. Clears the shellStamped mark.
+	stampFromFullWrite
+	// stampFromRead: a file-read. Also sets the read stamp and clears the
+	// shellStamped mark.
+	stampFromRead
+	// stampFromShell: the agent's own shell command changed the file
+	// (restampAfterShell). Sets the shellStamped mark.
+	stampFromShell
+)
+
+// setStampLocked records sum as key's stamp from src. si is the file's
+// identity when it held exactly that content (hasID false when unknown, and
+// then any identity recorded earlier is dropped, since it described other
+// content).
+func (r *toolRuntime) setStampLocked(key string, sum [32]byte, src stampSource, si stampedIdentity, hasID bool) {
 	if r.fileStamps == nil {
 		r.fileStamps = map[string][32]byte{}
 	}
@@ -181,11 +207,20 @@ func (r *toolRuntime) setStampLocked(key string, sum [32]byte, read bool, si sta
 	} else {
 		delete(r.stampIDs, key)
 	}
-	if read {
+	switch src {
+	case stampFromRead:
 		if r.readStamps == nil {
 			r.readStamps = map[string][32]byte{}
 		}
 		r.readStamps[key] = sum
+		delete(r.shellStamped, key)
+	case stampFromFullWrite:
+		delete(r.shellStamped, key)
+	case stampFromShell:
+		if r.shellStamped == nil {
+			r.shellStamped = map[string]struct{}{}
+		}
+		r.shellStamped[key] = struct{}{}
 	}
 	if r.stampsChanged == nil {
 		r.stampsChanged = map[string]struct{}{}
@@ -194,19 +229,31 @@ func (r *toolRuntime) setStampLocked(key string, sum [32]byte, read bool, si sta
 }
 
 // recordFileStamp remembers content, which the agent just wrote under the
-// file's lock, as rel's last-seen state. The identity is taken now, after
-// the write; verifiedAt is taken just before that stat. A write from
-// outside landing in between is caught all the same: the file then changed
-// within stampRacyWindow of verifiedAt, so the identity is not trusted and
-// the next shell snapshot hashes the content.
+// file's lock, as rel's last-seen state; the model knows only part of it
+// (stampFromWrite).
 func (r *toolRuntime) recordFileStamp(rel string, content []byte) {
+	r.recordWriteStamp(rel, content, stampFromWrite)
+}
+
+// recordFullWriteStamp is recordFileStamp for a file-write that replaced
+// the whole file with content the model supplied.
+func (r *toolRuntime) recordFullWriteStamp(rel string, content []byte) {
+	r.recordWriteStamp(rel, content, stampFromFullWrite)
+}
+
+// recordWriteStamp stamps content just written to rel. The identity is
+// taken now, after the write; verifiedAt is taken just before that stat.
+// A write from outside landing in between is caught all the same: the
+// file then changed within stampRacyWindow of verifiedAt, so the identity
+// is not trusted and the next shell snapshot hashes the content.
+func (r *toolRuntime) recordWriteStamp(rel string, content []byte, src stampSource) {
 	key := r.stampKey(rel)
 	sum := sha256.Sum256(content)
 	at := time.Now().UnixNano()
 	id, hasID := statIdentity(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.setStampLocked(key, sum, false, stampedIdentity{id: id, verifiedAt: at}, hasID)
+	r.setStampLocked(key, sum, src, stampedIdentity{id: id, verifiedAt: at}, hasID)
 }
 
 // recordReadStamp stamps rel after a file-read and remembers that content as
@@ -228,7 +275,7 @@ func (r *toolRuntime) recordReadStampSum(rel string, sum [32]byte, opened os.Fil
 	id, hasID := identityOf(opened)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.setStampLocked(key, sum, true, stampedIdentity{id: id, verifiedAt: statAt.UnixNano()}, hasID)
+	r.setStampLocked(key, sum, stampFromRead, stampedIdentity{id: id, verifiedAt: statAt.UnixNano()}, hasID)
 }
 
 // unchangedSinceRead reports whether content is exactly what the last
@@ -282,6 +329,23 @@ func (r *toolRuntime) checkFileStamp(tool, rel string, current []byte) error {
 		return nil
 	}
 	return staleReadError(tool, rel)
+}
+
+// checkOverwriteSeen rejects a file-write overwrite of a file whose stamp
+// came from the agent's own shell command: the model never saw that
+// content, so writing a whole file computed from its last read would revert
+// it (a formatter's output, generated code, or an outside change the
+// command's window absorbed). file-edit needs no such check: its old_string
+// must match the current text.
+func (r *toolRuntime) checkOverwriteSeen(rel string) error {
+	key := r.stampKey(rel)
+	r.mu.Lock()
+	_, shell := r.shellStamped[key]
+	r.mu.Unlock()
+	if !shell {
+		return nil
+	}
+	return fmt.Errorf("file-write: %s was changed by one of your bash commands since you last read it; file-read it first, so the overwrite does not drop that change (or use file-edit for a targeted change)", rel)
 }
 
 // shellStamp is one stamped file a foreground shell command may re-stamp:
@@ -390,7 +454,7 @@ func (r *toolRuntime) restampAfterShell(snap []shellStamp) []string {
 					r.stampIDs[s.key] = si
 				}
 			} else {
-				r.setStampLocked(s.key, sum, false, si, true)
+				r.setStampLocked(s.key, sum, stampFromShell, si, true)
 				changed = append(changed, s.key)
 			}
 		}
@@ -492,6 +556,7 @@ func (r *toolRuntime) stampRecordsLocked(keys []string) []provider.FileStamp {
 		if sum, ok := r.readStamps[k]; ok {
 			fs.Read = hex.EncodeToString(sum[:])
 		}
+		_, fs.Shell = r.shellStamped[k]
 		out = append(out, fs)
 	}
 	return out
@@ -512,6 +577,17 @@ func (r *toolRuntime) restoreStamps(msgs []provider.Message) {
 				// A restored stamp has no identity: the shell re-stamp
 				// verifies its content before trusting one.
 				delete(r.stampIDs, fs.Path)
+				// A record carrying Seen is the path's whole state
+				// (stampRecordsLocked), so its Shell mark replaces the
+				// current one either way.
+				if fs.Shell {
+					if r.shellStamped == nil {
+						r.shellStamped = map[string]struct{}{}
+					}
+					r.shellStamped[fs.Path] = struct{}{}
+				} else {
+					delete(r.shellStamped, fs.Path)
+				}
 			}
 			if read, ok := decodeStampSum(fs.Read); ok {
 				if r.readStamps == nil {

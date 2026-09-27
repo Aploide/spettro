@@ -176,6 +176,74 @@ func TestShellRestampSkipsBackgroundJobs(t *testing.T) {
 	}
 }
 
+func stampWrite(r *toolRuntime, rel, content string, appendMode bool) error {
+	raw, _ := json.Marshal(map[string]any{"path": rel, "content": content, "append": appendMode})
+	_, err := r.execute(context.Background(), toolCall{Tool: "file-write", Args: raw}, map[string]struct{}{"file-write": {}})
+	return err
+}
+
+// A file the agent's own command changed was never shown to the model, so
+// overwriting it whole from the model's last read is refused until it
+// reads the file again: the overwrite would revert the command's output,
+// and any change another process made while the command ran. Appending and
+// file-edit still work, and keep the mark.
+func TestShellRestampedFileNeedsReadBeforeOverwrite(t *testing.T) {
+	r, dir := newStampShellRuntime(t)
+	writeTestFile(t, dir, "f.go", "a := 1\n")
+	stampRead(t, r, "f.go")
+	stampShell(t, r, "printf 'a := 1\\nuser := 1\\n' > f.go")
+
+	if err := stampWrite(r, "f.go", "a := 2\n", false); err == nil || !strings.Contains(err.Error(), "changed by one of your bash commands") {
+		t.Fatalf("blind overwrite after own shell change: %v", err)
+	}
+	if err := stampWrite(r, "f.go", "tail := 1\n", true); err != nil {
+		t.Fatalf("append after own shell change refused: %v", err)
+	}
+	if err := stampEdit(r, "f.go", "user := 1", "user := 2"); err != nil {
+		t.Fatalf("edit after own shell change refused: %v", err)
+	}
+	if err := stampWrite(r, "f.go", "a := 2\n", false); err == nil {
+		t.Fatal("an append or edit cleared the mark: the model still has not seen the command's lines")
+	}
+	stampRead(t, r, "f.go")
+	if err := stampWrite(r, "f.go", "a := 2\n", false); err != nil {
+		t.Fatalf("overwrite after re-read refused: %v", err)
+	}
+	// A full write leaves nothing unseen: writing again needs no read.
+	if err := stampWrite(r, "f.go", "a := 3\n", false); err != nil {
+		t.Fatalf("second overwrite refused: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "f.go")); string(got) != "a := 3\n" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+// The mark rides on the conversation's stamp records like the stamps do,
+// and a later record without it (a re-read) clears it.
+func TestShellStampedMarkIsCarried(t *testing.T) {
+	first, dir := newStampShellRuntime(t)
+	writeTestFile(t, dir, "f.go", "a := 1\n")
+	stampRead(t, first, "f.go")
+	stampShell(t, first, "printf 'a := 9\\n' > f.go")
+	carried := []provider.Message{{Role: provider.RoleUser, FileStamps: first.takeStampDelta()}}
+
+	next, _ := newStampShellRuntime(t)
+	next.cwd = dir
+	next.restoreStamps(carried)
+	if err := stampWrite(next, "f.go", "a := 2\n", false); err == nil || !strings.Contains(err.Error(), "changed by one of your bash commands") {
+		t.Fatalf("restored mark not enforced: %v", err)
+	}
+
+	stampRead(t, first, "f.go")
+	carried = append(carried, provider.Message{Role: provider.RoleUser, FileStamps: first.takeStampDelta()})
+	last, _ := newStampShellRuntime(t)
+	last.cwd = dir
+	last.restoreStamps(carried)
+	if err := stampWrite(last, "f.go", "a := 2\n", false); err != nil {
+		t.Fatalf("re-read in a carried record did not clear the mark: %v", err)
+	}
+}
+
 // rewriteKeepingMtime changes a file's content in place to same-size text
 // and puts its mtime back, as touch -r, rsync -t --inplace or tar -x do:
 // size, mtime and inode all stay the same.
