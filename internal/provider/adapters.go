@@ -8,10 +8,10 @@ import (
 	"slices"
 	"strings"
 
-	anthropic "github.com/anthropics/anthropic-sdk-go"
-	anthropicOption "github.com/anthropics/anthropic-sdk-go/option"
-	openai "github.com/openai/openai-go/v3"
-	openaiOption "github.com/openai/openai-go/v3/option"
+	anthropic "github.com/charmbracelet/anthropic-sdk-go"
+	anthropicOption "github.com/charmbracelet/anthropic-sdk-go/option"
+	openai "github.com/charmbracelet/openai-go"
+	openaiOption "github.com/charmbracelet/openai-go/option"
 )
 
 // lastUserIndex returns the index of the last plain user turn (the current

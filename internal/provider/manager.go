@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	openai "github.com/openai/openai-go/v3"
+	openai "github.com/charmbracelet/openai-go"
 
 	"spettro/internal/budget"
 	"spettro/internal/models"
