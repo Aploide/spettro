@@ -208,7 +208,10 @@ func (m *Model) appendOrUpdateStream(kind, delta string) {
 	if n := len(m.messages); n > 0 {
 		last := &m.messages[n-1]
 		if last.Role == RoleAssistant && last.Kind == kind {
-			last.Content += delta
+			if last.draft == nil {
+				last.draft = &draftText{}
+			}
+			last.Content = last.draft.appendTo(last.Content, delta)
 			last.At = time.Now()
 			return
 		}

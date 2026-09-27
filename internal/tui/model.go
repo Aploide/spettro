@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -79,6 +78,15 @@ type ChatMessage struct {
 	Tools    []ToolItem
 	Images   []string
 	At       time.Time
+
+	// id identifies the message to the render cache; zero until its first
+	// render (see renderTranscriptBlocks), then kept for its lifetime.
+	id uint64
+	// paintMode is the agent mode whose accent colour the message is drawn
+	// in: the mode active when it was first rendered (decision D7).
+	paintMode string
+	// draft holds the growing text of a live stream draft (see draftText).
+	draft *draftText
 }
 
 const localConnectProviderID = "__local_endpoint__"
@@ -283,13 +291,13 @@ type Model struct {
 	ready     bool
 	startedAt time.Time
 
-	vp viewport.Model
+	vp lineView
 	ta textarea.Model
 
 	// renderCache memoizes per-message rendered blocks so the chat transcript
 	// is not re-rendered (markdown regex and all) on every frame. See
-	// renderMessages / renderCacheState. Pointer so the cache survives the
-	// value-copy semantics of the Bubble Tea Model.
+	// renderTranscriptBlocks / renderCacheState. Pointer so the cache
+	// survives the value-copy semantics of the Bubble Tea Model.
 	renderCache *renderCacheState
 
 	mode string

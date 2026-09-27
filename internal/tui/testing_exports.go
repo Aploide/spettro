@@ -226,7 +226,7 @@ func (m Model) RenderCacheSizeForTesting() int {
 	if m.renderCache == nil {
 		return -1
 	}
-	return len(m.renderCache.blocks)
+	return len(m.renderCache.entries)
 }
 
 // RenderCacheWidthForTesting returns the layout width the cache was built for.

@@ -21,6 +21,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if git := nm.gitRefreshCmd(); git != nil {
 			cmd = tea.Batch(cmd, git)
 		}
+		if fill := nm.fillCmd(); fill != nil {
+			cmd = tea.Batch(cmd, fill)
+		}
 		if save := nm.uiStateSaveCmd(); save != nil {
 			cmd = tea.Batch(cmd, save)
 		}
@@ -108,6 +111,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.banner = ""
 			m.bannerKind = ""
 			m.bannerClearAt = time.Time{}
+		}
+		if m.transcriptHasLiveTail() {
+			// A running pty tool's live tail comes from the pty session,
+			// not from the message, so only a repaint shows it moving.
+			m.refreshViewport()
 		}
 	case bannerExpiredMsg:
 		if m.banner != "" && m.bannerClearAt.Equal(msg.at) {
@@ -500,6 +508,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modifiedFilesMsg:
 		m.gitBranch = msg.branch
 		m.modifiedFiles = msg.files
+	case renderFillMsg:
+		if m.renderCache != nil {
+			m.renderCache.fillArmed = false
+		}
+		m.refreshViewport()
 	case diffCommandMsg:
 		m.applyDiffCommand(msg)
 	case toolDiffMsg:
@@ -837,10 +850,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.syncInputSuggestions(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-
-		var vpCmd tea.Cmd
-		m.vp, vpCmd = m.vp.Update(msg)
-		cmds = append(cmds, vpCmd)
+		// The transcript viewport needs no passthrough: keys reach it
+		// through updateMain (pgup/pgdown) and the wheel through the
+		// tea.MouseMsg case above.
 	}
 
 	return m, tea.Batch(cmds...)
