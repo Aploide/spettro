@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
@@ -168,6 +169,35 @@ func TestMarkdownReplyIsSanitized(t *testing.T) {
 	for _, raw := range []string{"\x1b[2J", "\x1b[1;1H", "\x1b[31m"} {
 		if strings.Contains(frame, raw) {
 			t.Fatalf("the frame holds the raw sequence %q", raw)
+		}
+	}
+}
+
+// A resize re-renders the transcript at the new width. The viewport cuts
+// rows wider than itself without a trace, so content rendered for the old
+// width lost its tail until something else refreshed it.
+func TestResizeReRendersTheTranscript(t *testing.T) {
+	m := footerModel(160, 30)
+	prose := strings.Repeat("word ", 40) + "ENDWORD"
+	m.messages = append(m.messages,
+		ChatMessage{Role: RoleUser, Content: "go"},
+		ChatMessage{Role: RoleAssistant, Content: prose, Tools: []ToolItem{
+			{Name: "bash", Status: "success", Args: mustJSON(map[string]any{"command": "ls " + strings.Repeat("x", 120)})},
+		}},
+	)
+	m = m.recalcLayout()
+	m.refreshViewport()
+	for _, width := range []int{60, 200} {
+		next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+		m = next.(Model)
+		for i, line := range strings.Split(m.vp.GetContent(), "\n") {
+			if w := ansi.StringWidth(line); w > m.transcriptWidth() {
+				t.Fatalf("after a resize to %d: transcript row %d is %d cells, the viewport is %d: %q",
+					width, i, w, m.transcriptWidth(), ansi.Strip(line))
+			}
+		}
+		if !strings.Contains(ansi.Strip(m.View().Content), "ENDWORD") {
+			t.Fatalf("after a resize to %d: the end of the reply is not on screen:\n%s", width, ansi.Strip(m.View().Content))
 		}
 	}
 }
