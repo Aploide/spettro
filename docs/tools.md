@@ -126,8 +126,16 @@ call, then fails with an error saying nothing was run.
   calls it by that name: the built-in's code runs (here, the shell), and the
   allow-list, permission rules, approval (the `shell-exec` entry's
   `requires_approval` and rules), hooks, traces and loop detection all see
-  `shell-exec`. It is advertised under its own name, with its old
-  description and schema, and is deferred or core as its canonical tool is.
+  `shell-exec`. It is advertised under its own name, and is deferred or
+  core as its canonical tool is. A retired tool whose arguments differ from
+  its canonical tool's (`repo-search`, `task-*`, `diagnostics`,
+  `references`, `hover`, `lsp-restart`) is advertised with its old
+  description and schema, which Spettro converts to the canonical tool's
+  arguments. The others (`shell-exec`, `bash-output`, `multi-edit`, `ls`,
+  `activate-skill`, `skill-activate`) are carried out by the canonical tool
+  on their arguments unchanged, so they are advertised with the canonical
+  tool's description and schema: an unfolded `ls` is described as `glob`,
+  not as the old directory listing, because `glob`'s code is what runs.
   A retired name the agent does not hold is refused as not allowed: it never
   becomes a call of your tool. Hooks and rules written for `bash` are your
   tool's and do not apply to `shell-exec`.

@@ -62,9 +62,12 @@ This file lets you define, in one place:
   `todo-write`; an agent left with no tools keeps `comment` and is disabled. Tools of another
   kind that share a retired name are left alone, and a tool of your own that
   holds a canonical name (a `bash` script) folds nothing of its group: those
-  built-ins keep their own names (see [Built-in tools](docs/tools.md#tools-of-your-own-with-a-built-ins-name)). The retired names stay
+  built-ins keep their own names (see [Built-in tools](docs/tools.md#tools-of-your-own-with-a-built-ins-name)). Folded retired names stay
   callable, but are never advertised to the model and cannot be listed in
-  `allowed_tools`.
+  `allowed_tools`. A built-in left under its own name because a tool of your
+  own holds its canonical name is the exception: it stays in `allowed_tools`
+  and is advertised under that name (it stands unfolded; see the same
+  section of docs/tools.md).
 - v13 folds the read-only language-server tools into one `lsp` tool whose
   `op` argument picks the operation:
 
