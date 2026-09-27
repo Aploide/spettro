@@ -39,12 +39,20 @@ var homeVars = []string{
 }
 
 // Main points every per-user location at a fresh temporary directory, runs
-// the tests and removes the directory. It returns m.Run's exit code.
-func Main(m *testing.M) int {
+// setup (if any) with that directory, runs the tests and removes the
+// directory. It returns m.Run's exit code.
+func Main(m *testing.M, setup ...func(home string) error) int {
 	dir, err := Isolate()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "testhome:", err)
 		return 1
+	}
+	for _, fn := range setup {
+		if err := fn(dir); err != nil {
+			fmt.Fprintln(os.Stderr, "testhome setup:", err)
+			_ = os.RemoveAll(dir)
+			return 1
+		}
 	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
@@ -52,11 +60,13 @@ func Main(m *testing.M) int {
 }
 
 // Isolate sets the variables Main sets and returns the temporary home. The
-// Go toolchain's own locations (GOCACHE, GOPATH, GOENV) are pinned to their
-// real values first when they are not set explicitly: tests that run `go`
-// (directly or through gopls) would otherwise rebuild the standard library
-// into an empty cache under the temporary home, which is slow and costs
-// gigabytes of disk.
+// Go toolchain's own locations (GOCACHE, GOPATH, GOENV, and gopls's cache
+// GOPLSCACHE) are pinned to their real values first when they are not set
+// explicitly: tests that run `go` or start gopls (the agent's edit tests
+// do) would otherwise rebuild the standard library into empty caches under
+// the temporary home. That is slow, costs gigabytes of disk, and the gopls
+// processes it leaves indexing in the background slowed a later CPU-bound
+// agent test from 4.4 s to 13 s under -race.
 func Isolate() (string, error) {
 	pinGoToolchainDirs()
 	dir, err := os.MkdirTemp("", "spettro-test-home-")
@@ -80,8 +90,8 @@ func Isolate() (string, error) {
 	return dir, nil
 }
 
-// pinGoToolchainDirs sets GOCACHE, GOPATH and GOENV to the locations the
-// real home gives them, unless they are already set.
+// pinGoToolchainDirs sets GOCACHE, GOPATH, GOENV and GOPLSCACHE to the
+// locations the real home gives them, unless they are already set.
 func pinGoToolchainDirs() {
 	if os.Getenv("GOCACHE") == "" {
 		if cache, err := os.UserCacheDir(); err == nil {
@@ -96,6 +106,11 @@ func pinGoToolchainDirs() {
 	if os.Getenv("GOPATH") == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			_ = os.Setenv("GOPATH", filepath.Join(home, "go"))
+		}
+	}
+	if os.Getenv("GOPLSCACHE") == "" {
+		if cache, err := os.UserCacheDir(); err == nil {
+			_ = os.Setenv("GOPLSCACHE", filepath.Join(cache, "gopls"))
 		}
 	}
 }

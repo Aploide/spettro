@@ -22,7 +22,31 @@ import (
 // temporary directory so no test can touch the real ~/.spettro.
 func TestMain(m *testing.M) {
 	lsptest.MaybeServe()
-	os.Exit(testhome.Main(m))
+	os.Exit(testhome.Main(m, disableInstalledLanguageServers))
+}
+
+// disableInstalledLanguageServers turns off, in the temporary home's
+// lsp.json, every language server Spettro would find installed. The edit
+// tests write .go, .py and .ts files: with gopls installed each started a
+// real server that none of them shut down, and once post-edit waits got
+// short those servers went on loading the standard library in the
+// background, stretching a later CPU-bound test from 4.4 s to 10+ s under
+// -race. Tests that want a server configure one in the workspace (see
+// fakeLSPRuntime).
+func disableInstalledLanguageServers(home string) error {
+	off := false
+	servers := map[string]lsp.ServerConfig{}
+	for _, key := range []string{"go", "typescript", "python", "rust", "c", "cpp", "csharp", "swift"} {
+		servers[key] = lsp.ServerConfig{Enabled: &off}
+	}
+	raw, err := json.Marshal(lsp.Config{Servers: servers})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".spettro"), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(home, ".spettro", "lsp.json"), raw, 0o644)
 }
 
 // TestHomeIsIsolated fails when the tests would run against the real home.

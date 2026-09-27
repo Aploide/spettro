@@ -24,7 +24,7 @@ func TestIsolateMovesEveryHomeVariable(t *testing.T) {
 			t.Errorf("%s = %q, not inside the temporary home %q", v, os.Getenv(v), home)
 		}
 	}
-	for _, v := range []string{"GOCACHE", "GOPATH"} {
+	for _, v := range []string{"GOCACHE", "GOPATH", "GOPLSCACHE"} {
 		if got := os.Getenv(v); got == "" || isWithin(home, got) {
 			t.Errorf("%s = %q: the toolchain cache must stay out of the temporary home", v, got)
 		}
