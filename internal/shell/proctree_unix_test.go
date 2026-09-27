@@ -148,31 +148,48 @@ const hangupHelperEnv = "SPETTRO_PROCTREE_HANGUP_HELPER"
 // cleanup that creates the named file.
 const hangupMarkerEnv = "SPETTRO_PROCTREE_HANGUP_MARKER"
 
+// hangupHelperLinger is how long the helper stays alive after its command
+// returns, waiting for the hangup handler to re-raise SIGHUP. It only has to
+// outlast the tests' own deadlines: a helper still alive after it is one the
+// hangup failed to end.
+const hangupHelperLinger = time.Minute
+
 func TestMain(m *testing.M) {
 	if pidFile := os.Getenv(hangupHelperEnv); pidFile != "" {
-		var cleanups []func()
-		if marker := os.Getenv(hangupMarkerEnv); marker != "" {
-			cleanups = append(cleanups, func() { _ = os.WriteFile(marker, nil, 0o644) })
-		}
-		KillProcessTreesOnHangup(cleanups...)
-		cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30 & echo $! > "+pidFile+"; wait")
-		ConfigureProcessTree(cmd)
-		_, _ = CombinedOutput(cmd)
-		os.Exit(3) // only reached if the hangup did not end the process
+		runHangupHelper(pidFile)
 	}
 	os.Exit(m.Run())
 }
 
-// Closing the terminal sends SIGHUP to spettro's process group only. The
-// command in its own group must still die, and spettro must still terminate.
-func TestHangupKillsCommandTrees(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "pid")
-	helper := exec.Command(os.Args[0], "-test.run=^$")
-	helper.Env = append(os.Environ(), hangupHelperEnv+"="+pidFile)
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
+// runHangupHelper is the body of the helper process the hangup tests start:
+// a spettro stand-in that installs the hangup handler and then blocks in a
+// long command running in its own process group. It never returns.
+//
+// The command returning does not mean the hangup failed. The handler kills
+// the command first and only re-raises SIGHUP after the extra cleanups ran, so
+// CombinedOutput returns while the handler is still working. Exiting right
+// away would race the re-raise (the test then saw "exit status 3" instead of
+// death by SIGHUP) and could skip the extra cleanups altogether, so the
+// helper waits for the signal instead and exits on its own only if it never
+// comes.
+func runHangupHelper(pidFile string) {
+	var cleanups []func()
+	if marker := os.Getenv(hangupMarkerEnv); marker != "" {
+		cleanups = append(cleanups, func() { _ = os.WriteFile(marker, nil, 0o644) })
 	}
-	pid := waitForPIDFile(t, pidFile)
+	KillProcessTreesOnHangup(cleanups...)
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30 & echo $! > "+pidFile+"; wait")
+	ConfigureProcessTree(cmd)
+	_, _ = CombinedOutput(cmd)
+	time.Sleep(hangupHelperLinger)
+	os.Exit(3) // only reached if the hangup did not end the process
+}
+
+// hangUpAndWaitForDeath sends SIGHUP to a started hangup helper and fails the
+// test unless the helper dies of that signal within a bound: death by SIGHUP
+// is what the handler's re-raise produces once its cleanup has finished.
+func hangUpAndWaitForDeath(t *testing.T, helper *exec.Cmd) {
+	t.Helper()
 	if err := helper.Process.Signal(syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +208,19 @@ func TestHangupKillsCommandTrees(t *testing.T) {
 		_ = helper.Process.Kill()
 		t.Fatal("helper did not exit on SIGHUP")
 	}
+}
+
+// Closing the terminal sends SIGHUP to spettro's process group only. The
+// command in its own group must still die, and spettro must still terminate.
+func TestHangupKillsCommandTrees(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	helper := exec.Command(os.Args[0], "-test.run=^$")
+	helper.Env = append(os.Environ(), hangupHelperEnv+"="+pidFile)
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := waitForPIDFile(t, pidFile)
+	hangUpAndWaitForDeath(t, helper)
 	if !processGone(pid) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("command %d survived the hangup", pid)
@@ -287,10 +317,7 @@ func TestHangupRunsExtraCleanups(t *testing.T) {
 	}
 	pid := waitForPIDFile(t, pidFile)
 	defer syscall.Kill(pid, syscall.SIGKILL)
-	if err := helper.Process.Signal(syscall.SIGHUP); err != nil {
-		t.Fatal(err)
-	}
-	_ = helper.Wait()
+	hangUpAndWaitForDeath(t, helper)
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("extra hangup cleanup did not run")
 	}
