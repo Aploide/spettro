@@ -32,7 +32,11 @@ server, so it is usually up by the time the file is edited; read-only agents
 (Ask, Explore, Review, ...) never start one. A sub-agent working in its own
 git worktree has its own servers, and they are stopped when its workspace is
 merged back or dropped. A server that fails to start is not retried on every
-edit; an `lsp` restart (`op: "restart"`) clears the failure mark.
+edit; an `lsp` restart (`op: "restart"`) clears the failure mark. A server
+that stops reading its input (wedged or busy-looping) cannot hold up a
+request past its deadline: when a write to it is still blocked at the
+deadline, or when the user cancels, the server is stopped, and the next
+request that needs it starts a fresh one.
 
 ## What the agent gets
 

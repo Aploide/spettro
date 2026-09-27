@@ -74,9 +74,10 @@ func (m *Manager) PostEditDiagnostics(ctx context.Context, absPath string, also 
 		return out
 	case <-ctx.Done():
 	}
-	// The pass honours ctx itself and reports what it has at the deadline;
-	// only a write to a server that stopped reading its stdin can outlast
-	// that, and such a server gets no more of the edit's time.
+	// The pass honours ctx itself and reports what it has at the deadline
+	// (a write to a server that stopped reading its stdin gives up then and
+	// abandons that server, see Client.write). The grace is a backstop in
+	// case some step still overruns: the edit never waits on it for long.
 	select {
 	case out := <-ch:
 		return out
@@ -100,9 +101,9 @@ func (m *Manager) postEdit(ctx context.Context, absPath string, also []string) p
 		rep.skip = !rep.starting
 		return rep
 	}
-	d, content, err := m.syncFromDisk(c, key, absPath, also...)
+	d, content, err := m.syncFromDisk(ctx, c, key, absPath, also...)
 	if err == nil {
-		err = c.didSave(d, content)
+		err = c.didSave(ctx, d, content)
 	}
 	if err != nil {
 		rep.skip = true

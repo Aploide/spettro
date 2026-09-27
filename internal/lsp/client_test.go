@@ -110,7 +110,7 @@ func TestWaitDiagnosticsMatchesServerSpelling(t *testing.T) {
 	}
 	c.diagCond = sync.NewCond(&c.diagMu)
 
-	d, err := c.syncFile(file, "c", "int main(){ return x; }\n")
+	d, err := c.syncFile(context.Background(), file, "c", "int main(){ return x; }\n")
 	if err != nil {
 		t.Fatal(err)
 	}

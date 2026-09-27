@@ -465,13 +465,15 @@ func (m *Manager) formatDiagnostics(path string, ds []Diagnostic) string {
 // sending the also files (other files the caller just changed, such as the
 // rest of a rename, that the server may not have open yet), so whatever it
 // reports next describes the workspace as it is. It returns the synced
-// document and the content sent.
-func (m *Manager) syncFromDisk(c *Client, key, absPath string, also ...string) (doc, string, error) {
+// document and the content sent. ctx bounds every write to the server: a
+// server that stopped reading its input is abandoned at the deadline
+// instead of blocking the caller (see Client.write).
+func (m *Manager) syncFromDisk(ctx context.Context, c *Client, key, absPath string, also ...string) (doc, string, error) {
 	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		return doc{}, "", err
 	}
-	c.resyncOpen(fileURI(absPath))
+	c.resyncOpen(ctx, fileURI(absPath))
 	for _, p := range also {
 		p = realPath(p)
 		if p == absPath {
@@ -481,13 +483,13 @@ func (m *Manager) syncFromDisk(c *Client, key, absPath string, also ...string) (
 			continue
 		}
 		if other, err := os.ReadFile(p); err == nil {
-			if d, err := c.syncFile(p, languageIDForPath(p, key), string(other)); err == nil {
-				_ = c.didSave(d, string(other))
+			if d, err := c.syncFile(ctx, p, languageIDForPath(p, key), string(other)); err == nil {
+				_ = c.didSave(ctx, d, string(other))
 			}
 		}
 	}
 	content := string(raw)
-	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, err := c.syncFile(ctx, absPath, languageIDForPath(absPath, key), content)
 	return d, content, err
 }
 
@@ -499,7 +501,7 @@ func (m *Manager) DiagnosticsForFile(ctx context.Context, absPath string) (strin
 	if err != nil {
 		return "", err
 	}
-	d, _, err := m.syncFromDisk(c, key, absPath)
+	d, _, err := m.syncFromDisk(ctx, c, key, absPath)
 	if err != nil {
 		return "", err
 	}
@@ -577,7 +579,7 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 	if err != nil {
 		return "", err
 	}
-	d, content, err := m.syncFromDisk(c, key, absPath)
+	d, content, err := m.syncFromDisk(ctx, c, key, absPath)
 	if err != nil {
 		return "", err
 	}
@@ -630,7 +632,7 @@ func (m *Manager) Hover(ctx context.Context, absPath, symbol string, line, chara
 	if err != nil {
 		return "", err
 	}
-	d, content, err := m.syncFromDisk(c, key, absPath)
+	d, content, err := m.syncFromDisk(ctx, c, key, absPath)
 	if err != nil {
 		return "", err
 	}
@@ -663,7 +665,7 @@ func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line,
 	if err != nil {
 		return nil, err
 	}
-	d, content, err := m.syncFromDisk(c, key, absPath)
+	d, content, err := m.syncFromDisk(ctx, c, key, absPath)
 	if err != nil {
 		return nil, err
 	}

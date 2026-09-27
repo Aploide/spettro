@@ -270,7 +270,7 @@ func startClient(ctx context.Context, root, command string, args []string, setti
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
 	c.save = parseSaveOptions(initResult)
-	if err := c.notify("initialized", map[string]any{}); err != nil {
+	if err := c.notify(ctx, "initialized", map[string]any{}); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -286,22 +286,13 @@ func (c *Client) Close() {
 	case <-c.closed:
 	default:
 		// A courtesy only, and bounded: a server that stopped reading its
-		// input blocks this write — and it queues behind any write already
-		// blocked — until stdin is closed below.
-		sent := make(chan struct{})
-		go func() {
-			_ = c.notify("exit", nil)
-			close(sent)
-		}()
-		select {
-		case <-sent:
-		case <-time.After(200 * time.Millisecond):
-		}
+		// input would block this write, which then gives up and abandons
+		// the server, as below.
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = c.notify(ctx, "exit", nil)
+		cancel()
 	}
-	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-	}
+	c.abandon()
 	select {
 	case <-c.closed:
 	case <-time.After(5 * time.Second):
@@ -377,7 +368,10 @@ func (c *Client) dispatch(msg rpcMessage) {
 		}
 		resp := map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": result}
 		raw, _ := json.Marshal(resp)
-		_ = c.write(raw)
+		// No deadline of its own: if the server stopped reading, this
+		// blocks the read loop until a request's deadline abandons the
+		// server, which unblocks it (see write).
+		_ = c.write(context.Background(), raw)
 	case msg.Method == "textDocument/publishDiagnostics":
 		var params struct {
 			URI         string       `json:"uri"`
@@ -423,7 +417,41 @@ func (c *Client) dispatch(msg rpcMessage) {
 	}
 }
 
-func (c *Client) write(payload []byte) error {
+// write sends one framed message, giving up when ctx ends first.
+//
+// A pipe write blocks once the server stops draining its stdin (a wedged or
+// busy-looping server), and nothing but closing the pipe unblocks it. So the
+// frame is written on its own goroutine, and if ctx ends before it
+// completes the server is abandoned: its stdin closed and the process
+// killed. That is also the only safe outcome, because a partly written frame
+// leaves the stream unparseable. The manager starts a fresh server on the
+// next request (ensureStarted checks alive), and the writer goroutine
+// returns as soon as the pipe is closed, so nothing leaks.
+func (c *Client) write(ctx context.Context, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.writeFrame(payload) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+	// The write may have finished just as ctx ended: prefer its result
+	// over killing a server that is fine.
+	select {
+	case err := <-done:
+		return err
+	default:
+	}
+	c.abandon()
+	return fmt.Errorf("lsp server is not reading its input: %w", ctx.Err())
+}
+
+// writeFrame writes the header and body of one message. writeMu keeps
+// concurrent frames from interleaving.
+func (c *Client) writeFrame(payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if _, err := fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n", len(payload)); err != nil {
@@ -433,7 +461,17 @@ func (c *Client) write(payload []byte) error {
 	return err
 }
 
-func (c *Client) notify(method string, params any) error {
+// abandon stops the server without waiting for it: closing stdin fails
+// every blocked write, and the kill ends the process, after which the
+// cmd.Wait goroutine marks the client closed. Safe to call repeatedly.
+func (c *Client) abandon() {
+	_ = c.stdin.Close()
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+}
+
+func (c *Client) notify(ctx context.Context, method string, params any) error {
 	msg := map[string]any{"jsonrpc": "2.0", "method": method}
 	if params != nil {
 		msg["params"] = params
@@ -442,7 +480,7 @@ func (c *Client) notify(method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return c.write(raw)
+	return c.write(ctx, raw)
 }
 
 func (c *Client) call(ctx context.Context, method string, params, result any) error {
@@ -461,7 +499,10 @@ func (c *Client) call(ctx context.Context, method string, params, result any) er
 	if err != nil {
 		return err
 	}
-	if err := c.write(raw); err != nil {
+	if err := c.write(ctx, raw); err != nil {
+		c.pendMu.Lock()
+		delete(c.pending, id)
+		c.pendMu.Unlock()
 		return err
 	}
 	select {
@@ -496,8 +537,9 @@ type doc struct {
 	version  int
 }
 
-// syncFile opens (or re-syncs with full text) a document.
-func (c *Client) syncFile(path, languageID, content string) (doc, error) {
+// syncFile opens (or re-syncs with full text) a document. ctx bounds the
+// write (see write).
+func (c *Client) syncFile(ctx context.Context, path, languageID, content string) (doc, error) {
 	d := doc{uri: fileURI(path), key: docKey(path)}
 	c.diagMu.Lock()
 	d.sinceGen = c.diagGen[d.key]
@@ -517,13 +559,13 @@ func (c *Client) syncFile(path, languageID, content string) (doc, error) {
 
 	var err error
 	if !open {
-		err = c.notify("textDocument/didOpen", map[string]any{
+		err = c.notify(ctx, "textDocument/didOpen", map[string]any{
 			"textDocument": map[string]any{
 				"uri": d.uri, "languageId": languageID, "version": version, "text": content,
 			},
 		})
 	} else {
-		err = c.notify("textDocument/didChange", map[string]any{
+		err = c.notify(ctx, "textDocument/didChange", map[string]any{
 			"textDocument":   map[string]any{"uri": d.uri, "version": version},
 			"contentChanges": []map[string]any{{"text": content}},
 		})
@@ -538,7 +580,7 @@ func (c *Client) syncFile(path, languageID, content string) (doc, error) {
 // on, as it was: errors the disk no longer has, and none of the ones it does.
 // Changed files are re-sent (and saved, for on-save checkers); deleted ones
 // are closed.
-func (c *Client) resyncOpen(skip string) {
+func (c *Client) resyncOpen(ctx context.Context, skip string) {
 	type entry struct {
 		uri string
 		doc openDoc
@@ -552,10 +594,13 @@ func (c *Client) resyncOpen(skip string) {
 	}
 	c.openMu.Unlock()
 	for _, e := range docs {
+		if ctx.Err() != nil {
+			return
+		}
 		raw, err := os.ReadFile(e.doc.path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				c.closeDoc(e.uri)
+				c.closeDoc(ctx, e.uri)
 			}
 			continue
 		}
@@ -563,20 +608,20 @@ func (c *Client) resyncOpen(skip string) {
 			continue
 		}
 		content := string(raw)
-		if d, err := c.syncFile(e.doc.path, e.doc.languageID, content); err == nil {
-			_ = c.didSave(d, content)
+		if d, err := c.syncFile(ctx, e.doc.path, e.doc.languageID, content); err == nil {
+			_ = c.didSave(ctx, d, content)
 		}
 	}
 }
 
 // closeDoc tells the server a document is gone, so it drops what it holds.
-func (c *Client) closeDoc(uri string) {
+func (c *Client) closeDoc(ctx context.Context, uri string) {
 	c.openMu.Lock()
 	_, open := c.openDocs[uri]
 	delete(c.openDocs, uri)
 	c.openMu.Unlock()
 	if open {
-		_ = c.notify("textDocument/didClose", map[string]any{
+		_ = c.notify(ctx, "textDocument/didClose", map[string]any{
 			"textDocument": map[string]any{"uri": uri},
 		})
 	}
@@ -623,7 +668,7 @@ func parseSaveOptions(initResult json.RawMessage) saveOptions {
 // didSave tells the server the synced document now matches the disk, for
 // servers that asked for save notifications. The file really was just
 // written, so this is the truth, and it is what triggers on-save checkers.
-func (c *Client) didSave(d doc, content string) error {
+func (c *Client) didSave(ctx context.Context, d doc, content string) error {
 	if !c.save.enabled {
 		return nil
 	}
@@ -631,7 +676,7 @@ func (c *Client) didSave(d doc, content string) error {
 	if c.save.includeText {
 		params["text"] = content
 	}
-	return c.notify("textDocument/didSave", params)
+	return c.notify(ctx, "textDocument/didSave", params)
 }
 
 // waitDiagnostics blocks until a publishDiagnostics about the synced text

@@ -513,7 +513,7 @@ func TestWaitSettledCollectsLaterPublishes(t *testing.T) {
 	}
 	c.diagCond = sync.NewCond(&c.diagMu)
 	file := filepath.Join(t.TempDir(), "a.ts")
-	d, err := c.syncFile(file, "typescript", "")
+	d, err := c.syncFile(context.Background(), file, "typescript", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,10 +587,10 @@ func TestWaitSettledIgnoresOlderVersions(t *testing.T) {
 	}
 	c.diagCond = sync.NewCond(&c.diagMu)
 	file := filepath.Join(t.TempDir(), "a.go")
-	if _, err := c.syncFile(file, "go", "v1"); err != nil {
+	if _, err := c.syncFile(context.Background(), file, "go", "v1"); err != nil {
 		t.Fatal(err)
 	}
-	d, err := c.syncFile(file, "go", "v2")
+	d, err := c.syncFile(context.Background(), file, "go", "v2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,5 +623,36 @@ func TestServerSettings(t *testing.T) {
 		if (got != nil) != want || (want && got["diagnosticsDelay"] != "0s") {
 			t.Errorf("serverSettings(%q) = %v", cmd, got)
 		}
+	}
+}
+
+// The lsp tool's own requests (diagnostics, hover, references, rename) must
+// honour their deadline against a server that stopped reading its input,
+// and the next request must get a working server again.
+func TestToolRequestsAgainstWedgedServerAreBounded(t *testing.T) {
+	m, root := fakeManager(t, lsptest.Options{StopReading: true})
+	a := filepath.Join(root, "a.fk")
+	writeFile(t, a, strings.Repeat("x", 4<<20)) // far past any pipe buffer
+	if _, _, err := m.clientFor(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	for name, run := range map[string]func(ctx context.Context) error{
+		"diagnostics": func(ctx context.Context) error { _, err := m.DiagnosticsForFile(ctx, a); return err },
+		"hover":       func(ctx context.Context) error { _, err := m.Hover(ctx, a, "", 1, 1); return err },
+		"references":  func(ctx context.Context) error { _, err := m.Lookup(ctx, a, "", "references", 1, 1); return err },
+		"rename":      func(ctx context.Context) error { _, err := m.RenameEdits(ctx, a, "", 1, 1, "y"); return err },
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		done := make(chan struct{})
+		go func() {
+			_ = run(ctx)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: still blocked 3s after a 300ms deadline", name)
+		}
+		cancel()
 	}
 }
