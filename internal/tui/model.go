@@ -455,6 +455,12 @@ type Model struct {
 	// lastModifiedRefreshAt throttles the async git modified-files query
 	// (see scheduleModifiedRefresh).
 	lastModifiedRefreshAt time.Time
+	// gitRefreshPending asks Update to start the background git query (see
+	// refreshModifiedFiles).
+	gitRefreshPending bool
+	// uiStateDirty asks Update to save the mode and side panel toggle in
+	// the background (see persistUIState).
+	uiStateDirty bool
 	// lastRepoScanAt throttles the async repo-file scan that feeds @-mention
 	// suggestions (see scheduleRepoScan).
 	lastRepoScanAt time.Time
@@ -708,7 +714,10 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	}
 	m.livePerm.set(cfg.Permission)
 	m.customCommands, _ = commands.Discover(cwd)
-	m.refreshModifiedFiles()
+	// The side panel's git state is read in the background (see
+	// refreshModifiedFiles); the first frame no longer waits for git.
+	m.lastModifiedRefreshAt = time.Now()
+	m.startupCmds = append(m.startupCmds, refreshModifiedFilesCmd(cwd))
 	// Scan the working directory in the background: walking a large tree
 	// synchronously here would block the first paint (seen: ~56s from $HOME).
 	m.lastRepoScanAt = time.Now()

@@ -18,6 +18,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if timers := nm.armTimers(); timers != nil {
 			cmd = tea.Batch(cmd, timers)
 		}
+		if git := nm.gitRefreshCmd(); git != nil {
+			cmd = tea.Batch(cmd, git)
+		}
+		if save := nm.uiStateSaveCmd(); save != nil {
+			cmd = tea.Batch(cmd, save)
+		}
 		return nm, cmd
 	}
 	return newModel, cmd
@@ -494,6 +500,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modifiedFilesMsg:
 		m.gitBranch = msg.branch
 		m.modifiedFiles = msg.files
+	case diffCommandMsg:
+		m.applyDiffCommand(msg)
 	case toolDiffMsg:
 		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
 			m.attachToolDiff(msg.seq, msg.diff)
