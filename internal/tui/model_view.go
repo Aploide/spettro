@@ -68,9 +68,12 @@ func (m Model) viewContent() string {
 
 	var parts []string
 	if len(m.cmdItems) > 0 {
-		// Overlay spans the full inner area. Fixed costs: header(1)+input(6)+status(1)=8,
-		// plus the indicator row while a run is in flight.
-		innerH := max(m.height-8-m.workingIndicatorHeight(), 4)
+		// The overlay takes the place of the separators, the transcript and
+		// the footer: every row the header, the status bar, the working
+		// indicator and the input area leave. The input area is measured,
+		// as recalcLayout does, because its height varies (attachment
+		// chips, a taller textarea).
+		innerH := max(m.height-1-1-m.workingIndicatorHeight()-lipgloss.Height(inputArea), 1)
 		overlay := m.viewCmdOverlay(m.vp.Width(), innerH)
 		parts = []string{overlay}
 	} else {
@@ -691,9 +694,9 @@ func (m Model) parallelFooterHeight() int {
 }
 
 // dialogMinTranscriptRows is how much of the conversation stays visible
-// above an open dialog (an approval or a question): three rows on a normal
-// terminal, down to one on a very short one, where the dialog needs every
-// row it can get.
+// above the input area when the terminal is short: three rows on a normal
+// terminal, down to one on a very short one, where the input area (a dialog,
+// a picker) needs every row it can get.
 func dialogMinTranscriptRows(height int) int {
 	return min(max(height/8, 1), 3)
 }
@@ -703,7 +706,14 @@ func dialogMinTranscriptRows(height int) int {
 // approval: the box border, the summary row, the preview footer and the
 // picker (or the "instead" field). For a question: the box border and agent
 // label plus the rows renderQuestionForm cannot do without.
+//
+// The plan approval and steer pickers take precedence over both in
+// viewInputBox, so while one of them is open this is 0 as well: the input
+// box then holds that picker, which has a fixed height and is measured.
 func (m Model) dialogMinInputRows() int {
+	if m.showPlanApproval || m.showSteerChoice {
+		return 0
+	}
 	switch {
 	case m.pendingAuth != nil:
 		return 2 + 1 + 1 + m.approvalControlRows()
@@ -713,19 +723,38 @@ func (m Model) dialogMinInputRows() int {
 	return 0
 }
 
+// inputRowsForFooter is the height of the input area the footer has to
+// leave room for. A size-adaptive dialog (approval, question) shrinks to
+// fit whatever the footer leaves it, so only its minimum counts; everything
+// else drawn in the input box (the textarea with its attachment chips, the
+// plan approval or steer picker) has one height, which is measured.
+//
+// Measuring cannot recurse: viewInputBox only consults the footer's height
+// for the size-adaptive dialogs, and those take the first branch.
+func (m Model) inputRowsForFooter() int {
+	if need := m.dialogMinInputRows(); need > 0 {
+		return need
+	}
+	return lipgloss.Height(m.viewInputBox(m.paneWidth()))
+}
+
 // parallelFooterBudget is the row budget renderParallelAgents spends. It is
-// footerBudget, except that while an approval or a question is open the
-// footer yields to it: on a short terminal the dialog keeps the rows its
-// essentials need (dialogMinInputRows) and the footer gets what is left,
-// down to nothing. On a normal terminal that leaves the footer untouched.
+// footerBudget, capped so the footer never takes the rows the rest of the
+// frame needs: the header, the separators, the status bar, the working
+// indicator, the input area (inputRowsForFooter) and a minimum of transcript
+// (dialogMinTranscriptRows). On a normal terminal the cap is above
+// footerBudget and changes nothing; on a short one the footer shrinks, down
+// to nothing, instead of pushing the frame past the bottom edge. That holds
+// whatever the input area holds: the textarea during a run, a picker, or a
+// dialog.
 func (m Model) parallelFooterBudget() int {
 	budget := footerBudget(m.height)
-	if need := m.dialogMinInputRows(); need > 0 {
-		chrome := 1 + 2 + 1 + m.workingIndicatorHeight() // header, separators, status bar, indicator
-		room := m.height - chrome - need - dialogMinTranscriptRows(m.height)
-		budget = min(budget, max(room, 0))
+	if m.height <= 0 {
+		return budget // no WindowSizeMsg yet: nothing to overflow
 	}
-	return budget
+	chrome := 1 + 2 + 1 + m.workingIndicatorHeight() // header, separators, status bar, indicator
+	room := m.height - chrome - m.inputRowsForFooter() - dialogMinTranscriptRows(m.height)
+	return min(budget, max(room, 0))
 }
 
 // renderParallelAgents draws everything that sits between the transcript and
@@ -1058,6 +1087,12 @@ func (m Model) viewStatusBar(width int) string {
 		right = lipgloss.NewStyle().Foreground(pal.SuccessBright).Render(label) + "  " + right
 	}
 
+	// The bar is one row: one cell of left padding, the left text, the
+	// right cluster and one trailing space. The right cluster is built from
+	// independent indicators with no bound of its own, so on a narrow
+	// terminal it alone can be wider than the bar; it is then cut from the
+	// left, keeping the context gauge at its end, which matters most.
+	right = termtext.FitLeft(right, max(width-2, 0))
 	leftWidth := max(width-lipgloss.Width(right)-2, 0)
 	// A banner can be anything, a provider's error message included; the
 	// Width style would wrap it onto a second row the layout never reserved,
