@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	agentprompts "spettro/agents"
 	"spettro/internal/config"
@@ -127,11 +128,18 @@ func sliceLines(content string, start, end int) string {
 	return b.String()
 }
 
+// truncate keeps at most max bytes of s and marks the cut. The cut backs up
+// to a rune boundary, so the result stays valid UTF-8: it ends up in tool
+// traces that ACP forwards as JSON, and in hook input.
 func truncate(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
-	return s[:max] + "\n... (truncated)"
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n... (truncated)"
 }
 
 func emptyIfBlank(s string) string {
