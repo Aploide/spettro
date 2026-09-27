@@ -69,6 +69,11 @@ func (r *toolRuntime) shellDir(prefix string, args shellToolArgs) (string, error
 	return abs, nil
 }
 
+// runShellTool runs one shell command for the built-in shell. toolID is the
+// call's identity ("bash", or an unfolded retired name such as shell-exec; see
+// tool_names.go): its manifest entry decides approval and the default
+// timeout. prefix names the tool in error messages. Everything else,
+// including how much of the output the model sees, is the shell's own.
 func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
 	var args shellToolArgs
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
@@ -132,7 +137,12 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// a server started with &) can no longer hang the call past its deadline.
 	shell.ConfigureProcessTree(cmd)
 	out, err := shell.CombinedOutput(cmd)
-	text := r.spoolResult(toolID, string(out))
+	// The output is sized as the shell's ("bash": a generous budget, head and
+	// tail kept), not by toolID. toolID is the call's identity, which for an
+	// unfolded retired name (shell-exec, bash-output) is that name; it decides
+	// approval and timeouts above, but the code that ran is the shell's, and
+	// the end of a build or test log is where its errors are.
+	text := r.spoolResult("bash", string(out))
 	status := shellFailureStatus(runCtx, cmd, err, timeout)
 	if status == "" {
 		if errors.Is(err, shell.ErrBackgroundLeft) {

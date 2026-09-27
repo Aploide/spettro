@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -251,6 +252,35 @@ func TestUnfoldedBuiltinUsesItsOwnPolicy(t *testing.T) {
 	res, _ := runNamed(r, "shell-exec", allowed)
 	if len(asked) != 1 || res.status != "error" {
 		t.Fatalf("shell-exec needs approval by its own entry: asked %v, result %s %q", asked, res.status, res.output)
+	}
+}
+
+// An unfolded shell-exec is the shell's code, so its output gets the shell's
+// history budget (head and tail kept), not the 2000-character head-only
+// default of an unknown name: the end of a build or test log is where the
+// errors are. The shell-exec output must match plain bash's exactly.
+func TestUnfoldedShellKeepsTheShellOutputBudget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses seq")
+	}
+	args := json.RawMessage(`{"command":"seq 1 20000"}`)
+	plain, _ := newAliasTestRuntime(t)
+	want, err := plain.executeWithTimeout(context.Background(), toolCall{Tool: "bash", Args: args}, map[string]struct{}{"bash": {}})
+	if err != nil {
+		t.Fatalf("plain bash: %v", err)
+	}
+	r, allowed := userToolRuntime(t, "bash", []string{"shell-exec"}, false)
+	got, err := r.executeWithTimeout(context.Background(), toolCall{Tool: "shell-exec", Args: args}, allowed)
+	if err != nil {
+		t.Fatalf("unfolded shell-exec: %v", err)
+	}
+	// The two results differ only in the spool entry the footer names, so
+	// the lengths match when the same budget applied.
+	if !strings.Contains(got, "\n20000") {
+		t.Errorf("unfolded shell-exec lost the tail of its output (%d chars)", len(got))
+	}
+	if len(got) != len(want) {
+		t.Errorf("unfolded shell-exec kept %d chars, plain bash %d", len(got), len(want))
 	}
 }
 
