@@ -2,11 +2,11 @@ package skills
 
 import (
 	"fmt"
-	"path/filepath"
+	"strings"
 	"sync"
 )
 
-// Cache memoises Discover per working directory and lookup options, so every
+// Cache memoises Discover per set of discovery roots (see cacheKey), so every
 // agent run, sub-agent and command menu in a session sees the same catalog
 // without rescanning the disk. That stability is what keeps the skill list
 // in the system prompt byte-identical from one run to the next, which the
@@ -28,7 +28,7 @@ var Shared = &Cache{}
 // Get returns the catalog for cwd and opts, discovering it on first use. The
 // result is a copy the caller may modify.
 func (c *Cache) Get(cwd string, opts LookupOptions) Catalog {
-	key := cacheKey(cwd, opts)
+	key := cacheKey(SearchRoots(cwd, opts))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cat, ok := c.entries[key]; ok {
@@ -49,8 +49,15 @@ func (c *Cache) Invalidate() {
 	c.entries = nil
 }
 
-// cacheKey identifies one Discover call. Options are part of the key so a
-// change to the compat setting takes effect without an explicit reload.
-func cacheKey(cwd string, opts LookupOptions) string {
-	return fmt.Sprintf("%s|%t|%t|%t|%q", filepath.Clean(cwd), opts.IncludeProject, opts.IncludeUser, opts.IncludeCompat, opts.ExtraDirs)
+// cacheKey identifies one Discover call by the roots it scans, which is
+// exactly what determines its result. Keying on the roots rather than on
+// cwd and options means a change to anything that moves them (the compat
+// setting, HOME, CODEX_HOME, a new .git higher up) takes effect without an
+// explicit reload.
+func cacheKey(roots []Root) string {
+	var b strings.Builder
+	for _, r := range roots {
+		fmt.Fprintf(&b, "%s|%s|%s\n", r.Path, r.Source, r.Scope)
+	}
+	return b.String()
 }

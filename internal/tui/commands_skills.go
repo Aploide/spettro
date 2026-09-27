@@ -85,7 +85,7 @@ func (m Model) skillCatalog() skills.Catalog {
 func (m Model) runSkillsList() (tea.Model, tea.Cmd) {
 	cat := m.skillCatalog()
 	if len(cat.Skills) == 0 {
-		rows := []string{"no skills discovered. install one with /skill install <source>, or add a folder with a SKILL.md to one of:", ""}
+		rows := []string{"no skills discovered. install one with /skill install <source>, or add a folder with a SKILL.md to one of these search roots:", ""}
 		rows = append(rows, m.skillRootRows()...)
 		m.pushSystemMsg(strings.Join(rows, "\n"))
 		return m, nil

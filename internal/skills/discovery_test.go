@@ -285,6 +285,23 @@ func TestCacheReusesAndInvalidates(t *testing.T) {
 	}
 }
 
+// The cache is keyed by the roots scanned, so a different home directory
+// (or compat setting) is a different entry, not a stale hit.
+func TestCacheKeyFollowsRoots(t *testing.T) {
+	cwd := t.TempDir()
+	var c Cache
+	homeA := isolateHome(t)
+	writeSkill(t, filepath.Join(homeA, ".spettro", "skills"), "a", "a", "d")
+	if got := c.Get(cwd, DefaultLookupOptions()); len(got.Skills) != 1 || got.Skills[0].Name != "a" {
+		t.Fatalf("home A: %+v", got.Skills)
+	}
+	homeB := isolateHome(t)
+	writeSkill(t, filepath.Join(homeB, ".spettro", "skills"), "b", "b", "d")
+	if got := c.Get(cwd, DefaultLookupOptions()); len(got.Skills) != 1 || got.Skills[0].Name != "b" {
+		t.Errorf("home B must not reuse home A's catalog: %+v", got.Skills)
+	}
+}
+
 func TestUninstallRejectsPathNames(t *testing.T) {
 	isolateHome(t)
 	for _, name := range []string{"../x", "a/b", ".."} {

@@ -279,12 +279,12 @@ func projectDirs(cwd, home string) []string {
 
 // Discover scans every root SearchRoots returns and builds the catalog. The
 // first skill of a name wins (see the package documentation); the others go
-// to Catalog.Shadowed with an entry in Catalog.Issues. Skills are sorted by
-// name. The error is always nil today and is kept for API stability;
+// to Catalog.Shadowed (not Catalog.Issues: a shadowed skill is expected,
+// and /skills shows the list). Skills are sorted by name. The error is always nil today and is kept for API stability;
 // per-directory problems are reported in Catalog.Issues instead.
 func Discover(cwd string, opts LookupOptions) (Catalog, error) {
 	cat := Catalog{}
-	seen := map[string]int{} // lower-cased name -> index in cat.Skills
+	seen := map[string]bool{} // lower-cased names already in cat.Skills
 	for _, root := range SearchRoots(cwd, opts) {
 		entries, err := os.ReadDir(root.Path)
 		if err != nil {
@@ -311,14 +311,11 @@ func Discover(cwd string, opts LookupOptions) (Catalog, error) {
 			skill.Source = root.Source
 			skill.Scope = root.Scope
 			key := strings.ToLower(skill.Name)
-			if existing, ok := seen[key]; ok {
+			if seen[key] {
 				cat.Shadowed = append(cat.Shadowed, skill)
-				cat.Issues = append(cat.Issues,
-					fmt.Sprintf("skill %q at %s is shadowed by %s",
-						skill.Name, skill.Location, cat.Skills[existing].Location))
 				continue
 			}
-			seen[key] = len(cat.Skills)
+			seen[key] = true
 			cat.Skills = append(cat.Skills, skill)
 		}
 	}
