@@ -597,12 +597,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	runtime.goalMode = cfg.GoalMode
 	runtime.workflowPreapproved = cfg.WorkflowPreapproved
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
-	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
+	// Project state (.spettro/) comes from the main checkout when this run
+	// is a sub-agent inside an agent worktree; see projectStateDir.
+	allowedShell, err := loadAllowedCommandSet(projectStateDir(cfg.CWD))
 	if err != nil {
 		return toolLoopResult{}, err
 	}
 	runtime.allowedShell = allowedShell
-	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
+	hooksCfg, err := hooks.LoadEffective(projectStateDir(cfg.CWD))
 	if err != nil {
 		return toolLoopResult{}, err
 	}

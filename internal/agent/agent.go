@@ -348,7 +348,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		MaxWorkers:          maxWorkers,
 		MaxDepth:            maxDelegationDepth,
 		MaxToolCalls:        maxToolCallsPerStep,
-		SkillsCatalog:       SkillCatalog(a.CWD),
+		SkillsCatalog:       SkillCatalog(projectStateDir(a.CWD)),
 		Steering:            a.Steering,
 	})
 	if err != nil {

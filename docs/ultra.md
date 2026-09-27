@@ -89,7 +89,13 @@ instead:
    forked from the current `HEAD`.
 2. Each sub-agent runs with its cwd inside its own worktree, so
    concurrent edits never collide and the main checkout stays clean
-   (`.spettro/` is auto-added to `.git/info/exclude`).
+   (`.spettro/` is auto-added to `.git/info/exclude`). Because `.spettro/`
+   is never checked out into a worktree, a sub-agent there reads the
+   project's operator state from the main checkout: hooks
+   (`.spettro/hooks.json`), the allow-always command and network lists,
+   prompt overrides, instruction files and project skills. An allow-always
+   choice made while a sub-agent runs is saved to the main checkout too, so
+   it outlives the worktree.
 3. When the swarm finishes, the branches are **merged back one at a
    time, in item order**, into the main checkout; leftover uncommitted
    work is committed first, with a Conventional Commits message written

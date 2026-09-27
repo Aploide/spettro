@@ -156,8 +156,6 @@ func ensureLocalGitExclude(ctx context.Context, repoRoot string) {
 	_, _ = f.WriteString("\n# spettro subagent workspaces\n.spettro/\n")
 }
 
-// newAgentWorkspace creates the worktree+branch pair for one subagent. The
-// worktree forks from the current HEAD of the repository containing cwd.
 // mainCheckoutPath maps a directory inside an agent worktree
 // (<repo>/.spettro/worktrees/<slug>/...) to the same directory in the main
 // checkout. Files git never checks out — .spettro/ itself (prompt overrides)
@@ -180,6 +178,22 @@ func mainCheckoutPath(dir string) (string, bool) {
 	}
 }
 
+// projectStateDir returns the directory whose .spettro/ holds the
+// operator's project state for a run in cwd: hooks.json, the allow-always
+// command and network lists, and project skills. For a sub-agent in an
+// agent worktree that is the same directory in the main checkout, because
+// .spettro/ is never checked out into a worktree, and anything saved in the
+// worktree's own .spettro/ is deleted with it after the merge. Everywhere
+// else it is cwd itself.
+func projectStateDir(cwd string) string {
+	if main, ok := mainCheckoutPath(cwd); ok {
+		return main
+	}
+	return cwd
+}
+
+// newAgentWorkspace creates the worktree+branch pair for one subagent. The
+// worktree forks from the current HEAD of the repository containing cwd.
 func newAgentWorkspace(ctx context.Context, cwd, name string) (*agentWorkspace, error) {
 	root, err := workspaceGit(ctx, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {

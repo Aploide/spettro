@@ -1196,7 +1196,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 	case config.RuleAllow:
 		return nil
 	}
-	allowed, err := loadAllowedNetworkSet(r.cwd)
+	allowed, err := loadAllowedNetworkSet(projectStateDir(r.cwd))
 	if err != nil {
 		return fmt.Errorf("read network approvals: %w", err)
 	}
@@ -1215,7 +1215,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 		return nil
 	case ShellApprovalAllowAlways:
 		allowed[target] = struct{}{}
-		if err := saveAllowedNetworkSet(r.cwd, allowed); err != nil {
+		if err := saveAllowedNetworkSet(projectStateDir(r.cwd), allowed); err != nil {
 			return fmt.Errorf("persist network approval: %w", err)
 		}
 		return nil

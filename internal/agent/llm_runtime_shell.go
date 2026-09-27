@@ -449,7 +449,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 			r.allowedShell[seg] = struct{}{}
 		}
 		r.mu.Unlock()
-		if err := saveAllowedCommandSet(r.cwd, r.allowedShell); err != nil {
+		if err := saveAllowedCommandSet(projectStateDir(r.cwd), r.allowedShell); err != nil {
 			return fmt.Errorf("persist allowed command: %w", err)
 		}
 		r.emitApprovalTrace("allowed", "user", toolID, strings.Join(missingApprovals, " | "), "approved and persisted")
