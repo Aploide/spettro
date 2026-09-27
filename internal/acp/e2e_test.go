@@ -699,3 +699,39 @@ func keys(m map[string]map[string]any) []string {
 	}
 	return out
 }
+
+// A file attached as a resource link (an editor's @file) is a required
+// read the model can satisfy: once it reads the file, other tools work and
+// the turn ends with the answer. The link is percent-encoded, as editors
+// send a path with a space.
+func TestACPEndToEnd_AttachedFileIsReadOnce(t *testing.T) {
+	llm := newScriptedLLM(t,
+		llmReply{calls: []llmCall{{"file-read", `{"path":"My Proj/a.txt"}`}}},
+		llmReply{calls: []llmCall{{"file-write", `{"path":"My Proj/b.txt","content":"x\n"}`}}},
+		llmReply{content: "All done."},
+		llmReply{content: "extra 1"},
+		llmReply{content: "extra 2"},
+	)
+	h := newACPHarness(t, llm, config.PermissionYOLO)
+	writeFile(t, filepath.Join(h.cwd, "My Proj", "a.txt"), "hello\n")
+	h.initialize()
+	sid := h.newSession("coding")
+
+	uri := "file://" + filepath.ToSlash(h.cwd) + "/My%20Proj/a.txt"
+	resp, err := h.conn.Prompt(h.ctx(), acpsdk.PromptRequest{SessionId: sid, Prompt: []acpsdk.ContentBlock{
+		acpsdk.TextBlock("look at "),
+		acpsdk.ResourceLinkBlock("a.txt", uri),
+	}})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if resp.StopReason != acpsdk.StopReasonEndTurn {
+		t.Fatalf("stop reason = %s", resp.StopReason)
+	}
+	if n := len(llm.requestBodies()); n != 3 {
+		t.Fatalf("model requests = %d, want 3 (read, write, answer)", n)
+	}
+	if _, err := os.Stat(filepath.Join(h.cwd, "My Proj", "b.txt")); err != nil {
+		t.Fatalf("the write after the required read did not run: %v", err)
+	}
+}

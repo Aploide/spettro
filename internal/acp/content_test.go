@@ -24,14 +24,35 @@ func TestReadPromptContent_TextAndResourceLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task != "Read @/tmp/proj/main.go and summarize it." {
+	if task != "Read @"+filepath.FromSlash("/tmp/proj/main.go")+" and summarize it." {
 		t.Fatalf("unexpected task: %q", task)
 	}
 	if len(images) != 0 {
 		t.Fatalf("expected no images, got %v", images)
 	}
-	if len(mentioned) != 1 || mentioned[0] != "/tmp/proj/main.go" {
+	if len(mentioned) != 1 || mentioned[0] != filepath.FromSlash("/tmp/proj/main.go") {
 		t.Fatalf("unexpected mentioned files: %v", mentioned)
+	}
+}
+
+// Resource links are URIs: a percent-encoded space or a "localhost"
+// authority must still name the file on disk, and a link that is not a
+// file:// URI names no file to read first.
+func TestReadPromptContent_ResourceLinkURIForms(t *testing.T) {
+	p, err := readPromptContent([]acpsdk.ContentBlock{
+		acpsdk.ResourceLinkBlock("a.txt", "file:///tmp/My%20Proj/a.txt"),
+		acpsdk.ResourceLinkBlock("b.txt", "file://localhost/tmp/b.txt"),
+		acpsdk.ResourceLinkBlock("docs", "https://example.com/docs"),
+	}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.FromSlash("/tmp/My Proj/a.txt"), filepath.FromSlash("/tmp/b.txt")}
+	if strings.Join(p.mentioned, "|") != strings.Join(want, "|") {
+		t.Fatalf("mentioned = %q, want %q", p.mentioned, want)
+	}
+	if !strings.Contains(p.typed, "@https://example.com/docs") {
+		t.Fatalf("a non-file link should stay in the text: %q", p.typed)
 	}
 }
 

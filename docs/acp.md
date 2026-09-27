@@ -160,7 +160,12 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   intentionally not advertised: the editor's own session picker drives
   `session/load` instead (see below).
 - **Prompt content** — text, `@`-mentioned files (resource links), embedded
-  context, and images are accepted in prompts.
+  context, and images are accepted in prompts. A `file://` resource link
+  (percent-encoded paths included) is a file the agent must read with
+  `file-read` before anything else, like an `@` mention in the TUI. A link
+  to a file outside the session's project, or to one that does not exist,
+  stays in the prompt text but is not required, so it can never hold up the
+  turn; a link with another scheme (`https://`) is only text.
 - **Tool-call images** — when a tool attaches an image for the model (the
   `view-image` vision tool, see [vision.md](vision.md)), the corresponding
   `tool_call`/`tool_call_update` carries an image content block (base64 +

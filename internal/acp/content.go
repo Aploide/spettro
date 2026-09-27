@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,8 +381,16 @@ func readPromptContent(blocks []acpsdk.ContentBlock, mediaDir string) (promptCon
 		case block.Text != nil:
 			text.WriteString(block.Text.Text)
 		case block.ResourceLink != nil:
-			path := uriToPath(block.ResourceLink.Uri)
+			// A file link becomes an @-mention and a required read; any
+			// other link (a web page, an editor-specific scheme) is only
+			// mentioned, since there is no file for file-read to open.
+			uri := block.ResourceLink.Uri
+			path, isFile := fileURIPath(uri)
 			text.WriteString("@")
+			if !isFile {
+				text.WriteString(uri)
+				continue
+			}
 			text.WriteString(path)
 			p.mentioned = append(p.mentioned, path)
 		case block.Resource != nil:
@@ -411,8 +420,33 @@ func readPromptContent(blocks []acpsdk.ContentBlock, mediaDir string) (promptCon
 	return p, nil
 }
 
+// uriToPath returns the local path of a file:// URI, or uri unchanged when
+// it is not one (it then only labels embedded context).
 func uriToPath(uri string) string {
-	return strings.TrimPrefix(uri, "file://")
+	if path, ok := fileURIPath(uri); ok {
+		return path
+	}
+	return uri
+}
+
+// fileURIPath decodes a file:// URI into a local path: percent-escapes are
+// decoded ("My%20Proj" is "My Proj"), an empty or "localhost" authority is
+// accepted, and a Windows drive path ("/C:/x") loses its leading slash.
+// ok is false for any other scheme or a remote authority, which name no
+// file this process can read.
+func fileURIPath(uri string) (path string, ok bool) {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "file" || u.Path == "" {
+		return "", false
+	}
+	if u.Host != "" && u.Host != "localhost" {
+		return "", false
+	}
+	p := u.Path
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p), true
 }
 
 func imageExt(mime string) string {

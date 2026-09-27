@@ -610,11 +610,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
 		return toolLoopResult{}, err
 	}
+	// Required reads are keyed by workspace-relative path, the key
+	// runFileRead clears. The prompt lists the same normalized paths.
+	cfg.RequiredReads = runtime.readableRequiredReads(cfg.RequiredReads)
 	for _, p := range cfg.RequiredReads {
-		p = filepath.ToSlash(strings.TrimSpace(p))
-		if p != "" {
-			runtime.requiredReads[p] = struct{}{}
-		}
+		runtime.requiredReads[p] = struct{}{}
 	}
 	var traces []ToolTrace
 
@@ -2016,6 +2016,36 @@ func (r *toolRuntime) lockFileForMutation(rawArgs []byte) (unlock func()) {
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
+}
+
+// readableRequiredReads turns the caller's required reads into the
+// workspace-relative, slash-separated paths runFileRead records, dropping
+// any the model could never satisfy: a path outside the workspace, or one
+// that is not an existing regular file. Every non-read tool call is refused
+// and every final answer is sent back while a required read is pending, so
+// an unsatisfiable entry would otherwise loop the turn until its budget ran
+// out. The TUI already sends relative, existing paths; ACP sends the
+// absolute paths of the files the client attached.
+func (r *toolRuntime) readableRequiredReads(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		abs, rel, err := r.resolvePath(p)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(abs); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if !seen[rel] {
+			seen[rel] = true
+			out = append(out, rel)
+		}
+	}
+	return out
 }
 
 func (r *toolRuntime) nextRequiredRead() (string, bool) {
