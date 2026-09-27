@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	wire "spettro/internal/provider/wire/chatcompletions"
 )
@@ -17,10 +18,31 @@ const toolImageNote = "[image attached from the tool result above]"
 // defaultToolSchema replaces a tool schema that is not a JSON object.
 const defaultToolSchema = `{"additionalProperties":true,"type":"object"}`
 
-// Encoder cache bounds: conversations encoded at once (the main agent plus
-// concurrent sub-agents) and distinct tool surfaces kept.
+// Encoder cache bounds.
 const (
-	maxEncoderLanes = 4
+	// maxEncoderLanes bounds the conversations cached at once. The main
+	// agent and all of its sub-agents share one Manager, so one encoder:
+	// ultra runs up to 32 sub-agents and workflow up to 16 next to the main
+	// agent. With fewer lanes than conversations taking turns, every lane
+	// is recycled before its conversation's next step and every step
+	// encodes the whole history again.
+	maxEncoderLanes = 48
+	// encoderCacheLimit bounds the cached encodings of all lanes together
+	// (a lane holds about its conversation's size in JSON). Past it, the
+	// least recently used lanes are dropped; their conversations encode in
+	// full on their next step, as every step did before this cache (about
+	// 1.3 ms at 1000 messages). 8 MB holds a conversation that fills a
+	// 1M-token context window (about 4 MB of JSON) next to a fan-out's
+	// sub-agents at typical sizes; together with mediaCacheLimit it stays
+	// under the performance plan's 15 MB memory-regression allowance.
+	encoderCacheLimit = 8 << 20
+	// encoderLaneIdle is how long an unused lane is kept. Without it, a
+	// conversation that ended, was cleared or was compacted (its first
+	// message changes, so it continues in a new lane) would keep its old
+	// encodings, and the strings its snapshots share, until newer lanes
+	// pushed it out, which in a single-agent session never happens.
+	encoderLaneIdle = 5 * time.Minute
+	// maxToolSurfaces bounds the distinct tool arrays kept.
 	maxToolSurfaces = 4
 )
 
@@ -40,24 +62,51 @@ const (
 //
 // Key: lane = the conversation's first message plus the provider and model
 // (reasoning replay depends on them); entry = position within the lane.
-// Invalidation: by comparison on every use, as above; lanes are recycled
-// least recently used first. Messages with images are never cached: their
-// bytes come from the media cache, which checks the files on every use.
-// Owner: shared by the Manager's goroutines; mu guards all of it. Cached
-// encodings are never modified once stored, so request bodies keep
-// pointing at them after mu is released.
+// Invalidation: by comparison on every use, as above. Lanes are dropped
+// least recently used first past maxEncoderLanes or encoderCacheLimit, and
+// by a timer once unused for encoderLaneIdle. Messages with images are
+// never cached: their data URLs come from the media cache, which checks
+// the files on every use, and go into the body as chunks of their own.
+// Requests of a single message (a compaction summary, a one-shot helper
+// call, a sub-agent's first step) take no lane: nothing would reuse it,
+// and a compaction transcript would hold its size until the lane idled
+// out.
+//
+// Owner and ordering: shared by the Manager's goroutines, plus the idle
+// timer's goroutine. mu guards the lane list, each lane's bookkeeping
+// (lastUse, size, cached), the byte total, the timer and the tool arrays.
+// A lane's own mu guards its encodings and is held while a request
+// encodes that lane, so different conversations encode in parallel and
+// only requests of the same conversation wait for each other. The two
+// are never held together: encode takes mu to find the lane, releases it,
+// encodes under the lane's lock, then takes mu again to charge the lane's
+// new size. The media cache's lock is taken under a lane's lock, the
+// schema cache's under mu; neither takes these in turn. Cached encodings
+// are never modified once stored, so request bodies keep pointing at them
+// after the locks are released, and after their lane is dropped.
 type chatEncoder struct {
 	mu    sync.Mutex
 	lanes []*encoderLane // most recently used first
+	total int            // sum of the cached lanes' size
+	idle  *time.Timer    // pending idle sweep, nil when none
 	tools []*toolSurface // most recently used first
 }
 
 // encoderLane is the cache of one conversation.
 type encoderLane struct {
+	// Fixed at creation. first is a snapshot of the conversation's first
+	// message, which identifies the lane.
 	provider, model string
-	// first is a snapshot of the conversation's first message, which
-	// identifies the lane.
-	first     Message
+	first           Message
+
+	// Guarded by chatEncoder.mu: the last time a request used the lane,
+	// the bytes it is charged for, and whether it is still in the list.
+	lastUse time.Time
+	size    int
+	cached  bool
+
+	// mu guards the encodings.
+	mu        sync.Mutex
 	system    string
 	systemEnc []byte
 	entries   []encodedMessage
@@ -87,13 +136,22 @@ func (e *chatEncoder) encode(providerName, modelName string, req Request) *wire.
 	// Head, system prompt, one chunk per message, the tool array's three.
 	body.Grow(len(req.Messages) + 6)
 	body.Append(wire.AppendRequestHead(nil, chatOptions(modelName, req)))
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(req.Messages) == 0 {
-		msg := Message{Role: RoleUser, Content: req.Prompt}
-		body.Append(appendChatMessage(nil, providerName, modelName, msg, req.Images)[1:])
-	} else {
-		e.appendMessages(body, providerName, modelName, req)
+	switch len(req.Messages) {
+	case 0:
+		var w messageWriter
+		writeChatMessage(&w, providerName, modelName, Message{Role: RoleUser, Content: req.Prompt}, req.Images)
+		out := bodyMessages{body: body}
+		for _, chunk := range w.finish() {
+			out.add(chunk)
+		}
+	case 1:
+		// A one-shot request: encoded through a lane of its own that is
+		// never listed, so it is garbage once the body is sent.
+		(&encoderLane{}).appendMessages(body, providerName, modelName, req)
+	default:
+		lane := e.lane(providerName, modelName, req.Messages[0])
+		size := lane.appendMessages(body, providerName, modelName, req)
+		e.charge(lane, size)
 	}
 	if len(req.Tools) == 0 {
 		body.AppendString(wire.MessagesEnd)
@@ -130,78 +188,157 @@ func isOpenAIReasoningModel(modelID string) bool {
 		strings.Contains(modelID, "gpt-5")
 }
 
-// appendMessages adds the system prompt and every message of req to body,
-// from the lane cache where possible. The caller holds e.mu.
-func (e *chatEncoder) appendMessages(body *wire.Body, providerName, modelName string, req Request) {
-	lane := e.lane(providerName, modelName, req.Messages[0])
-	first := true
-	add := func(enc []byte) {
-		if len(enc) == 0 {
-			return
-		}
-		if first {
-			enc = enc[1:] // drop the leading comma
-			first = false
-		}
-		body.Append(enc)
-	}
-	if strings.TrimSpace(req.System) != "" {
-		if lane.systemEnc == nil || lane.system != req.System {
-			lane.system = req.System
-			lane.systemEnc = wire.AppendSystemMessage([]byte{','}, req.System)
-		}
-		add(lane.systemEnc)
-	}
-	if n := len(req.Messages); len(lane.entries) != n {
-		if len(lane.entries) > n {
-			clear(lane.entries[n:])
-		}
-		lane.entries = slices.Grow(lane.entries[:min(len(lane.entries), n)], n)[:n]
-	}
-	imageIdx := lastUserIndex(req.Messages)
-	for i, msg := range req.Messages {
-		entry := &lane.entries[i]
-		var extra []string
-		if i == imageIdx {
-			extra = req.Images
-		}
-		if len(extra) > 0 || hasImages(msg) {
-			*entry = encodedMessage{}
-			add(appendChatMessage(nil, providerName, modelName, msg, extra))
-			continue
-		}
-		if !entry.cached || !sameWireMessage(entry.msg, msg) {
-			enc := appendChatMessage(nil, providerName, modelName, msg, nil)
-			*entry = encodedMessage{msg: snapshotMessage(msg), enc: enc, cached: true}
-		}
-		add(entry.enc)
-	}
-}
-
-// lane returns the cache lane of the conversation that starts with first,
-// moving it to the front, or recycles the least recently used lane for it.
-// The caller holds e.mu.
+// lane returns the lane of the conversation that starts with first, moving
+// it to the front, or creates one, dropping the least recently used lane
+// when the list is full.
 func (e *chatEncoder) lane(providerName, modelName string, first Message) *encoderLane {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := time.Now()
 	for i, l := range e.lanes {
 		if l.provider != providerName || l.model != modelName || !sameWireMessage(l.first, first) {
 			continue
 		}
 		copy(e.lanes[1:i+1], e.lanes[:i])
 		e.lanes[0] = l
+		l.lastUse = now
 		return l
 	}
-	l := &encoderLane{provider: providerName, model: modelName, first: snapshotMessage(first)}
-	if len(e.lanes) < maxEncoderLanes {
-		e.lanes = append(e.lanes, nil)
+	if len(e.lanes) >= maxEncoderLanes {
+		e.dropLaneLocked(len(e.lanes) - 1)
 	}
+	l := &encoderLane{provider: providerName, model: modelName, first: snapshotMessage(first), lastUse: now, cached: true}
+	e.lanes = append(e.lanes, nil)
 	copy(e.lanes[1:], e.lanes[:len(e.lanes)-1])
 	e.lanes[0] = l
+	e.armIdleLocked()
 	return l
 }
 
-// toolsEncoding returns the encoded tool definitions. The caller holds
-// e.mu.
+// charge records that l now caches size bytes, then drops the least
+// recently used lanes while the total is over encoderCacheLimit. The most
+// recently used lane stays even when it alone is over the limit. A lane
+// dropped while it was being encoded is not charged.
+func (e *chatEncoder) charge(l *encoderLane, size int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !l.cached {
+		return
+	}
+	e.total += size - l.size
+	l.size = size
+	for e.total > encoderCacheLimit && len(e.lanes) > 1 {
+		e.dropLaneLocked(len(e.lanes) - 1)
+	}
+}
+
+// dropLaneLocked removes lane i from the list. A request still encoding it
+// finishes normally; the lane is garbage once that request is done.
+func (e *chatEncoder) dropLaneLocked(i int) {
+	l := e.lanes[i]
+	e.total -= l.size
+	l.size = 0
+	l.cached = false
+	e.lanes = slices.Delete(e.lanes, i, i+1)
+}
+
+// armIdleLocked schedules an idle sweep while lanes remain and none is
+// pending.
+func (e *chatEncoder) armIdleLocked() {
+	if e.idle == nil && len(e.lanes) > 0 {
+		e.idle = time.AfterFunc(encoderLaneIdle, e.onIdleTimer)
+	}
+}
+
+// onIdleTimer runs on the timer's goroutine. A lane is dropped between
+// encoderLaneIdle and twice that after its last use.
+func (e *chatEncoder) onIdleTimer() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.idle = nil
+	e.dropIdleLocked(time.Now())
+	e.armIdleLocked()
+}
+
+// dropIdleLocked drops the lanes last used more than encoderLaneIdle
+// before now. The list is in last-use order, so they are all at its end.
+func (e *chatEncoder) dropIdleLocked(now time.Time) {
+	cutoff := now.Add(-encoderLaneIdle)
+	for n := len(e.lanes); n > 0 && e.lanes[n-1].lastUse.Before(cutoff); n = len(e.lanes) {
+		e.dropLaneLocked(n - 1)
+	}
+}
+
+// appendMessages adds the system prompt and every message of req to body,
+// from the lane's cache where possible, and returns the bytes the lane
+// caches afterwards.
+func (l *encoderLane) appendMessages(body *wire.Body, providerName, modelName string, req Request) (size int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := bodyMessages{body: body}
+	if strings.TrimSpace(req.System) != "" {
+		if l.systemEnc == nil || l.system != req.System {
+			l.system = req.System
+			l.systemEnc = wire.AppendSystemMessage([]byte{','}, req.System)
+		}
+		out.add(l.systemEnc)
+	}
+	size += len(l.systemEnc)
+	if n := len(req.Messages); len(l.entries) != n {
+		if len(l.entries) > n {
+			clear(l.entries[n:])
+		}
+		l.entries = slices.Grow(l.entries[:min(len(l.entries), n)], n)[:n]
+	}
+	imageIdx := lastUserIndex(req.Messages)
+	for i, msg := range req.Messages {
+		entry := &l.entries[i]
+		var extra []string
+		if i == imageIdx {
+			extra = req.Images
+		}
+		if len(extra) > 0 || hasImages(msg) {
+			*entry = encodedMessage{}
+			var w messageWriter
+			writeChatMessage(&w, providerName, modelName, msg, extra)
+			for _, chunk := range w.finish() {
+				out.add(chunk)
+			}
+			continue
+		}
+		if !entry.cached || !sameWireMessage(entry.msg, msg) {
+			*entry = encodedMessage{msg: snapshotMessage(msg), enc: encodeMessage(providerName, modelName, msg), cached: true}
+		}
+		out.add(entry.enc)
+		size += len(entry.enc)
+	}
+	return size
+}
+
+// bodyMessages appends message encodings to the "messages" array of a
+// body. Every message encoding starts with a comma; the first chunk added
+// loses it. That first chunk is always a message's own bytes, never a
+// shared image literal (see messageWriter).
+type bodyMessages struct {
+	body    *wire.Body
+	started bool
+}
+
+func (m *bodyMessages) add(chunk []byte) {
+	if len(chunk) == 0 {
+		return
+	}
+	if !m.started {
+		chunk = chunk[1:]
+		m.started = true
+	}
+	m.body.Append(chunk)
+}
+
+// toolsEncoding returns the encoded tool definitions.
 func (e *chatEncoder) toolsEncoding(specs []ToolSpec) []byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for i, s := range e.tools {
 		if sameToolSpecs(s.specs, specs) {
 			copy(e.tools[1:i+1], e.tools[:i])
@@ -229,7 +366,49 @@ func (e *chatEncoder) toolsEncoding(specs []ToolSpec) []byte {
 	return enc
 }
 
-// appendChatMessage appends msg as chat-completions message objects, each
+// messageWriter collects one message's encoding as body chunks. Most of it
+// is written into buf; an image's data URL is added as a chunk of its own,
+// shared with the media cache, instead of being copied: copying and
+// re-scanning five 400 KB screenshots on every request cost 2.7 MB and
+// most of the time of BenchmarkSendWithImages. A message's first chunk is
+// always its own bytes (it starts with the message's comma).
+type messageWriter struct {
+	chunks [][]byte // finished chunks
+	buf    []byte   // the chunk being written
+}
+
+// shared adds chunk, which must never be modified, after what was written
+// so far.
+func (w *messageWriter) shared(chunk []byte) {
+	w.flush()
+	w.chunks = append(w.chunks, chunk)
+}
+
+func (w *messageWriter) flush() {
+	if len(w.buf) > 0 {
+		w.chunks = append(w.chunks, w.buf)
+		w.buf = nil
+	}
+}
+
+// finish returns the message's chunks.
+func (w *messageWriter) finish() [][]byte {
+	w.flush()
+	return w.chunks
+}
+
+// encodeMessage returns the encoding of msg, which has no images, as one
+// byte slice.
+func encodeMessage(providerName, modelName string, msg Message) []byte {
+	var w messageWriter
+	writeChatMessage(&w, providerName, modelName, msg, nil)
+	if len(w.chunks) == 0 {
+		return w.buf // nothing was shared: the usual case
+	}
+	return bytes.Join(w.finish(), nil)
+}
+
+// writeChatMessage writes msg as chat-completions message objects, each
 // preceded by a comma, the way fantasy's OpenAI-compatible provider
 // converts the equivalent fantasy prompt (see buildFantasyCall):
 //
@@ -242,42 +421,54 @@ func (e *chatEncoder) toolsEncoding(specs []ToolSpec) []byte {
 //     carries its text, its tool calls and the reasoning replayed for this
 //     model as reasoning_content (the last block's text), and is dropped
 //     when it has neither text nor tool calls.
-func appendChatMessage(b []byte, providerName, modelName string, msg Message, extraImages []string) []byte {
+func writeChatMessage(w *messageWriter, providerName, modelName string, msg Message, extraImages []string) {
 	switch msg.Role {
 	case RoleUser:
 		if len(msg.ToolResults) > 0 {
 			var spill []string
 			for _, tr := range msg.ToolResults {
-				b = append(b, ',')
-				b = wire.AppendToolResult(b, tr.ID, tr.Output)
+				w.buf = append(w.buf, ',')
+				w.buf = wire.AppendToolResult(w.buf, tr.ID, tr.Output)
 				spill = append(spill, tr.Images...)
 			}
 			if msg.Content != "" {
-				b = append(b, ',')
-				b = wire.AppendUserText(b, msg.Content)
+				w.buf = append(w.buf, ',')
+				w.buf = wire.AppendUserText(w.buf, msg.Content)
 			}
-			if urls := imageDataURLs(spill); len(urls) > 0 {
-				b = append(b, ',')
-				b = wire.AppendUserParts(b, toolImageNote, urls)
+			if literals := imageURLLiterals(spill); len(literals) > 0 {
+				w.buf = append(w.buf, ',')
+				writeUserParts(w, toolImageNote, literals)
 			}
-			return b
+			return
 		}
 		images := msg.Images
 		if len(extraImages) > 0 {
 			images = append(images[:len(images):len(images)], extraImages...)
 		}
-		b = append(b, ',')
-		if urls := imageDataURLs(images); len(urls) > 0 {
-			return wire.AppendUserParts(b, msg.Content, urls)
+		w.buf = append(w.buf, ',')
+		if literals := imageURLLiterals(images); len(literals) > 0 {
+			writeUserParts(w, msg.Content, literals)
+			return
 		}
-		return wire.AppendUserText(b, msg.Content)
+		w.buf = wire.AppendUserText(w.buf, msg.Content)
 	case RoleAssistant:
-		return appendAssistantMessage(b, providerName, modelName, msg)
+		w.buf = appendAssistantMessage(w.buf, providerName, modelName, msg)
 	}
-	return b
 }
 
-// appendAssistantMessage appends an assistant turn (see appendChatMessage).
+// writeUserParts writes a user message with text and images. literals are
+// the images' data URLs as JSON strings, from the media cache.
+func writeUserParts(w *messageWriter, text string, literals [][]byte) {
+	w.buf = wire.AppendUserPartsStart(w.buf, text)
+	for _, literal := range literals {
+		w.buf = append(w.buf, wire.ImagePartStart...)
+		w.shared(literal)
+		w.buf = append(w.buf, wire.ImagePartEnd...)
+	}
+	w.buf = append(w.buf, wire.UserPartsEnd...)
+}
+
+// appendAssistantMessage appends an assistant turn (see writeChatMessage).
 func appendAssistantMessage(b []byte, providerName, modelName string, msg Message) []byte {
 	var reasoning string
 	replayed := 0
@@ -311,15 +502,16 @@ func appendAssistantMessage(b []byte, providerName, modelName string, msg Messag
 	return wire.AppendAssistant(b, m)
 }
 
-// imageDataURLs loads images as data URLs, skipping unreadable files.
-func imageDataURLs(paths []string) []string {
-	var urls []string
+// imageURLLiterals loads images as data-URL JSON strings, skipping
+// unreadable files.
+func imageURLLiterals(paths []string) [][]byte {
+	var literals [][]byte
 	for _, p := range paths {
-		if url, _, ok := requestMedia.dataURL(p); ok {
-			urls = append(urls, url)
+		if literal, _, ok := requestMedia.urlLiteral(p); ok {
+			literals = append(literals, literal)
 		}
 	}
-	return urls
+	return literals
 }
 
 // hasImages reports whether msg carries images of its own or from tools.

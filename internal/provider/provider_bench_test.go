@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,6 +52,9 @@ func benchManager(srv *httptest.Server, mode WireMode, vision bool) *Manager {
 	return pm
 }
 
+// BenchmarkSendStream resends one unchanged request: for the native
+// client that is the encoder's best case, nothing new to encode.
+// BenchmarkSendStep measures a real step.
 func BenchmarkSendStream(b *testing.B) {
 	srv := instantSSE(b, okSSE)
 	for _, n := range []int{10, 100, 500} {
@@ -68,6 +72,41 @@ func BenchmarkSendStream(b *testing.B) {
 			})
 		}
 	}
+}
+
+// BenchmarkSendStep is Manager.Send for one agent step at n messages: the
+// last two messages (a tool call and its result) are new on every
+// iteration, as on every step of a run, so the native encoder encodes those
+// two and reuses the rest. It is the plan's "Manager.Send at n msgs".
+func BenchmarkSendStep(b *testing.B) {
+	srv := instantSSE(b, okSSE)
+	for _, n := range []int{10, 100, 500} {
+		for _, mode := range benchWires {
+			req := guardRequest(n)
+			req.Messages = slices.Clone(req.Messages)
+			req.OnStream = func(StreamEvent) {}
+			pm := benchManager(srv, mode, false)
+			b.Run(fmt.Sprintf("%s/hist=%d", mode, n), func(b *testing.B) {
+				b.ReportAllocs()
+				step := 0
+				for b.Loop() {
+					step++
+					replaceLastStep(req.Messages, step)
+					if _, err := pm.Send(context.Background(), srv.URL, "m", req); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// replaceLastStep overwrites the last two messages of msgs, in place, with
+// a new tool call and its result.
+func replaceLastStep(msgs []Message, step int) {
+	id := "step_" + strconv.Itoa(step)
+	msgs[len(msgs)-2] = Message{Role: RoleAssistant, Content: "Next file.", ToolCalls: []NativeTool{{ID: id, Name: "file-read", Args: json.RawMessage(`{"path":"pkg/step.go"}`)}}}
+	msgs[len(msgs)-1] = Message{Role: RoleUser, ToolResults: []ToolResult{{ID: id, Name: "file-read", Output: "package step // " + id}}}
 }
 
 // BenchmarkEncodeStep is the request encoding of one agent step at n

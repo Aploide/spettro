@@ -5,6 +5,7 @@ package provider
 // (provider_bench_test.go); these pin allocation and work counts.
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"spettro/internal/budget"
+	wire "spettro/internal/provider/wire/chatcompletions"
 )
 
 // estimateRequestTokensOracle is EstimateRequestTokens as it was before it
@@ -111,15 +113,18 @@ func TestMediaCacheRereadsChangedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &mediaCache{limit: 1 << 20}
-	url1, _, ok := c.dataURL(path)
-	if !ok || url1 != "data:image/png;base64,Zmlyc3Q=" {
-		t.Fatalf("data URL %q", url1)
+	lit1, _, ok := c.urlLiteral(path)
+	if !ok || string(lit1) != `"data:image/png;base64,Zmlyc3Q="` {
+		t.Fatalf("data URL literal %s", lit1)
 	}
-	url2, _, _ := c.dataURL(path)
-	if url2 != url1 {
-		t.Fatal("cached data URL changed")
+	if b64, _ := c.base64(path); b64 != "Zmlyc3Q=" {
+		t.Fatalf("base64 %q", b64)
 	}
-	if n := testing.AllocsPerRun(20, func() { _, _, _ = c.dataURL(path) }); n > 3 {
+	lit2, _, _ := c.urlLiteral(path)
+	if &lit2[0] != &lit1[0] {
+		t.Fatal("cached data URL rebuilt")
+	}
+	if n := testing.AllocsPerRun(20, func() { _, _, _ = c.urlLiteral(path) }); n > 3 {
 		t.Fatalf("a cached lookup allocated %v times (stat only expected)", n)
 	}
 	later := time.Now().Add(time.Minute)
@@ -146,7 +151,7 @@ func TestMediaCacheEvictsToItsLimit(t *testing.T) {
 		if err := os.WriteFile(p, make([]byte, 1000), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, ok := c.dataURL(p); !ok {
+		if _, _, ok := c.urlLiteral(p); !ok {
 			t.Fatal("unreadable")
 		}
 	}
@@ -154,6 +159,76 @@ func TestMediaCacheEvictsToItsLimit(t *testing.T) {
 	defer c.mu.Unlock()
 	if c.total > c.limit || c.lru.Len() == 0 || c.lru.Len() != len(c.entries) {
 		t.Fatalf("cache holds %d bytes in %d entries (map %d), limit %d", c.total, c.lru.Len(), len(c.entries), c.limit)
+	}
+}
+
+// An entry holds only the forms callers asked for: the native client's
+// data URL alone costs its own size, not the file's bytes as well.
+func TestMediaCacheKeepsOnlyRequestedForms(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shot.jpg")
+	if err := os.WriteFile(path, make([]byte, 3000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &mediaCache{limit: 1 << 20}
+	literal, _, _ := c.urlLiteral(path)
+	c.mu.Lock()
+	raw, total := c.entries[path].Value.(*mediaFile).raw, c.total
+	c.mu.Unlock()
+	if raw != nil || total != len(literal) {
+		t.Fatalf("after urlLiteral: raw kept = %v, total %d, want %d", raw != nil, total, len(literal))
+	}
+	data, ok := c.bytes(path)
+	c.mu.Lock()
+	total = c.total
+	c.mu.Unlock()
+	if !ok || len(data) != 3000 || total != len(literal)+len(data) {
+		t.Fatalf("after bytes: %d bytes read, total %d, want %d", len(data), total, len(literal)+len(data))
+	}
+}
+
+// Images nobody asked for in mediaIdle leave the cache.
+func TestMediaCacheDropsIdleEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("img"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &mediaCache{limit: 1 << 20}
+	if _, _, ok := c.urlLiteral(path); !ok {
+		t.Fatal("unreadable")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.idle == nil {
+		t.Fatal("no idle sweep scheduled")
+	}
+	c.dropIdleLocked(time.Now())
+	if c.lru.Len() != 1 {
+		t.Fatal("a fresh entry was dropped")
+	}
+	c.dropIdleLocked(time.Now().Add(2 * mediaIdle))
+	if c.lru.Len() != 0 || len(c.entries) != 0 || c.total != 0 {
+		t.Fatalf("idle entries kept: %d entries, %d bytes", c.lru.Len(), c.total)
+	}
+}
+
+// The cached literal is exactly the JSON string the encoder would write
+// for the data URL, so bodies can splice it in unchanged.
+func TestDataURLLiteralIsJSON(t *testing.T) {
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+	for _, mediaType := range []string{"image/png", "image/jpeg", "image/webp"} {
+		for _, content := range [][]byte{nil, data[:1], data[:2], data} {
+			literal, start := dataURLLiteral(mediaType, content)
+			url := "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(content)
+			if want := wire.AppendString(nil, url); string(literal) != string(want) {
+				t.Fatalf("literal %s, want %s", literal, want)
+			}
+			if got := string(literal[start : len(literal)-1]); got != base64.StdEncoding.EncodeToString(content) {
+				t.Fatalf("base64 part %q", got)
+			}
+		}
 	}
 }
 

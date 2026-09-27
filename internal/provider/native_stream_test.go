@@ -492,7 +492,9 @@ func TestNativeEncoderFailureFallsBackToFantasy(t *testing.T) {
 	pm.encoder = nil
 	enc := pm.chatEncoder()
 	enc.lanes = []*encoderLane{nil}
-	resp, err := pm.Send(context.Background(), rec.srv.URL, "m", Request{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	// Two messages: a single-message request takes no lane.
+	msgs := []Message{{Role: RoleUser, Content: "hi"}, {Role: RoleAssistant, Content: "hello"}}
+	resp, err := pm.Send(context.Background(), rec.srv.URL, "m", Request{Messages: msgs})
 	if err != nil || resp.Content != "ok" {
 		t.Fatalf("resp = %+v, err = %v", resp, err)
 	}

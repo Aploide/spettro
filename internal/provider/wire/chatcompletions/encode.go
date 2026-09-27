@@ -98,16 +98,36 @@ func AppendUserText(b []byte, text string) []byte {
 // AppendUserParts appends a user message whose content is an array: the
 // text part first, then one image_url part per data URL.
 func AppendUserParts(b []byte, text string, imageURLs []string) []byte {
+	b = AppendUserPartsStart(b, text)
+	for _, u := range imageURLs {
+		b = append(b, ImagePartStart...)
+		b = AppendString(b, u)
+		b = append(b, ImagePartEnd...)
+	}
+	return append(b, UserPartsEnd...)
+}
+
+// AppendUserPartsStart appends the start of a user message whose content is
+// an array, up to and including its text part. The message continues with
+// zero or more image parts (ImagePartStart, the URL as a JSON string,
+// ImagePartEnd) and ends with UserPartsEnd. AppendUserParts writes all of
+// it into one buffer; the pieces let a caller add a large, already encoded
+// URL to a Body as a chunk of its own instead of copying it.
+func AppendUserPartsStart(b []byte, text string) []byte {
 	b = append(b, `{"role":"user","content":[{"type":"text","text":`...)
 	b = AppendString(b, text)
-	b = append(b, '}')
-	for _, u := range imageURLs {
-		b = append(b, `,{"type":"image_url","image_url":{"url":`...)
-		b = AppendString(b, u)
-		b = append(b, `}}`...)
-	}
-	return append(b, `]}`...)
+	return append(b, '}')
 }
+
+// ImagePartStart and ImagePartEnd surround the URL of one image part of a
+// user message (see AppendUserPartsStart).
+const (
+	ImagePartStart = `,{"type":"image_url","image_url":{"url":`
+	ImagePartEnd   = `}}`
+)
+
+// UserPartsEnd closes a user message started by AppendUserPartsStart.
+const UserPartsEnd = `]}`
 
 // AppendToolResult appends one tool message answering the call callID.
 func AppendToolResult(b []byte, callID, content string) []byte {
