@@ -33,6 +33,37 @@ shell's approval rules and the [sandbox](sandbox.md), not by this check.
 Under an active sandbox, a path whose real target leaves the workspace
 through a symlink is refused too.
 
+## Search tools
+
+`grep` and `glob` walk the workspace the same way: the directories `.git`,
+`.spettro`, `vendor`, `node_modules`, `dist` and `build` are skipped below the
+search root, and every `.gitignore` from the filesystem root down applies
+with git's rules (a nested file overrides its parent, the last matching rule
+wins, `!` re-includes, an ignored directory hides everything in it).
+Symlinked directories are not followed; `glob` lists symlinks to files,
+`grep` skips them unless named as `path`.
+
+`grep` runs [ripgrep](https://github.com/BurntSushi/ripgrep) when it can and
+a built-in Go search otherwise; both give the same answers. When `rg` is not
+on PATH, the first `grep` that has to use the Go search starts a background
+download of ripgrep 15.2.0 for the platform into `~/.spettro/bin` (macOS,
+Linux, Windows; x86-64 and ARM). The archive's SHA-256 is pinned in Spettro
+and checked before anything is unpacked. The download never delays a tool
+call, and a failure (offline, a proxy, an unsupported platform) only means
+the Go search stays in use for the session. It is skipped when the OS
+sandbox confines the network (`sandbox_net`), and `ripgrep_download_disabled`
+in `config.json` turns it off (see [Configuration](configuration.md#search)).
+
+Results are listed in walk order (a directory's entries by name, depth
+first). When `max_results` cuts a result, the Go search always keeps the
+first matches in that order; with ripgrep, which searches files in
+parallel, which files make the cut can vary between runs (the listing
+itself stays sorted, and the footer says the result was truncated).
+
+`glob` starts its walk at the directory prefix its pattern names
+(`internal/agent/**/*.go` reads only `internal/agent`), so a narrow pattern
+is fast on any tree size.
+
 ## Deferred tools
 
 An agent holding `tool-search` gets only its core tools advertised up front:

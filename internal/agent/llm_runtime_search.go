@@ -15,9 +15,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
+
+	"spettro/internal/ripgrep"
+	"spettro/internal/sandbox"
 )
 
 const (
@@ -347,6 +349,8 @@ func (r *toolRuntime) runGrep(ctx context.Context, args grepArgs) (string, error
 	if rg, ok := lookRipgrep(); ok {
 		results, err = r.grepWithRipgrep(ctx, rg, q)
 		usedRipgrep = err == nil
+	} else {
+		r.fetchRipgrep()
 	}
 	if !usedRipgrep {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -383,19 +387,22 @@ func looksBinary(data []byte) bool {
 	return bytes.IndexByte(data[:min(len(data), binarySniffBytes)], 0) >= 0
 }
 
-// lookRipgrep finds the rg binary. It is a variable so tests can force the Go
-// backend or a specific binary.
-var lookRipgrep = func() (string, bool) {
-	ripgrepOnce.Do(func() {
-		ripgrepPath, _ = exec.LookPath("rg")
-	})
-	return ripgrepPath, ripgrepPath != ""
-}
+// lookRipgrep finds the rg binary: on PATH, or the copy downloaded into
+// ~/.spettro/bin. It never starts a download (fetchRipgrep does). It is a
+// variable so tests can force the Go backend or a specific binary.
+var lookRipgrep = func() (string, bool) { return ripgrep.Default.Path() }
 
-var (
-	ripgrepOnce sync.Once
-	ripgrepPath string
-)
+// fetchRipgrep starts the background download of rg (product decision D9)
+// after a grep had to use the Go backend, unless the sandbox confines the
+// network: a user who cut the agent's commands off the network does not
+// expect Spettro to reach out on their behalf. The download never delays
+// this or any other call; later greps use rg once it is installed.
+func (r *toolRuntime) fetchRipgrep() {
+	if p := r.sandboxPolicy(); p.Enabled() && p.Net != "" && p.Net != sandbox.NetAll {
+		return
+	}
+	ripgrep.Default.EnsureDownload()
+}
 
 // grepWithRipgrep runs the search through ripgrep's JSON output. Any failure
 // other than "no matches" (an rg too old for a flag, a pattern rg's regex

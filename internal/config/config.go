@@ -100,6 +100,11 @@ type UserConfig struct {
 	CleanSessionAgeDays int `json:"clean_session_age_days,omitempty"` // sessions older than this are clean candidates
 	CleanKeepSessions   int `json:"clean_keep_sessions,omitempty"`    // most recent K sessions per project always survive
 
+	// RipgrepDownloadDisabled stops grep from downloading ripgrep into
+	// ~/.spettro/bin when rg is not on PATH (see internal/ripgrep); grep
+	// then keeps using its built-in Go search.
+	RipgrepDownloadDisabled bool `json:"ripgrep_download_disabled,omitempty"`
+
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited
