@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -160,6 +161,91 @@ func TestPromptRunsSkillCommandAndMention(t *testing.T) {
 		}
 		if got := s.transcript[2*i].Content; got != tc.input {
 			t.Errorf("%q: transcript records %q, want what the user typed", tc.input, got)
+		}
+	}
+
+	// A file the editor attached as embedded context is not part of the
+	// skill's arguments: $ARGUMENTS is what the user typed, and the file
+	// still reaches the model after the skill's instructions. A $word
+	// inside the file is not a mention.
+	attached := acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
+		TextResourceContents: &acpsdk.TextResourceContents{Uri: "file:///proj/main.go", Text: "echo $greet $0 \"unbalanced"},
+	})
+	for _, tc := range []struct {
+		name          string
+		text          string
+		want, notWant []string
+	}{
+		{"skill command", "/greet Ada", []string{"(/greet Ada)", "Say hello to Ada.\n", "Context from /proj/main.go:"}, nil},
+		{"mention in the file", "look at this", []string{"Context from /proj/main.go:"}, []string{"skill_content"}},
+	} {
+		if _, err := b.Prompt(context.Background(), acpsdk.PromptRequest{
+			SessionId: acpsdk.SessionId(s.id),
+			Prompt:    []acpsdk.ContentBlock{acpsdk.TextBlock(tc.text), attached},
+		}); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		mu.Lock()
+		turn := lastMessageContent(t, bodies[len(bodies)-1])
+		mu.Unlock()
+		for _, want := range tc.want {
+			if !strings.Contains(turn, want) {
+				t.Errorf("%s: the turn lacks %q:\n%s", tc.name, want, turn)
+			}
+		}
+		for _, bad := range tc.notWant {
+			if strings.Contains(turn, bad) {
+				t.Errorf("%s: the turn contains %q:\n%s", tc.name, bad, turn)
+			}
+		}
+	}
+}
+
+// lastMessageContent returns the content of the last message of a chat
+// completion request body.
+func lastMessageContent(t *testing.T, body string) string {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil || len(req.Messages) == 0 {
+		t.Fatalf("request body: %v\n%s", err, body)
+	}
+	return req.Messages[len(req.Messages)-1].Content
+}
+
+// A skill command or $mention sent while a turn is running becomes steering
+// for it: the running agent gets the skill's instructions, but the
+// transcript (replayed on session/load) records what the user typed.
+func TestSkillPromptWhileRunningSteersWithTypedTranscript(t *testing.T) {
+	cwd := skillWorkspace(t)
+	b := newBridge(Options{CWD: cwd, GlobalDir: t.TempDir(), Providers: provider.NewManager()})
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	b.conn = acpsdk.NewAgentSideConnection(b, io.Discard, pr)
+	s := &acpSession{id: "sess-steer", cwd: cwd, mediaDir: t.TempDir(), startedAt: time.Now(), commandsAnnounced: true}
+	b.sessions[s.id] = s
+	_, finish, ok := b.beginRun(context.Background(), s)
+	if !ok {
+		t.Fatal("could not claim the run slot")
+	}
+	defer finish()
+
+	for _, input := range []string{"/greet Ada", "also use $greet"} {
+		if _, err := b.Prompt(context.Background(), acpsdk.PromptRequest{
+			SessionId: acpsdk.SessionId(s.id),
+			Prompt:    []acpsdk.ContentBlock{acpsdk.TextBlock(input)},
+		}); err != nil {
+			t.Fatalf("%q: %v", input, err)
+		}
+		if got := s.transcript[len(s.transcript)-1].Content; got != input {
+			t.Errorf("%q: transcript records %q, want what the user typed", input, got)
+		}
+		queued := s.steering.Drain()
+		if len(queued) != 1 || !strings.Contains(queued[0], "<skill_content") {
+			t.Errorf("%q: steering = %q, want the skill's instructions", input, queued)
 		}
 	}
 }

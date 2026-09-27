@@ -258,16 +258,28 @@ func MentionedSkills(prompt string, c Catalog) []Skill {
 
 // ExpandMentions appends the activated instructions of every skill the
 // prompt mentions as $name (see MentionedSkills) to the prompt, and returns
-// the names it activated. The prompt text itself is kept as typed. A skill
-// whose body cannot be read is skipped, since the mention was only a hint.
-// With no mentions the prompt is returned unchanged.
+// the names it activated. The prompt text itself is kept as typed. With no
+// mentions the prompt is returned unchanged.
 func ExpandMentions(prompt string, c Catalog) (string, []string) {
-	mentioned := MentionedSkills(prompt, c)
+	section, names := MentionInstructions(prompt, c)
+	return prompt + section, names
+}
+
+// MentionInstructions returns the section ExpandMentions appends for the
+// skills text mentions as $name: a one-line lead-in, then each skill's
+// activated instructions. It returns "" and no names when text mentions no
+// skill. A skill whose body cannot be read is skipped, since the mention
+// was only a hint.
+//
+// Hosts whose prompt carries more than the user typed (ACP editors attach
+// files) look for mentions in the typed text only and append the section
+// to the whole prompt, so a $word inside an attached file is not a mention.
+func MentionInstructions(text string, c Catalog) (string, []string) {
+	mentioned := MentionedSkills(text, c)
 	if len(mentioned) == 0 {
-		return prompt, nil
+		return "", nil
 	}
 	var b strings.Builder
-	b.WriteString(prompt)
 	b.WriteString("\n\nThe user referenced these skills with $name; follow their instructions for this request:\n\n")
 	var names []string
 	for _, s := range mentioned {
@@ -280,7 +292,7 @@ func ExpandMentions(prompt string, c Catalog) (string, []string) {
 		names = append(names, s.Name)
 	}
 	if len(names) == 0 {
-		return prompt, nil
+		return "", nil
 	}
 	return strings.TrimRight(b.String(), "\n"), names
 }

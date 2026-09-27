@@ -297,12 +297,19 @@ func (b *bridge) beginRun(ctx context.Context, s *acpSession) (runCtx context.Co
 // next step boundary and this (second) prompt turn ends immediately. Clients
 // that want replace-semantics instead send session/cancel first, which stops
 // the run before the new prompt arrives.
-func (b *bridge) steerRunningTurn(ctx context.Context, s *acpSession, sessionID acpsdk.SessionId, task string) (acpsdk.PromptResponse, error) {
+//
+// shown, when not empty, is what the transcript records instead of task: the
+// "/<skill> args" or $mention the user sent, where task carries the skill's
+// instructions (see shownTask in Prompt).
+func (b *bridge) steerRunningTurn(ctx context.Context, s *acpSession, sessionID acpsdk.SessionId, task, shown string) (acpsdk.PromptResponse, error) {
+	if shown == "" {
+		shown = task
+	}
 	b.mu.Lock()
 	q := s.steering
 	// Record the steering text in the flat transcript now; the structured
 	// history picks it up from the running turn's RunResult.Messages.
-	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: time.Now()})
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: shown, At: time.Now()})
 	b.mu.Unlock()
 	q.Push(task)
 	_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
@@ -340,11 +347,17 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		b.opts.Providers.SetAPIKeys(cfg.APIKeys)
 	}
 
-	task, images, mentioned, err := promptFromBlocks(params.Prompt, s.mediaDir)
+	content, err := readPromptContent(params.Prompt, s.mediaDir)
 	if err != nil {
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": err.Error()})
 	}
+	task, images, mentioned := content.task(), content.images, content.mentioned
 	trimmedTask := strings.TrimSpace(task)
+	// typed is the text the user typed, without the files the editor
+	// attached. Skill commands and $mentions are parsed from it alone: an
+	// attached file is context for the turn, not the skill's arguments,
+	// and a $word inside it is not a mention.
+	typed := strings.TrimSpace(content.typed)
 	if trimmedTask == "" {
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "prompt has no text content"})
 	}
@@ -358,7 +371,8 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	// shownTask, when set, is what the transcript records as the user's
 	// message instead of task: a skill invocation or $mention sends the
 	// skill's instructions to the model, but the transcript (replayed on
-	// session/load) keeps what the user typed.
+	// session/load) keeps what the user sent. This holds for a prompt that
+	// becomes steering of a running turn too (see steerRunningTurn).
 	shownTask := ""
 
 	if strings.HasPrefix(trimmedTask, "/") {
@@ -373,6 +387,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			b.mu.Unlock()
 			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
 			task = trimmedTask
+			typed = strings.TrimSpace(strings.TrimPrefix(typed, "/plan"))
 		} else if rewritten, ok := acpWorkflowRunPrompt(s.cwd, trimmedTask); ok {
 			// /workflows run <name> becomes an ordinary turn instructing the
 			// agent to invoke the saved script, so the model reviews and acts
@@ -399,7 +414,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 				// A goal/run is already in flight: treat "/goal <text>" sent
 				// mid-turn as steering for it (minus the command prefix).
 				return b.steerRunningTurn(ctx, s, params.SessionId,
-					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")))
+					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")), "")
 			}
 			defer finish()
 			turn.ctx = runCtx
@@ -425,7 +440,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 				// A loop/run is already in flight: treat "/loop <text>" sent
 				// mid-turn as steering for it (minus the command prefix).
 				return b.steerRunningTurn(ctx, s, params.SessionId,
-					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/loop")))
+					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/loop")), "")
 			}
 			defer finish()
 			turn.ctx = runCtx
@@ -466,7 +481,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		}
 		// Not one of Spettro's commands: "/<skill-name> [args]" runs that
 		// skill; anything else goes to the model as typed.
-		if prompt, errText, ok := resolveSkillCommand(s.cwd, cfg, trimmedTask); ok {
+		if prompt, errText, ok := resolveSkillCommand(s.cwd, cfg, typed); ok {
 			if errText != "" {
 				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
 					SessionId: params.SessionId,
@@ -475,13 +490,13 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 			}
 			shownTask = trimmedTask
-			task = prompt
+			task = content.withContexts(prompt)
 		}
-	} else if expanded, names := skills.ExpandMentions(task, agent.SkillCatalogFor(s.cwd, cfg)); len(names) > 0 {
+	} else if section, names := skills.MentionInstructions(typed, agent.SkillCatalogFor(s.cwd, cfg)); len(names) > 0 {
 		// $skill-name mentions pull those skills' instructions into the
 		// prompt (Codex style).
 		shownTask = task
-		task = expanded
+		task += section
 	}
 
 	// Claim the session's run slot. If a turn is already executing, this
@@ -490,7 +505,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	// agent runs under runCtx, so it is unaffected).
 	runCtx, finish, ok := b.beginRun(ctx, s)
 	if !ok {
-		return b.steerRunningTurn(ctx, s, params.SessionId, task)
+		return b.steerRunningTurn(ctx, s, params.SessionId, task, shownTask)
 	}
 	defer finish()
 	turn.ctx = runCtx

@@ -11,8 +11,10 @@ package acp
 //   - /skills lists the discovered skills as text (skillsText).
 //
 // $skill-name mentions in an ordinary prompt are expanded in Prompt with
-// skills.ExpandMentions. Built-in commands win a name collision: a skill
-// called "help" is neither advertised nor run as /help.
+// skills.MentionInstructions. Both a skill command and mentions are read
+// from the text the user typed, never from files the editor attached (see
+// promptContent). Built-in commands win a name collision: a skill called
+// "help" is neither advertised nor run as /help.
 
 import (
 	"fmt"

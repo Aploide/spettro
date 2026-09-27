@@ -122,8 +122,14 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   [workflow](workflows.md) scripts inline; `/workflows run <name> [json]`
   is rewritten into an ordinary turn that invokes that script.
   `/<skill-name> [args]` runs the turn with that skill's instructions, and
-  `$<skill-name>` in a prompt appends the skill's instructions; the
-  transcript replayed on `session/load` keeps what the user typed. `/skills`
+  `$<skill-name>` in a prompt appends the skill's instructions. Both are
+  read from the text the user typed only: files the editor attached are
+  passed along as context after the instructions, never as the skill's
+  arguments, and a `$word` inside them is not a mention. The transcript
+  replayed on `session/load` keeps what the user typed, also when the
+  prompt arrives during a running turn and becomes steering for it. A
+  skill added or changed on disk is picked up on the next prompt, and
+  advertised in sessions created after the change. `/skills`
   lists the skills inline. Anything else needing a TUI dialog
   (`/skill install`, `/mcp`, ...) is not available over ACP yet. `/resume` is
   intentionally not advertised: the editor's own session picker drives

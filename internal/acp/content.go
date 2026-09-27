@@ -373,13 +373,45 @@ func imageMime(path string) string {
 	}
 }
 
-// promptFromBlocks flattens the ACP prompt content into the single task
-// string LLMAgent consumes: text blocks in order, resource links surfaced as
-// @-mentions (and RequiredReads), embedded text resources appended as fenced
-// context, images decoded to files for the vision channel.
-func promptFromBlocks(blocks []acpsdk.ContentBlock, mediaDir string) (task string, images []string, mentioned []string, err error) {
+// promptContent is an ACP prompt's content blocks, read. The typed text and
+// the attached contexts are kept apart because a skill command must be
+// parsed from what the user typed alone: an attached file is context for
+// the turn, never part of the skill's arguments (see Prompt).
+type promptContent struct {
+	// typed is what the user typed: the text blocks in order, each resource
+	// link written as an @path mention.
+	typed string
+	// contexts are the files the editor embedded as resources, each
+	// rendered as a "Context from <path>:" fenced block.
+	contexts []string
+	// images are the image blocks, decoded to files for the vision channel.
+	images []string
+	// mentioned are the resource links' paths (the run's RequiredReads).
+	mentioned []string
+}
+
+// task is the prompt the model receives for this content: the typed text,
+// then the attached contexts.
+func (p promptContent) task() string {
+	return p.withContexts(p.typed)
+}
+
+// withContexts appends the attached contexts to text, which is the typed
+// text or a prompt built from it (a skill's instructions).
+func (p promptContent) withContexts(text string) string {
+	if len(p.contexts) == 0 {
+		return text
+	}
+	return strings.TrimSpace(text) + "\n\n" + strings.Join(p.contexts, "\n\n")
+}
+
+// readPromptContent reads the ACP prompt content blocks: text blocks in
+// order, resource links surfaced as @-mentions (and RequiredReads),
+// embedded text resources kept as fenced context, images decoded to files
+// in mediaDir.
+func readPromptContent(blocks []acpsdk.ContentBlock, mediaDir string) (promptContent, error) {
+	var p promptContent
 	var text strings.Builder
-	var contexts []string
 	imgN := 0
 	for _, block := range blocks {
 		switch {
@@ -389,35 +421,32 @@ func promptFromBlocks(blocks []acpsdk.ContentBlock, mediaDir string) (task strin
 			path := uriToPath(block.ResourceLink.Uri)
 			text.WriteString("@")
 			text.WriteString(path)
-			mentioned = append(mentioned, path)
+			p.mentioned = append(p.mentioned, path)
 		case block.Resource != nil:
 			if tr := block.Resource.Resource.TextResourceContents; tr != nil {
-				contexts = append(contexts, fmt.Sprintf("Context from %s:\n```\n%s\n```", uriToPath(tr.Uri), tr.Text))
+				p.contexts = append(p.contexts, fmt.Sprintf("Context from %s:\n```\n%s\n```", uriToPath(tr.Uri), tr.Text))
 			}
 		case block.Image != nil:
 			if block.Image.Data == "" {
 				continue
 			}
 			if err := ensureMediaDir(mediaDir); err != nil {
-				return "", nil, nil, fmt.Errorf("media dir: %w", err)
+				return promptContent{}, fmt.Errorf("media dir: %w", err)
 			}
 			raw, derr := base64.StdEncoding.DecodeString(block.Image.Data)
 			if derr != nil {
-				return "", nil, nil, fmt.Errorf("decode image: %w", derr)
+				return promptContent{}, fmt.Errorf("decode image: %w", derr)
 			}
 			imgN++
-			p := filepath.Join(mediaDir, fmt.Sprintf("prompt-img-%d%s", imgN, imageExt(block.Image.MimeType)))
-			if werr := os.WriteFile(p, raw, 0o600); werr != nil {
-				return "", nil, nil, fmt.Errorf("write image: %w", werr)
+			path := filepath.Join(mediaDir, fmt.Sprintf("prompt-img-%d%s", imgN, imageExt(block.Image.MimeType)))
+			if werr := os.WriteFile(path, raw, 0o600); werr != nil {
+				return promptContent{}, fmt.Errorf("write image: %w", werr)
 			}
-			images = append(images, p)
+			p.images = append(p.images, path)
 		}
 	}
-	task = text.String()
-	if len(contexts) > 0 {
-		task = strings.TrimSpace(task) + "\n\n" + strings.Join(contexts, "\n\n")
-	}
-	return task, images, mentioned, nil
+	p.typed = text.String()
+	return p, nil
 }
 
 func uriToPath(uri string) string {
