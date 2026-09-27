@@ -218,6 +218,12 @@ type toolLoopConfig struct {
 	MaxDepth        int
 	MaxToolCalls    int            // max tool calls per LLM step (0 → default 32)
 	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
+
+	// CheckpointPrepare prepares a step's snapshot ahead of its first
+	// mutating call (see LLMAgent.CheckpointPrepare); nil means every
+	// snapshot is taken synchronously through Checkpoint.
+	CheckpointPrepare func() PreparedCheckpoint
+
 	// Steering, when set, is drained at every step boundary; each pending
 	// message is appended to the conversation as a user turn so the model sees
 	// it before its next step. Top-level runs get the host's queue; a delegated
@@ -315,6 +321,14 @@ type toolRuntime struct {
 	// working tree (checkpoint_policy.go); parallelExec clears it per step.
 	stepCheckpointMu sync.Mutex
 	stepCheckpointed bool
+	// checkpointPrepare, speculative and speculativeDirty implement the
+	// snapshot prepared while the model generates
+	// (checkpoint_speculative.go). speculative is the pending preparation;
+	// speculativeDirty records that a call that may write the tree ran
+	// since it started. Both are guarded by stepCheckpointMu.
+	checkpointPrepare func() PreparedCheckpoint
+	speculative       *speculativeCheckpoint
+	speculativeDirty  bool
 
 	delegationDepth      int
 	maxParallelWorkers   int
@@ -617,6 +631,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		return toolLoopResult{}, err
 	}
 	runtime.hooksConfig = hooksCfg
+	// Preparing snapshots ahead is only safe when nothing but the tools
+	// themselves changes files between steps (checkpoint_speculative.go),
+	// and only useful when a tool can take a snapshot at all. Only the
+	// host's own run is handed a preparer; sub-agents sharing the checkout
+	// snapshot synchronously (subagentCheckpoint).
+	if !hooksMayWriteFiles(hooksCfg) && mayCheckpoint(allowed) {
+		runtime.checkpointPrepare = cfg.CheckpointPrepare
+	}
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
 		return toolLoopResult{}, err
 	}
@@ -866,6 +888,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// req is exactly what promptTokens measured: the system prompt, the
 		// history and the advertised tools.
 		sentEstimate := promptTokens
+		// The tree is quiet while the model generates: snapshot it now for
+		// the step's first mutating call to claim.
+		runtime.prepareStepCheckpoint()
 		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()
@@ -1639,6 +1664,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
+	r.noteTreeUse(call)
 	if r.checkpoint != nil && needsCheckpoint(call) {
 		r.checkpointStep(id)
 	}

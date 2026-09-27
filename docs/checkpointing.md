@@ -19,6 +19,45 @@ A step's mutating calls run one at a time in the order the model gave them,
 so that single snapshot captures the tree as it was before any of them, and
 rewinding to it undoes the whole step.
 
+### Snapshots prepared while the model generates
+
+Staging and committing the tree is the expensive part of a snapshot (several
+git processes over the whole tree). Nothing is supposed to change the tree
+while the model is generating a step, so Spettro does that part as soon as the
+step's request is sent, in the background. When the step's first mutating
+call arrives, it only records the prepared snapshot as the checkpoint (a list
+entry and the conversation blob, no git process), so the call no longer waits
+for git. The checkpoint's content is the same as a synchronous snapshot's.
+
+Spettro falls back to taking the snapshot when the call arrives:
+
+- while a background shell job or a pty session is running (it can change
+  files at any moment);
+- when hooks are configured that run around tool calls (`PreToolUse`,
+  `PostToolUse`, `PermissionRequest`): their commands can change files right
+  before the call;
+- when preparing failed, or something else was snapshotted or restored in the
+  meantime (for example by a sub-agent working in the same checkout).
+
+If a file the agent read or wrote changed while the model was generating (you
+saved it in your editor, say), the tracked files are staged again
+(`git add -u`) before the checkpoint is recorded, so your edit is in it.
+
+A preparation that no mutating call claimed is kept for the next step when
+that step ran only tools that cannot change the tree (reads, searches,
+read-only shell commands) and it is less than 30 seconds old; otherwise the
+next step prepares a new one and the unclaimed commit is unpinned. An
+unclaimed commit left by an exit is unpinned the next time the project's
+checkpoints are opened.
+
+**Limitation.** A file the agent never read or wrote that another program
+creates or edits while the model generates (within the reuse window, for a
+reused preparation) is captured by the next checkpoint rather than this one.
+Rewinding to this step's checkpoint then reverts that edit, or removes that new
+file. Checkpointing never waits on a file-system monitor daemon (a deliberate
+choice: no background daemons), so this window cannot be closed without
+re-scanning the whole tree on every mutating call.
+
 Shell commands that provably cannot write to the working tree take no
 snapshot: `ls`, `cat`, `head`, `grep`/`rg`, `find` without `-delete`/`-exec`,
 `sed -n '<range>p'`, `git status`/`diff`/`log`/`show`, `go vet`/`list`, and
@@ -73,8 +112,12 @@ Checkpointing is engineered to not duplicate your repository:
   blob once no kept checkpoint references it.
 - **Maintenance.** The shadow repo runs with `core.untrackedCache` and
   `index.version=4` to keep `add -A` fast on large trees, `git gc --auto`
-  runs every 20 snapshots, and reflogs are disabled so pruned checkpoints
-  can actually be collected.
+  runs every 20 snapshots (at the start of the next snapshot's preparation,
+  never while a tool call waits), and reflogs are disabled so pruned
+  checkpoints can actually be collected.
+- **Cached index file.** `checkpoints.json` is kept in memory between
+  snapshots and re-read only when its size or modification time changes (for
+  example, another Spettro session on the same project added a checkpoint).
 - **Retention.** On open (never in the per-snapshot hot path), checkpoints
   older than `checkpoint_retention_days` (default 14) are pruned: list
   entries and conversation blobs are deleted, their pinning refs
@@ -185,7 +228,8 @@ snapshot was taken.
     ├── conv/               # conversation snapshots (one per checkpoint)
     │   ├── <commit-hash>.json
     │   └── ...
-    └── checkpoints.json    # index of all checkpoints
+    ├── checkpoints.json    # index of all checkpoints
+    └── prepared-commit     # transient: a prepared snapshot not claimed yet
 ```
 
 The project hash is the first 8 hex digits of SHA-256(`<project-path>`), so
