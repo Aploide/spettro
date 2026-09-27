@@ -164,6 +164,13 @@ func (m Model) BannerForTesting() string {
 	return m.banner
 }
 
+// BannerKindForTesting returns the current banner's kind ("success",
+// "error", "info", ...), so tests can tell a success from a warning that
+// happens to share its wording.
+func (m Model) BannerKindForTesting() string {
+	return m.bannerKind
+}
+
 // ThinkingLevelForTesting returns the persisted extended-thinking level so
 // tests can assert that /thinking <level> took effect. The value mirrors
 // UserConfig.ThinkingLevel: empty when never set, "off" when explicitly

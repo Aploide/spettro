@@ -15,6 +15,7 @@ Spettro uses both project-local and user-global storage.
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
 | `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
+| `skills/` | User [Agent Skills](skills.md) (one folder with a `SKILL.md` per skill). |
 | `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created; reclaimable via [`/storage clean`](storage.md)). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
@@ -29,6 +30,7 @@ Spettro uses both project-local and user-global storage.
 | `lsp.json` | Optional project [LSP](lsp.md) overrides (wins over the global file per server key). |
 | `memory.md` | [Persistent memory](memory.md): project-scope facts loaded into agent context each session. |
 | `commands/` | Project [custom slash commands](custom-commands.md); override global commands on name conflict. |
+| `skills/` | Project [Agent Skills](skills.md); win over user skills of the same name. |
 | `index.json` | Optional project snapshot when indexer-style flow is used. |
 
 ## Project root
@@ -91,6 +93,15 @@ macOS).
 | --- | --- | --- |
 | `notifications_disabled` | `false` | Set `true` to turn all notifications off. |
 | `notify_quiet_sec` | `5` | Minimum seconds between notifications; events inside the window are dropped so bursts don't spam. |
+
+## Agent Skills
+
+See [Agent Skills](skills.md) for how skills are found and used.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `skills_compat_disabled` | `false` | Set `true` to read skills only from `.spettro/skills` and `~/.spettro/skills`, ignoring the Claude Code and Codex folders (`.claude/skills`, `.agents/skills`, `.codex/skills`, `.openai/skills`). |
+| `disabled_skills` | `[]` | Skill names hidden from the agent and the `/` menu; edited by `/skill disable` and `/skill enable`. |
 
 ## Checkpointing storage
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -342,8 +343,8 @@ func TestV13MigrationIsIdempotent(t *testing.T) {
 	}
 }
 
-// Loading a v12 project manifest rewrites it at v13 and keeps the original as
-// a .bak.
+// Loading a v12 project manifest rewrites it at the latest version and keeps
+// the original as a .bak.
 func TestV13MigrationWritesBackup(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, AgentManifestFilename)
@@ -361,8 +362,8 @@ func TestV13MigrationWritesBackup(t *testing.T) {
 		t.Fatal("backup must hold the original manifest")
 	}
 	rewritten, _ := os.ReadFile(path)
-	if !strings.Contains(string(rewritten), "version = 13") || strings.Contains(string(rewritten), "id = 'diagnostics'") {
-		t.Fatalf("manifest not rewritten at v13:\n%s", rewritten)
+	if !strings.Contains(string(rewritten), fmt.Sprintf("version = %d", latestManifestVersion)) || strings.Contains(string(rewritten), "id = 'diagnostics'") {
+		t.Fatalf("manifest not rewritten at the latest version:\n%s", rewritten)
 	}
 }
 

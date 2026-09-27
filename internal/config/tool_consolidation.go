@@ -37,6 +37,17 @@ var lspConsolidatedTools = []toolFold{
 	{"lsp", []string{"diagnostics", "references", "hover", "lsp-restart"}},
 }
 
+// skillConsolidatedTools is the v14 fold: skill-read (load one skill) and
+// skill-list (list them) become one skill tool, which loads a skill when
+// given a name and lists them when not. activate-skill and skill-activate
+// were aliases of skill-read before; listing them here keeps them aliases
+// of the new tool. An agent that held only skill-list gains the ability to
+// load a skill's instructions: both halves only read SKILL.md files the
+// catalog already exposes, so this is not a new kind of access.
+var skillConsolidatedTools = []toolFold{
+	{"skill", []string{"activate-skill", "skill-activate", "skill-read", "skill-list"}},
+}
+
 // opFolds are the canonical tools whose retired tools became operations of
 // it rather than duplicates. An agent granted one through only some of them
 // gets a rule denying each op of the others (see denyUnheldOps), so an agent
@@ -87,7 +98,8 @@ func LSPOpDenied(op string, layers ...[]PermissionRule) bool {
 
 // toolFolds is every fold, in migration order.
 func toolFolds() []toolFold {
-	return append(slices.Clone(consolidatedTools), lspConsolidatedTools...)
+	out := append(slices.Clone(consolidatedTools), lspConsolidatedTools...)
+	return append(out, skillConsolidatedTools...)
 }
 
 // v11ToolDescriptions are the descriptions the canonical tools shipped with
@@ -109,7 +121,7 @@ var removedTools = []string{"grok-image", "grok-video"}
 // the migration drops them instead of handing it todo-write.
 var readOnlyRetiredTools = map[string]bool{"task-get": true, "task-list": true}
 
-// retiredToolNames returns the names a migration (v12 or v13) folded into
+// retiredToolNames returns the names a migration (v12, v13 or v14) folded into
 // canonical, in table order; nil when it replaced none.
 func retiredToolNames(canonical string) []string {
 	for _, g := range toolFolds() {
@@ -134,7 +146,8 @@ func canonicalOf(id string) (string, bool) {
 // consolidateBuiltinTools folds each group's retired built-ins into its
 // canonical tool and deletes the removed ones, without giving any agent
 // access it did not have. v12 runs it for the duplicate built-ins (and
-// removes the grok media tools), v13 for the language-server tools.
+// removes the grok media tools), v13 for the language-server tools, v14 for
+// the skill tools.
 //
 //   - Access is settled first, against the manifest as it stands (v11 for
 //     the v12 fold, v12 for the v13 one): for

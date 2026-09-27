@@ -5,13 +5,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"spettro/internal/agent"
+	"spettro/internal/config"
 	"spettro/internal/skills"
 )
+
+// This file holds the TUI's skill surface:
+//
+//   - /skill <sub> and /skills: manage and list skills (handleSkillsCommand);
+//   - /<skill-name> [args]: run a skill (findUserSkill, runUserSkill), wired
+//     into handleCommand after built-ins and custom commands;
+//   - $<skill-name> mentions in a prompt (expandSkillMentions), wired into
+//     handlePrompt.
+//
+// All of them read the catalog through skillCatalog, which is the shared
+// session catalog from agent.SkillCatalogFor, so the menu, the listing and
+// the model always agree.
 
 const skillsUsage = "usage: /skill <list|install|uninstall|info|enable|disable|reload|where> ..."
 
@@ -34,8 +48,8 @@ func (m Model) handleSkillsCommand(input string) (tea.Model, tea.Cmd) {
 	case "disable":
 		return m.runSkillsEnable(fields[2:], false)
 	case "reload", "refresh":
-		m.refreshSkillsCatalog()
-		m.showBanner("skills catalog reloaded", "success")
+		agent.ReloadSkills()
+		m.showBanner(fmt.Sprintf("skills reloaded: %d found", len(m.skillCatalog().Skills)), "success")
 		return m, nil
 	case "where", "paths":
 		return m.runSkillsWhere()
@@ -49,43 +63,42 @@ func (m Model) handleSkillsCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 const skillsHelp = `skills commands:
-  /skill list                              list discovered skills
+  /skills                                  list discovered skills and where they come from
+  /<skill-name> [args]                     run a skill (also: mention $skill-name in a prompt)
   /skill install <source> [--force]        install from local path, https git URL, or owner/repo
   /skill install <source> --project        install into <cwd>/.spettro/skills (default: ~/.spettro/skills)
   /skill install <source> --as=<name>      override destination name
   /skill install <source> --path=<subdir>  pick a subdirectory inside the source
-  /skill uninstall <name> [--project]      remove an installed skill
+  /skill uninstall <name> [--project]      remove a skill installed in .spettro/skills
   /skill info <name>                       show metadata + body excerpt
-  /skill enable <name> | disable <name>    toggle a skill in this project
+  /skill enable <name> | disable <name>    show or hide a skill everywhere (saved in your config)
   /skill where                             show discovery roots
-  /skill reload                            re-scan skill directories`
+  /skill reload                            force a re-scan of the skill directories`
 
+// skillCatalog returns the session's skill catalog under the current config.
+func (m Model) skillCatalog() skills.Catalog {
+	return agent.SkillCatalogFor(m.cwd, m.cfg)
+}
+
+// runSkillsList renders /skills: every discovered skill with how it can be
+// invoked and where it came from, then shadowed skills and warnings.
 func (m Model) runSkillsList() (tea.Model, tea.Cmd) {
-	cat := m.skillsCatalog()
+	cat := m.skillCatalog()
 	if len(cat.Skills) == 0 {
-		var rows []string
-		rows = append(rows, "no skills discovered. install one with /skill install <source>")
-		rows = append(rows, "")
-		rows = append(rows, "search roots:")
-		for _, r := range skills.SearchRoots(m.cwd, skills.DefaultLookupOptions()) {
-			rows = append(rows, fmt.Sprintf("- [%s/%s] %s", r.Source, r.Scope, r.Path))
-		}
+		rows := []string{"no skills discovered. install one with /skill install <source>, or add a folder with a SKILL.md to one of these search roots:", ""}
+		rows = append(rows, m.skillRootRows()...)
 		m.pushSystemMsg(strings.Join(rows, "\n"))
 		return m, nil
 	}
-	rows := []string{fmt.Sprintf("installed skills (%d):", len(cat.Skills))}
+	rows := []string{fmt.Sprintf("skills (%d):", len(cat.Skills))}
 	for _, s := range cat.Skills {
-		state := "enabled"
-		if s.Disabled {
-			state = "disabled"
-		}
-		desc := truncateLabel(s.Description, 96)
-		rows = append(rows, fmt.Sprintf("- %s [%s/%s, %s] — %s", s.Name, s.Source, s.Scope, state, desc))
+		rows = append(rows, fmt.Sprintf("- %s  [%s]  %s", s.Name, skillInvocationLabel(s), truncateLabel(s.ListingDescription(), 96)))
+		rows = append(rows, fmt.Sprintf("    %s/%s  %s", s.Source, s.Scope, s.Location))
 	}
 	if len(cat.Shadowed) > 0 {
-		rows = append(rows, "", fmt.Sprintf("shadowed (%d):", len(cat.Shadowed)))
+		rows = append(rows, "", fmt.Sprintf("shadowed by a skill of the same name (%d):", len(cat.Shadowed)))
 		for _, s := range cat.Shadowed {
-			rows = append(rows, fmt.Sprintf("- %s [%s/%s] — %s", s.Name, s.Source, s.Scope, s.Location))
+			rows = append(rows, fmt.Sprintf("- %s  %s/%s  %s", s.Name, s.Source, s.Scope, s.Location))
 		}
 	}
 	if len(cat.Issues) > 0 {
@@ -94,8 +107,25 @@ func (m Model) runSkillsList() (tea.Model, tea.Cmd) {
 			rows = append(rows, "- "+msg)
 		}
 	}
+	rows = append(rows, "", "run one with /<name> [args] or mention it as $<name>; the agent loads the others by itself when they fit.")
 	m.pushSystemMsg(strings.Join(rows, "\n"))
 	return m, nil
+}
+
+// skillInvocationLabel says who can run a skill, for /skills.
+func skillInvocationLabel(s skills.Skill) string {
+	switch {
+	case s.Disabled:
+		return "disabled"
+	case s.ModelInvocationDisabled && s.UserInvocationDisabled:
+		return "nobody"
+	case s.ModelInvocationDisabled:
+		return "/" + s.Name + " only"
+	case s.UserInvocationDisabled:
+		return "agent only"
+	default:
+		return "/" + s.Name
+	}
 }
 
 func (m Model) runSkillsInstall(args []string) (tea.Model, tea.Cmd) {
@@ -142,14 +172,14 @@ func (m Model) runSkillsInstall(args []string) (tea.Model, tea.Cmd) {
 		m.showBanner("install failed: "+err.Error(), "error")
 		return m, nil
 	}
-	m.refreshSkillsCatalog()
+	agent.ReloadSkills()
 	verb := "installed"
 	if res.Replaced {
 		verb = "reinstalled"
 	}
 	m.pushSystemMsg(fmt.Sprintf(
-		"%s skill %q\n  source: %s\n  destination: %s\n  description: %s",
-		verb, res.Skill.Name, res.Source, res.Destination, truncateLabel(res.Skill.Description, 200),
+		"%s skill %q\n  source: %s\n  destination: %s\n  description: %s\n  run it with /%s",
+		verb, res.Skill.Name, res.Source, res.Destination, truncateLabel(res.Skill.Description, 200), res.Skill.Name,
 	))
 	m.showBanner(fmt.Sprintf("skill %q %s", res.Skill.Name, verb), "success")
 	return m, nil
@@ -184,10 +214,15 @@ func (m Model) runSkillsUninstall(args []string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if err := skills.Uninstall(name, scope, m.cwd); err != nil {
-		m.showBanner("uninstall failed: "+err.Error(), "error")
+		msg := "uninstall failed: " + err.Error()
+		if s, ok := m.skillCatalog().Find(name); ok && s.Source != skills.SourceSpettro {
+			// Spettro never writes to another tool's skill folder.
+			msg = fmt.Sprintf("%q lives in %s, which Spettro only reads; remove it there, or /skill disable %s", s.Name, s.Directory, s.Name)
+		}
+		m.showBanner(msg, "error")
 		return m, nil
 	}
-	m.refreshSkillsCatalog()
+	agent.ReloadSkills()
 	m.showBanner(fmt.Sprintf("skill %q uninstalled", name), "success")
 	return m, nil
 }
@@ -198,10 +233,9 @@ func (m Model) runSkillsInfo(args []string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	name := args[0]
-	cat := m.skillsCatalog()
-	skill, ok := cat.Find(name)
+	skill, ok := m.skillCatalog().Find(name)
 	if !ok {
-		m.showBanner(fmt.Sprintf("skill %q not found (run /skill list to discover)", name), "error")
+		m.showBanner(fmt.Sprintf("skill %q not found (run /skills to list them)", name), "error")
 		return m, nil
 	}
 	body, err := skills.LoadBody(skill)
@@ -211,23 +245,22 @@ func (m Model) runSkillsInfo(args []string) (tea.Model, tea.Cmd) {
 	}
 	rows := []string{
 		fmt.Sprintf("skill: %s", skill.Name),
+		fmt.Sprintf("invocation: %s", skillInvocationLabel(skill)),
 		fmt.Sprintf("source: %s/%s", skill.Source, skill.Scope),
 		fmt.Sprintf("location: %s", skill.Location),
 		fmt.Sprintf("directory: %s", skill.Directory),
 	}
-	if skill.License != "" {
-		rows = append(rows, "license: "+skill.License)
+	optional := []struct{ label, value string }{
+		{"argument-hint", skill.ArgumentHint},
+		{"arguments", strings.Join(skill.Arguments, " ")},
+		{"license", skill.License},
+		{"compatibility", skill.Compatibility},
+		{"allowed-tools (not enforced)", skill.AllowedTools},
 	}
-	if skill.Compatibility != "" {
-		rows = append(rows, "compatibility: "+skill.Compatibility)
-	}
-	if skill.AllowedTools != "" {
-		rows = append(rows, "allowed-tools: "+skill.AllowedTools)
-	}
-	if skill.Disabled {
-		rows = append(rows, "status: disabled")
-	} else {
-		rows = append(rows, "status: enabled")
+	for _, f := range optional {
+		if f.value != "" {
+			rows = append(rows, f.label+": "+f.value)
+		}
 	}
 	if len(skill.Resources) > 0 {
 		rows = append(rows, "resources:")
@@ -241,83 +274,135 @@ func (m Model) runSkillsInfo(args []string) (tea.Model, tea.Cmd) {
 			rows = append(rows, "  - "+msg)
 		}
 	}
-	rows = append(rows, "", "description:", skill.Description)
-	rows = append(rows, "", "instructions (excerpt):", truncateLabel(body, 1500))
+	rows = append(rows, "", "description:", skill.ListingDescription())
+	// The body is shown as text, so it gets the same cleaning as the
+	// frontmatter: a skill from a cloned repository must not be able to
+	// send escape sequences to the terminal.
+	rows = append(rows, "", "instructions (excerpt):", truncateLabel(skills.CleanText(body), 1500))
 	m.pushSystemMsg(strings.Join(rows, "\n"))
 	return m, nil
 }
 
+// runSkillsEnable records a skill as enabled or disabled in the user config
+// (disabled_skills).
+//
+// Enabling also deletes a legacy .spettro-disabled marker from the skill's
+// folder, whatever root it is in: older versions of /skill disable wrote
+// that marker into Claude Code and Codex folders too, and it is Spettro's
+// own file, so removing it is cleanup rather than a write into another
+// agent's skill. A skill can still be off after that, when its own SKILL.md
+// says disabled: true (or enabled: false); Spettro does not edit other
+// people's skill files, so the banner says where to change it instead of
+// reporting success.
 func (m Model) runSkillsEnable(args []string, enable bool) (tea.Model, tea.Cmd) {
+	verb := "enable"
+	if !enable {
+		verb = "disable"
+	}
 	if len(args) == 0 {
-		verb := "enable"
-		if !enable {
-			verb = "disable"
-		}
 		m.showBanner(fmt.Sprintf("usage: /skill %s <name>", verb), "info")
 		return m, nil
 	}
-	name := args[0]
-	cat := m.skillsCatalog()
-	skill, ok := cat.Find(name)
+	skill, ok := m.skillCatalog().Find(args[0])
 	if !ok {
-		m.showBanner(fmt.Sprintf("skill %q not found", name), "error")
+		m.showBanner(fmt.Sprintf("skill %q not found", args[0]), "error")
 		return m, nil
 	}
-	if err := writeSkillEnabledMarker(skill, enable); err != nil {
-		m.showBanner("toggle failed: "+err.Error(), "error")
+	if err := m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.DisabledSkills = setSkillDisabled(cfg.DisabledSkills, skill.Name, !enable)
+		return nil
+	}); err != nil {
+		m.showBanner(verb+" failed: "+err.Error(), "error")
 		return m, nil
 	}
-	m.refreshSkillsCatalog()
-	state := "enabled"
 	if !enable {
-		state = "disabled"
+		m.showBanner(fmt.Sprintf("skill %q disabled", skill.Name), "success")
+		return m, nil
 	}
-	m.showBanner(fmt.Sprintf("skill %q %s", skill.Name, state), "success")
+	marker := filepath.Join(skill.Directory, skills.DisabledMarker)
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		m.showBanner(fmt.Sprintf("skill %q is still disabled: could not remove %s: %v", skill.Name, marker, err), "error")
+		return m, nil
+	}
+	agent.ReloadSkills()
+	if now, ok := m.skillCatalog().Find(skill.Name); ok && now.Disabled {
+		// The config entry and the marker are gone, so only the skill's own
+		// frontmatter can be keeping it off.
+		m.showBanner(fmt.Sprintf("skill %q is still disabled: its SKILL.md sets disabled: true (or enabled: false); edit %s", skill.Name, now.Location), "error")
+		return m, nil
+	}
+	m.showBanner(fmt.Sprintf("skill %q enabled", skill.Name), "success")
 	return m, nil
 }
 
+// setSkillDisabled adds name to (disabled) or removes it from (enabled) a
+// disabled_skills list, case-insensitively and without duplicates.
+func setSkillDisabled(list []string, name string, disabled bool) []string {
+	out := slices.DeleteFunc(slices.Clone(list), func(n string) bool { return strings.EqualFold(n, name) })
+	if disabled {
+		out = append(out, name)
+	}
+	return out
+}
+
 func (m Model) runSkillsWhere() (tea.Model, tea.Cmd) {
-	rows := []string{"skill discovery roots (in priority order):"}
-	for _, r := range skills.SearchRoots(m.cwd, skills.DefaultLookupOptions()) {
+	rows := []string{"skill discovery roots (in priority order; the first skill of a name wins):"}
+	rows = append(rows, m.skillRootRows()...)
+	rows = append(rows, "", "* the directory exists; (read-only) roots belong to other agents and are never written to.")
+	if m.cfg.SkillsCompatDisabled {
+		rows = append(rows, "Claude Code / Codex roots are off (skills_compat_disabled in config.json).")
+	}
+	m.pushSystemMsg(strings.Join(rows, "\n"))
+	return m, nil
+}
+
+// skillRootRows lists the discovery roots, marking the ones that exist.
+func (m Model) skillRootRows() []string {
+	var rows []string
+	for _, r := range skills.SearchRoots(m.cwd, agent.SkillLookupOptions(m.cfg)) {
 		marker := " "
 		if _, err := os.Stat(r.Path); err == nil {
 			marker = "*"
 		}
-		rows = append(rows, fmt.Sprintf("%s [%s/%s] %s", marker, r.Source, r.Scope, r.Path))
-	}
-	rows = append(rows, "", "* indicates the directory exists.")
-	m.pushSystemMsg(strings.Join(rows, "\n"))
-	return m, nil
-}
-
-func writeSkillEnabledMarker(s skills.Skill, enable bool) error {
-	if strings.TrimSpace(s.Directory) == "" {
-		return fmt.Errorf("skill has no directory")
-	}
-	disabledFlag := filepath.Join(s.Directory, ".spettro-disabled")
-	if enable {
-		if err := os.Remove(disabledFlag); err != nil && !os.IsNotExist(err) {
-			return err
+		suffix := ""
+		if r.ReadOnly() {
+			suffix = " (read-only)"
 		}
-		return nil
+		rows = append(rows, fmt.Sprintf("%s [%s/%s] %s%s", marker, r.Source, r.Scope, r.Path, suffix))
 	}
-	return os.WriteFile(disabledFlag, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
+	return rows
 }
 
-// skillsCatalog re-discovers skills and applies any persisted enabled markers.
-func (m Model) skillsCatalog() skills.Catalog {
-	cat, _ := skills.Discover(m.cwd, skills.DefaultLookupOptions())
-	for i := range cat.Skills {
-		flag := filepath.Join(cat.Skills[i].Directory, ".spettro-disabled")
-		if _, err := os.Stat(flag); err == nil {
-			cat.Skills[i].Disabled = true
-		}
+// findUserSkill resolves "/name" to a skill the user may run. Built-in and
+// custom commands are resolved before this is called, so they win a name
+// collision (see handleCommand).
+func (m Model) findUserSkill(cmd string) (skills.Skill, bool) {
+	s, ok := m.skillCatalog().Find(strings.TrimPrefix(cmd, "/"))
+	if !ok || !s.UserInvocable() {
+		return skills.Skill{}, false
 	}
-	return cat
+	return s, true
 }
 
-// refreshSkillsCatalog is called after install/uninstall/enable changes; it's
-// a no-op today (catalog is rebuilt on demand) but reserved for caching.
-func (m *Model) refreshSkillsCatalog() {
-	_ = m.skillsCatalog()
+// runUserSkill runs "/name args": the transcript shows what the user typed,
+// and the agent receives the skill's instructions with args substituted
+// (skills.UserInvocationPrompt).
+func (m Model) runUserSkill(input string, skill skills.Skill, args string) (tea.Model, tea.Cmd) {
+	prompt, err := skills.UserInvocationPrompt(skill, args)
+	if err != nil {
+		m.showBanner(err.Error(), "error")
+		return m, nil
+	}
+	return m.handlePromptWith(input, prompt)
+}
+
+// expandSkillMentions appends the instructions of every skill the prompt
+// names as $skill-name (Codex style) and tells the user which ones were
+// loaded. The typed text is kept as is.
+func (m *Model) expandSkillMentions(prompt string) string {
+	expanded, names := skills.ExpandMentions(prompt, m.skillCatalog())
+	if len(names) > 0 {
+		m.showBanner("skills loaded: "+strings.Join(names, ", "), "info")
+	}
+	return expanded
 }

@@ -297,6 +297,10 @@ func (r *toolRuntime) recordActivations(msgs []provider.Message) {
 // prompt is the agent's system prompt: a held tool it names in backticks
 // (`view-image`) is one the prompt tells the model to use, so it is
 // advertised up front rather than deferred.
+//
+// A name the operator's own tool holds (a script called skill or lsp) gets
+// no built-in spec: the built-in's description and schema would tell the
+// model it is calling something it is not.
 func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *toolSurface {
 	// A held tool of the operator's own is never advertised with the schema of
 	// the built-in whose name it shares; the retired built-ins that stand
@@ -311,15 +315,16 @@ func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *to
 			}
 		}
 	}
-	// A skills catalog in the system prompt tells the model to call
-	// skill-read, so it is advertised whenever there is one.
-	hasSkills := len(r.skillsCatalog.Active()) > 0
+	// The skill list in the system prompt tells the model to call the tool
+	// it loads skills with (r.skillTool), so that tool is advertised
+	// whenever the model may load any skill.
+	hasSkills := r.skillTool != "" && len(r.skillsCatalog.ForModel()) > 0
 	isCore := func(name string) bool {
 		builtin := name
 		if r.unfoldedTool(name) {
 			builtin = legacyTools[name].canonical
 		}
-		return coreTools[builtin] || (builtin == "skill-read" && hasSkills) || strings.Contains(prompt, "`"+name+"`")
+		return coreTools[builtin] || (name == r.skillTool && hasSkills) || strings.Contains(prompt, "`"+name+"`")
 	}
 	return newToolSurface(specs, isCore, hidden)
 }

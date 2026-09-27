@@ -8,11 +8,10 @@ import (
 )
 
 // sharedBuiltinNames are the built-in names a tool of the operator's own may
-// collide with: every canonical tool and retired name the v12 and v13
-// migrations fold, plus the skill-read aliases, which no migration folds but
-// the agent runtime still routes.
+// collide with: every canonical tool and retired name the v12, v13 and v14
+// migrations fold.
 func sharedBuiltinNames() []string {
-	names := []string{"skill-read", "activate-skill", "skill-activate"}
+	var names []string
 	for _, g := range toolFolds() {
 		names = append(names, g.canonical)
 		names = append(names, g.retired...)
@@ -22,7 +21,7 @@ func sharedBuiltinNames() []string {
 }
 
 // userToolManifest is a v10 manifest (so the v11 general-purpose retrofit and
-// the v12 and v13 folds all run) that defines, as built-ins, every shared
+// the v12, v13 and v14 folds all run) that defines, as built-ins, every shared
 // name but taken, plus file-read and comment, and a script tool of the
 // operator's own called taken. Agent "coder" holds every tool, the
 // operator's included; agent "other" holds every built-in but not the

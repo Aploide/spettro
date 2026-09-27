@@ -150,11 +150,17 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 }
 
 // Uninstall removes a skill from the user or project skill library. It only
-// removes skills installed under the spettro-native directories.
+// removes skills installed under the spettro-native directories; skills in
+// the read-only compat roots (.claude, .agents, ...) belong to other tools.
 func Uninstall(name string, scope Scope, cwd string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("uninstall: skill name is required")
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		// A name is one directory entry; "../x" must not reach outside
+		// the skills directory.
+		return fmt.Errorf("uninstall: invalid skill name %q", name)
 	}
 	root, err := installRoot(scope, cwd)
 	if err != nil {

@@ -3,7 +3,7 @@ name: ask
 description: Answer questions accurately using repository evidence and concise guidance, delegating discovery to specialist workers.
 model: inherit
 color: cyan
-tools: ["agent", "glob", "grep", "file-read", "comment", "web-search", "mcp-list-resources", "mcp-read-resource", "tool-search", "skill-read", "skill-list"]
+tools: ["agent", "glob", "grep", "file-read", "comment", "web-search", "mcp-list-resources", "mcp-read-resource", "tool-search", "skill"]
 ---
 
 You are Spettro's ask orchestrator. You handle Q&A, explanation, and guidance. You are read-only by design.

@@ -8,12 +8,14 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/compact"
 	"spettro/internal/diff"
 	"spettro/internal/jobs"
 	"spettro/internal/pty"
 	"spettro/internal/session"
+	"spettro/internal/skills"
 	"spettro/internal/theme"
 	"spettro/internal/version"
 )
@@ -308,25 +310,22 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ commands")
 	title := diagFillTitle(titleLabel, innerW)
 
-	// Descriptions must fit on one line to prevent the dialog from growing taller
-	// than the height passed to lipgloss.Place (which doesn't clip overflow).
-	maxDescW := max(innerW-18, 8)
-
+	// Every row must fit on one line: a wrapped row makes the dialog taller
+	// than the height passed to lipgloss.Place, which does not clip.
 	var rows []string
 	for i, cmd := range m.cmdItems {
-		desc := truncateLabel(cmd.desc, maxDescW)
+		name, desc := cmdMenuColumns(cmd.name, cmd.desc, innerW)
 		if i == m.cmdCursor {
-			label := fmt.Sprintf("%-16s  %s", cmd.name, desc)
 			rows = append(rows, lipgloss.NewStyle().
 				Background(theme.Current().BgSelection).
 				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
-				Render(label))
+				Render(name+"  "+desc))
 		} else {
 			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().Text)
 			descStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
-			rows = append(rows, nameStyle.Render(fmt.Sprintf("%-16s", cmd.name))+"  "+descStyle.Render(desc))
+			rows = append(rows, nameStyle.Render(name)+"  "+descStyle.Render(desc))
 		}
 	}
 	if len(m.cmdItems) == 0 {
@@ -377,28 +376,64 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	))
 }
 
+// cmdNameWidth is the width of the command-name column in the slash menu.
+const cmdNameWidth = 16
+
+// cmdMenuColumns fits one slash-menu row into innerW terminal cells: the
+// name padded to cmdNameWidth (a longer name, such as a skill's, keeps up to
+// half the row) and the description cut to the rest, two cells of gap
+// between them. Widths are measured in cells, so wide characters cannot
+// push a row past the dialog edge.
+func cmdMenuColumns(name, desc string, innerW int) (string, string) {
+	nameW := max(cmdNameWidth, min(ansi.StringWidth(name), innerW/2))
+	name = ansi.Truncate(name, nameW, "…")
+	name += strings.Repeat(" ", max(nameW-ansi.StringWidth(name), 0))
+	desc = ansi.Truncate(desc, max(innerW-nameW-2, 0), "…")
+	return name, desc
+}
+
+// viewMentionPalette renders the completions for an @file or $skill mention
+// being typed. Each row is cut to one line of the box (see
+// state_render.go, which reserves one row per item).
 func (m Model) viewMentionPalette(width int) string {
 	if len(m.mentionItems) == 0 {
 		return ""
 	}
 	boxW := width - 4
 	innerW := dialogInnerWidth(boxW)
-	titleLabel := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render("available files")
+	label := "available files"
+	if m.mentionKind == mentionSkill {
+		label = "skills"
+	}
+	titleLabel := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render(label)
 	title := diagFillTitle(titleLabel, innerW)
+	var cat skills.Catalog
+	if m.mentionKind == mentionSkill {
+		cat = m.skillCatalog()
+	}
 	var rows []string
 	for i, item := range m.mentionItems {
+		text := item
+		if m.mentionKind == mentionSkill {
+			text = "$" + item
+			if s, ok := cat.Find(item); ok {
+				text += "  " + s.ListingDescription()
+			}
+		}
+		// Two cells go to the cursor marker in front of the text.
+		text = ansi.Truncate(text, max(innerW-2, 1), "…")
 		if i == m.mentionCursor {
 			rows = append(rows, lipgloss.NewStyle().
 				Background(theme.Current().BgSelection).
 				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
-				Render("› "+item))
+				Render("› "+text))
 		} else {
-			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+item))
+			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+text))
 		}
 	}
-	hint := styleMuted.Render("↑↓ navigate  enter inserts mention")
+	hint := styleMuted.Render(ansi.Truncate("↑↓ navigate  enter inserts mention", innerW, "…"))
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(theme.Current().Border).

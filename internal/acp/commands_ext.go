@@ -37,6 +37,9 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 	case "/stats":
 		return acpStatsText(pm), false, true
 
+	case "/skills":
+		return skillsText(s.cwd, *cfg), false, true
+
 	case "/tasks":
 		return acpTasksText(b, s, input, fields), false, true
 

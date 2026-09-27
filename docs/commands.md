@@ -35,14 +35,14 @@
 | `/approve` | Execute pending plan through `coding` agent. |
 | `/tasks [list\|add\|done\|set\|show\|rm\|clear]` | Manage the session task graph. `list` prints tasks in dependency order with `deps:` and `[blocked]` markers; `set` accepts `pending`, `in_progress`, `completed`, `blocked` or `cancelled`; `rm <id>` deletes a task (stripping references to it from other tasks' dependencies); `clear` prunes all completed/cancelled tasks. |
 | `/mcp <list\|read\|auth>` | Manage MCP resources and auth. |
-| `/skill list` | List installed Agent Skills. |
-| `/skill install <source>` | Install a skill from a local path, https git URL, or `owner/repo` shorthand. |
-| `/skill info <name>` | Show metadata + body excerpt for an installed skill. |
-| `/skill enable <name>` / `disable <name>` | Toggle whether a skill is exposed to agents. |
-| `/skill uninstall <name>` | Remove a previously installed skill. |
-| `/skill where` | Show the discovery roots being scanned. |
-| `/skill reload` | Re-scan skill directories (after manual install/remove). |
-| `/skills` | Alias of `/skill`. |
+| `/skills` (or `/skill list`) | List [Agent Skills](skills.md): who can run each, its source folder and `SKILL.md` path, shadowed skills and warnings. |
+| `/<skill-name> [args]` | Run a skill: its instructions, with the arguments substituted, become the prompt. Listed in the `/` menu with the skill's description; built-in and custom commands win a name clash. `$<skill-name>` in any prompt pulls the skill in too. |
+| `/skill install <source>` | Install a skill from a local path, https git URL, or `owner/repo` shorthand into `~/.spettro/skills` (`--project`: `.spettro/skills`). |
+| `/skill info <name>` | Show metadata, bundled files and the start of the instructions. |
+| `/skill enable <name>` / `disable <name>` | Show or hide a skill for the agent and the `/` menu (saved as `disabled_skills` in `config.json`). |
+| `/skill uninstall <name>` | Remove a skill installed in `.spettro/skills` (Claude Code / Codex folders are never written to). |
+| `/skill where` | Show the discovery folders, in priority order. |
+| `/skill reload` | Force a re-scan of the skill folders (changes on disk are otherwise picked up on the next use). |
 | `/stats` | Show session token usage and prompt-cache metrics. |
 | `/hooks` | Show effective runtime hooks (project + global). |
 | `/memory [show]` | Show persistent cross-session memory (user + project). See [Persistent Memory](memory.md). |

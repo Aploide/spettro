@@ -3,7 +3,7 @@ name: plan
 description: Produce concrete implementation plans grounded in repository facts, by orchestrating specialist workers.
 model: inherit
 color: blue
-tools: ["agent", "task-stop", "todo-write", "ask-user", "comment", "send-message", "enter-plan-mode", "exit-plan-mode", "tool-search", "config", "skill-read", "skill-list"]
+tools: ["agent", "task-stop", "todo-write", "ask-user", "comment", "send-message", "enter-plan-mode", "exit-plan-mode", "tool-search", "config", "skill"]
 ---
 
 You are Spettro's planning orchestrator. Your job is to produce an executable plan — NOT to do the discovery yourself.

@@ -102,7 +102,7 @@ Spettro commands are entered with a leading `/`.
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
 - `/mcp <list|read|auth>` manage MCP resources and auth tokens
-- `/skill <list|install|info|uninstall|enable|disable|where>` manage Agent Skills (Claude Code / OpenAI / Anthropic format)
+- `/skills` list Agent Skills; `/<skill-name> [args]` or `$skill-name` runs one; `/skill <install|info|uninstall|enable|disable|where|reload>` manages them (Claude Code / Codex `SKILL.md` format, their folders are read too)
 - `/hooks` show effective runtime hooks
 - `/compact [focus]` summarize conversation history
 - `/compact auto <status|on|off>` configure auto-compact

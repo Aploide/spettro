@@ -266,6 +266,13 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			}
 			return m.handlePrompt(expanded)
 		}
+		// Skills come last: a built-in (the cases above) or a custom
+		// command with the same name wins, so installing a skill can never
+		// take over a command the user relies on.
+		if skill, ok := m.findUserSkill(cmd); ok {
+			args := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
+			return m.runUserSkill(input, skill, args)
+		}
 		m.showBanner("unknown command: "+cmd, "error")
 	}
 
@@ -273,14 +280,28 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handlePrompt sends a prompt the user typed. $skill-name mentions in it
+// pull in those skills' instructions (see expandSkillMentions).
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
+	// Expand first, as its own statement: it sets a banner on m, which must
+	// be the receiver handlePromptWith then runs on.
+	body := m.expandSkillMentions(input)
+	return m.handlePromptWith(input, body)
+}
+
+// handlePromptWith runs (or queues) a turn whose transcript entry is input,
+// what the user typed, and whose model prompt is body. The two differ for a
+// skill invocation, where the user typed "/name args" and the model gets the
+// skill's instructions. @file mentions are taken from input, so a skill body
+// that happens to contain "@something" attaches nothing.
+func (m Model) handlePromptWith(input, body string) (tea.Model, tea.Cmd) {
 	eval := m.evaluateCompact()
 	if eval.IsBlocking {
 		m.showBanner("context limit reached; run /compact before sending new prompts", "error")
 		return m, nil
 	}
 	mentionedFiles := m.extractMentionedFiles(input)
-	prompt := injectMentionGuidance(input, mentionedFiles)
+	prompt := injectMentionGuidance(body, mentionedFiles)
 	prompt = m.injectAttachments(prompt)
 	// Collect image paths (Kind="image") to send via the vision channel.
 	var imagePaths []string

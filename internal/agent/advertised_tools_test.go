@@ -17,7 +17,7 @@ var codingAgentAdvertisedTools = []string{
 	"agent", "glob", "grep", "file-read", "file-write", "file-edit",
 	"lsp", "bash", "job-output", "job-kill",
 	"tool-search", "todo-write", "task-stop", "config", "send-message", "comment",
-	"skill-read", "skill-list", "save-memory", "web-fetch", "download", "view-image",
+	"skill", "save-memory", "web-fetch", "download", "view-image",
 	"rename-symbol", "pty-start", "pty-write", "pty-kill", "tool-output",
 	"ask-user",
 }

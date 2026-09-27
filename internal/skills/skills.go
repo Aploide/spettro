@@ -1,27 +1,53 @@
 // Package skills implements the Agent Skills standard for Spettro.
 //
 // A skill is a directory containing a SKILL.md file with YAML frontmatter
-// (name + description, plus optional fields) followed by Markdown instructions.
-// Skills can also bundle scripts/, references/, and assets/ subdirectories.
+// (name + description, plus optional fields) followed by Markdown
+// instructions. Skills can also bundle scripts/, references/, and assets/
+// subdirectories that the model reads on demand.
 //
-// Spettro discovers skills from multiple well-known locations to remain
-// compatible with the Claude Code and OpenAI skill ecosystems while still
-// supporting its own native location:
+// # Discovery
 //
-//   - <project>/.spettro/skills/        (Spettro native, project scope)
-//   - <project>/.agents/skills/         (cross-client convention)
-//   - <project>/.claude/skills/         (Claude Code compatibility)
-//   - <project>/.openai/skills/         (OpenAI tools compatibility)
-//   - ~/.spettro/skills/                (Spettro native, user scope)
-//   - ~/.agents/skills/                 (cross-client convention)
-//   - ~/.claude/skills/                 (Claude Code compatibility)
-//   - ~/.openai/skills/                 (OpenAI tools compatibility)
+// Spettro owns two skill directories, which are the only ones it ever writes
+// to (install, uninstall):
 //
-// See https://agentskills.io/specification for the format.
+//   - <project>/.spettro/skills/
+//   - ~/.spettro/skills/
+//
+// It also reads, but never writes, the directories other agents use, so a
+// skill installed for Claude Code or Codex works in Spettro without copying.
+// These "compat" roots are on by default and can be switched off with the
+// skills_compat_disabled user setting (see LookupOptions.IncludeCompat):
+//
+//   - .agents/skills/  (cross-client convention; current Codex location)
+//   - .claude/skills/  (Claude Code)
+//   - .codex/skills/   (legacy Codex location; ~/.codex honours $CODEX_HOME)
+//   - .openai/skills/  (kept for configurations written before .codex)
+//
+// "<project>" is the working directory and each of its parents up to the
+// repository root (the first directory holding .git), nearest first, so a
+// skill checked in at the root of a monorepo is found from any package.
+//
+// Most roots hold one skill per subdirectory (<root>/<skill>/SKILL.md), as
+// Claude Code expects. The Codex roots (.codex/skills and .agents/skills)
+// may also group skills in subfolders (<root>/<group>/<skill>/SKILL.md), as
+// Codex allows, so discovery descends into them (see Root.nestsSkills).
+//
+// # Precedence
+//
+// SearchRoots lists the roots in priority order and the first skill with a
+// given name wins; later ones are kept in Catalog.Shadowed for /skills to
+// show. The order is: project roots before user roots; within the project,
+// the nearest directory first; within one directory, Spettro before the
+// compat families in the order listed above. Names compare
+// case-insensitively.
+//
+// See https://agentskills.io/specification for the format and docs/skills.md
+// for the user-facing guide.
 package skills
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,15 +59,40 @@ import (
 // SkillFilename is the canonical name of the skill manifest file.
 const SkillFilename = "SKILL.md"
 
-// Source labels the discovery directory family a skill came from.
+// DisabledMarker is the legacy per-skill opt-out file. Older versions of
+// /skill disable wrote it into the skill's directory; it is still honoured
+// (the skill is marked Disabled) and /skill enable removes it, but new
+// disables are recorded in the user config instead so the compat roots stay
+// read-only.
+const DisabledMarker = ".spettro-disabled"
+
+// Source labels the directory family a skill was discovered in.
 type Source string
 
 const (
+	// SourceSpettro is .spettro/skills, the only family Spettro writes to.
 	SourceSpettro Source = "spettro"
-	SourceAgents  Source = "agents"
-	SourceClaude  Source = "claude"
-	SourceOpenAI  Source = "openai"
+	// SourceAgents is .agents/skills, the cross-client convention Codex uses.
+	SourceAgents Source = "agents"
+	// SourceClaude is .claude/skills (Claude Code).
+	SourceClaude Source = "claude"
+	// SourceCodex is .codex/skills, or $CODEX_HOME/skills for the user root.
+	SourceCodex Source = "codex"
+	// SourceOpenAI is .openai/skills, kept for older configurations.
+	SourceOpenAI Source = "openai"
 )
+
+// compatFamilies are the read-only directory families, in precedence order,
+// as the name of the directory that holds "skills" under a project or home.
+var compatFamilies = []struct {
+	dir    string
+	source Source
+}{
+	{".agents", SourceAgents},
+	{".claude", SourceClaude},
+	{".codex", SourceCodex},
+	{".openai", SourceOpenAI},
+}
 
 // Scope is "project" (workspace-relative) or "user" (home-relative).
 type Scope string
@@ -52,43 +103,89 @@ const (
 )
 
 // Skill is a discovered skill ready for disclosure to the model.
+//
+// Name, Description and every other frontmatter value are free of terminal
+// control characters (see CleanText), and Name never contains whitespace
+// (see commandSafeName), so every host can offer a skill as "/<Name>".
 type Skill struct {
 	Name          string            `json:"name"`
 	Description   string            `json:"description"`
 	License       string            `json:"license,omitempty"`
 	Compatibility string            `json:"compatibility,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
-	AllowedTools  string            `json:"allowed_tools,omitempty"`
-	Disabled      bool              `json:"disabled,omitempty"`
-	Location      string            `json:"location"`            // absolute path to SKILL.md
-	Directory     string            `json:"directory"`           // absolute path to the skill folder
-	Source        Source            `json:"source"`              // discovery family
-	Scope         Scope             `json:"scope"`               // project or user
-	Resources     []string          `json:"resources,omitempty"` // bundled scripts/references/assets, relative to Directory
-	Issues        []string          `json:"issues,omitempty"`    // non-fatal validation warnings
+	// AllowedTools is recorded for display only. Spettro's permission model
+	// is the agent manifest, so a skill cannot pre-approve tools.
+	AllowedTools string `json:"allowed_tools,omitempty"`
+	// WhenToUse (Claude Code's when_to_use) extends Description in the
+	// model's skill list; see ListingDescription.
+	WhenToUse string `json:"when_to_use,omitempty"`
+	// ArgumentHint is shown next to the skill in the slash-command menu,
+	// e.g. "[issue-number]".
+	ArgumentHint string `json:"argument_hint,omitempty"`
+	// Arguments names the positional arguments of a user invocation, so the
+	// body can say $component instead of $0 (see RenderBody).
+	Arguments []string `json:"arguments,omitempty"`
+	// ModelInvocationDisabled (disable-model-invocation: true) keeps the skill
+	// out of the model's list and the skill tool: only the user can run it.
+	ModelInvocationDisabled bool `json:"model_invocation_disabled,omitempty"`
+	// UserInvocationDisabled (user-invocable: false) keeps the skill out of
+	// the slash-command menu and $-mentions: only the model can load it.
+	UserInvocationDisabled bool `json:"user_invocation_disabled,omitempty"`
+	// Disabled hides the skill from both the model and the user. It comes
+	// from the frontmatter (disabled: true / enabled: false), the legacy
+	// DisabledMarker file, or the user config (Catalog.WithDisabledNames).
+	Disabled  bool     `json:"disabled,omitempty"`
+	Location  string   `json:"location"`            // absolute path to SKILL.md
+	Directory string   `json:"directory"`           // absolute path to the skill folder
+	Source    Source   `json:"source"`              // discovery family
+	Scope     Scope    `json:"scope"`               // project or user
+	Resources []string `json:"resources,omitempty"` // bundled scripts/references/assets, relative to Directory
+	Issues    []string `json:"issues,omitempty"`    // non-fatal validation warnings
+}
+
+// ModelInvocable reports whether the model may see and load the skill.
+func (s Skill) ModelInvocable() bool { return !s.Disabled && !s.ModelInvocationDisabled }
+
+// UserInvocable reports whether the user may run the skill as /name or
+// mention it as $name.
+func (s Skill) UserInvocable() bool { return !s.Disabled && !s.UserInvocationDisabled }
+
+// ListingDescription is the one-line text the model's skill list and the
+// slash-command menu show: Description plus WhenToUse, whitespace collapsed.
+func (s Skill) ListingDescription() string {
+	text := s.Description
+	if strings.TrimSpace(s.WhenToUse) != "" {
+		text += " " + s.WhenToUse
+	}
+	return strings.Join(strings.Fields(text), " ")
 }
 
 // Catalog is the complete set of skills discovered for a session.
 type Catalog struct {
 	Skills   []Skill
-	Shadowed []Skill // skills hidden by name collision
+	Shadowed []Skill // skills hidden by a higher-priority skill of the same name
 	Issues   []string
 }
 
-// LookupOptions controls how Discover walks the well-known directories.
+// LookupOptions controls which directories Discover walks.
 type LookupOptions struct {
-	// IncludeProject limits discovery to user-level when false.
+	// IncludeProject scans the project roots (the working directory and its
+	// parents up to the repository root).
 	IncludeProject bool
-	// IncludeUser limits discovery to project-level when false.
+	// IncludeUser scans the roots under the home directory.
 	IncludeUser bool
+	// IncludeCompat adds the read-only roots of other agents (.agents,
+	// .claude, .codex, .openai) next to Spettro's own .spettro/skills.
+	IncludeCompat bool
 	// ExtraDirs are additional skill root directories to scan (each is a
 	// directory expected to contain skill subfolders, e.g. ~/custom-skills).
+	// They come last in precedence.
 	ExtraDirs []string
 }
 
-// DefaultLookupOptions enables both project and user discovery.
+// DefaultLookupOptions enables project, user and compat discovery.
 func DefaultLookupOptions() LookupOptions {
-	return LookupOptions{IncludeProject: true, IncludeUser: true}
+	return LookupOptions{IncludeProject: true, IncludeUser: true, IncludeCompat: true}
 }
 
 // Root describes a single skill discovery directory.
@@ -98,58 +195,142 @@ type Root struct {
 	Scope  Scope  `json:"scope"`
 }
 
-// SearchRoots returns the list of skill root directories Discover will scan,
-// in deterministic order. The first occurrence of a given skill name wins,
-// and project roots are listed before user roots so they take precedence.
+// ReadOnly reports whether Spettro treats the root as another agent's
+// directory that it reads but never writes.
+func (r Root) ReadOnly() bool { return r.Source != SourceSpettro }
+
+// nestsSkills reports whether skills may sit deeper than one directory below
+// the root. Codex finds skills anywhere under its roots (grouped as
+// <root>/<group>/<skill>/SKILL.md), so its two families are searched that
+// way; every other root holds one skill per subdirectory, as Claude Code
+// expects, and a deeper SKILL.md there is not a skill.
+func (r Root) nestsSkills() bool { return r.Source == SourceCodex || r.Source == SourceAgents }
+
+// Limits on the search below a nesting root (see Root.nestsSkills), the
+// same Codex applies: skills at most maxNestedDepth directories down, and
+// at most maxDirsPerRoot directories looked at, so a huge tree cannot stall
+// discovery.
+const (
+	maxNestedDepth = 6
+	maxDirsPerRoot = 2000
+)
+
+// maxSkillFileBytes caps the size of a SKILL.md Spettro will read. The spec
+// recommends keeping a skill's instructions to a few hundred lines; 1 MiB is
+// far above any real skill and still small enough to hold in memory.
+const maxSkillFileBytes = 1 << 20
+
+// SearchRoots returns the skill root directories Discover scans, in
+// precedence order (see the package documentation). A path is listed once
+// even when it is reachable two ways (a working directory inside the home
+// directory, say).
 func SearchRoots(cwd string, opts LookupOptions) []Root {
 	var roots []Root
-	if opts.IncludeProject && strings.TrimSpace(cwd) != "" {
-		roots = append(roots,
-			Root{Path: filepath.Join(cwd, ".spettro", "skills"), Source: SourceSpettro, Scope: ScopeProject},
-			Root{Path: filepath.Join(cwd, ".agents", "skills"), Source: SourceAgents, Scope: ScopeProject},
-			Root{Path: filepath.Join(cwd, ".claude", "skills"), Source: SourceClaude, Scope: ScopeProject},
-			Root{Path: filepath.Join(cwd, ".openai", "skills"), Source: SourceOpenAI, Scope: ScopeProject},
-		)
-	}
-	if opts.IncludeUser {
-		if home, err := homedir.Dir(); err == nil {
-			roots = append(roots,
-				Root{Path: filepath.Join(home, ".spettro", "skills"), Source: SourceSpettro, Scope: ScopeUser},
-				Root{Path: filepath.Join(home, ".agents", "skills"), Source: SourceAgents, Scope: ScopeUser},
-				Root{Path: filepath.Join(home, ".claude", "skills"), Source: SourceClaude, Scope: ScopeUser},
-				Root{Path: filepath.Join(home, ".openai", "skills"), Source: SourceOpenAI, Scope: ScopeUser},
-			)
+	seen := map[string]bool{}
+	add := func(r Root) {
+		clean := filepath.Clean(r.Path)
+		if seen[clean] {
+			return
 		}
+		seen[clean] = true
+		r.Path = clean
+		roots = append(roots, r)
+	}
+	addFamilies := func(base string, scope Scope) {
+		add(Root{Path: filepath.Join(base, ".spettro", "skills"), Source: SourceSpettro, Scope: scope})
+		if !opts.IncludeCompat {
+			return
+		}
+		for _, f := range compatFamilies {
+			path := filepath.Join(base, f.dir, "skills")
+			if f.source == SourceCodex && scope == ScopeUser {
+				path = codexUserSkillsDir(base)
+			}
+			add(Root{Path: path, Source: f.source, Scope: scope})
+		}
+	}
+	home, homeErr := homedir.Dir()
+	if opts.IncludeProject && strings.TrimSpace(cwd) != "" {
+		for _, dir := range projectDirs(cwd, home) {
+			addFamilies(dir, ScopeProject)
+		}
+	}
+	if opts.IncludeUser && homeErr == nil {
+		addFamilies(home, ScopeUser)
 	}
 	for _, dir := range opts.ExtraDirs {
 		if strings.TrimSpace(dir) == "" {
 			continue
 		}
-		roots = append(roots, Root{Path: dir, Source: SourceSpettro, Scope: ScopeUser})
+		add(Root{Path: dir, Source: SourceSpettro, Scope: ScopeUser})
 	}
 	return roots
 }
 
-// Discover scans all well-known skill roots and returns a deduplicated catalog.
-// Project-scope skills override user-scope skills with the same name; shadowed
-// skills are returned in Catalog.Shadowed for diagnostics.
-func Discover(cwd string, opts LookupOptions) (Catalog, error) {
-	cat := Catalog{}
-	seen := map[string]int{} // name -> index in cat.Skills
-	for _, root := range SearchRoots(cwd, opts) {
-		entries, err := os.ReadDir(root.Path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			cat.Issues = append(cat.Issues, fmt.Sprintf("read %s: %v", root.Path, err))
-			continue
+// codexUserSkillsDir is Codex's user skill directory: $CODEX_HOME/skills when
+// CODEX_HOME is set, ~/.codex/skills otherwise.
+func codexUserSkillsDir(home string) string {
+	if dir := strings.TrimSpace(os.Getenv("CODEX_HOME")); dir != "" {
+		return filepath.Join(dir, "skills")
+	}
+	return filepath.Join(home, ".codex", "skills")
+}
+
+// projectDirs returns the directories whose skill roots count as project
+// scope: cwd, then each parent up to and including the repository root (the
+// first directory that holds .git). When cwd is not inside a repository only
+// cwd itself is used, so a stray skills folder high up the tree is never
+// picked up. The walk also stops below the home directory, whose skill
+// roots are the user scope.
+func projectDirs(cwd, home string) []string {
+	start, err := filepath.Abs(cwd)
+	if err != nil {
+		return []string{cwd}
+	}
+	home = filepath.Clean(home)
+	var dirs []string
+	for dir := start; ; {
+		if dir == home && len(dirs) > 0 {
+			break
 		}
-		for _, ent := range entries {
-			if !ent.IsDir() {
-				continue
-			}
-			dir := filepath.Join(root.Path, ent.Name())
+		dirs = append(dirs, dir)
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dirs
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	// No repository root on the way up: the walk proves nothing about
+	// which parents belong to the project, so only cwd counts.
+	return []string{start}
+}
+
+// Discover scans every root SearchRoots returns and builds the catalog. The
+// first skill of a name wins (see the package documentation); the others go
+// to Catalog.Shadowed (not Catalog.Issues: a shadowed skill is expected,
+// and /skills shows the list). Skills are sorted by name. The error is
+// always nil today and is kept for API stability; per-directory problems
+// are reported in Catalog.Issues instead.
+func Discover(cwd string, opts LookupOptions) (Catalog, error) {
+	cat, _ := discover(cwd, opts)
+	return cat, nil
+}
+
+// discover is Discover that also returns a stamp of every path the result
+// depends on: each root, each directory looked into, each SKILL.md read.
+// The cache compares them to tell whether a cached catalog is still current
+// (see Cache.Get).
+func discover(cwd string, opts LookupOptions) (Catalog, []pathStamp) {
+	cat := Catalog{}
+	var stamps []pathStamp
+	seen := map[string]bool{} // lower-cased names already in cat.Skills
+	for _, root := range SearchRoots(cwd, opts) {
+		stamps = append(stamps, stampOf(root.Path))
+		for _, dir := range skillDirs(root, &cat, &stamps) {
+			stamps = append(stamps, stampOf(filepath.Join(dir, SkillFilename)))
 			skill, err := Read(dir)
 			if err != nil {
 				cat.Issues = append(cat.Issues, fmt.Sprintf("%s: %v", dir, err))
@@ -157,43 +338,147 @@ func Discover(cwd string, opts LookupOptions) (Catalog, error) {
 			}
 			skill.Source = root.Source
 			skill.Scope = root.Scope
-			if existing, ok := seen[skill.Name]; ok {
+			key := strings.ToLower(skill.Name)
+			if seen[key] {
 				cat.Shadowed = append(cat.Shadowed, skill)
-				cat.Issues = append(cat.Issues,
-					fmt.Sprintf("skill %q shadowed by %s (existing: %s)",
-						skill.Name, skill.Location, cat.Skills[existing].Location))
 				continue
 			}
-			seen[skill.Name] = len(cat.Skills)
+			seen[key] = true
 			cat.Skills = append(cat.Skills, skill)
 		}
 	}
 	sort.SliceStable(cat.Skills, func(i, j int) bool {
 		return cat.Skills[i].Name < cat.Skills[j].Name
 	})
-	return cat, nil
+	return cat, stamps
+}
+
+// skillDirs returns the skill directories under root (those holding a
+// SKILL.md), in the order Discover considers them: breadth first, each
+// directory's entries by name. It appends a stamp for every directory it
+// looks into to stamps, and unreadable directories to cat.Issues.
+//
+// A directory with a SKILL.md is a skill, and the search does not go below
+// it: a skill's own scripts/ or references/ never hold more skills. A folder
+// without one (a shared scripts dir, say) is not a skill and is silently
+// passed over, or, under a root that nests skills, searched in turn.
+// Hidden folders are never searched below.
+func skillDirs(root Root, cat *Catalog, stamps *[]pathStamp) []string {
+	maxDepth := 1
+	if root.nestsSkills() {
+		maxDepth = maxNestedDepth
+	}
+	var found []string
+	visited := 0
+	level := []string{root.Path}
+	for depth := 1; depth <= maxDepth && len(level) > 0; depth++ {
+		var next []string
+		for _, parent := range level {
+			entries, err := os.ReadDir(parent)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					cat.Issues = append(cat.Issues, fmt.Sprintf("read %s: %v", parent, err))
+				}
+				continue
+			}
+			for _, ent := range entries {
+				dir := filepath.Join(parent, ent.Name())
+				if !isDir(ent, dir) {
+					continue
+				}
+				if visited++; visited > maxDirsPerRoot {
+					cat.Issues = append(cat.Issues, fmt.Sprintf("%s: stopped after %d folders; skills further down were not looked for", root.Path, maxDirsPerRoot))
+					return found
+				}
+				*stamps = append(*stamps, stampOf(dir))
+				if _, err := os.Stat(filepath.Join(dir, SkillFilename)); err == nil {
+					found = append(found, dir)
+					continue
+				}
+				if !strings.HasPrefix(ent.Name(), ".") {
+					next = append(next, dir)
+				}
+			}
+		}
+		level = next
+	}
+	return found
+}
+
+// isDir reports whether a directory entry is a directory, following a
+// symlink (skills are often linked in from a shared checkout).
+func isDir(ent os.DirEntry, path string) bool {
+	if ent.IsDir() {
+		return true
+	}
+	if ent.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Read parses the SKILL.md file in dir and returns a populated Skill (without
-// the body, which can be loaded on demand via LoadBody).
+// the body, which is loaded on demand via LoadBody). Parsing is tolerant: a
+// missing name defaults to the directory name and a missing description to
+// the first line of the body (see parse); only an unreadable file or a skill
+// with no description and no body is an error.
 func Read(dir string) (Skill, error) {
 	manifest := filepath.Join(dir, SkillFilename)
-	raw, err := os.ReadFile(manifest)
+	raw, err := readSkillFile(manifest)
 	if err != nil {
 		return Skill{}, err
 	}
-	skill, err := parse(string(raw))
+	skill, err := parse(string(raw), filepath.Base(dir))
 	if err != nil {
 		return Skill{}, err
 	}
 	skill.Location = manifest
 	skill.Directory = dir
 	skill.Resources = enumerateResources(dir)
-	if base := filepath.Base(dir); skill.Name != "" && skill.Name != base {
+	if base := filepath.Base(dir); !strings.EqualFold(skill.Name, base) {
 		skill.Issues = append(skill.Issues,
 			fmt.Sprintf("name %q does not match parent directory %q", skill.Name, base))
 	}
+	if _, err := os.Stat(filepath.Join(dir, DisabledMarker)); err == nil {
+		skill.Disabled = true
+	}
 	return skill, nil
+}
+
+// readSkillFile reads a SKILL.md, refusing anything but a regular file of
+// at most maxSkillFileBytes. Skill folders come from cloned repositories
+// (and are looked up in parent directories up to the repository root), so
+// a SKILL.md may be a FIFO, whose open blocks until a writer appears, or a
+// symlink to /dev/zero or to a huge file. Discovery runs under the cache
+// lock, on the TUI's keystroke path among others, so one such file must
+// not be able to hang Spettro or exhaust its memory.
+func readSkillFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", SkillFilename)
+	}
+	if info.Size() > maxSkillFileBytes {
+		return nil, fmt.Errorf("%s is %d bytes, over the %d-byte limit", SkillFilename, info.Size(), maxSkillFileBytes)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// The limit is enforced on the read too, in case the file grew
+	// between the Stat and the Open.
+	raw, err := io.ReadAll(io.LimitReader(f, maxSkillFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxSkillFileBytes {
+		return nil, fmt.Errorf("%s is over the %d-byte limit", SkillFilename, maxSkillFileBytes)
+	}
+	return raw, nil
 }
 
 // LoadBody reads SKILL.md from disk and returns the markdown content following
@@ -202,7 +487,7 @@ func LoadBody(s Skill) (string, error) {
 	if strings.TrimSpace(s.Location) == "" {
 		return "", fmt.Errorf("skill %q has no location", s.Name)
 	}
-	raw, err := os.ReadFile(s.Location)
+	raw, err := readSkillFile(s.Location)
 	if err != nil {
 		return "", err
 	}
@@ -210,35 +495,80 @@ func LoadBody(s Skill) (string, error) {
 	return strings.TrimSpace(body), nil
 }
 
-// Find returns a skill by name from the catalog.
+// Find returns a skill by name (case-insensitive), disabled ones included.
 func (c Catalog) Find(name string) (Skill, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Skill{}, false
 	}
-	lower := strings.ToLower(name)
 	for _, s := range c.Skills {
 		if strings.EqualFold(s.Name, name) {
-			return s, true
-		}
-		if strings.ToLower(s.Name) == lower {
 			return s, true
 		}
 	}
 	return Skill{}, false
 }
 
-// Active returns enabled (non-disabled) skills, suitable for prompting.
+// Active returns the skills that are not disabled.
 func (c Catalog) Active() []Skill {
+	return c.filter(func(s Skill) bool { return !s.Disabled })
+}
+
+// ForModel returns the skills the model may see and load.
+func (c Catalog) ForModel() []Skill {
+	return c.filter(Skill.ModelInvocable)
+}
+
+// ForUser returns the skills the user may run as /name or mention as $name.
+func (c Catalog) ForUser() []Skill {
+	return c.filter(Skill.UserInvocable)
+}
+
+func (c Catalog) filter(keep func(Skill) bool) []Skill {
 	out := make([]Skill, 0, len(c.Skills))
 	for _, s := range c.Skills {
-		if s.Disabled {
-			continue
+		if keep(s) {
+			out = append(out, s)
 		}
-		out = append(out, s)
 	}
 	return out
 }
+
+// WithDisabledNames returns a copy of the catalog with every skill whose name
+// is in names (case-insensitive) marked Disabled. It is how the user
+// config's disabled_skills list is applied; the receiver is not modified.
+func (c Catalog) WithDisabledNames(names []string) Catalog {
+	out := c.clone()
+	if len(names) == 0 {
+		return out
+	}
+	off := map[string]bool{}
+	for _, n := range names {
+		off[strings.ToLower(strings.TrimSpace(n))] = true
+	}
+	for i := range out.Skills {
+		if off[strings.ToLower(out.Skills[i].Name)] {
+			out.Skills[i].Disabled = true
+		}
+	}
+	return out
+}
+
+// clone copies the catalog's slices so a caller can modify the skills
+// without affecting a cached catalog. Skill values are copied; their
+// Metadata maps and Resources slices are shared and must be treated as
+// read-only.
+func (c Catalog) clone() Catalog {
+	return Catalog{
+		Skills:   append([]Skill(nil), c.Skills...),
+		Shadowed: append([]Skill(nil), c.Shadowed...),
+		Issues:   append([]string(nil), c.Issues...),
+	}
+}
+
+// maxResources caps the bundled files listed for one skill, so a skill that
+// ships a large asset tree does not flood the activation message.
+const maxResources = 50
 
 func enumerateResources(dir string) []string {
 	var out []string
@@ -256,10 +586,9 @@ func enumerateResources(dir string) []string {
 			return nil
 		})
 	}
-	const cap = 50
-	if len(out) > cap {
-		out = append(out[:cap], "... (truncated)")
-	}
 	sort.Strings(out)
+	if len(out) > maxResources {
+		out = append(out[:maxResources], "... (truncated)")
+	}
 	return out
 }

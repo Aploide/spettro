@@ -13,12 +13,13 @@ import (
 	"spettro/internal/session"
 )
 
-func TestPromptFromBlocks_TextAndResourceLink(t *testing.T) {
-	task, images, mentioned, err := promptFromBlocks([]acpsdk.ContentBlock{
+func TestReadPromptContent_TextAndResourceLink(t *testing.T) {
+	p, err := readPromptContent([]acpsdk.ContentBlock{
 		acpsdk.TextBlock("Read "),
 		acpsdk.ResourceLinkBlock("main.go", "file:///tmp/proj/main.go"),
 		acpsdk.TextBlock(" and summarize it."),
 	}, t.TempDir())
+	task, images, mentioned := p.task(), p.images, p.mentioned
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,8 +34,8 @@ func TestPromptFromBlocks_TextAndResourceLink(t *testing.T) {
 	}
 }
 
-func TestPromptFromBlocks_EmbeddedResource(t *testing.T) {
-	task, _, _, err := promptFromBlocks([]acpsdk.ContentBlock{
+func TestReadPromptContent_EmbeddedResource(t *testing.T) {
+	p, err := readPromptContent([]acpsdk.ContentBlock{
 		acpsdk.TextBlock("Explain this."),
 		acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
 			TextResourceContents: &acpsdk.TextResourceContents{
@@ -46,18 +47,25 @@ func TestPromptFromBlocks_EmbeddedResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	task := p.task()
 	if !strings.Contains(task, "Context from /tmp/proj/util.go:") || !strings.Contains(task, "package util") {
 		t.Fatalf("embedded context missing from task: %q", task)
 	}
+	// The typed text is kept apart from the attached file, so a skill
+	// command can be parsed from it alone.
+	if p.typed != "Explain this." {
+		t.Fatalf("typed text = %q", p.typed)
+	}
 }
 
-func TestPromptFromBlocks_ImageDecodedToFile(t *testing.T) {
+func TestReadPromptContent_ImageDecodedToFile(t *testing.T) {
 	dir := t.TempDir()
 	payload := []byte{0x89, 0x50, 0x4e, 0x47}
-	_, images, _, err := promptFromBlocks([]acpsdk.ContentBlock{
+	p, err := readPromptContent([]acpsdk.ContentBlock{
 		acpsdk.TextBlock("look"),
 		acpsdk.ImageBlock(base64.StdEncoding.EncodeToString(payload), "image/png"),
 	}, filepath.Join(dir, "media"))
+	images := p.images
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

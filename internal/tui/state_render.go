@@ -385,8 +385,11 @@ func (m Model) recalcLayout() Model {
 			inputH += lipgloss.Height(block)
 		}
 	}
-	if len(m.mentionItems) > 0 {
-		inputH += 5 + len(m.mentionItems)
+	if palette := m.viewMentionPalette(m.paneWidth()); palette != "" {
+		// Reserve what the palette actually renders (border, title, rows,
+		// hint): a fixed estimate was one row short and pushed the frame
+		// past the bottom of the terminal whenever the palette was open.
+		inputH += lipgloss.Height(palette)
 	}
 
 	parallelH := 0

@@ -211,6 +211,11 @@ type toolLoopConfig struct {
 	// toolSurfaceNote is the system prompt's note on the tools held but not
 	// advertised up front (see toolSurfacePrompt); set by runToolLoop.
 	toolSurfaceNote string
+
+	// skillLoadTool is the tool the system prompt's skill list tells the
+	// model to call (see toolRuntime.skillLoadTool); "" leaves the list out.
+	// Set by runToolLoop.
+	skillLoadTool string
 }
 
 // traceID is the agent identity stamped on emitted ToolTraces: the unique
@@ -296,6 +301,7 @@ type toolRuntime struct {
 	stopRequested        bool
 	stopReason           string
 	skillsCatalog        skills.Catalog
+	skillTool            string // the tool the model loads skills with (see skillLoadTool); "" when none
 	goalMode             bool
 	// workflowPreapproved skips the workflow tool's confirmation prompt: the
 	// user already said yes by writing the keyword.
@@ -600,6 +606,8 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// once tool-search (or a call by name) activated it — in this turn or an
 	// earlier one of the carried conversation. It changes only on an
 	// activation, so the cached prompt prefix survives every other step.
+	runtime.skillTool = runtime.skillLoadTool(allowed)
+	cfg.skillLoadTool = runtime.skillTool
 	runtime.surface = runtime.buildToolSurface(cfg.AllowedTools, cfg.SystemPrompt)
 	runtime.restoreActivations(cfg.Messages)
 	cfg.toolSurfaceNote = toolSurfacePrompt(runtime.surface.deferredNames(), len(runtime.surface.droppedNames()) > 0)
@@ -1199,8 +1207,7 @@ var concurrentTools = map[string]bool{
 	"web-fetch":          true,
 	"web-search":         true,
 	"view-image":         true,
-	"skill-read":         true,
-	"skill-list":         true,
+	"skill":              true,
 	"tool-search":        true,
 	"job-output":         true,
 	"tool-output":        true,
@@ -1710,10 +1717,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runGoalComplete(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
-	case "skill-read":
-		return r.runSkillRead(call.Args)
-	case "skill-list":
-		return r.runSkillList(call.Args)
+	case "skill":
+		return r.runSkill(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
 	case "lsp":

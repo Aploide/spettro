@@ -102,6 +102,8 @@ and shows the command's output — nothing is sent to the agent.
 - `/help` appends a "custom commands" section listing everything discovered.
 - Names are matched case-insensitively; built-in commands always take
   precedence, so a custom file named `help.toml` cannot shadow `/help`.
+  A custom command in turn wins over an [Agent Skill](skills.md) of the
+  same name; the skill is then left out of the `/` menu.
 
 ## More examples
 

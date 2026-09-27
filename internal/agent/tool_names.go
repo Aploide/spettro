@@ -16,9 +16,9 @@ import (
 //
 //   - built-ins, carried out by the dispatch in toolRuntime.execute;
 //   - retired built-in names (legacyTools in tool_aliases.go: shell-exec,
-//     multi-edit, repo-search, ls, task-*, activate-skill, diagnostics, ...),
-//     each an alias of one canonical built-in (bash, file-edit, grep, glob,
-//     todo-write, skill-read, lsp);
+//     multi-edit, repo-search, ls, task-*, skill-read, skill-list,
+//     diagnostics, ...), each an alias of one canonical built-in (bash,
+//     file-edit, grep, glob, todo-write, skill, lsp);
 //   - tools of the operator's own: manifest tools of kind mcp, script or
 //     http, which may take any name, a built-in's or a retired one's
 //     included.
@@ -159,10 +159,18 @@ type retiredToolSurface struct {
 }
 
 // retiredToolSurfaces are the surfaces of the retired built-ins whose
-// arguments differ from their canonical tool's. A retired name missing here
-// (shell-exec, bash-output, multi-edit, ls, activate-skill, skill-activate)
-// takes exactly its canonical tool's arguments, so it is advertised with the
-// canonical tool's description and schema (see unfoldedSurface).
+// arguments or role differ from their canonical tool's. A retired name
+// missing here (shell-exec, bash-output, multi-edit, ls, activate-skill,
+// skill-activate) takes exactly its canonical tool's arguments, so it is
+// advertised with the canonical tool's description and schema (see
+// unfoldedSurface).
+//
+// skill-read and skill-list are listed although the skill tool accepts their
+// arguments unchanged: each did only half of what skill does (load one skill,
+// or list them), and skill's description, which covers both, would misdescribe
+// them. skill-read is also the name the system prompt's skill list points at
+// while it stands unfolded (toolRuntime.skillLoadTool), so it must say that it
+// loads a skill.
 var retiredToolSurfaces = map[string]retiredToolSurface{
 	"repo-search": {
 		desc:   "Symbol search: the ranked definitions of an identifier, then its usages.",
@@ -187,6 +195,14 @@ var retiredToolSurfaces = map[string]retiredToolSurface{
 	"task-delete": {
 		desc:   "Delete a task by id, or set clear_completed to prune completed and cancelled tasks. Returns the whole list.",
 		schema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"clear_completed":{"type":"boolean"}}}`),
+	},
+	"skill-read": {
+		desc:   "Load an Agent Skill by name: returns its instructions and the directory holding its bundled files. args, when given, fill the skill's $ARGUMENTS placeholders.",
+		schema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"the skill to load"},"args":{"type":"string","description":"optional arguments for the skill"}},"required":["name"]}`),
+	},
+	"skill-list": {
+		desc:   "List the Agent Skills you may load (query filters by name or description).",
+		schema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
 	},
 	"diagnostics": {
 		desc:   "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",

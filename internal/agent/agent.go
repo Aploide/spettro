@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -13,7 +11,6 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/memory"
 	"spettro/internal/provider"
-	"spettro/internal/skills"
 )
 
 // Legacy interfaces — kept for backward compatibility with existing tests and callers.
@@ -296,8 +293,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 			maxToolCallsPerStep = a.Manifest.Runtime.Delegation.MaxToolCallsPerStep
 		}
 	}
-	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
-	catalog = filterDisabledSkills(catalog)
 	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt: systemPrompt,
 		UserTask:     task,
@@ -343,7 +338,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		MaxWorkers:          maxWorkers,
 		MaxDepth:            maxDelegationDepth,
 		MaxToolCalls:        maxToolCallsPerStep,
-		SkillsCatalog:       catalog,
+		SkillsCatalog:       SkillCatalog(a.CWD),
 		Steering:            a.Steering,
 	})
 	if err != nil {
@@ -376,20 +371,4 @@ func compact(s string) string {
 		return s
 	}
 	return s[:max] + "..."
-}
-
-// filterDisabledSkills removes skills that have a sentinel `.spettro-disabled`
-// file in their directory. The TUI command `/skill disable <name>` writes this
-// marker so the user can opt out of a discovered skill without uninstalling.
-func filterDisabledSkills(c skills.Catalog) skills.Catalog {
-	keep := make([]skills.Skill, 0, len(c.Skills))
-	for _, s := range c.Skills {
-		flag := filepath.Join(s.Directory, ".spettro-disabled")
-		if _, err := os.Stat(flag); err == nil {
-			continue
-		}
-		keep = append(keep, s)
-	}
-	c.Skills = keep
-	return c
 }
