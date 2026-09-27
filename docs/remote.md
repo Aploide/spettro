@@ -176,7 +176,7 @@ All events share the envelope:
 | `comment` | Agent published a progress comment via the `comment` tool | `message` |
 | `tool` | Any tool started/finished | `name`, `status` (`running`/`success`/`error`), `agent`, `args`/`args_raw`, `output` |
 | `banner` | UI banner shown (info/warn/error/success) | `text`, `level` |
-| `approval_request` | Shell approval is needed | `command`, `tool_id`, `segments`, `reason` |
+| `approval_request` | A command, file change or network access needs approval | `command`, `tool_id`, `segments`, `reason`, `diff` (file changes only), `command_bytes`, `command_truncated`, `diff_bytes`, `diff_truncated` — see [Approval requests](#approval-requests) |
 | `ask_user` | The agent invoked `ask-user` | `version`, `count`, `active`, `questions[]`, plus the v1 fields `question`, `options`, `context`, `default`, `allow_free_response` describing the question numbered `active` — see [Ask-user forms](#ask-user-forms) |
 | `commit` / `commit_error` | Auto-commit agent finished | `message` / `error` |
 | `search` / `search_error` | Repo searcher finished | `result` / `error` |
@@ -186,6 +186,22 @@ All events share the envelope:
 
 The `kind` field is also reflected as the `event:` SSE name for clients
 that filter by event name.
+
+### Approval requests
+
+An `approval_request` carries what is being approved in full: the whole
+`command` (a heredoc of any length, not its first line) and, for a
+`file-write`/`file-edit`, the whole unified `diff`. A client that lets the
+user decide must show all of it, or say plainly that it does not; a
+command cut short can look harmless when its end is not.
+
+Each of the two text fields is bounded at 4 MiB, far above anything a
+person reads (the diff of the largest file Spettro diffs at all fits).
+Past that the text ends with a line
+`[truncated: N of M bytes not shown; this is not the whole text]`, the
+matching `command_truncated`/`diff_truncated` is `true`, and
+`command_bytes`/`diff_bytes` give the full size. A client should check the
+flag rather than guess from the text.
 
 ### Ask-user forms
 

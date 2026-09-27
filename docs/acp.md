@@ -275,9 +275,15 @@ worktree for an isolated sub-agent) or network target wins, else the newest.
 The request carries:
 
 - for a file change, a `diff` block of the exact change (for a file too
-  large to diff structurally, the unified diff as text);
-- for a command, the reason and the command segments still needing
-  approval;
+  large to diff structurally, the whole unified diff as text);
+- for a command, the whole command as a fenced code block, then the reason
+  and the command segments still needing approval; for a network access,
+  the whole target the same way. A card's title and `rawInput` are clipped
+  (see **Streaming**), so this block is where the editor shows everything
+  being approved. It is cut only past 4 MiB, far beyond any command or diff
+  a person reads, and then a `[truncated: N of M bytes not shown; this is
+  not the whole text]` line follows the block, so a cut text never reads as
+  the whole;
 - options `allow-once` ("Allow once"), `allow-always` and `deny` ("Deny").
   `allow-always` is offered only for commands and network targets, the
   approvals Spettro remembers (in the project's allowed-commands and
