@@ -75,3 +75,21 @@ func TestFooterPointsAtThePanelOnlyWhereItFits(t *testing.T) {
 		}
 	}
 }
+
+// Found in a VHS screenshot of parallel approvals: denying one approval
+// stopped the run, but the "agents" footer kept listing both sub-agents as
+// running, with the input idle, until the next run. A stop clears them.
+func TestStoppedRunDropsItsSubAgentsFromTheFooter(t *testing.T) {
+	m := footerModel(120, 40)
+	footerWorkers(&m, 2)
+	m.thinking = true
+	m = m.recalcLayout()
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "survey subsystem 1") {
+		t.Fatalf("the running sub-agents are not listed:\n%s", plain)
+	}
+	m.interruptRun("Command denied by user.", true)
+	m = m.recalcLayout()
+	if plain := ansi.Strip(m.View().Content); strings.Contains(plain, "survey subsystem") {
+		t.Fatalf("the stopped run's sub-agents are still listed:\n%s", plain)
+	}
+}

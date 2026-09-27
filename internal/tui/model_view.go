@@ -855,7 +855,7 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 	}
 	header := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("  agents")
 	// The tightest form still says the work exists and where to look.
-	compact := []string{header + styleMuted.Render(fmt.Sprintf("  %d running · ctrl+b", len(active)))}
+	compact := []string{header + styleMuted.Render(fmt.Sprintf("  %d running%s", len(active), m.panelKeyHint(" · ", "")))}
 	if rows == 1 {
 		return compact
 	}

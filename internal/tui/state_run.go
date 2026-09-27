@@ -41,6 +41,10 @@ func (m *Model) stopAgent() {
 	m.currentTool = nil
 	m.pendingAuth = nil
 	m.pendingQuestion = nil
+	// The stopped run's done message is ignored (isActiveRun), so
+	// resetRunState never runs for it: its sub-agents are cleared here, or
+	// the "agents" footer kept listing them as running after the stop.
+	m.parallelAgents = nil
 	*m = m.resetApprovalUI()
 	m.progressNote = ""
 	m.activePrompt = nil

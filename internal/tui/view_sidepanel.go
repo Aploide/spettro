@@ -46,11 +46,15 @@ func (m Model) sidePanelFits() bool {
 }
 
 // panelKeyHint is the "<sep>ctrl+b for <what>" tail of a footer or banner
-// that points at the side panel, or "" on a terminal too small to draw it,
-// where ctrl+b would show nothing (it only says where the panel shows).
+// that points at the side panel ("<sep>ctrl+b" when what is empty), or ""
+// on a terminal too small to draw it, where ctrl+b would show nothing (it
+// only says where the panel shows).
 func (m Model) panelKeyHint(sep, what string) string {
 	if !m.sidePanelFits() {
 		return ""
+	}
+	if what == "" {
+		return sep + "ctrl+b"
 	}
 	return sep + "ctrl+b for " + what
 }
