@@ -1,8 +1,10 @@
 package termtext
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -114,5 +116,67 @@ func TestWrapKeepsEveryCellAndFits(t *testing.T) {
 	}
 	if want := strings.ReplaceAll(in, " ", ""); joined.String() != want {
 		t.Fatal("wrapping lost or reordered text")
+	}
+}
+
+// Text that is not valid UTF-8 (a Windows-1252 file read or printed by a
+// tool) must not reach the terminal raw: a lone byte in 0x80..0x9F is a C1
+// control to the renderer, so 0x9B would start a CSI sequence and swallow
+// the text after it. SanitizeLine replaces such bytes with U+FFFD, keeping
+// everything around them.
+func TestSanitizeLineReplacesInvalidUTF8(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"quote \x9btext", "quote \uFFFDtext"},
+		{"x\x9b31mRED", "x\uFFFD31mRED"},
+		{"price \x80100 \x96 cheap", "price \uFFFD100 \uFFFD cheap"},
+	}
+	for _, tc := range cases {
+		got := SanitizeLine(tc.in)
+		if got != tc.want {
+			t.Errorf("SanitizeLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("SanitizeLine(%q) = %q is not valid UTF-8", tc.in, got)
+		}
+	}
+}
+
+// EscapeControls names every character it cannot show: an invalid byte is
+// written as "\x9b", and a Unicode format character (a bidi override or
+// isolate, a zero-width character, the byte-order mark), which prints
+// nothing but can reorder or hide text on some terminals, as a "\u202e"-style
+// escape.
+func TestEscapeControlsShowsInvalidBytesAndFormatCharacters(t *testing.T) {
+	// The format characters are built from their code points so that this
+	// file shows which ones are tested; escaped is the form EscapeControls
+	// writes for each.
+	char := func(r rune) string { return string(r) }
+	escaped := func(r rune) string { return fmt.Sprintf("%su%04x", `\`, r) }
+	const (
+		rightToLeftOverride = 0x202e
+		leftToRightIsolate  = 0x2066
+		popDirectional      = 0x2069
+		zeroWidthSpace      = 0x200b
+		wordJoiner          = 0x2060
+		byteOrderMark       = 0xfeff
+	)
+	cases := []struct {
+		in, want string
+	}{
+		{"quote \x9btext", `quote \x9btext`},
+		{"price \x80100", `price \x80100`},
+		{"rm -rf ~ #" + char(rightToLeftOverride) + " hi", "rm -rf ~ #" + escaped(rightToLeftOverride) + " hi"},
+		{"a" + char(leftToRightIsolate) + "b" + char(popDirectional) + "c",
+			"a" + escaped(leftToRightIsolate) + "b" + escaped(popDirectional) + "c"},
+		{"zero" + char(zeroWidthSpace) + "width" + char(wordJoiner) + "joiner" + char(byteOrderMark),
+			"zero" + escaped(zeroWidthSpace) + "width" + escaped(wordJoiner) + "joiner" + escaped(byteOrderMark)},
+		{"h\xc3\xa9llo \xe4\xb8\xad\xe6\x96\x87", "h\xc3\xa9llo \xe4\xb8\xad\xe6\x96\x87"},
+	}
+	for _, tc := range cases {
+		if got := EscapeControls(tc.in); got != tc.want {
+			t.Errorf("EscapeControls(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

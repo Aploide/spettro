@@ -17,6 +17,8 @@ package termtext
 import (
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -34,6 +36,12 @@ const Ellipsis = "…"
 // dropped. s is expected to be a single line; a "\n" inside it is treated like
 // any other control character and dropped.
 //
+// Bytes that are not valid UTF-8 (a Windows-1252 file, a binary blob) each
+// become U+FFFD, the replacement character, before anything else looks at
+// the text. Left in place, a lone byte in 0x80..0x9F is a C1 control to the
+// terminal and to the renderer: 0x9B starts a CSI sequence that swallows
+// the text after it or recolours it, and 0x80 or 0x96 vanish.
+//
 // Carriage returns are resolved the way a terminal shows them: a progress
 // meter that redraws itself with "\r" (downloads, test runners) leaves only
 // its final state on screen, so only the text after the last "\r" is kept.
@@ -43,16 +51,17 @@ func SanitizeLine(s string) string {
 	if i := strings.LastIndexByte(s, '\r'); i >= 0 {
 		s = s[i+1:]
 	}
-	if isPlainPrintable(s) {
+	if isPlainPrintable(s, false) {
 		return s
 	}
+	s = strings.ToValidUTF8(s, string(utf8.RuneError))
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range ansi.Strip(s) {
 		switch {
 		case r == '\t':
 			b.WriteString(strings.Repeat(" ", TabWidth))
-		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+		case isControl(r):
 			// A control character has no width and no meaning on screen;
 			// dropping it is the only handling that cannot move the cursor.
 		default:
@@ -62,26 +71,42 @@ func SanitizeLine(s string) string {
 	return b.String()
 }
 
-// EscapeControls returns s with every control character made visible instead
-// of removed: tabs become TabWidth spaces and other C0 controls are written in
-// caret notation ("^M" for a carriage return, "^[" for the escape that starts
-// a colour sequence, "^?" for DEL); C1 controls are written as "\u0085"-style
-// escapes. A trailing "\r" (a CRLF line ending split on "\n") is dropped,
-// since it is how the line ends, not what it says.
+// EscapeControls returns s with every character that would not show as
+// itself made visible instead of removed:
+//
+//   - a tab becomes TabWidth spaces;
+//   - other C0 controls are written in caret notation ("^M" for a carriage
+//     return, "^[" for the escape that starts a colour sequence, "^?" for
+//     DEL);
+//   - C1 controls and Unicode format characters are written as
+//     "\u0085"-style escapes. Format characters (general category Cf) print
+//     nothing but still act: bidi overrides and isolates (U+202A..U+202E,
+//     U+2066..U+2069) make a terminal that applies bidi reorder the text
+//     around them, and zero-width characters (U+200B, U+2060, the U+FEFF
+//     byte-order mark) hide inside a word;
+//   - a byte that is not valid UTF-8 is written as "\x9b".
+//
+// A trailing "\r" (a CRLF line ending split on "\n") is dropped, since it is
+// how the line ends, not what it says.
 //
 // Use it, not SanitizeLine, for text the user is asked to judge: a command
 // waiting for approval or a file change being shown as a diff. SanitizeLine
 // shows what a terminal would, and a terminal would let "rm -rf ~ #\recho hi"
 // display as "echo hi"; this shows every character that is actually there.
+// The price is that text which legitimately uses a format character (an
+// emoji joined with U+200D, say) shows the escape instead.
 func EscapeControls(s string) string {
 	s = strings.TrimRight(s, "\r")
-	if isPlainPrintable(s) {
+	if isPlainPrintable(s, true) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 8)
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, "\\x%02x", s[i])
 		case r == '\t':
 			b.WriteString(strings.Repeat(" ", TabWidth))
 		case r < 0x20:
@@ -89,27 +114,49 @@ func EscapeControls(s string) string {
 			b.WriteRune(r + 0x40)
 		case r == 0x7f:
 			b.WriteString("^?")
-		case r >= 0x80 && r <= 0x9f:
+		case isControl(r), unicode.Is(unicode.Cf, r):
 			fmt.Fprintf(&b, "\\u%04x", r)
 		default:
 			b.WriteRune(r)
 		}
+		i += size
 	}
 	return b.String()
 }
 
-// isPlainPrintable reports whether s has no byte SanitizeLine would change,
-// so the common case (ordinary ASCII or UTF-8 text) skips the rebuild. Bytes
-// at or above 0x80 are allowed through here and checked by the slow path only
-// when some other byte already forced it; C1 controls (U+0080..U+009F) are
-// encoded as 0xC2 0x80..0x9F, which this check catches.
-func isPlainPrintable(s string) bool {
+// isControl reports whether r is a C0 control, DEL or a C1 control: the
+// characters a terminal acts on instead of printing.
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// isPlainPrintable reports whether s is valid UTF-8 with no control
+// character, and, when formatToo is set, no Unicode format character
+// either: text SanitizeLine (formatToo false) or EscapeControls (formatToo
+// true) would return unchanged. It lets the common case, ordinary ASCII,
+// skip the rebuild after one pass over the bytes; only text with a byte at
+// or above 0x80 is decoded rune by rune.
+func isPlainPrintable(s string, formatToo bool) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < 0x20 || c == 0x7f {
 			return false
 		}
-		if c == 0xc2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9f {
+		if c >= 0x80 {
+			return isPlainUnicode(s[i:], formatToo)
+		}
+	}
+	return true
+}
+
+// isPlainUnicode is the rune-by-rune half of isPlainPrintable, for text that
+// is not pure ASCII.
+func isPlainUnicode(s string, formatToo bool) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if isControl(r) || (formatToo && unicode.Is(unicode.Cf, r)) {
 			return false
 		}
 	}
