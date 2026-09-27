@@ -36,7 +36,7 @@ func (m *Model) stopAgent() {
 	m.currentTool = nil
 	m.pendingAuth = nil
 	m.pendingQuestion = nil
-	m.approvalCursor = 0
+	*m = m.resetApprovalUI()
 	m.progressNote = ""
 	m.activePrompt = nil
 	m.activeAgentID = ""

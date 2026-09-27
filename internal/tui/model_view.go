@@ -731,7 +731,7 @@ func (m Model) dialogMinInputRows() int {
 	}
 	switch {
 	case m.pendingAuth != nil:
-		return 2 + 1 + 1 + m.approvalControlRows()
+		return 2 + 1 + 1 + m.approvalLatchedControlRows()
 	case m.pendingQuestion != nil:
 		return 3 + questionMinBlockRows
 	}

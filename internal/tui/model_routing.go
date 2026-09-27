@@ -9,12 +9,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/config"
+	"spettro/internal/remote"
 	"spettro/internal/theme"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	newModel, cmd := m.update(msg)
 	if nm, ok := newModel.(Model); ok {
+		// Settle whether a pending approval offers its review (the picker
+		// grows a row) before the layout measures the input area (see
+		// dialog_approvals.go).
+		nm.syncApprovalReview()
 		nm = nm.recalcLayout()
 		return nm, cmd
 	}
@@ -499,18 +504,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellApprovalRequestMsg:
 		if m.thinking {
 			m.pendingAuth = &msg
-			m.approvalCursor = 0
-			m.approvalPreviewExpanded = false
-			m.approvalScroll = 0
+			m = m.resetApprovalUI()
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
 			m.notifyIfUnfocused("Agent is waiting for command approval")
-			m.publishRemote("approval_request", map[string]any{
-				"command":  msg.request.Command,
-				"tool_id":  msg.request.ToolID,
-				"segments": msg.request.Segments,
-				"reason":   msg.request.Reason,
-			})
+			m.publishRemote("approval_request", remote.ApprovalEvent(remote.ApprovalRequest{
+				ToolID:   msg.request.ToolID,
+				Command:  msg.request.Command,
+				Reason:   msg.request.Reason,
+				Segments: msg.request.Segments,
+				Diff:     msg.request.Diff,
+			}))
 			if m.approvalCh != nil {
 				cmds = append(cmds, waitForShellApproval(m.approvalCh))
 			}
@@ -690,6 +694,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ensureResumeWindow()
 				return m, tea.Batch(cmds...)
 			}
+		}
+		if m.activeModal() == modalApprovalReview {
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				m = m.scrollApprovalReview(-3)
+			case tea.MouseWheelDown:
+				m = m.scrollApprovalReview(3)
+			}
+			return m, tea.Batch(cmds...)
 		}
 		sideW := m.sidePanelWidth()
 		onSidePanel := sideW > 0 && mouse.X >= m.paneWidth()+1

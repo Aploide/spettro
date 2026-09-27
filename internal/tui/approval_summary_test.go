@@ -32,9 +32,9 @@ func TestFileApprovalSummaryKeepsTheFileName(t *testing.T) {
 	}
 
 	// A shell command is still cut at its end: its start is what matters,
-	// and the preview shows the rest.
+	// and the preview shows the rest. A cut row says so.
 	row := approvalSummaryRow(agent.ShellApprovalRequest{ToolID: "bash", Command: "bash " + strings.Repeat("x", 200)}, 40)
-	if got := ansi.Strip(row); !strings.HasPrefix(got, "  $ bash xxx") || !strings.HasSuffix(got, "…") {
+	if got := ansi.Strip(row); !strings.HasPrefix(got, "  $ bash xxx") || !strings.HasSuffix(got, "…"+approvalCutMarker) {
 		t.Fatalf("shell summary row = %q, want it cut at the end", got)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -124,24 +125,32 @@ type apiResponse struct {
 
 // call POSTs JSON to the given method and decodes the OK envelope.
 func (c *BotClient) call(ctx context.Context, method string, payload any, out any) error {
-	if strings.TrimSpace(c.token) == "" {
-		return errors.New("telegram: bot token is empty")
-	}
 	var body io.Reader
+	contentType := ""
 	if payload != nil {
 		buf, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("telegram: marshal %s: %w", method, err)
 		}
 		body = bytes.NewReader(buf)
+		contentType = "application/json"
+	}
+	return c.post(ctx, method, body, contentType, out)
+}
+
+// post POSTs body (of contentType, none when body is nil) to the given
+// method and decodes the OK envelope into out.
+func (c *BotClient) post(ctx context.Context, method string, body io.Reader, contentType string, out any) error {
+	if strings.TrimSpace(c.token) == "" {
+		return errors.New("telegram: bot token is empty")
 	}
 	endpoint := fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.token, method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return fmt.Errorf("telegram: build %s: %w", method, err)
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -311,4 +320,46 @@ func FormatChatTarget(username string, id int64) string {
 	default:
 		return ""
 	}
+}
+
+// MaxDocumentBytes is the largest file SendDocument uploads: the Bot API
+// accepts up to 50 MB from bots; this stays well below.
+const MaxDocumentBytes = 20 << 20
+
+// SendDocument uploads data as a file named filename to the given chat, with
+// an optional caption (at most 1024 characters, the Bot API limit). It is how
+// the relay delivers a text too long for chat messages, such as the full diff
+// of an approval (see FormatApproval).
+func (c *BotClient) SendDocument(ctx context.Context, chatID int64, filename string, data []byte, caption string) (*Message, error) {
+	if len(data) == 0 {
+		return nil, errors.New("telegram: SendDocument with empty data")
+	}
+	if len(data) > MaxDocumentBytes {
+		return nil, fmt.Errorf("telegram: document %s is %d bytes, over the %d-byte limit", filename, len(data), MaxDocumentBytes)
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return nil, err
+	}
+	if caption = strings.TrimSpace(caption); caption != "" {
+		if err := w.WriteField("caption", caption); err != nil {
+			return nil, err
+		}
+	}
+	part, err := w.CreateFormFile("document", filename)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := part.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	var msg Message
+	if err := c.post(ctx, "sendDocument", &buf, w.FormDataContentType(), &msg); err != nil {
+		return nil, err
+	}
+	return &msg, nil
 }

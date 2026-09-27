@@ -145,10 +145,3 @@ func (m Model) handlePlanEdit(editInstruction string) (tea.Model, tea.Cmd) {
 	m.planEditing = false
 	return m.runAgent(spec, task, nil, nil)
 }
-
-var shellApprovalOptions = []string{
-	"Allow once",
-	"Allow always  (remember this command)",
-	"Deny",
-	"Tell the agent what to do instead",
-}

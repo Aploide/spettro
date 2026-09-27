@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"strings"
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
@@ -159,5 +160,73 @@ func TestAlwaysAllowLabelNamesWhatIsRemembered(t *testing.T) {
 	command := subjectOf(agent.ShellApprovalRequest{ToolID: "bash", Command: "make", Segments: []string{"make"}})
 	if got := alwaysAllowLabel(command); got != "Always allow this command" {
 		t.Errorf("command label %q", got)
+	}
+}
+
+// approvalTexts is the text of every text block of an approval prompt.
+func approvalTexts(ar agent.ShellApprovalRequest) []string {
+	var out []string
+	for _, c := range approvalContent(ar) {
+		if c.Content != nil && c.Content.Content.Text != nil {
+			out = append(out, c.Content.Content.Text.Text)
+		}
+	}
+	return out
+}
+
+// The prompt carries the whole command: the card's title and rawInput are
+// clipped (120 runes, 2 KiB), so without this an editor showed a 50k
+// heredoc as its first line and asked to approve it.
+func TestApprovalContentCarriesTheWholeCommand(t *testing.T) {
+	command := "cat <<'EOF' > out.txt\n" + strings.Repeat("line with ``` fences and text\n", 2000) + "EOF\nrm -rf build"
+	texts := approvalTexts(agent.ShellApprovalRequest{ToolID: "bash", Command: command, Segments: []string{"cat", "rm -rf build"}, Reason: "non-whitelisted command"})
+	if len(texts) != 2 || !strings.Contains(texts[0], command) || strings.Contains(texts[0], "truncated") {
+		t.Fatalf("the command block does not hold the whole command (%d blocks)", len(texts))
+	}
+	// The fence is longer than the backtick runs inside, so the command
+	// cannot close it and show its tail as prose.
+	if !strings.HasPrefix(texts[0], "````sh\n") || !strings.HasSuffix(texts[0], "\n````") {
+		t.Fatalf("fence: %.20q ... %.20q", texts[0], texts[0][len(texts[0])-20:])
+	}
+	if !strings.Contains(texts[1], "needs approval: cat | rm -rf build") {
+		t.Fatalf("note = %q", texts[1])
+	}
+
+	network := approvalTexts(agent.ShellApprovalRequest{Command: "network web-fetch https://example.com/?q=" + strings.Repeat("a", 5000) + "&key=TAIL"})
+	if len(network) == 0 || !strings.Contains(network[0], "&key=TAIL") {
+		t.Fatal("a network approval does not carry the whole target")
+	}
+}
+
+// A diff shown as text (no structured change, or a file too large for one)
+// is whole, where it used to be cut at 16 KiB.
+func TestApprovalContentCarriesTheWholeDiff(t *testing.T) {
+	diff := "--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,5000 @@\n" + strings.Repeat("+a line of the new file\n", 5000)
+	for _, ar := range []agent.ShellApprovalRequest{
+		{ToolID: "file-write", Command: "file-write big.txt", Diff: diff},
+		{ToolID: "file-write", Command: "file-write big.txt", Diff: diff, Change: &agent.FileChange{Path: "/p/big.txt", Created: true, TextOmitted: true}},
+	} {
+		var found bool
+		for _, text := range approvalTexts(ar) {
+			if strings.Contains(text, strings.TrimRight(diff, "\n")) {
+				found = true
+			}
+			if strings.Contains(text, "truncated") || strings.Contains(text, "more bytes not shown") {
+				t.Fatalf("a %d-byte diff was cut", len(diff))
+			}
+		}
+		if !found {
+			t.Fatalf("the diff is not in the prompt whole (change=%v)", ar.Change != nil)
+		}
+	}
+}
+
+// Past the (very generous) bound the text is cut with an explicit note
+// outside the code block.
+func TestApprovalTextBlockSaysItWasCut(t *testing.T) {
+	block := approvalTextBlock("sh", strings.Repeat("x", maxApprovalTextBytes+100))
+	text := block.Content.Content.Text.Text
+	if !strings.Contains(text, "\n```\n\n[truncated: 100 of ") || !strings.HasSuffix(text, "not the whole text]") {
+		t.Fatalf("cut block ends %q", text[len(text)-120:])
 	}
 }

@@ -602,18 +602,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// RequestApproval publishes an approval_request event and blocks until the
-// Android client responds via POST /approval. ctx cancellation returns deny.
-func (s *Server) RequestApproval(ctx context.Context, toolID, command, reason string) (ApprovalDecision, error) {
+// RequestApproval publishes an approval_request event (ApprovalEvent: the
+// whole command and diff) and blocks until the Android client responds via
+// POST /approval. ctx cancellation returns deny.
+func (s *Server) RequestApproval(ctx context.Context, req ApprovalRequest) (ApprovalDecision, error) {
 	ch := make(chan ApprovalDecision, 1)
-	s.pendingApprovals.Store(toolID, ch)
-	defer s.pendingApprovals.Delete(toolID)
+	s.pendingApprovals.Store(req.ToolID, ch)
+	defer s.pendingApprovals.Delete(req.ToolID)
 
-	s.Publish("approval_request", map[string]any{
-		"tool_id": toolID,
-		"command": command,
-		"reason":  reason,
-	})
+	s.Publish("approval_request", ApprovalEvent(req))
 
 	select {
 	case dec := <-ch:

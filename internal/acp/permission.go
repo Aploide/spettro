@@ -31,6 +31,15 @@ package acp
 // label names what is remembered, which for a network approval depends on
 // the tool (see networkTargets): it is never a whole site.
 //
+// Content. What the prompt shows is what is approved, in full: the proposed
+// change as a real diff (or the whole unified diff as text when the file is
+// too large for one), the whole command, or the whole network target. Tool
+// call titles and rawInput are clipped for every card (see tools.go); an
+// approval's content is not, beyond maxApprovalTextBytes, which no command or
+// diff a person reads comes near. Past it the text ends with an explicit
+// "[truncated: ...]" line (remote.ClipApprovalText), so a cut is never shown
+// as the whole: a person must be able to trust what they approve.
+//
 // Timeouts. The request is bound to the tool's own deadline (timeout_sec in
 // the manifest, e.g. 120 s for bash and 60 s for file edits): when it passes
 // unanswered, or the turn is cancelled, the SDK withdraws the request with
@@ -47,6 +56,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/agent"
+	"spettro/internal/remote"
 )
 
 // Permission option IDs. They are echoed back by the client, so they must
@@ -323,21 +333,34 @@ func approvalTitle(subject approvalSubject, ar agent.ShellApprovalRequest) strin
 	return clipLine(ar.Command, maxTitleRunes)
 }
 
+// maxApprovalTextBytes bounds the command or diff text of one approval
+// prompt (see the package comment: Content).
+const maxApprovalTextBytes = remote.MaxApprovalFieldBytes
+
 // approvalContent is what the prompt shows: the proposed change as a real
-// diff when the runtime supplied one, else the unified diff as text, and
-// the reason plus the command segments that still need approval.
+// diff when the runtime supplied one, else the whole unified diff as text;
+// for anything that is not a file change, the whole command or network
+// target; then the reason plus the command segments that still need
+// approval.
 func approvalContent(ar agent.ShellApprovalRequest) []acpsdk.ToolCallContent {
 	var out []acpsdk.ToolCallContent
 	switch {
 	case ar.Change != nil:
 		out = append(out, fileChangeContent([]agent.FileChange{*ar.Change})...)
-		if ar.Change.TextOmitted && strings.TrimSpace(ar.Diff) != "" {
+		if fileChangeOmitted(*ar.Change) && strings.TrimSpace(ar.Diff) != "" {
 			// The file is too large for a structured diff; the unified diff
 			// the runtime computed still shows what changes.
-			out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes("```diff\n"+ar.Diff+"\n```", maxToolTextBytes))))
+			out = append(out, approvalTextBlock("diff", ar.Diff))
 		}
 	case strings.TrimSpace(ar.Diff) != "":
-		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes("```diff\n"+ar.Diff+"\n```", maxToolTextBytes))))
+		out = append(out, approvalTextBlock("diff", ar.Diff))
+	case subjectOf(ar).network:
+		// The card's title and rawInput are clipped; this is the whole
+		// target ("network <tool> <target>") the user is approving.
+		out = append(out, approvalTextBlock("", ar.Command))
+	case strings.TrimSpace(ar.Command) != "":
+		// Likewise the whole command.
+		out = append(out, approvalTextBlock("sh", ar.Command))
 	}
 	note := strings.TrimSpace(ar.Reason)
 	if len(ar.Segments) > 0 {
@@ -347,4 +370,45 @@ func approvalContent(ar agent.ShellApprovalRequest) []acpsdk.ToolCallContent {
 		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes(note, maxToolTextBytes))))
 	}
 	return out
+}
+
+// fileChangeOmitted reports whether fileChangeContent leaves change out of
+// its structured diffs (texts dropped, or too large for one update).
+func fileChangeOmitted(change agent.FileChange) bool {
+	return change.TextOmitted || len(change.OldText)+len(change.NewText) > maxDiffBytesPerUpdate
+}
+
+// approvalTextBlock is text as a fenced code block of language lang, cut to
+// maxApprovalTextBytes with an explicit note after the fence when it is
+// longer. The fence is longer than any run of backticks in text, so the text
+// cannot close it early and show part of itself as prose.
+func approvalTextBlock(lang, text string) acpsdk.ToolCallContent {
+	body, cut := remote.ClipApprovalText(strings.TrimRight(text, "\n"), maxApprovalTextBytes)
+	note := ""
+	if cut {
+		// ClipApprovalText ends a cut text with its note; move the note out
+		// of the code block so it reads as a statement, not as code.
+		i := strings.LastIndex(body, "\n[truncated:")
+		body, note = body[:i], body[i+1:]
+	}
+	fence := strings.Repeat("`", max(3, longestRun(body, '`')+1))
+	block := fence + lang + "\n" + body + "\n" + fence
+	if note != "" {
+		block += "\n\n" + note
+	}
+	return acpsdk.ToolContent(acpsdk.TextBlock(block))
+}
+
+// longestRun is the length of the longest run of c in s.
+func longestRun(s string, c byte) int {
+	best, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			run++
+			best = max(best, run)
+		} else {
+			run = 0
+		}
+	}
+	return best
 }

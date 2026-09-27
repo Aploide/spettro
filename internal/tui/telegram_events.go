@@ -90,14 +90,16 @@ func (m *Model) dispatchTelegramEvent(kind string, data map[string]any) {
 			m.telegramRelay.ExpectAnswer(chatID, true)
 		}
 	case "approval_request":
-		cmd, _ := data["command"].(string)
-		reason, _ := data["reason"].(string)
-		text := "‼ shell approval required\n  command: " + telegram.Truncate(cmd, 1000)
-		if reason != "" {
-			text += "\n  reason:  " + reason
-		}
-		text += "\n\nApprove or deny inside the TUI."
-		m.telegramBroadcastAsync(text)
+		// The whole command or diff, never a cut one presented as whole:
+		// long ones go as a head plus an attachment (telegram.FormatApproval).
+		a := telegram.Approval{}
+		a.ToolID, _ = data["tool_id"].(string)
+		a.Command, _ = data["command"].(string)
+		a.Reason, _ = data["reason"].(string)
+		a.Diff, _ = data["diff"].(string)
+		text, doc := telegram.FormatApproval(a)
+		relay := m.telegramRelay
+		go relay.BroadcastApproval(text, doc)
 	case "commit":
 		msg, _ := data["message"].(string)
 		if msg != "" {

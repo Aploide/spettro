@@ -268,7 +268,13 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 						if cfg.Permission == config.PermissionYOLO {
 							return agent.ShellApprovalAllowOnce, nil
 						}
-						dec, err := server.RequestApproval(sctx, ar.ToolID, ar.Command, ar.Reason)
+						dec, err := server.RequestApproval(sctx, remote.ApprovalRequest{
+							ToolID:   ar.ToolID,
+							Command:  ar.Command,
+							Reason:   ar.Reason,
+							Segments: ar.Segments,
+							Diff:     ar.Diff,
+						})
 						if err != nil {
 							return agent.ShellApprovalDeny, err
 						}
