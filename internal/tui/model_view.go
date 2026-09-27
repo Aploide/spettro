@@ -97,8 +97,10 @@ func (m Model) viewContent() string {
 		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
 	}
 	sidePane := m.viewSidePanel(sideW)
-	divider := lipgloss.NewStyle().Foreground(theme.Current().Border).Render("│")
-	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
+	// A blank gutter column between the panes: the panel draws its own
+	// border. The gutter was once a one-row "│", which JoinHorizontal left
+	// as a stray tick at the end of the transcript's top rule.
+	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, " ", sidePane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
