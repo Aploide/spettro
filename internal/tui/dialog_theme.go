@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 
@@ -105,8 +106,14 @@ func (m Model) viewThemePicker() string {
 	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select theme")
 	rows := []string{diagFillTitle(titleLabel, innerW), ""}
 
+	// The descriptions start in one column: labels are padded to the
+	// longest ("light" is a cell longer than "auto" and "dark").
+	labelW := 0
+	for _, k := range themePickerOrder {
+		labelW = max(labelW, len(k.String()))
+	}
 	for i, k := range themePickerOrder {
-		label := k.String()
+		label := fmt.Sprintf("%-*s", labelW, k.String())
 		desc := themePickerDesc[k]
 		// Auto is the only option whose name does not say what you will get,
 		// so it carries what choosing it would resolve to right now.
