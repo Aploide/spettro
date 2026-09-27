@@ -2,126 +2,11 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"math/rand"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
-
-// sequentialWalk is the walker as it was before the parallel one (a
-// filepath.WalkDir with the same filters), kept as the oracle for the
-// parallel walker's order and filtering.
-func sequentialWalk(w workspaceWalker, root string) []string {
-	var out []string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(w.cwd, path)
-		rel = filepath.ToSlash(rel)
-		if d.IsDir() {
-			if path == root {
-				return nil
-			}
-			if skipDirs[d.Name()] || w.ignores.ignored(path, true) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !w.keepFile(path, d) || w.ignores.ignored(path, false) {
-			return nil
-		}
-		out = append(out, rel)
-		return nil
-	})
-	return out
-}
-
-// randomWorkspace writes a random tree with nested .gitignore files, skipDirs
-// names, symlinks and names chosen to make walk order differ from plain
-// string order ("a" < "a.go" < "a0", "a/b" before "a.go").
-func randomWorkspace(t *testing.T, rng *rand.Rand) string {
-	t.Helper()
-	root := t.TempDir()
-	names := []string{"a", "a.go", "a0", "b", "C", "build", "node_modules", "x.log", "keep.log", "z.txt", ".hidden", "sub"}
-	files := map[string]string{}
-	for range 150 {
-		var parts []string
-		for range 1 + rng.Intn(4) {
-			parts = append(parts, names[rng.Intn(len(names))])
-		}
-		files[strings.Join(parts, "/")] = "match me\n"
-	}
-	// Drop files whose path is a directory of another file.
-	for p := range files {
-		for q := range files {
-			if strings.HasPrefix(q, p+"/") {
-				delete(files, p)
-				break
-			}
-		}
-	}
-	writeTree(t, root, files)
-	ignores := []string{"*.log\n!keep.log\n", "a0/\n", "/z.txt\n", "sub/a\n", "C\n"}
-	writeTree(t, root, map[string]string{".gitignore": ignores[rng.Intn(len(ignores))]})
-	for d := range files {
-		if dir := filepath.Dir(filepath.FromSlash(d)); dir != "." && rng.Intn(6) == 0 {
-			writeTree(t, root, map[string]string{filepath.ToSlash(filepath.Join(dir, ".gitignore")): ignores[rng.Intn(len(ignores))]})
-		}
-	}
-	_ = os.Symlink("a.go", filepath.Join(root, "link.go"))
-	_ = os.Symlink("sub", filepath.Join(root, "linkdir"))
-	return root
-}
-
-// The parallel walker visits exactly what a sequential WalkDir walk with the
-// same filters visits, in the same order.
-func TestWalkMatchesSequentialOracle(t *testing.T) {
-	rng := rand.New(rand.NewSource(7))
-	for i := range 25 {
-		root := randomWorkspace(t, rng)
-		for _, symlinked := range []bool{false, true} {
-			w := workspaceWalker{cwd: root, ignores: newGitignoreSet(), symlinkedFiles: symlinked}
-			var got []string
-			if err := w.walk(context.Background(), root, func(_, rel string, _ fs.DirEntry) error {
-				got = append(got, rel)
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			want := sequentialWalk(workspaceWalker{cwd: root, ignores: newGitignoreSet(), symlinkedFiles: symlinked}, root)
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("tree %d symlinked=%v:\nparallel   %v\nsequential %v", i, symlinked, got, want)
-			}
-		}
-	}
-}
-
-func TestWalkStopsEarlyAndHonoursCancellation(t *testing.T) {
-	root := randomWorkspace(t, rand.New(rand.NewSource(1)))
-	w := workspaceWalker{cwd: root, ignores: newGitignoreSet()}
-	n := 0
-	err := w.walk(context.Background(), root, func(_, _ string, _ fs.DirEntry) error {
-		n++
-		if n == 3 {
-			return errStopWalk
-		}
-		return nil
-	})
-	if err != nil || n != 3 {
-		t.Fatalf("stop: err=%v visited=%d", err, n)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := w.walk(ctx, root, func(_, _ string, _ fs.DirEntry) error { return nil }); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled walk returned %v", err)
-	}
-}
 
 // The Go grep backend reports matches in walk order and cuts max_results at
 // the same place a one-file-at-a-time search would, however its workers
@@ -237,25 +122,6 @@ func TestGlobLiteralPrefixStart(t *testing.T) {
 		}
 		if out != c.want {
 			t.Errorf("glob %q path %q = %q, want %q", c.pattern, c.path, out, c.want)
-		}
-	}
-}
-
-func TestCompareWalkOrder(t *testing.T) {
-	ordered := []string{"B.go", "a/b.go", "a/c/d.go", "a.go", "a0.go", "b/x"}
-	for i := range ordered {
-		for j := range ordered {
-			got := compareWalkOrder(ordered[i], ordered[j])
-			want := 0
-			switch {
-			case i < j:
-				want = -1
-			case i > j:
-				want = 1
-			}
-			if got != want {
-				t.Errorf("compareWalkOrder(%q, %q) = %d, want %d", ordered[i], ordered[j], got, want)
-			}
 		}
 	}
 }

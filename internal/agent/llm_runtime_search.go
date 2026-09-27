@@ -451,7 +451,7 @@ func (r *toolRuntime) grepWithRipgrep(ctx context.Context, rg string, q grepQuer
 		}
 		if delegated {
 			walker := r.newWorkspaceWalker()
-			keep = func(rel string) bool { return !walker.ignoredBelow(q.rootRel, rel) }
+			keep = func(rel string) bool { return !walker.IgnoredBelow(q.rootRel, rel) }
 		}
 	}
 	args = append(args, "--regexp", q.pattern, "--", q.rootRel)

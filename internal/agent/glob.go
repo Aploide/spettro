@@ -49,7 +49,7 @@ func (r *toolRuntime) runGlob(ctx context.Context, pattern, subPath string) (str
 
 	var matches []string
 	walker := r.newWorkspaceWalker()
-	walker.symlinkedFiles = true
+	walker.SymlinkedFiles = true
 	visit := func(_, rel string, _ fs.DirEntry) error {
 		if globMatchesAny(patterns, rel, rootRel) {
 			matches = append(matches, rel)
@@ -58,7 +58,7 @@ func (r *toolRuntime) runGlob(ctx context.Context, pattern, subPath string) (str
 	}
 	starts := globWalkStarts(root, rootRel, r.cwd, patterns)
 	for _, start := range starts {
-		if !walker.reachable(root, start) {
+		if !walker.Reachable(root, start) {
 			continue
 		}
 		if err := walker.walk(ctx, start, visit); err != nil {
@@ -263,55 +263,4 @@ func outermostDirs(dirs []string) []string {
 func isWithin(dir, path string) bool {
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// reachable reports whether a walk of root would reach start: every
-// directory from below root down to start exists, is a real directory (walks
-// do not follow symlinked directories) and is neither a skipDirs name nor
-// ignored. root itself is never filtered, as in a walk.
-func (w workspaceWalker) reachable(root, start string) bool {
-	if start == root {
-		return true
-	}
-	rel, err := filepath.Rel(root, start)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	dir := root
-	for _, name := range strings.Split(rel, string(filepath.Separator)) {
-		dir = filepath.Join(dir, name)
-		info, err := os.Lstat(dir)
-		if err != nil || !info.IsDir() || skipDirs[name] || w.ignores.ignored(dir, true) {
-			return false
-		}
-	}
-	return true
-}
-
-// compareWalkOrder orders slash paths the way a walk visits them: by
-// segment, each compared as a name ("a/b.go" before "a.go", since the
-// directory "a" sorts before the file "a.go").
-func compareWalkOrder(a, b string) int {
-	for {
-		sa, sb := a, b
-		ia, ib := strings.IndexByte(a, '/'), strings.IndexByte(b, '/')
-		if ia >= 0 {
-			sa = a[:ia]
-		}
-		if ib >= 0 {
-			sb = b[:ib]
-		}
-		if c := strings.Compare(sa, sb); c != 0 {
-			return c
-		}
-		switch {
-		case ia < 0 && ib < 0:
-			return 0
-		case ia < 0:
-			return -1
-		case ib < 0:
-			return 1
-		}
-		a, b = a[ia+1:], b[ib+1:]
-	}
 }
