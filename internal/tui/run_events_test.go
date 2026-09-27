@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
@@ -145,5 +146,87 @@ func TestRunEventsBatchIsApplied(t *testing.T) {
 	}
 	if len(m.messages) != 2 || m.messages[1].Kind != "tool-stream" {
 		t.Fatalf("the tool row did not follow the text: %+v", m.messages)
+	}
+}
+
+// Stopping a run (Esc, a denied approval, a remote interrupt) abandons its
+// queue: a batch the reader had already returned is dropped by Update, and
+// the stopped run's command is not held back waiting for a drain that no
+// reader will ever finish.
+func TestStoppedRunReleasesItsDoneMessage(t *testing.T) {
+	m := footerModel(120, 40)
+	m.thinking = true
+	q := newRunEventQueue()
+	m.runEvents = q
+	tr := agent.ToolTrace{Name: "bash", Status: "error"}
+	q.push(runEvent{trace: &tr})
+	batch := waitForRunEvents(q)()
+	m.stopAgent()
+	nm, _ := m.Update(batch)
+	m = nm.(Model)
+	for _, msg := range m.messages {
+		if msg.Kind == "tool-stream" {
+			t.Fatalf("a batch of the stopped run was applied: %+v", msg)
+		}
+	}
+	q.close() // what the stopped run's command does when a.Run returns
+	select {
+	case <-q.drained:
+	default:
+		t.Fatal("waitDrained still blocks after the run was stopped")
+	}
+	if msg := waitForRunEvents(q)(); msg != nil {
+		t.Fatalf("the reader of an abandoned queue returned %T, want nil", msg)
+	}
+}
+
+// A reader blocked waiting for events returns as soon as the run is stopped.
+func TestAbandonWakesABlockedReader(t *testing.T) {
+	q := newRunEventQueue()
+	done := make(chan tea.Msg, 1)
+	go func() { done <- waitForRunEvents(q)() }()
+	q.abandon()
+	select {
+	case msg := <-done:
+		if msg != nil {
+			t.Fatalf("reader returned %T, want nil", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reader did not return after abandon")
+	}
+}
+
+// The done message of a stopped run must not end a run started after it:
+// it names its run, and only the active run's messages are applied.
+func TestStaleDoneMessageLeavesTheNewRunAlone(t *testing.T) {
+	stopped := newRunEventQueue()
+	for _, msg := range []tea.Msg{
+		agentDoneMsg{run: stopped, err: fmt.Errorf("context canceled")},
+		planDoneMsg{run: stopped, plan: "stale plan"},
+		runEventsMsg{queue: stopped, events: []runEvent{{chunk: &agent.StreamChunk{Kind: agent.StreamKindAnswer, Delta: "stale"}}}},
+	} {
+		m := footerModel(120, 40)
+		m.thinking = true
+		cancelled := false
+		m.cancelAgent = func() { cancelled = true }
+		current := newRunEventQueue()
+		m.runEvents = current
+		nm, _ := m.Update(msg)
+		m = nm.(Model)
+		if !m.thinking || m.runEvents != current || m.cancelAgent == nil || cancelled {
+			t.Fatalf("%T of a stopped run ended the new run: thinking=%v runEvents=%v", msg, m.thinking, m.runEvents == current)
+		}
+		if strings.Contains(ansi.Strip(m.View().Content), "context canceled") {
+			t.Fatalf("%T of a stopped run showed its error on the new run", msg)
+		}
+	}
+	// The active run's own done message still ends it.
+	m := footerModel(120, 40)
+	m.thinking = true
+	current := newRunEventQueue()
+	m.runEvents = current
+	nm, _ := m.Update(agentDoneMsg{run: current, content: "finished"})
+	if nm.(Model).thinking {
+		t.Fatal("the active run's done message did not end it")
 	}
 }

@@ -94,6 +94,11 @@ const localConnectProviderID = "__local_endpoint__"
 type tickMsg time.Time
 
 type agentDoneMsg struct {
+	// run is the event queue of the run that finished, its identity: Update
+	// ignores the message when run is not the active m.runEvents (the run was
+	// stopped, and maybe another started). Nil, as tests send it, matches
+	// any run.
+	run           *runEventQueue
 	content       string
 	meta          string
 	tools         []agent.ToolTrace
@@ -111,6 +116,7 @@ type agentDoneMsg struct {
 }
 
 type planDoneMsg struct {
+	run           *runEventQueue // see agentDoneMsg.run
 	plan          string
 	tools         []agent.ToolTrace
 	tokensUsed    int

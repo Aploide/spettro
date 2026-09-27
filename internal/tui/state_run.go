@@ -30,6 +30,11 @@ func (m *Model) stopAgent() {
 	}
 	m.discardQuestionQueue(fmt.Errorf("cancelled"))
 	m.thinking = false
+	if m.runEvents != nil {
+		// Release the stopped run's reader and its done message now (see
+		// runEventQueue); that message is then ignored by isActiveRun.
+		m.runEvents.abandon()
+	}
 	m.runEvents = nil
 	m.usageCh = nil
 	m.approvalCh = nil

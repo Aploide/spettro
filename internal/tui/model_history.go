@@ -293,13 +293,13 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			close(approvalCh)
 			close(askUserCh)
 			if err != nil {
-				return agentDoneMsg{err: err}
+				return agentDoneMsg{run: events, err: err}
 			}
 			if agentID == "plan" || spec.Mode == "planning" {
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
-				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, messages: result.Messages}
+				return planDoneMsg{run: events, plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, messages: result.Messages}
 			}
-			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary, messages: result.Messages}
+			return agentDoneMsg{run: events, content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, contextTokens: result.ContextTokens, meta: "", goalComplete: result.GoalComplete, goalSummary: result.GoalSummary, messages: result.Messages}
 		},
 	)
 }

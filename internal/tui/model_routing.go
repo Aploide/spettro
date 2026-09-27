@@ -38,6 +38,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return newModel, cmd
 }
 
+// isActiveRun reports whether a message from the run identified by queue
+// belongs to the run in progress. A stopped run's messages do not, even
+// when a new run has started since. A nil queue (tests build messages
+// without one) matches whatever run is in progress.
+func (m *Model) isActiveRun(queue *runEventQueue) bool {
+	return m.thinking && (queue == nil || queue == m.runEvents)
+}
+
 // resetRunState clears every per-run field when an agent or plan run ends, so
 // no channel, cursor, live-tool, or progress state leaks into the next run.
 // Both the agentDoneMsg and planDoneMsg handlers begin with this identical
@@ -130,7 +138,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bannerClearAt = time.Time{}
 		}
 	case agentDoneMsg:
-		if !m.thinking {
+		if !m.isActiveRun(msg.run) {
 			break
 		}
 		m.resetRunState()
@@ -233,7 +241,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoSave()
 		}
 	case planDoneMsg:
-		if !m.thinking {
+		if !m.isActiveRun(msg.run) {
 			break
 		}
 		m.resetRunState()
@@ -419,7 +427,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runEventsMsg:
 		// A batch left over from a stopped run is dropped: its queue is no
 		// longer the active one (tests deliver batches with no queue).
-		if m.thinking && (msg.queue == nil || msg.queue == m.runEvents) {
+		if m.isActiveRun(msg.queue) {
 			for _, ev := range msg.events {
 				if ev.chunk != nil {
 					m.applyStreamChunk(*ev.chunk)

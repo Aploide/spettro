@@ -50,14 +50,24 @@ type runEventsMsg struct {
 // row can no longer be left "running" by a trace that arrived after the
 // run ended.
 //
-// Concurrency: push and close run on agent goroutines, take on the one
-// goroutine running waitForRunEvents' command. mu guards items and closed;
-// wake (capacity 1) only signals that something changed; drained is closed
-// once, by the reader, when it has delivered everything.
+// A run the user stops (Esc, a denied approval, a remote interrupt) is
+// abandoned instead: stopAgent calls abandon on the Update goroutine, which
+// discards whatever is still queued, ends the reader and releases
+// waitDrained at once, so the stopped run's done message is not held back.
+// That message carries the queue as the run's identity (agentDoneMsg.run),
+// and Update drops it when it no longer names the active run, so it cannot
+// end a run started after the stop.
+//
+// Concurrency: push and close run on agent goroutines, abandon on the
+// Update goroutine, take on the one goroutine running waitForRunEvents'
+// command. mu guards items, closed and abandoned; wake (capacity 1) only
+// signals that something changed; drained is closed once, by the reader
+// when it has delivered everything or by abandon.
 type runEventQueue struct {
 	mu        sync.Mutex
 	items     []runEvent
 	closed    bool
+	abandoned bool
 	wake      chan struct{}
 	drained   chan struct{}
 	drainOnce sync.Once
@@ -99,6 +109,24 @@ func (q *runEventQueue) close() {
 	q.signal()
 }
 
+// abandon ends a run the UI stopped: queued events are discarded, later
+// pushes are dropped, the reader returns nil the next time it looks, and
+// waitDrained returns immediately. Safe to call more than once.
+func (q *runEventQueue) abandon() {
+	q.mu.Lock()
+	q.closed = true
+	q.abandoned = true
+	q.items = nil
+	q.mu.Unlock()
+	q.markDrained()
+	q.signal()
+}
+
+// markDrained releases waitDrained; only the first call has an effect.
+func (q *runEventQueue) markDrained() {
+	q.drainOnce.Do(func() { close(q.drained) })
+}
+
 func (q *runEventQueue) signal() {
 	select {
 	case q.wake <- struct{}{}:
@@ -107,10 +135,13 @@ func (q *runEventQueue) signal() {
 }
 
 // take removes and returns everything queued, and whether the queue is
-// closed and drained.
+// closed and drained. An abandoned queue is always empty and drained.
 func (q *runEventQueue) take() ([]runEvent, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.abandoned {
+		return nil, true
+	}
 	items := q.items
 	q.items = nil
 	return items, q.closed && len(items) == 0
@@ -126,7 +157,7 @@ func waitForRunEvents(q *runEventQueue) tea.Cmd {
 				return runEventsMsg{queue: q, events: items}
 			}
 			if done {
-				q.drainOnce.Do(func() { close(q.drained) })
+				q.markDrained()
 				return nil
 			}
 			<-q.wake
