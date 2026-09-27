@@ -288,10 +288,7 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 		agentID = m.mode
 	}
 	key := fmt.Sprintf("tool:%s:%s", t.Name, t.Args)
-	title := formatToolLabel(t.Name, t.Args)
-	if t.Status == "running" {
-		title = formatRunningLabel(t.Name, t.Args)
-	}
+	title := m.toolLabel(t.Name, t.Args, t.Status == "running")
 	bodyParts := []string{}
 	if summary := summarizeToolArgs(t.Name, t.Args); summary != "" {
 		bodyParts = append(bodyParts, summary)

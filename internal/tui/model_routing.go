@@ -50,9 +50,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		oldTranscriptW := m.transcriptWidth()
 		m.width = msg.Width
 		m.height = msg.Height
 		m = m.recalcLayout()
+		if m.ready && m.transcriptWidth() != oldTranscriptW {
+			// The transcript is rendered for one width, and the viewport
+			// cuts rows wider than itself without a trace. Nothing else
+			// re-renders it while the run is idle or waiting on an
+			// approval, so a narrower terminal would keep showing rows
+			// cut mid-word, and a wider one rows wrapped too early.
+			m.refreshViewport()
+		}
 		if !m.ready {
 			m.ready = true
 			if !config.IsTrusted(m.cwd) {
@@ -380,7 +389,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		m.vp.SetContent(m.renderMessages())
+		m.refreshViewport()
 	case toolProgressMsg:
 		if m.thinking {
 			t := msg.trace
@@ -482,12 +491,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolDiffMsg:
 		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
 			m.attachToolDiff(msg.seq, msg.diff)
-			m.vp.SetContent(m.renderMessages())
+			// The diff lands on an earlier tool row after later output may
+			// already be on screen; refreshViewport keeps a view that was
+			// following the latest output at the bottom as the row grows.
+			m.refreshViewport()
 		}
 	case shellApprovalRequestMsg:
 		if m.thinking {
 			m.pendingAuth = &msg
 			m.approvalCursor = 0
+			m.approvalPreviewExpanded = false
+			m.approvalScroll = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
 			m.notifyIfUnfocused("Agent is waiting for command approval")

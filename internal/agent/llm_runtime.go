@@ -1357,7 +1357,11 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			return
 		}
 		if callback != nil && isMajorOperationTool(c.Tool) {
-			msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
+			// The note is one line of the transcript: a heredoc's newlines,
+			// or the "\n... (truncated)" truncate appends, would otherwise
+			// render the start of the script as a paragraph of its own.
+			args := strings.Join(strings.Fields(summarizeLoopToolArgs(c.Tool, callArgs)), " ")
+			msg := fmt.Sprintf("Starting %s (%s).", c.Tool, args)
 			callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 		}
 		if callback != nil {

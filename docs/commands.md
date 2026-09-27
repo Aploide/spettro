@@ -92,8 +92,9 @@
 | `Shift+Tab` | Cycle active mode/agent. |
 | `F2` | Next favorite model. |
 | `Shift+F2` | Previous favorite model. |
-| `Ctrl+O` | Toggle transcript tool details (trimmed outputs). |
+| `Ctrl+O` | Toggle transcript tool details (trimmed outputs). In an approval dialog: expand or collapse the preview. |
 | `Ctrl+G` | Toggle full (untrimmed) tool outputs; implies details visible. |
+| `PgUp` / `PgDn` | Scroll the transcript a page at a time (scrolling back to the bottom resumes following new output). In an approval dialog: scroll the preview (a file change's diff, or a long command) instead. |
 | `Ctrl+C` twice | Quit with safety confirmation. |
 | `Ctrl+Q` | Quit immediately. |
 | `Ctrl+V` | Paste image from clipboard (vision-capable models only). |
@@ -113,6 +114,10 @@
 - `/approve` requires a pending plan (typically produced in `plan` mode).
 - In `ask-first`, coding prompts are gated by approval flow.
 - Shell approval options: allow once, allow always, deny, or provide an alternative instruction.
+- The approval dialog always fits the terminal with every option visible, down to 40x15. It shows the call on one summary row, then a preview when there is more to see: the diff of a `file-write`/`file-edit`, or the full text of anything too long for the summary row: a command (a heredoc, say), or the whole target of a network call (the URL of a `web-fetch` or `download`, query string included). The preview is capped (16 diff lines, 8 command lines) until `Ctrl+O` expands it to every row the terminal can spare, and `PgUp`/`PgDn` scroll it; a footer row says which lines are on screen (`lines 1-8 of 3002`), or that the preview is hidden when the terminal is too short for it. Control characters in a command or a diff are shown rather than interpreted (`^M` for a carriage return, `^[` for an escape), and so are characters that print nothing but can reorder or hide text (bidi overrides, zero-width characters, the byte-order mark, shown as `\u202e`-style escapes) and bytes that are not valid UTF-8 (`\x9b`), so nothing the agent sends can hide part of what you approve.
+- Tool calls and outputs of any size stay inside the terminal. A tool's header row is one line (a multi-line command is folded onto it, a long path is cut from the left so the file name stays visible); output lines wider than the transcript are cut with `…` and a `long lines cut · ctrl+g for full output` note, and `Ctrl+G` shows them whole, wrapped. Escape sequences in output (and in model replies and the activity panel's details) are dropped, bytes that are not valid UTF-8 show as `�`, and progress meters that redraw with carriage returns show their final state. After a resize the transcript is redrawn at the new width. A call of a tool you defined yourself (see [Tools of your own with a built-in's name](tools.md#tools-of-your-own-with-a-built-ins-name)) is labelled with its own name, never as the built-in it shares a name with.
+- With the activity panel open (`Ctrl+B`), the task list moves into the panel (the footer under the transcript is not drawn then); it shows live tasks first and counts completed ones. The panel needs a terminal at least 110 columns wide and 15 rows tall; on a smaller one it is not drawn until the terminal grows again. On a short terminal the footer shrinks, down to nothing, so the transcript keeps at least a row (three on a normal terminal) and whatever is in the input box keeps the rows it needs: the text input during a run, the steer or plan picker, an approval or a question.
+- Markdown tables wider than the transcript have their widest columns narrowed (cells cut with `…`) instead of wrapping, and code-block lines are cut with `…` rather than clipped silently.
 - "Allow always" persists normalized command approvals in `.spettro/allowed_commands.json`.
 - `/connect` includes `Local endpoints (LM Studio/Ollama/llama.cpp/…)` and probes `/v1/models`. Multiple local endpoints can be connected side by side; each can optionally carry an API key (for servers started with authentication, e.g. `llama-server --api-key`), and existing endpoints can be managed (edit key / remove) from the same dialog.
 - In `/models`, press `f` to toggle favorites for highlighted model.

@@ -192,3 +192,23 @@ enabled = true
 		}
 	}
 }
+
+// UserTool finds a tool of the operator's own by its ID or an alias, and
+// never returns a built-in, even one that holds the name.
+func TestAgentManifestUserTool(t *testing.T) {
+	m := AgentManifest{Tools: []ToolSpec{
+		{ID: "bash", Kind: "builtin", Aliases: []string{"shell-exec"}},
+		{ID: "grep"},
+		{ID: "references", Kind: "script", Aliases: []string{"refs"}},
+	}}
+	for _, name := range []string{"references", "refs"} {
+		if spec, ok := m.UserTool(name); !ok || spec.ID != "references" {
+			t.Errorf("UserTool(%q) = %q, %v; want the references script", name, spec.ID, ok)
+		}
+	}
+	for _, name := range []string{"bash", "shell-exec", "grep", "missing"} {
+		if spec, ok := m.UserTool(name); ok {
+			t.Errorf("UserTool(%q) = %q; a built-in or unknown name is no tool of the operator's own", name, spec.ID)
+		}
+	}
+}

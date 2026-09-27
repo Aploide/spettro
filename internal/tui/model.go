@@ -217,6 +217,9 @@ type agentTickMsg struct{}
 type shellApprovalRequestMsg struct {
 	request  agent.ShellApprovalRequest
 	response chan shellApprovalResponse
+	// previewCache is filled by approvalPreviewLines the first time the
+	// dialog is drawn; see approvalPreviewCache.
+	previewCache *approvalPreviewCache
 }
 
 type shellApprovalResponse struct {
@@ -390,12 +393,16 @@ type Model struct {
 	// tool call blocked on its reply.
 	questionQueue  []askUserRequestMsg
 	approvalCursor int
-	// approvalDiffExpanded toggles (ctrl+o) the full diff in a file-write /
-	// file-edit approval prompt; collapsed shows the first lines only.
-	approvalDiffExpanded bool
-	progressNote         string
-	pendingPrompts       []queuedPrompt
-	awaitingInstead      bool
+	// approvalPreviewExpanded toggles (ctrl+o) the approval dialog's preview
+	// (the diff of a file-write/file-edit, or a long command) between its
+	// collapsed cap and every row the terminal can spare.
+	approvalPreviewExpanded bool
+	// approvalScroll is the first preview row on screen; pgup/pgdn move it.
+	// approvalLayout clamps it to the preview on every render.
+	approvalScroll  int
+	progressNote    string
+	pendingPrompts  []queuedPrompt
+	awaitingInstead bool
 	// steering carries mid-run user guidance into the active run; the agent
 	// loop drains it at every step boundary. One queue per Model so goal-mode
 	// iterations share it (a message typed between iterations reaches the

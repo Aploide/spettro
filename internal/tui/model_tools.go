@@ -196,13 +196,21 @@ func todoWriteLabel(argsJSON string) string {
 }
 
 func formatToolLabel(name, argsJSON string) string {
+	switch {
+	case isLSPTool(name):
+		return lspLabel(name, argsJSON, false)
+	case isSkillTool(name):
+		return skillLabel(name, argsJSON, false)
+	case name == "approval":
+		return approvalLabel(argsJSON)
+	}
 	switch name {
 	case "file-read":
 		var args struct {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Read " + args.Path
+			return "Read " + labelPath(args.Path)
 		}
 		return "Read file"
 	case "file-write":
@@ -210,7 +218,7 @@ func formatToolLabel(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Wrote " + args.Path
+			return "Wrote " + labelPath(args.Path)
 		}
 		return "Wrote file"
 	case "file-edit", "multi-edit":
@@ -218,7 +226,7 @@ func formatToolLabel(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Edited " + args.Path
+			return "Edited " + labelPath(args.Path)
 		}
 		return "Edited file"
 	case "repo-search":
@@ -271,7 +279,7 @@ func formatToolLabel(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
-			cmd := truncateLabel(args.Command, 60)
+			cmd := labelCommand(args.Command, 60)
 			return "Ran $ " + cmd
 		}
 		return "Ran command"
@@ -280,7 +288,7 @@ func formatToolLabel(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
-			return "Started terminal $ " + truncateLabel(args.Command, 60)
+			return "Started terminal $ " + labelCommand(args.Command, 60)
 		}
 		return "Started terminal session"
 	case "pty-write":
@@ -481,13 +489,19 @@ func formatToolLabel(name, argsJSON string) string {
 }
 
 func formatRunningLabel(name, argsJSON string) string {
+	switch {
+	case isLSPTool(name):
+		return lspLabel(name, argsJSON, true)
+	case isSkillTool(name):
+		return skillLabel(name, argsJSON, true)
+	}
 	switch name {
 	case "file-read":
 		var args struct {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Reading " + args.Path + "…"
+			return "Reading " + labelPath(args.Path) + "…"
 		}
 		return "Reading…"
 	case "file-write":
@@ -495,7 +509,7 @@ func formatRunningLabel(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Writing " + args.Path + "…"
+			return "Writing " + labelPath(args.Path) + "…"
 		}
 		return "Writing…"
 	case "file-edit", "multi-edit":
@@ -503,7 +517,7 @@ func formatRunningLabel(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Editing " + args.Path + "…"
+			return "Editing " + labelPath(args.Path) + "…"
 		}
 		return "Editing…"
 	case "repo-search":
@@ -556,8 +570,8 @@ func formatRunningLabel(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
-			cmd := truncateLabel(args.Command, 60)
-			return "Running $ " + cmd + "…"
+			cmd := labelCommand(args.Command, 60)
+			return inProgress("Running $ " + cmd)
 		}
 		return "Running…"
 	case "pty-start":
@@ -565,7 +579,7 @@ func formatRunningLabel(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
-			return "Starting terminal $ " + truncateLabel(args.Command, 60) + "…"
+			return inProgress("Starting terminal $ " + labelCommand(args.Command, 60))
 		}
 		return "Starting terminal session…"
 	case "pty-write":
@@ -664,6 +678,12 @@ func extractToolPath(name, argsJSON string) string {
 }
 
 func toolActionVerb(name string) string {
+	switch {
+	case isLSPTool(name):
+		return "Queried"
+	case isSkillTool(name):
+		return "Loaded"
+	}
 	switch name {
 	case "file-read":
 		return "Read"
@@ -728,6 +748,18 @@ func toolActionVerb(name string) string {
 }
 
 func toolNounCount(name string, count int) string {
+	switch {
+	case isLSPTool(name):
+		if count == 1 {
+			return "the language server once"
+		}
+		return fmt.Sprintf("the language server %d times", count)
+	case isSkillTool(name):
+		if count == 1 {
+			return "1 skill"
+		}
+		return fmt.Sprintf("%d skills", count)
+	}
 	switch name {
 	case "file-read", "file-write", "file-edit", "multi-edit":
 		if count == 1 {
@@ -860,7 +892,7 @@ func summarizeToolArgs(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
-			return fmt.Sprintf("Runs `%s`.", truncateLabel(args.Command, 120))
+			return fmt.Sprintf("Runs `%s`.", labelCommand(args.Command, 120))
 		}
 	case "glob":
 		var args struct {

@@ -17,22 +17,23 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
-// questionMinContentH is the smallest conversation pane the question block is
-// allowed to leave behind.
-const questionMinContentH = 3
+// questionMinBlockRows is the smallest block the form is drawn in: the
+// question, one answer, the "… N more" marker and the key hint. The footer
+// yields rows to keep this much on a short terminal (parallelFooterBudget).
+const questionMinBlockRows = 4
 
 // questionBlockBudget is how many lines the form may occupy inside the input
 // box. Everything else on screen — header, separators, status bar, the
 // box's own border and agent label, the parallel-agent strip — keeps its space,
-// and the conversation pane keeps a minimum. The renderer windows its answer
-// list to fit this; without it a question with many options pushes the input
-// box off the bottom of the terminal.
+// and the conversation pane keeps a minimum (dialogMinTranscriptRows). The
+// renderer windows its answer list to fit this; without it a question with
+// many options pushes the input box off the bottom of the terminal.
 func (m Model) questionBlockBudget() int {
 	if m.height <= 0 {
 		// No WindowSizeMsg yet: nothing is on screen to overflow, and guessing
@@ -48,13 +49,9 @@ func (m Model) questionBlockBudget() int {
 		m.workingIndicatorHeight() +
 		2 + // the separators bracketing the conversation pane
 		lipgloss.Height(m.viewStatusBar(paneW)) +
-		3 // the input box's border plus the agent label inside it
-	if m.sidePanelWidth() <= 0 {
-		if pa := m.renderParallelAgents(); pa != "" {
-			fixed += lipgloss.Height(pa)
-		}
-	}
-	return max(m.height-fixed-questionMinContentH, 4)
+		3 + // the input box's border plus the agent label inside it
+		m.parallelFooterHeight()
+	return max(m.height-fixed-dialogMinTranscriptRows(m.height), questionMinBlockRows)
 }
 
 // questionSpacedMinBudget is the block height from which the form can afford a
@@ -124,15 +121,14 @@ func (m Model) renderQuestionForm() string {
 
 	// A line wider than the box wraps inside it, and the wrap is a row the
 	// layout did not reserve — the input box would then hang off the bottom of
-	// the terminal. Cut instead: the tail of a hint is worth less than the frame.
+	// the terminal. Cut instead, with a "…" so the cut reads as one: the tail
+	// of a hint is worth less than the frame.
 	// Split first: a block like the answer list arrives as one multi-line entry,
 	// and cutting that as a single string would eat its newlines with it.
 	boxW := max(m.paneWidth()-4, 12)
 	out := strings.Split(strings.Join(joined, "\n"), "\n")
 	for i, line := range out {
-		if ansi.StringWidth(line) > boxW {
-			out[i] = ansi.Cut(line, 0, boxW)
-		}
+		out[i] = termtext.Fit(line, boxW)
 	}
 	return strings.Join(out, "\n")
 }

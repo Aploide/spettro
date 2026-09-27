@@ -297,10 +297,12 @@ func (m *Model) nextQueuedPrompt() (queuedPrompt, bool) {
 	return next, true
 }
 
-func compactRunSummary(tools []ToolItem, current *ToolItem) string {
+// compactRunSummary lists what an interrupted run did, for the "Progress
+// kept" note: the label of each finished call, then the call in progress.
+func (m Model) compactRunSummary(tools []ToolItem, current *ToolItem) string {
 	var parts []string
 	for _, t := range tools {
-		label := formatToolLabel(t.Name, t.Args)
+		label := m.toolLabel(t.Name, t.Args, false)
 		if strings.TrimSpace(label) == "" {
 			label = t.Name
 		}
@@ -312,7 +314,7 @@ func compactRunSummary(tools []ToolItem, current *ToolItem) string {
 		}
 	}
 	if current != nil {
-		label := formatRunningLabel(current.Name, current.Args)
+		label := m.toolLabel(current.Name, current.Args, true)
 		if strings.TrimSpace(label) == "" {
 			label = current.Name
 		}
@@ -339,7 +341,7 @@ func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
 	// Drop transient live-stream drafts; the kept-progress note below is the
 	// canonical record of an interrupted run.
 	m.clearStreamMessages()
-	runSummary := compactRunSummary(m.liveTools, m.currentTool)
+	runSummary := m.compactRunSummary(m.liveTools, m.currentTool)
 	content := strings.TrimSpace(summaryPrefix)
 	if runSummary != "" {
 		if content != "" {

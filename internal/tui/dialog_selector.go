@@ -153,8 +153,11 @@ func (m Model) viewSelector() string {
 	title := diagFillTitle(titleLabel, innerW)
 
 	if len(m.providers.ConnectedModels(m.cfg.APIKeys)) == 0 {
+		// This box pads four cells a side, not two, so its title rule is
+		// four cells shorter than innerW; at innerW it wrapped onto a
+		// second row.
 		msg := lipgloss.JoinVertical(lipgloss.Left,
-			title,
+			diagFillTitle(titleLabel, innerW-4),
 			"",
 			styleMuted.Render("no providers connected yet"),
 			"",

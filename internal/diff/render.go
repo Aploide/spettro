@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -73,11 +75,20 @@ type parsedLine struct {
 
 // parseUnified walks unified-diff text (ours or git's) tracking hunk line
 // numbers so the renderer can show them.
+//
+// Diff bodies are file contents, so they carry tabs (Go and Makefiles are
+// tab-indented), carriage returns and occasionally escape sequences. Each
+// line has its control characters made visible here (termtext.EscapeControls),
+// before intra-line spans are computed and before truncation measures it, so
+// every later width calculation sees exactly the cells the terminal will
+// draw. They are escaped rather than stripped because a diff is often shown
+// for approval: a carriage return must not be able to hide part of a line.
 func parseUnified(diffText string) []parsedLine {
 	var out []parsedLine
 	oldNo, newNo := 0, 0
 	inHunk := false
-	for line := range strings.SplitSeq(strings.TrimRight(diffText, "\n"), "\n") {
+	for rawLine := range strings.SplitSeq(strings.TrimRight(diffText, "\n"), "\n") {
+		line := termtext.EscapeControls(rawLine)
 		switch {
 		case strings.HasPrefix(line, "@@"):
 			oldNo, newNo = parseHunkHeader(line)
@@ -167,6 +178,7 @@ func Render(diffText string, opts Options) string {
 		if opts.ExpandHint != "" {
 			footer += " " + opts.ExpandHint
 		}
+		footer = truncCells(footer, avail)
 		sb.WriteString("\n")
 		sb.WriteString(opts.Indent)
 		sb.WriteString(styleMeta.Render(footer))
@@ -195,21 +207,15 @@ func fmtNo(n, width int) string {
 	return fmt.Sprintf("%*d", width, n)
 }
 
-// truncCells hard-caps s at max cells (rune-based) so a rendered line never
-// wraps in the terminal, which would break height budgeting upstream. max <= 0
-// means unlimited.
+// truncCells hard-caps plain text s at max display cells, ending a cut line
+// with "…", so a rendered line never wraps in the terminal, which would break
+// height budgeting upstream. Widths are cells, not runes: a line of CJK text
+// is twice as wide as its rune count. max <= 0 means unlimited.
 func truncCells(s string, max int) string {
 	if max <= 0 {
 		return s
 	}
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	if max == 1 {
-		return "…"
-	}
-	return string(r[:max-1]) + "…"
+	return termtext.Fit(s, max)
 }
 
 // renderUnifiedLines renders one row per diff line, each capped at maxW cells
@@ -306,13 +312,15 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 
 	divider := styleDivider.Render(" │ ")
 	cellSpans := func(no int, text string, spans []span, style, hi styler) string {
-		r := []rune(text)
-		if len(r) > textW {
-			r = append(r[:textW-1:textW-1], '…')
-			spans = clipSpans(spans, textW-1)
+		shown := truncCells(text, textW)
+		if shown != text {
+			// Reserve the trailing "…" from highlighting.
+			spans = clipSpans(spans, len([]rune(shown))-1)
 		}
-		pad := textW - len(r)
-		return styleLineNo.Render(fmtNo(no, w)) + " " + renderSpans(string(r), spans, style, hi) + strings.Repeat(" ", pad)
+		// Pad by cells, not runes, so the divider stays in one column when
+		// a line holds wide characters.
+		pad := max(textW-ansi.StringWidth(shown), 0)
+		return styleLineNo.Render(fmtNo(no, w)) + " " + renderSpans(shown, spans, style, hi) + strings.Repeat(" ", pad)
 	}
 	cell := func(no int, text string, style styler) string {
 		return cellSpans(no, text, nil, style, style)

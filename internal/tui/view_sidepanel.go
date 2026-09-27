@@ -8,14 +8,27 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
+// Terminal size the side panel needs. Below either, the panel is not drawn
+// (ctrl+b still toggles the setting, and the panel comes back when the
+// terminal grows): the transcript needs the width, and the panel's frame,
+// its sections and its three rows of key hints cannot be squeezed into
+// fewer rows without pushing the frame past the bottom of the terminal.
+const (
+	sidePanelMinTerminalWidth  = 110
+	sidePanelMinTerminalHeight = 15
+)
+
+// sidePanelWidth is the width of the side panel column, or 0 when it is not
+// drawn: switched off, or a terminal below the size the panel needs.
 func (m Model) sidePanelWidth() int {
 	if !m.showSidePanel {
 		return 0
 	}
-	if m.width < 110 {
+	if m.width < sidePanelMinTerminalWidth || m.height < sidePanelMinTerminalHeight {
 		return 0
 	}
 	w := max(m.width/3, 34)
@@ -60,6 +73,14 @@ func (m Model) sidePanelItems() []sidePanelItem {
 	return items
 }
 
+// sidePanelGitSummary is the "⎇ branch repo +added -deleted" section of the
+// side panel and the number of rows it occupies, its leading blank separator
+// included (0 when there is no git branch to show).
+//
+// It is one row when it fits inside the panel frame. A long branch name and
+// repository name together often do not, and cutting both to share one row
+// left neither readable, so the branch then gets a row of its own and the
+// repository shares the second row with the line counts.
 func (m Model) sidePanelGitSummary(width int) (string, int) {
 	if strings.TrimSpace(m.gitBranch) == "" {
 		return "", 0
@@ -70,19 +91,23 @@ func (m Model) sidePanelGitSummary(width int) (string, int) {
 		added += f.Added
 		deleted += f.Deleted
 	}
-
+	pal := theme.Current()
+	contentW := sidePanelContentWidth(width)
+	branch := termtext.SingleLine(m.gitBranch)
 	repo := filepath.Base(m.cwd)
-	branch := truncateLabel(m.gitBranch, max(12, width-20))
-	repo = truncateLabel(repo, max(10, width/2))
+	counts := lipgloss.NewStyle().Bold(true).Foreground(pal.SuccessBright).Render(fmt.Sprintf("+%d", added)) + " " +
+		lipgloss.NewStyle().Bold(true).Foreground(pal.Error).Render(fmt.Sprintf("-%d", deleted))
+	icon := lipgloss.NewStyle().Foreground(pal.TextMuted).Render("⎇") + " "
+	branchStyle := lipgloss.NewStyle().Bold(true).Foreground(pal.Text)
 
-	line := strings.Join([]string{
-		lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("⎇"),
-		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text).Render(branch),
-		styleMuted.Render(repo),
-		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().SuccessBright).Render(fmt.Sprintf("+%d", added)),
-		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Error).Render(fmt.Sprintf("-%d", deleted)),
-	}, " ")
-	return line, 2
+	oneRow := icon + branchStyle.Render(branch) + " " + styleMuted.Render(repo) + " " + counts
+	if lipgloss.Width(oneRow) <= contentW {
+		return oneRow, 2
+	}
+	branchRow := icon + branchStyle.Render(termtext.Fit(branch, contentW-lipgloss.Width(icon)))
+	repoRoom := max(contentW-lipgloss.Width(counts)-1, 4)
+	repoRow := styleMuted.Render(termtext.Fit(repo, repoRoom)) + " " + counts
+	return branchRow + "\n" + repoRow, 3
 }
 
 func (m Model) sideListGeometry() (startY, rows int) {
@@ -92,9 +117,12 @@ func (m Model) sideListGeometry() (startY, rows int) {
 	return 5 + reserved, rows
 }
 
+// sidePanelInnerHeight is the number of rows of the side panel column below
+// the header, less the frame's border and one row of slack: the panel is
+// drawn only on a terminal at least sidePanelMinTerminalHeight rows tall
+// (sidePanelWidth), so this is never below 11.
 func (m Model) sidePanelInnerHeight() int {
-	h := max(m.height-4, 12)
-	return h
+	return m.height - 4
 }
 
 // sidePanelCursor clamps the stored cursor to the current item list.
@@ -188,15 +216,19 @@ func (m Model) sidePanelWorkflowLines(width int) []string {
 	return m.workflowTreeLines(max(12, width-2), 0)
 }
 
-// sidePanelReservedRows is the vertical space the git summary, workflow tree
-// and swarm sections occupy above the activity list (each block includes its
-// leading separator line).
+// sidePanelReservedRows is the vertical space the git summary, workflow tree,
+// swarm and task sections occupy above the activity list (each block includes
+// its leading separator line). It must count exactly what
+// sidePanelHeaderParts draws after the title and subtitle.
 func (m Model) sidePanelReservedRows(width int) int {
 	_, rows := m.sidePanelGitSummary(width)
 	if lines := m.sidePanelWorkflowLines(width); len(lines) > 0 {
 		rows += len(lines) + 1
 	}
 	if lines := m.sidePanelSwarmLines(width); len(lines) > 0 {
+		rows += len(lines) + 1
+	}
+	if lines := m.sidePanelTodoLines(); len(lines) > 0 {
 		rows += len(lines) + 1
 	}
 	return rows
@@ -221,7 +253,9 @@ func (m Model) sidePanelLines(items []sidePanelItem, width int) ([]string, []int
 	lines := make([]string, 0, len(items)+4)
 	rowToItem := make([]int, 0, len(items)+4)
 	selectedRow := 0
-	rowBudget := max(12, width-6)
+	// A row is the 4-cell cursor prefix plus up to rowBudget cells of
+	// "└ title detail", which has to fit the room inside the panel frame.
+	rowBudget := max(12, sidePanelContentWidth(width)-4)
 	prevAgent := ""
 	pal := theme.Current()
 	for idx, it := range items {
@@ -255,8 +289,10 @@ func (m Model) sidePanelLines(items []sidePanelItem, width int) ([]string, []int
 				detailColor = pal.Info
 			}
 		}
-		titleRaw := strings.ReplaceAll(strings.TrimSpace(it.Title), "\n", " ")
-		detailRaw := strings.ReplaceAll(strings.TrimSpace(it.Detail), "\n", " ")
+		// Titles and details carry tool arguments (a command, a path) and
+		// are folded onto the row as plain text: see termtext.SingleLine.
+		titleRaw := termtext.SingleLine(it.Title)
+		detailRaw := termtext.SingleLine(it.Detail)
 		labelBudget := max(4, rowBudget-3)
 		label := truncateLabel(titleRaw, labelBudget)
 		row := prefix + "└ " + titleStyle.Render(label)
@@ -318,22 +354,28 @@ func scrollBlock(content string, height, offset int) (string, int, int) {
 func (m Model) sidePanelDetailMeta(selected sidePanelItem) []string {
 	details := []string{
 		lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("Details"),
-		styleMuted.Render("type: " + selected.Kind),
-		styleMuted.Render("id: " + selected.ID),
+		styleMuted.Render("type: " + termtext.SingleLine(selected.Kind)),
+		styleMuted.Render("id: " + termtext.SingleLine(selected.ID)),
 	}
 	if selected.Agent != "" {
-		details = append(details, styleMuted.Render("agent: "+selected.Agent))
+		details = append(details, styleMuted.Render("agent: "+termtext.SingleLine(selected.Agent)))
 	}
 	return details
 }
 
+// sidePanelDetailBody is the detail pane of the selected activity entry:
+// the entry's full body (arguments and output) while ctrl+o is on, else a
+// two-row summary of it. The body is raw tool output; renderMarkdown makes
+// every line of it plain text (no escape sequences, tabs or carriage
+// returns) before styling it, and the collapsed summary is folded the same
+// way by termtext.SingleLine.
 func (m Model) sidePanelDetailBody(selected sidePanelItem, width int) string {
 	detailsBody := strings.TrimSpace(selected.Detail)
 	if m.showTools && strings.TrimSpace(selected.Body) != "" {
 		detailsBody = strings.TrimSpace(selected.Body)
 	}
 	if !m.showTools && strings.TrimSpace(selected.Body) != "" {
-		detailsBody = truncateLabel(strings.ReplaceAll(strings.TrimSpace(selected.Body), "\n", " "), max(24, width*2))
+		detailsBody = truncateLabel(termtext.SingleLine(selected.Body), max(24, width*2))
 	}
 	lines := []string{}
 	if detailsBody != "" {
@@ -395,14 +437,27 @@ func (m Model) sidePanelDetailMaxScroll(width int) int {
 	return maxOffset
 }
 
-func (m Model) viewSidePanel(width int) string {
-	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
-	gitSummary, _ := m.sidePanelGitSummary(width)
-	workflowLines := m.sidePanelWorkflowLines(width)
-	swarmLines := m.sidePanelSwarmLines(width)
-	reserved := m.sidePanelReservedRows(width)
-	items := m.sidePanelItems()
-	hints := m.sidePanelHintsView()
+// sidePanelTodoRows caps the task list in the side panel. The footer block
+// that shows tasks when the panel is hidden is skipped while the panel is
+// open (viewContent), so the panel has to carry them; a long plan still must
+// not squeeze the activity list out, hence the cap and the "… N more" row.
+const sidePanelTodoRows = 8
+
+// sidePanelTodoLines is the task section of the side panel: the same rows
+// the footer shows (live tasks first, completed ones only counted), or nil
+// when there is nothing left to do.
+func (m Model) sidePanelTodoLines() []string {
+	if len(m.todos) == 0 {
+		return nil
+	}
+	return m.todoLines(sidePanelTodoRows)
+}
+
+// sidePanelHeaderParts is everything above the activity list: title,
+// subtitle, and the git, workflow, swarm and task sections, each preceded by
+// a blank separator row. sidePanelReservedRows counts the same sections, so
+// the list budget and the mouse hit-testing agree with what is drawn.
+func (m Model) sidePanelHeaderParts(width int) []string {
 	subtitle := "Operational tool activity"
 	switch {
 	case m.workflow != nil:
@@ -410,32 +465,69 @@ func (m Model) viewSidePanel(width int) string {
 	case m.cfg.UltraActive():
 		subtitle = "Ultra swarm · per-agent activity"
 	}
+	parts := []string{
+		lipgloss.NewStyle().Bold(true).Render("Activity"),
+		styleMuted.Render(subtitle),
+	}
+	if gitSummary, _ := m.sidePanelGitSummary(width); gitSummary != "" {
+		parts = append(parts, "", gitSummary)
+	}
+	for _, section := range [][]string{
+		m.sidePanelWorkflowLines(width),
+		m.sidePanelSwarmLines(width),
+		m.sidePanelTodoLines(),
+	} {
+		if len(section) > 0 {
+			parts = append(parts, "")
+			parts = append(parts, section...)
+		}
+	}
+	return parts
+}
+
+// sidePanelBox draws the panel's frame around body. The frame is exactly
+// width cells wide (lipgloss v2 counts border and padding inside Width) and
+// innerHeight+2 rows tall. Body lines are cut to the room inside the frame
+// rather than left for the box to wrap: a wrapped line would make the panel
+// taller than the rows the layout gave it and widen the frame past the
+// terminal edge.
+func sidePanelBox(body string, width, innerHeight int) string {
+	contentW := sidePanelContentWidth(width)
+	lines := strings.Split(clampLines(body, innerHeight), "\n")
+	for i, line := range lines {
+		// JoinVertical pads every line with spaces to the widest one; that
+		// padding is not content and must not earn a line a "…".
+		lines[i] = termtext.Fit(strings.TrimRight(line, " "), contentW)
+	}
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(innerHeight+2).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(theme.Current().Border).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+}
+
+// sidePanelContentWidth is the room inside the panel's frame: the column
+// width minus the border and the one-cell padding on each side.
+func sidePanelContentWidth(width int) int {
+	return max(width-4, 1)
+}
+
+func (m Model) viewSidePanel(width int) string {
+	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
+	reserved := m.sidePanelReservedRows(width)
+	items := m.sidePanelItems()
+	hints := m.sidePanelHintsView()
+	contentParts := m.sidePanelHeaderParts(width)
+
 	if len(items) == 0 {
-		parts := []string{
-			lipgloss.NewStyle().Bold(true).Render("Activity"),
-			styleMuted.Render(subtitle),
+		contentParts = append(contentParts, "")
+		for _, line := range termtext.Wrap("Observability is on. Commands, edits, and other tool activity will appear here.", sidePanelContentWidth(width)) {
+			contentParts = append(contentParts, styleMuted.Render(line))
 		}
-		if gitSummary != "" {
-			parts = append(parts, "", gitSummary)
-		}
-		if len(workflowLines) > 0 {
-			parts = append(parts, "")
-			parts = append(parts, workflowLines...)
-		}
-		if len(swarmLines) > 0 {
-			parts = append(parts, "")
-			parts = append(parts, swarmLines...)
-		}
-		parts = append(parts, "", styleMuted.Render("Observability is on. Commands, edits, and other tool activity will appear here."))
-		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
-		box := lipgloss.NewStyle().
-			Width(width+2).
-			Height(innerHeight+2).
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Current().Border).
-			Padding(0, 1).
-			Render(clampLines(body, innerHeight))
-		return lipgloss.JoinVertical(lipgloss.Left, box, hints)
+		body := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
+		return lipgloss.JoinVertical(lipgloss.Left, sidePanelBox(body, width, innerHeight), hints)
 	}
 
 	selected := items[m.sidePanelCursor(items)]
@@ -460,31 +552,7 @@ func (m Model) viewSidePanel(width int) string {
 	detailsBlockParts = append(detailsBlockParts, detailFooter)
 	detailsBlock := strings.Join(detailsBlockParts, "\n")
 
-	contentParts := []string{
-		lipgloss.NewStyle().Bold(true).Render("Activity"),
-		styleMuted.Render(subtitle),
-	}
-	if gitSummary != "" {
-		contentParts = append(contentParts, "", gitSummary)
-	}
-	if len(workflowLines) > 0 {
-		contentParts = append(contentParts, "")
-		contentParts = append(contentParts, workflowLines...)
-	}
-	if len(swarmLines) > 0 {
-		contentParts = append(contentParts, "")
-		contentParts = append(contentParts, swarmLines...)
-	}
 	contentParts = append(contentParts, "", listBlock, "", detailsBlock)
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
-	content = clampLines(content, innerHeight)
-
-	box := lipgloss.NewStyle().
-		Width(width+2).
-		Height(innerHeight+2).
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(theme.Current().Border).
-		Padding(0, 1).
-		Render(content)
-	return lipgloss.JoinVertical(lipgloss.Left, box, hints)
+	return lipgloss.JoinVertical(lipgloss.Left, sidePanelBox(content, width, innerHeight), hints)
 }
