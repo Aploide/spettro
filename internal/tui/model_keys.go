@@ -173,7 +173,7 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		m.refreshViewport()
 		if m.showSidePanel {
-			m.showBanner("activity panel enabled", "info")
+			m.showBanner(sidePanelEnabledBanner(m.sidePanelWidth() > 0), "info")
 		} else {
 			m.showBanner("activity panel hidden", "info")
 		}

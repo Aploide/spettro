@@ -39,6 +39,16 @@ func (m Model) sidePanelWidth() int {
 	return w
 }
 
+// sidePanelEnabledBanner is the banner ctrl+b shows when it turns the panel
+// on. On a terminal below the panel's size nothing appears, so the banner
+// says where the panel will show instead of claiming it is there.
+func sidePanelEnabledBanner(drawn bool) string {
+	if drawn {
+		return "activity panel enabled"
+	}
+	return fmt.Sprintf("activity panel on, shown from %dx%d", sidePanelMinTerminalWidth, sidePanelMinTerminalHeight)
+}
+
 func (m Model) paneWidth() int {
 	sw := m.sidePanelWidth()
 	if sw <= 0 {
