@@ -107,13 +107,19 @@ Choose a session to resume:
 
 When a session is loaded:
 
-1. The chat transcript is restored exactly as it appeared (user messages,
-   assistant responses, system messages, tool traces, plan cards).
-2. The structured conversation history (`convHistory`) is rebuilt, so the LLM
-   has full context of what was said and done before.
+1. The chat messages are restored: your prompts, the assistant's answers
+   (with their thinking) and system messages. Tool-call rows and plan cards
+   are not saved with the messages, so they do not reappear in the
+   transcript (step 3 shows what the tools did).
+2. The model's context for the first new turn is the saved transcript as
+   flattened text, since the structured history of that conversation (tool
+   calls and their outputs) is not saved. From that turn on the structured
+   history grows again as usual.
 3. Session events (tool activity, approval decisions, agent spawns) are
    replayed into the activity feed and side panel.
 4. Session tasks (todos) are restored.
+5. What belonged to the conversation you left is dropped: the context gauge
+   starts from zero again, and a plan waiting for `/approve` is discarded.
 
 If the session had an **unfinished goal** in progress, Spettro remembers its
 state (objective, iteration count, no-progress counter, elapsed time) and
@@ -305,8 +311,8 @@ is returned on the `session/prompt` response.
 
 - **Saves** the current conversation to disk (exactly as `/resume` would find
   it).
-- **Clears** the chat transcript, the structured conversation history, and the
-  token counters.
+- **Clears** the chat transcript, the structured conversation history, the
+  token counters and context gauge, and a plan waiting for `/approve`.
 - Starts a fresh session.
 
 Use `/clear` when you want to start a new topic without losing the previous

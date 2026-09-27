@@ -27,7 +27,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 
 Spettro loads `spettro.agents.toml` from project root when present; otherwise it uses built-ins.
 
-See [AGENTS.md](../AGENTS.md) for schema details (`version = 2`, `[runtime]`, `[[tools]]`, `[[agents]]`, permissions, validation).
+See [AGENTS.md](../AGENTS.md) for schema details (`version = 14`, `[runtime]`, `[[tools]]`, `[[agents]]`, permissions, validation, and the migrations that bring an older manifest up to date).
 
 ## Execution flow
 

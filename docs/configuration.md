@@ -166,10 +166,14 @@ Session policy for `/storage clean` and `spettro clean`; see
 
 Spettro loads `spettro.agents.toml` from the project root if present; otherwise it falls back to built-ins.
 
-See [`AGENTS.md`](../AGENTS.md) for full schema and validation.
+See [`AGENTS.md`](../AGENTS.md) for full schema and validation. The
+snippet below shows the root and `[runtime]` fields only; a complete manifest
+also lists its `[[tools]]` and `[[agents]]`. Write the current `version`
+(14): an older one is migrated, and the file rewritten with a `.bak`, on the
+first load.
 
 ```toml
-version = 3
+version = 14
 default_agent = "plan"
 
 [runtime]
