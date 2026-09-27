@@ -81,11 +81,14 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `agent_thought_chunk`s. Text the model writes in a step that also calls
   tools ("Let me check the tests first.") is sent once as an
   `agent_message_chunk` when the step ends, followed by a blank line, and so
-  is a message it sends with the `comment` tool; a sub-agent's prose and the
-  runtime's own progress notes are not. The final answer is sent as a
-  single `agent_message_chunk` when the turn completes (the internal stream
-  has draft-reset semantics, so the answer is flushed from the
-  authoritative final content rather than chunked).
+  is a message it sends with the `comment` tool; a sub-agent's prose,
+  comment-tool messages and steering notices, and the runtime's own
+  progress notes, are not. The final answer is sent as a single
+  `agent_message_chunk` when the turn completes (the internal stream has
+  draft-reset semantics, so the answer is flushed from the authoritative
+  final content rather than chunked). A `/goal` iteration that ends with
+  `goal-complete` and no summary returns its last step's prose, which was
+  already sent, so it is not sent again.
 - **Tool calls** — see [Tool calls](#tool-calls) below: every call is a
   card with a kind, a readable title, absolute file locations, its output,
   and a real diff for file changes.
@@ -183,7 +186,8 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   boundary (append-only, so the provider prompt cache keeps hitting). The
   steering prompt's own turn ends immediately with a "steering queued" note,
   and a "✔ steering delivered" message streams when the agent actually sees
-  it. This works for normal turns and for `/goal` turns (the queue is shared
+  it (only for the session's own agent: a sub-agent's steering queue
+  carries the runtime's time-limit wrap-up notice, not your messages). This works for normal turns and for `/goal` turns (the queue is shared
   across goal iterations). Clients that want the classic replace behavior
   keep it: sending `session/cancel` first stops the run, and the next prompt
   starts a fresh turn. A steering message the run never reached is held and
@@ -232,7 +236,7 @@ tool name that do not convert) arrives as a single, already finished
 | Field | What Spettro sends |
 |---|---|
 | `kind` | From the tool's canonical name, so a retired name gets its canonical tool's kind: `read` for `file-read`, `view-image`, `skill`, `job-output`, `tool-output` and the MCP resource tools; `edit` for `file-write`, `file-edit`, `rename-symbol`; `search` for `grep`, `glob`, `lsp`, `tool-search`; `execute` for `bash`, `job-kill` and the `pty-*` tools; `fetch` for `web-fetch`, `web-search`, `download`; `think` for `todo-write`, `agent`, `ultra`, `workflow`, `goal-complete`; `switch_mode` for `enter-plan-mode` and `exit-plan-mode`; `other` for the rest. A tool that is not a built-in (MCP, manifest) is classified from the words in its name. |
-| `title` | A sentence for the built-ins (`Run go test ./...`, `Edit internal/app.go`, `Search TODO in internal`, `Load skill greet`), `<name> <arguments>` for other tools, `agent <id>: <task>` for a sub-agent. Swarm members are prefixed with their instance (`[code#3] Read a.go`). One line, at most 120 characters. |
+| `title` | A sentence for the built-ins (`Run go test ./...`, `Edit internal/app.go`, `Search TODO in internal`, `Load skill greet`), read from the argument names the runtime accepts (`command` or `cmd`; `path` or `file_path`), `<name> <arguments>` for other tools, with the arguments clipped and redacted as in `rawInput`, `agent <id>: <task>` for a sub-agent. Swarm members are prefixed with their instance (`[code#3] Read a.go`). One line, at most 120 characters. |
 | `locations` | The file named by the call's `path` argument, resolved against the session's working directory (ACP paths are absolute), with the start line when the call gives one. The completion replaces it with the absolute paths of the files the call actually changed. |
 | `rawInput` | The call's arguments, with each string cut to 2 KiB, the whole object to 16 KiB, and values named `token`, `api_key`, `password`, `secret` (and similar) redacted. |
 | `content` | On completion: a `diff` block (`path`, `oldText`, `newText`; no `oldText` for a created file) for every file `file-write`, `file-edit` or `rename-symbol` changed, then a short excerpt of the text output (the runtime cuts it to a few hundred bytes for every front-end; the model itself sees the full output) and any image the tool attached. |
@@ -256,18 +260,29 @@ write or edit whose tool requires approval, and access to a network target
 not yet allowed. Permission rules, hooks and the saved allow-lists decide
 first; an `lsp-op` rule denies an lsp operation outright rather than asking.
 Each question becomes a `session/request_permission` whose `toolCall` is the
-card already on screen (matched by tool and by the command, file or URL the
-call names), set to `pending`, with:
+card already on screen, set to `pending`. The runtime says which agent asks
+and in which directory it works, because the main agent and its sub-agents
+run tools at the same time: only that agent's cards of the asking tool are
+candidates, a card already showing a prompt is skipped (its call is waiting
+on that prompt), and among the rest the one naming the approval's command,
+file (a relative path resolved against that agent's directory, which is a
+worktree for an isolated sub-agent) or network target wins, else the newest.
+The request carries:
 
 - for a file change, a `diff` block of the exact change (for a file too
   large to diff structurally, the unified diff as text);
 - for a command, the reason and the command segments still needing
   approval;
-- options `allow-once` ("Allow once"), `allow-always` ("Always allow this
-  command" / "Always allow this site") and `deny` ("Deny"). `allow-always`
-  is offered only for commands and network targets, the approvals Spettro
-  remembers (in the project's allowed-commands and allowed-network lists);
-  a file write is asked about every time, so it is not offered there.
+- options `allow-once` ("Allow once"), `allow-always` and `deny` ("Deny").
+  `allow-always` is offered only for commands and network targets, the
+  approvals Spettro remembers (in the project's allowed-commands and
+  allowed-network lists); a file write is asked about every time, so it is
+  not offered there. What is remembered is the exact target, so the label
+  names it: "Always allow this command", "Always allow this URL"
+  (`web-fetch`, `download`; one URL, not the whole site), "Always allow this
+  search" (`web-search`; that query), "Always allow this MCP server"
+  (`mcp-list-resources`, `mcp-auth`) or "Always allow this MCP resource"
+  (`mcp-read-resource`).
 
 After "Allow" the card goes back to `in_progress` and finishes normally;
 after "Deny" (or a `cancelled` outcome) the call fails without running and
@@ -466,9 +481,10 @@ tell the model that nobody answered.
 | `session/load`, `session/resume`, `session/list` | `internal/acp/sessions.go` |
 | Tool call cards, comments and narration, plans | `internal/acp/content.go` |
 | Kinds, titles, locations, size limits, diffs | `internal/acp/tools.go` |
-| Permission requests | `internal/acp/permission.go` |
+| Permission requests, which card they attach to, "always allow" labels | `internal/acp/permission.go` (unit tests in `permission_test.go`) |
 | Toolbar selectors | `internal/acp/config_options.go` |
 | File changes reported by the runtime (`ToolTrace.FileChanges`, `ShellApprovalRequest.Change`) | `internal/agent/file_changes.go` |
+| The asking agent and its directory on every approval request (`ShellApprovalRequest.AgentID`, `CWD`) | `toolRuntime.askApproval` in `internal/agent/llm_runtime_ext.go` |
 
 `internal/acp/e2e_test.go` drives the whole protocol the way an editor does:
 a client connection from the ACP Go SDK talks to the bridge over in-memory
