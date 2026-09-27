@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,7 +18,6 @@ import (
 	"spettro/internal/budget"
 	compactpkg "spettro/internal/compact"
 	"spettro/internal/config"
-	"spettro/internal/diff"
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
 	"spettro/internal/skills"
@@ -61,6 +61,11 @@ type ShellApprovalRequest struct {
 	// file-edit approvals only); the UI renders it so the user sees exactly
 	// what will change before approving.
 	Diff string
+	// Change is the proposed change itself, the file's whole text before and
+	// after, when the approval is for one file (file-write, file-edit); nil
+	// otherwise. Hosts that render real diffs (ACP editors) use it instead of
+	// Diff. Its texts are dropped for very large files (see FileChange).
+	Change *FileChange
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
@@ -456,6 +461,12 @@ type toolLoopResult struct {
 	goalSummary   string
 	messages      []provider.Message
 }
+
+// ErrContentFiltered is the error a run fails with when the provider's
+// content filter stopped the model's reply before it said anything. Hosts
+// test for it with errors.Is to report a refusal rather than a failure (ACP
+// maps it to the "refusal" stop reason).
+var ErrContentFiltered = errors.New("the provider's content filter stopped the response")
 
 // stepCapMessage closes an iteration that hit cfg.MaxSteps. It is returned as
 // the run's content (and recorded as the final assistant turn), so the goal
@@ -933,7 +944,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 
 		if main == "" && len(resp.ToolCalls) == 0 {
 			if resp.FinishReason == provider.FinishContentFilter {
-				return fail(fmt.Errorf("agent call failed: the provider's content filter stopped the response"))
+				return fail(fmt.Errorf("agent call failed: %w", ErrContentFiltered))
 			}
 			if len(truncatedText) > 0 {
 				// A continuation came back empty: the answer is complete. Drop
@@ -1092,7 +1103,7 @@ func emitNarration(cfg toolLoopConfig, text string) {
 	if id == "" {
 		id = cfg.AgentID
 	}
-	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
+	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text, Narration: true})
 }
 
 // dropEmptyNudges removes the last n empty-reply nudges from msgs, matched
@@ -1364,6 +1375,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
 		}
 		cctx, sink := withImageSink(ctx)
+		cctx, changes := withFileChangeSink(cctx)
 		output, err := r.executeWithTimeout(cctx, c, allowed)
 		status := "success"
 		if err != nil {
@@ -1379,7 +1391,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			images:  sink.list(),
 		}
 		if callback != nil {
-			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list(), FileChanges: changes.list()})
 			if isMajorOperationTool(c.Tool) {
 				msg := fmt.Sprintf("Completed %s.", c.Tool)
 				if err != nil {
@@ -1632,7 +1644,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if args.Append {
 			newContent = oldContent + args.Content
 		}
-		if err := r.authorizeWriteAccess(ctx, "file-write", rel, diff.Unified(rel, oldContent, newContent)); err != nil {
+		if err := r.authorizeFileChange(ctx, "file-write", abs, rel, oldContent, newContent, !exists); err != nil {
 			return "", err
 		}
 		if err := r.recheckBeforeWrite("file-write", rel, abs, exists, oldRaw); err != nil {
@@ -1664,6 +1676,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			r.recordFileStamp(rel, []byte(newContent))
 		}
 		r.invalidateSymbolIndex(rel)
+		recordFileChange(ctx, abs, oldContent, newContent, !exists)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}

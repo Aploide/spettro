@@ -327,6 +327,7 @@ func (r *toolRuntime) runLSPRename(ctx context.Context, rawArgs []byte) (string,
 		r.readSet[ch.Rel] = struct{}{}
 		r.mu.Unlock()
 		r.recordFileStamp(ch.Rel, []byte(ch.New))
+		recordFileChange(ctx, ch.Path, ch.Old, ch.New, false)
 	}
 	msg := fmt.Sprintf("renamed to %q in %d file(s):\n- %s", newName, len(applied), strings.Join(applied, "\n- "))
 	return r.withLSPDiagnostics(ctx, abs, msg, written...), nil

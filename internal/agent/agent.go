@@ -45,6 +45,16 @@ type ToolTrace struct {
 	// model (screenshot, view-image). Hosts that can render images (ACP
 	// editors) show them; text-only hosts ignore the field.
 	Images []string
+	// FileChanges lists the files the call changed, with their text before
+	// and after, on the completion trace of a call that wrote files
+	// (file-write, file-edit, rename-symbol). Hosts that render diffs (ACP
+	// editors) show them; others ignore the field. See file_changes.go.
+	FileChanges []FileChange
+	// Narration marks a "comment" trace that carries the model's own prose:
+	// text it wrote alongside (or instead of) tool calls in a step (see
+	// emitNarration). Other comment traces are the runtime's progress notes.
+	// Hosts that keep a transcript show narration as the model's words.
+	Narration bool
 }
 
 type RunResult struct {
