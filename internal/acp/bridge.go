@@ -71,6 +71,13 @@ type acpSession struct {
 	// exists yet.
 	transcript []session.Message
 	startedAt  time.Time
+	// storedGoal and storedStats are metadata a session loaded from the
+	// store carried that ACP does not manage itself: the TUI's /goal record
+	// (its /resume offers to continue an unfinished goal) and the /stats
+	// usage counters. persistState writes them back unchanged, so
+	// continuing a TUI session from an editor does not erase them.
+	storedGoal  *session.GoalRecord
+	storedStats *provider.SessionUsage
 	// commandsAnnounced records that a prompt turn has re-sent the available
 	// commands list, the fallback for clients that dropped the initial
 	// announcement (see NewSession).
