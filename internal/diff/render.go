@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -58,6 +59,14 @@ type Options struct {
 	ExpandHint string
 	// Indent is prefixed to every rendered line.
 	Indent string
+	// Wrap breaks a line wider than Width over as many rows as it needs
+	// instead of cutting it with "…", so every character of the diff is
+	// drawn. Continuation rows leave the line-number gutter and the +/-
+	// column blank. Wrap always uses the unified layout (a wrapped
+	// side-by-side row pairs badly with its other half). It is for views
+	// that must show a change whole, such as the approval review; with Width
+	// 0 there is nothing to wrap at and it has no effect.
+	Wrap bool
 }
 
 // SideBySideMinWidth is the minimum terminal width for side-by-side layout.
@@ -152,10 +161,13 @@ func Render(diffText string, opts Options) string {
 		avail = opts.Width - len(opts.Indent)
 	}
 	var rendered []string
-	if opts.Width >= SideBySideMinWidth {
+	switch {
+	case opts.Wrap && avail > 0:
+		rendered = renderUnifiedLines(parsed, avail, true)
+	case opts.Width >= SideBySideMinWidth:
 		rendered = renderSideBySide(parsed, avail)
-	} else {
-		rendered = renderUnifiedLines(parsed, avail)
+	default:
+		rendered = renderUnifiedLines(parsed, avail, false)
 	}
 
 	shown := rendered
@@ -218,35 +230,81 @@ func truncCells(s string, max int) string {
 	return termtext.Fit(s, max)
 }
 
-// renderUnifiedLines renders one row per diff line, each capped at maxW cells
-// (0 = unlimited).
-func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
-	w := numWidth(parsed)
-	textW := 0
-	if maxW > 0 {
-		textW = max(
-			// line numbers + space + sign + space
-			maxW-(2*w+1)-3, 8)
+// Overflows reports whether Render would cut any line of diffText with "…"
+// at opts.Width in the unified layout, so a caller that must show a change
+// whole knows it did not. It assumes the unified layout (opts.Width below
+// SideBySideMinWidth), and is false when opts.Width is 0 (no limit) or
+// opts.Wrap is set (nothing is cut then).
+func Overflows(diffText string, opts Options) bool {
+	if opts.Width <= 0 || opts.Wrap || strings.TrimSpace(diffText) == "" {
+		return false
 	}
+	avail := opts.Width - len(opts.Indent)
+	parsed := parseUnified(diffText)
+	textW := unifiedTextWidth(avail, numWidth(parsed))
+	for _, l := range parsed {
+		limit, text := textW, l.text
+		if l.meta {
+			limit, text = avail, l.raw
+		}
+		if ansi.StringWidth(text) > limit {
+			return true
+		}
+	}
+	return false
+}
+
+// unifiedTextWidth is the room a unified row leaves for a line's text once
+// the two line-number columns, the sign and the spaces between them are
+// drawn, for a row maxW cells wide (0 = unlimited) and line numbers numW
+// digits wide.
+func unifiedTextWidth(maxW, numW int) int {
+	if maxW <= 0 {
+		return 0
+	}
+	// line numbers + space + sign + space
+	return max(maxW-(2*numW+1)-3, 8)
+}
+
+// renderUnifiedLines renders the diff in the unified layout, each row at
+// most maxW cells (0 = unlimited). A line too long for its row is cut with
+// "…", or, with wrap, continued on further rows under a blank gutter.
+func renderUnifiedLines(parsed []parsedLine, maxW int, wrap bool) []string {
+	w := numWidth(parsed)
+	textW := unifiedTextWidth(maxW, w)
+	blankNums := styleLineNo.Render(strings.Repeat(" ", 2*w+1)) + " "
 	var out []string
 	i := 0
 	for i < len(parsed) {
 		l := parsed[i]
 		if l.meta {
-			raw := truncCells(l.raw, maxW)
-			switch {
-			case strings.HasPrefix(l.raw, "@@"):
-				out = append(out, styleHunk.Render(raw))
-			default:
-				out = append(out, styleMeta.Render(raw))
+			style := styleMeta
+			if strings.HasPrefix(l.raw, "@@") {
+				style = styleHunk
+			}
+			if wrap {
+				for _, row := range termtext.HardWrap(l.raw, maxW) {
+					out = append(out, style.Render(row))
+				}
+			} else {
+				out = append(out, style.Render(truncCells(l.raw, maxW)))
 			}
 			i++
 			continue
 		}
 		if l.kind == kindContext {
-			text := truncCells(l.text, textW)
 			nums := styleLineNo.Render(fmtNo(l.oldNo, w)+" "+fmtNo(l.newNo, w)) + " "
-			out = append(out, nums+styleCtx.Render("  "+text))
+			if !wrap {
+				out = append(out, nums+styleCtx.Render("  "+truncCells(l.text, textW)))
+				i++
+				continue
+			}
+			for r, row := range termtext.HardWrap(l.text, textW) {
+				if r > 0 {
+					nums = blankNums
+				}
+				out = append(out, nums+styleCtx.Render("  "+row))
+			}
 			i++
 			continue
 		}
@@ -267,11 +325,53 @@ func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
 		}
 		for r, d := range dels {
 			nums := styleLineNo.Render(fmtNo(d.oldNo, w)+" "+strings.Repeat(" ", w)) + " "
-			out = append(out, nums+renderBodyLine("- ", d.text, delSpans[r], textW, styleDel, styleDelHi))
+			if wrap {
+				out = append(out, wrapBodyLine(nums, blankNums, "- ", d.text, delSpans[r], textW, styleDel, styleDelHi)...)
+			} else {
+				out = append(out, nums+renderBodyLine("- ", d.text, delSpans[r], textW, styleDel, styleDelHi))
+			}
 		}
 		for r, a := range adds {
 			nums := styleLineNo.Render(strings.Repeat(" ", w)+" "+fmtNo(a.newNo, w)) + " "
-			out = append(out, nums+renderBodyLine("+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi))
+			if wrap {
+				out = append(out, wrapBodyLine(nums, blankNums, "+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi)...)
+			} else {
+				out = append(out, nums+renderBodyLine("+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi))
+			}
+		}
+	}
+	return out
+}
+
+// wrapBodyLine is renderBodyLine for Options.Wrap: the whole of a +/- line
+// over as many rows as it takes, the first under its line numbers and sign,
+// the rest under a blank gutter, with the changed spans still emphasized on
+// whichever row they fall.
+func wrapBodyLine(nums, blankNums, sign, text string, spans []span, textW int, base, hi styler) []string {
+	rows := termtext.HardWrap(text, textW)
+	out := make([]string, 0, len(rows))
+	offset := 0 // rune offset of the row in text
+	for r, row := range rows {
+		n := utf8.RuneCountInString(row)
+		prefix := nums + base.Render(sign)
+		if r > 0 {
+			prefix = blankNums + base.Render(strings.Repeat(" ", len(sign)))
+		}
+		out = append(out, prefix+renderSpans(row, shiftSpans(spans, offset, n), base, hi))
+		offset += n
+	}
+	return out
+}
+
+// shiftSpans returns the part of spans that falls in the runes
+// [offset, offset+n) of a line, relative to offset: the spans of one row of
+// a wrapped line.
+func shiftSpans(spans []span, offset, n int) []span {
+	var out []span
+	for _, sp := range spans {
+		start, end := max(sp.start-offset, 0), min(sp.end-offset, n)
+		if start < end {
+			out = append(out, span{start, end})
 		}
 	}
 	return out
@@ -306,7 +406,7 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 	col := (width - 3) / 2
 	if col < w+10 {
 		// Too narrow after all; fall back to unified.
-		return renderUnifiedLines(parsed, width)
+		return renderUnifiedLines(parsed, width, false)
 	}
 	textW := col - w - 2
 

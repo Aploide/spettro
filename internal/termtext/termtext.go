@@ -217,3 +217,34 @@ func Wrap(s string, width int) []string {
 	}
 	return strings.Split(ansi.Wrap(s, width, ""), "\n")
 }
+
+// HardWrap breaks plain text s into rows of at most width display cells,
+// cutting wherever a row is full rather than at spaces. Unlike Wrap it keeps
+// every character: no space is dropped at a break and none is added, so
+// joining the rows gives back s exactly. That is what the approval review
+// needs, where a run of spaces in a command or a line of a file is part of
+// what the user approves. Rows break between grapheme clusters, never inside
+// one; a cluster wider than width (a wide character at width 1) takes a row
+// of its own. s must not contain escape sequences (escape it with
+// EscapeControls first). A width below 1 is treated as 1; an empty s yields
+// one empty row.
+func HardWrap(s string, width int) []string {
+	width = max(width, 1)
+	if ansi.StringWidth(s) <= width {
+		return []string{s}
+	}
+	var rows []string
+	start, used := 0, 0
+	for pos := 0; pos < len(s); {
+		// The same clusters and widths ansi.StringWidth measures, so a row
+		// is never wider than the layout thinks.
+		cluster, w := ansi.FirstGraphemeCluster(s[pos:], ansi.GraphemeWidth)
+		if used+w > width && used > 0 {
+			rows = append(rows, s[start:pos])
+			start, used = pos, 0
+		}
+		used += w
+		pos += max(len(cluster), 1)
+	}
+	return append(rows, s[start:])
+}
