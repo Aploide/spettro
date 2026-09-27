@@ -97,8 +97,10 @@ func (m Model) viewContent() string {
 		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
 	}
 	sidePane := m.viewSidePanel(sideW)
-	divider := lipgloss.NewStyle().Foreground(theme.Current().Border).Render("│")
-	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
+	// A blank gutter column between the panes: the panel draws its own
+	// border. The gutter was once a one-row "│", which JoinHorizontal left
+	// as a stray tick at the end of the transcript's top rule.
+	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, " ", sidePane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
@@ -513,6 +515,19 @@ func wrapPlainLines(s string, width int) []string {
 	lines := strings.Split(wrapped, "\n")
 	for i := range lines {
 		lines[i] = strings.TrimRight(lines[i], " ")
+	}
+	return lines
+}
+
+// wrapIndentedLines is wrapPlainLines for a block drawn indent cells in: the
+// text is wrapped to the width left beside the indent and every row gets
+// the indent, so wrapped rows line up under the first one. Wrapping the
+// indented text as a whole (as the ask-user dialog once did) indents only
+// the first row and sends the rest back to column 0.
+func wrapIndentedLines(s, indent string, width int) []string {
+	lines := wrapPlainLines(s, max(width-ansi.StringWidth(indent), 1))
+	for i, line := range lines {
+		lines[i] = indent + line
 	}
 	return lines
 }

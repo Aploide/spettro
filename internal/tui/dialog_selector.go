@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -9,6 +10,7 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -199,91 +201,77 @@ func (m Model) viewSelector() string {
 			}
 			rows = append(rows, lipgloss.NewStyle().
 				Foreground(theme.Current().TextMuted).Bold(true).
-				Render("  ─ "+provLabel))
+				Render(termtext.Fit("  ─ "+provLabel, innerW)))
 		}
-
-		isSelected := i == m.selCursor
-		isCurrent := mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel
-		isFav := m.favorites[mod.Provider+":"+mod.Name]
-
-		displayName := mod.DisplayName
-		if displayName == "" {
-			displayName = mod.Name
-		}
-		tag := mod.Tag()
-
-		if isSelected {
+		if i == m.selCursor {
 			selectedRow = len(rows)
-			prefix := "› "
-			if isFav {
-				prefix += "★ "
-			}
-			if isCurrent {
-				prefix += "● "
-			}
-			label := prefix + displayName
-			if tag != "" {
-				label += "  " + tag
-			}
-			rows = append(rows, lipgloss.NewStyle().
-				Background(theme.Current().BgSelection).
-				Foreground(theme.Current().Text).
-				Bold(true).
-				Width(innerW).
-				Render(label))
-		} else {
-			prefix := "  "
-			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
-			tagStyle := lipgloss.NewStyle().Foreground(theme.Current().TextDim)
-			var badges string
-			if isFav {
-				badges += lipgloss.NewStyle().Foreground(theme.Current().WarningSoft).Render("★ ")
-			}
-			if isCurrent {
-				badges += lipgloss.NewStyle().Foreground(mc).Render("● ")
-			}
-			row := prefix + badges + nameStyle.Render(displayName)
-			if tag != "" {
-				row += "  " + tagStyle.Render(tag)
-			}
-			rows = append(rows, row)
 		}
+		rows = append(rows, m.selectorRow(mod, i == m.selCursor, innerW, mc))
 	}
 	if len(m.selItems) == 0 {
 		rows = append(rows, styleMuted.Render("  no matches"))
 	}
 
-	hint := styleMuted.Render("↑↓ navigate  enter select  f favorite  c connect  esc close")
-
-	maxRows := max(m.height-12, 4)
-	start := 0
-	if len(rows) > maxRows {
-		start = max(selectedRow-maxRows/2, 0)
-		if start+maxRows > len(rows) {
-			start = len(rows) - maxRows
-		}
-		rows = rows[start : start+maxRows]
+	d := listDialog{
+		title:  title,
+		head:   []string{filterLine},
+		rows:   rows,
+		hints:  []string{"↑↓ navigate", "enter select", "f favorite", "c connect", "esc close"},
+		border: mc,
 	}
-
-	dialog := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
-			title,
-			"",
-			filterLine,
-			"",
-			strings.Join(rows, "\n"),
-			"",
-			hint,
-		))
-
+	_, visible := d.layout(innerW, m.height)
+	dialog := d.view(dialogWidth, m.height, windowStart(len(rows), visible, selectedRow))
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
+}
+
+// selectorRow renders one model of the selector on a single row of innerW
+// cells: badges (favourite, current), the name and the tag ("img think 32k
+// ctx"). A name too long for the row is cut with "…" and the tag goes with
+// it, rather than the row wrapping and growing the dialog.
+func (m Model) selectorRow(mod provider.Model, selected bool, innerW int, mc color.Color) string {
+	isCurrent := mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel
+	isFav := m.favorites[mod.Provider+":"+mod.Name]
+	displayName := mod.DisplayName
+	if displayName == "" {
+		displayName = mod.Name
+	}
+	tag := mod.Tag()
+
+	if selected {
+		label := "› "
+		if isFav {
+			label += "★ "
+		}
+		if isCurrent {
+			label += "● "
+		}
+		label += displayName
+		if tag != "" {
+			label += "  " + tag
+		}
+		return lipgloss.NewStyle().
+			Background(theme.Current().BgSelection).
+			Foreground(theme.Current().Text).
+			Bold(true).
+			Width(innerW).
+			Render(termtext.Fit(label, innerW))
+	}
+
+	var badges string
+	if isFav {
+		badges += lipgloss.NewStyle().Foreground(theme.Current().WarningSoft).Render("★ ")
+	}
+	if isCurrent {
+		badges += lipgloss.NewStyle().Foreground(mc).Render("● ")
+	}
+	row := "  " + badges + lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render(displayName)
+	if tag != "" {
+		row += "  " + lipgloss.NewStyle().Foreground(theme.Current().TextDim).Render(tag)
+	}
+	return termtext.Fit(row, innerW)
 }

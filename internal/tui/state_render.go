@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/diff"
 	"spettro/internal/session"
@@ -265,11 +266,65 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		}
 		return lipgloss.NewStyle().
 			Foreground(theme.Current().TextMuted).
-			PaddingLeft(4).
-			Width(m.paneWidth() - 4).
-			Render(msg.Content)
+			Render(indent(strings.Join(wrapSystemText(msg.Content, m.paneWidth()-8), "\n"), "    "))
 	}
 	return ""
+}
+
+// wrapSystemText wraps a system message (command output such as /help,
+// /skills, /stats) to width cells. Those messages are mostly two-column
+// listings, "  /models p:m    set model directly", so a row too long for the
+// pane is wrapped with a hanging indent at its second column: the wrapped
+// part lines up under the description instead of starting at column 0,
+// where it read as a new entry. A row with no second column hangs at its own
+// indent. Rows carrying escape sequences (already styled) are wrapped as
+// before, by lipgloss.
+func wrapSystemText(content string, width int) []string {
+	width = max(width, 10)
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "\x1b") {
+			out = append(out, strings.Split(lipgloss.NewStyle().Width(width).Render(line), "\n")...)
+			continue
+		}
+		line = strings.ReplaceAll(line, "\t", "    ")
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		cut := systemTextHangColumn(line)
+		if cut == 0 || ansi.StringWidth(line[:cut]) > width/2 {
+			// Leading spaces are one byte a cell, so this is also a width.
+			cut = min(len(line)-len(strings.TrimLeft(line, " ")), width/2)
+		}
+		prefixW := ansi.StringWidth(line[:cut])
+		parts := termtext.Wrap(line[cut:], width-prefixW)
+		out = append(out, line[:cut]+parts[0])
+		pad := strings.Repeat(" ", prefixW)
+		for _, part := range parts[1:] {
+			out = append(out, pad+part)
+		}
+	}
+	return out
+}
+
+// systemTextHangColumn returns the byte offset of a listing row's second
+// column: the text after the first run of two or more spaces that follows
+// the row's first word. It returns 0 when the row has no second column.
+func systemTextHangColumn(line string) int {
+	lead := len(line) - len(strings.TrimLeft(line, " "))
+	gap := strings.Index(line[lead:], "  ")
+	if lead == len(line) || gap <= 0 {
+		return 0
+	}
+	col := lead + gap
+	for col < len(line) && line[col] == ' ' {
+		col++
+	}
+	if col == len(line) {
+		return 0
+	}
+	return col
 }
 
 // renderKeySeed seeds messageRenderKey. The keys only ever live in this

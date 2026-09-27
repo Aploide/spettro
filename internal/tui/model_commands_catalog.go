@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"spettro/internal/commands"
@@ -161,17 +162,48 @@ func (m Model) filterCommands(query string) []commandDef {
 		catalog = append(catalog, commandDef{"/" + c.Name, desc})
 	}
 	catalog = append(catalog, m.skillMenuEntries()...)
+	// The query is trimmed because completing a command leaves the input as
+	// "/clear " (name plus a space, ready for an argument), and the menu is
+	// filtered again from that text. Untrimmed, "clear " matches no name, so
+	// /clear fell to a description match and the next Enter ran whichever
+	// command's description contains "clear " (/memory) instead.
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return catalog
 	}
+	// Matches are ranked, catalog order kept within a rank: the command
+	// named exactly as typed first, then names starting with the query,
+	// then names containing it, then commands matched only by their
+	// description. Enter runs the highlighted entry, so without the ranking
+	// typing "/skills" highlighted "/skill" (its description says "Agent
+	// Skills" and it comes first in the catalog) and Enter opened the wrong
+	// command's sub-menu.
 	q := strings.ToLower(query)
-	var out []commandDef
+	var ranked [4][]commandDef
 	for _, c := range catalog {
-		if strings.Contains(strings.ToLower(c.name), q) || strings.Contains(strings.ToLower(c.desc), q) {
-			out = append(out, c)
+		if rank, ok := commandMatchRank(c, q); ok {
+			ranked[rank] = append(ranked[rank], c)
 		}
 	}
-	return out
+	return slices.Concat(ranked[0], ranked[1], ranked[2], ranked[3])
+}
+
+// commandMatchRank ranks how well command c matches the lowercase query q
+// (see filterCommands): 0 exact name, 1 name prefix, 2 name substring,
+// 3 description substring. ok is false when c does not match at all.
+func commandMatchRank(c commandDef, q string) (rank int, ok bool) {
+	name := strings.TrimPrefix(strings.ToLower(c.name), "/")
+	switch {
+	case name == q:
+		return 0, true
+	case strings.HasPrefix(name, q):
+		return 1, true
+	case strings.Contains(name, q):
+		return 2, true
+	case strings.Contains(strings.ToLower(c.desc), q):
+		return 3, true
+	}
+	return 0, false
 }
 
 // skillMenuEntries lists the user-invocable skills as /name entries for the
@@ -379,7 +411,9 @@ keys:
   ctrl+f         attach a file to the next message
   ctrl+r         remove last file attachment
   ctrl+b         toggle side activity panel
-  ctrl+o         toggle expanded tool context in side panel
+  ctrl+o         toggle tool details in the transcript (in an approval: the preview)
+  ctrl+g         toggle full, untrimmed tool outputs
+  pgup pgdn      scroll the transcript
   drag (mouse)   select text on screen; release copies it to the clipboard
   ctrl+t         toggle text-select mode (release mouse for terminal selection)
 

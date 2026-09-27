@@ -205,6 +205,11 @@ func FitLeft(s string, width int) string {
 // possible and inside a word only when the word alone is wider than width.
 // s should already be sanitized; ANSI styling in it is preserved. A width
 // below 1 is treated as 1 so the result is always usable.
+//
+// The escape sequences are only kept, not carried: a style opened before a
+// break still applies only to the row that holds its escape once the rows
+// are drawn separately. Styled text whose spans can cross a break should be
+// wrapped with lipgloss.Wrap, which reopens the style on every row.
 func Wrap(s string, width int) []string {
 	width = max(width, 1)
 	if ansi.StringWidth(s) <= width {

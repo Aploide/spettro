@@ -329,6 +329,12 @@ type Model struct {
 
 	cmdItems  []commandDef
 	cmdCursor int
+	// cmdQuery is the input the slash menu was last filtered for. When the
+	// input changes the highlight goes back to the best match (the top
+	// row); otherwise a cursor moved in a longer list would stay on the
+	// same index of the narrowed one, and Enter would run a command other
+	// than the one typed.
+	cmdQuery string
 
 	// customCommands are user-defined slash commands discovered from
 	// ~/.spettro/commands and <cwd>/.spettro/commands at startup.

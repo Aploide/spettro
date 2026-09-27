@@ -655,29 +655,18 @@ func (m Model) viewConnect() string {
 		rows = append(rows, styleMuted.Render("  no matches"))
 	}
 
-	hint := styleMuted.Render(termtext.Fit("↑↓ navigate  enter connect  esc close", innerW))
-	maxRows := max(m.height-12, 4)
-	start := 0
-	if len(rows) > maxRows {
-		start = max(selectedRow-maxRows/2, 0)
-		if start+maxRows > len(rows) {
-			start = len(rows) - maxRows
-		}
-		rows = rows[start : start+maxRows]
+	// The shared picker layout keeps every key hint on screen (packed onto
+	// a second row when the dialog is narrow) and gives the list exactly the
+	// rows left; see listDialog.
+	d := listDialog{
+		title:  title,
+		head:   []string{filterLine},
+		rows:   rows,
+		hints:  []string{"↑↓ navigate", "enter connect", "esc close"},
+		border: mc,
 	}
-
-	dialog := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
-			title, "",
-			filterLine, "",
-			strings.Join(rows, "\n"),
-			"",
-			hint,
-		))
+	_, visible := d.layout(innerW, m.height)
+	dialog := d.view(dialogWidth, m.height, windowStart(len(rows), visible, selectedRow))
 
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,

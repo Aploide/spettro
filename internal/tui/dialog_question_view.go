@@ -143,9 +143,9 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 		return nil
 	}
 
-	head := wrapPlainLines("  "+question.Question, width)
+	head := wrapIndentedLines(question.Question, "  ", width)
 	questionLines := len(head)
-	head = append(head, wrapPlainLines("  "+strings.TrimSpace(q.form.Context), width)...)
+	head = append(head, wrapIndentedLines(strings.TrimSpace(q.form.Context), "  ", width)...)
 
 	// Reserve the footer, one option row, and the line the "… N more" marker
 	// takes when the list has to be windowed.

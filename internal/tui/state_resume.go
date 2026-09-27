@@ -259,22 +259,27 @@ func (m *Model) ensureResumeWindow() {
 	}
 }
 
+// resumeMaxRows is how many sessions the resume dialog shows at once, the
+// page size of pgup/pgdn. It comes from the same layout viewResume draws
+// with, so paging moves by exactly what is on screen.
 func (m Model) resumeMaxRows() int {
-	maxRows := max(m.height-12, 4)
-	return maxRows
+	width := resumeDialogWidth(m.width)
+	d := m.resumeDialog(width)
+	_, visible := d.layout(dialogInnerWidth(width), m.height)
+	return visible
 }
 
-func (m Model) viewResume() string {
-	mc := m.currentColor()
-	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation")
-	dialogWidth := 72
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
+// resumeDialogWidth is the resume dialog's width on a terminal width cells
+// wide: 72, or what the terminal leaves with a two-cell margin a side.
+func resumeDialogWidth(width int) int {
+	return max(min(72, width-4), 30)
+}
 
+// resumeDialog builds the resume dialog, dialogWidth cells wide: one row per
+// saved session (its start time and first prompt).
+func (m Model) resumeDialog(dialogWidth int) listDialog {
+	mc := m.currentColor()
+	innerW := dialogInnerWidth(dialogWidth)
 	var rows []string
 	for i, s := range m.resumeItems {
 		isSelected := i == m.resumeCursor
@@ -297,43 +302,30 @@ func (m Model) viewResume() string {
 			timeStyle = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 			previewStyle = lipgloss.NewStyle().Foreground(theme.Current().TextDim)
 		}
-		prefixWidth := lipgloss.Width(prefix)
-		timeWidth := lipgloss.Width(timeStr) + 2
-		previewBudget := max(8, dialogWidth-prefixWidth-timeWidth-6)
+		previewBudget := max(innerW-lipgloss.Width(prefix)-lipgloss.Width(timeStr)-2, 1)
 		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(termtext.Fit(preview, previewBudget)))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, styleMuted.Render("  no saved conversations"))
 	}
-
-	hint := styleMuted.Render("↑↓ navigate  pgup/pgdn jump  enter load  esc close")
-	maxRows := m.resumeMaxRows()
-	if len(rows) > maxRows {
-		start := max(m.resumeScroll, 0)
-		if start+maxRows > len(rows) {
-			start = len(rows) - maxRows
-		}
-		if start < 0 {
-			start = 0
-		}
-		rows = rows[start:min(len(rows), start+maxRows)]
+	return listDialog{
+		title:  lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation"),
+		rows:   rows,
+		hints:  []string{"↑↓ navigate", "pgup/pgdn jump", "enter load", "esc close"},
+		border: mc,
 	}
+}
 
-	dialog := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
-			title, "",
-			strings.Join(rows, "\n"),
-			"",
-			hint,
-		))
-
+func (m Model) viewResume() string {
+	width := resumeDialogWidth(m.width)
+	d := m.resumeDialog(width)
+	_, visible := d.layout(dialogInnerWidth(width), m.height)
+	// The stored scroll is kept by the key handler; after a resize it may
+	// no longer show the cursor, so the window is pulled back over it.
+	start := min(max(m.resumeScroll, m.resumeCursor-visible+1), m.resumeCursor)
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
-		dialog,
+		d.view(width, m.height, max(start, 0)),
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)

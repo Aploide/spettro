@@ -14,7 +14,24 @@ import (
 	"spettro/internal/session"
 )
 
+// handleCommand runs a slash command. Whatever the command added to the
+// transcript is on screen when it returns: many handlers (/skills, /tasks,
+// /hooks, /jobs, /memory, ...) return early without refreshing the viewport,
+// and their output stayed invisible until some later event repainted it (a
+// VHS run showed /skills doing nothing). The refresh is done here once
+// rather than trusted to every handler.
 func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
+	before := len(m.messages)
+	next, cmd := m.dispatchCommand(input)
+	if nm, ok := next.(Model); ok && len(nm.messages) != before {
+		nm.refreshViewport()
+		return nm, cmd
+	}
+	return next, cmd
+}
+
+// dispatchCommand routes a slash command to its handler; see handleCommand.
+func (m Model) dispatchCommand(input string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(input)
 	cmd := fields[0]
 	m.recordCommandEvent(input)
