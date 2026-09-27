@@ -405,7 +405,9 @@ keys:
   ctrl+f         attach a file to the next message
   ctrl+r         remove last file attachment
   ctrl+b         toggle side activity panel
-  ctrl+o         toggle expanded tool context in side panel
+  ctrl+o         toggle tool details in the transcript (in an approval: the preview)
+  ctrl+g         toggle full, untrimmed tool outputs
+  pgup pgdn      scroll the transcript
   drag (mouse)   select text on screen; release copies it to the clipboard
   ctrl+t         toggle text-select mode (release mouse for terminal selection)
 
