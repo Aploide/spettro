@@ -72,3 +72,44 @@ func TestAuthorizeFileChangeCarriesTheChange(t *testing.T) {
 		t.Errorf("large change: omitted=%v diff has tail=%v", got.Change != nil && got.Change.TextOmitted, strings.Contains(got.Diff, "+tail"))
 	}
 }
+
+// Every kind of approval request names the agent asking and its working
+// directory, so a host running sub-agents in parallel can show the request
+// on that agent's tool call (see ShellApprovalRequest.AgentID).
+func TestApprovalRequestsNameTheAskingAgent(t *testing.T) {
+	var got []ShellApprovalRequest
+	cwd := t.TempDir()
+	rt := &toolRuntime{
+		cwd:          cwd,
+		agentID:      "code",
+		instanceID:   "code#2",
+		permission:   config.PermissionAskFirst,
+		allowedShell: map[string]struct{}{},
+		toolPolicies: map[string]config.ToolSpec{
+			"file-edit": {RequiresApproval: true},
+			"web-fetch": {RequiresApproval: true},
+		},
+		shellApproval: func(_ context.Context, req ShellApprovalRequest) (ShellApprovalDecision, error) {
+			got = append(got, req)
+			return ShellApprovalAllowOnce, nil
+		},
+	}
+	ctx := context.Background()
+	if err := rt.authorizeShellCommand(ctx, "bash", "npm run build"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.authorizeFileChange(ctx, "file-edit", cwd+"/a.txt", "a.txt", "one\n", "two\n", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.authorizeNetworkAccess(ctx, "web-fetch", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 approval requests, got %d", len(got))
+	}
+	for _, req := range got {
+		if req.AgentID != "code#2" || req.CWD != cwd {
+			t.Errorf("request %q: agent %q cwd %q, want code#2 in %s", req.Command, req.AgentID, req.CWD, cwd)
+		}
+	}
+}

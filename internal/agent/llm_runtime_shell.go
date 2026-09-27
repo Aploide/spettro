@@ -424,7 +424,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
 
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{
+	decision, err := r.askApproval(ctx, ShellApprovalRequest{
 		Command:  command,
 		ToolID:   toolID,
 		Segments: append([]string(nil), missingApprovals...),

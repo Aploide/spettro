@@ -66,6 +66,17 @@ type ShellApprovalRequest struct {
 	// otherwise. Hosts that render real diffs (ACP editors) use it instead of
 	// Diff. Its texts are dropped for very large files (see FileChange).
 	Change *FileChange
+	// AgentID is the agent asking, under the same name its ToolTraces carry
+	// (the per-instance name such as "code#3" for swarm members, else the
+	// agent's ID). Sub-agents run in parallel with the main agent and with
+	// each other, so a host that shows the request on a tool call card uses
+	// it to pick a card of the asking agent. Set by toolRuntime.askApproval.
+	AgentID string
+	// CWD is the asking agent's working directory: a worktree for an
+	// isolated sub-agent, else the session's directory. Relative paths in
+	// that agent's tool arguments are relative to it. Set by
+	// toolRuntime.askApproval.
+	CWD string
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
