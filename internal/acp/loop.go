@@ -90,6 +90,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 		return reply("agent not found: " + agentID)
 	}
 	spec.Permission = cfg.Permission
+	turn.agentID = spec.ID
 
 	if cfg.Permission != config.PermissionYOLO {
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(fmt.Sprintf(
@@ -158,7 +159,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 				if livePermission() == config.PermissionYOLO {
 					return agent.ShellApprovalAllowOnce, nil
 				}
-				return turn.requestShellApproval(sctx, ar)
+				return turn.requestApproval(sctx, ar)
 			},
 			AskUser: turn.askForm,
 		}

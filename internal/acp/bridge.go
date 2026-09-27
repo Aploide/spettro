@@ -366,7 +366,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		bridge:    b,
 		ctx:       ctx,
 		sessionID: params.SessionId,
-		open:      make(map[string][]acpsdk.ToolCallId),
+		cwd:       s.cwd,
 	}
 	// shownTask, when set, is what the transcript records as the user's
 	// message instead of task: a skill invocation or $mention sends the
@@ -537,6 +537,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return acpsdk.PromptResponse{}, fmt.Errorf("agent not found: %s", agentID)
 	}
 	spec.Permission = cfg.Permission
+	turn.agentID = spec.ID
 	livePermission := func() config.PermissionLevel {
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -585,7 +586,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			if livePermission() == config.PermissionYOLO {
 				return agent.ShellApprovalAllowOnce, nil
 			}
-			return turn.requestShellApproval(sctx, ar)
+			return turn.requestApproval(sctx, ar)
 		},
 		// The whole form when the client can take one, question by question when
 		// it cannot. See question_form.go for the ladder.
@@ -664,42 +665,6 @@ func turnUsageResponse(u provider.Usage, estimatedTotal int) *acpsdk.Usage {
 		out.CachedWriteTokens = new(u.CacheWriteTokens)
 	}
 	return out
-}
-
-// requestShellApproval bridges Spettro's shell approval flow to ACP's
-// session/request_permission, letting the editor render its native prompt.
-func (t *turnState) requestShellApproval(ctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
-	title := "Run shell command: " + ar.Command
-	update := acpsdk.ToolCallUpdate{
-		ToolCallId: t.openToolCallID(ar.ToolID),
-		Title:      new(title),
-		Kind:       acpsdk.Ptr(acpsdk.ToolKindExecute),
-		Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
-		RawInput:   map[string]any{"command": ar.Command, "reason": ar.Reason},
-	}
-	resp, err := t.bridge.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
-		SessionId: t.sessionID,
-		ToolCall:  update,
-		Options: []acpsdk.PermissionOption{
-			{OptionId: "allow-once", Name: "Allow once", Kind: acpsdk.PermissionOptionKindAllowOnce},
-			{OptionId: "allow-always", Name: "Always allow", Kind: acpsdk.PermissionOptionKindAllowAlways},
-			{OptionId: "deny", Name: "Deny", Kind: acpsdk.PermissionOptionKindRejectOnce},
-		},
-	})
-	if err != nil {
-		return agent.ShellApprovalDeny, err
-	}
-	if resp.Outcome.Cancelled != nil || resp.Outcome.Selected == nil {
-		return agent.ShellApprovalDeny, nil
-	}
-	switch string(resp.Outcome.Selected.OptionId) {
-	case "allow-once":
-		return agent.ShellApprovalAllowOnce, nil
-	case "allow-always":
-		return agent.ShellApprovalAllowAlways, nil
-	default:
-		return agent.ShellApprovalDeny, nil
-	}
 }
 
 // Agent questions (the ask-user tool) live in question.go: turnState.askUser
