@@ -91,3 +91,65 @@ func BenchmarkSnapshotOneFileChanged(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkCommitPrepared measures what a mutating tool call waits for when
+// the step's snapshot was prepared while the model generated (performance
+// plan, Unit D4: "mutating-step wait on checkpoint, speculative hit"): the
+// Commit of a Prepared snapshot after a single edit in a 5000-file tree.
+func BenchmarkCommitPrepared(b *testing.B) {
+	project := mediumRepo(b, 100, 50)
+	c, err := Open(b.TempDir(), project)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := c.Snapshot("warmup", "p", conversationBlob); err != nil {
+		b.Fatal(err)
+	}
+	target := filepath.Join(project, "pkg050", "file025.go")
+	b.ResetTimer()
+	for i := range b.N {
+		b.StopTimer()
+		if err := os.WriteFile(target, []byte(fmt.Sprintf("package p\n// edit %d\n", i)), 0o644); err != nil {
+			b.Fatal(err)
+		}
+		p, err := c.Prepare("step")
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		if _, err := c.Commit(p, "file-edit", "p", conversationBlob); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkCommitTracked measures the fallback taken when a file the agent
+// knows changed after preparation: re-staging tracked files only (git add
+// -u) on top of the prepared staging, after a single edit in a 5000-file
+// tree (plan: "synchronous fallback, tracked-only path").
+func BenchmarkCommitTracked(b *testing.B) {
+	project := mediumRepo(b, 100, 50)
+	c, err := Open(b.TempDir(), project)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := c.Snapshot("warmup", "p", conversationBlob); err != nil {
+		b.Fatal(err)
+	}
+	target := filepath.Join(project, "pkg050", "file025.go")
+	b.ResetTimer()
+	for i := range b.N {
+		b.StopTimer()
+		p, err := c.Prepare("step")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(fmt.Sprintf("package p\n// edit %d\n", i)), 0o644); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		if _, err := c.CommitTracked(p, "file-edit", "p", conversationBlob); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
