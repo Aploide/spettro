@@ -2098,12 +2098,10 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		// Every file tool is confined to the workspace, in every permission
 		// mode, yolo included: this is the file tools' scope, not an
-		// approval that a mode could grant. Models still aim file-write at
-		// /tmp for scratch scripts (ten such calls in the round-7 bench),
-		// so the error says where they can go instead, as the coding prompt
-		// does. Shell commands are governed by the shell's own approval
-		// and sandbox rules, not by this check.
-		return "", "", fmt.Errorf("path outside workspace is not allowed: the file tools only reach files under %s; for a scratch file elsewhere, use bash (e.g. pipe a heredoc to the interpreter)", r.cwd)
+		// approval that a mode could grant. Shell commands are governed by
+		// the shell's own approval and sandbox rules, not by this check;
+		// only a bash cwd goes through it (shellDir).
+		return "", "", &outsideWorkspaceError{root: r.cwd}
 	}
 	// Under an active sandbox, also reject paths whose *real* target escapes the
 	// workspace through a symlink. Without this, an agent could `ln -s` a secret
@@ -2115,6 +2113,20 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 	}
 	rel = filepath.ToSlash(rel)
 	return abs, rel, nil
+}
+
+// outsideWorkspaceError is resolvePath's refusal of a path that leaves the
+// workspace. Its message is written for the file tools: models still aim
+// file-write at /tmp for scratch scripts (ten such calls in the round-7
+// bench), so it says where they can go instead, as the coding prompt does.
+// A caller that is not a file tool (shellDir) words its own refusal, since
+// "use bash" is wrong advice inside a bash call.
+type outsideWorkspaceError struct {
+	root string
+}
+
+func (e *outsideWorkspaceError) Error() string {
+	return fmt.Sprintf("path outside workspace is not allowed: the file tools only reach files under %s; for a scratch file elsewhere, use bash (e.g. pipe a heredoc to the interpreter)", e.root)
 }
 
 // realPathEscapes reports whether abs — after resolving symlinks on its

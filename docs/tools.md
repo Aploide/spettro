@@ -27,7 +27,8 @@ that leaves it (`../x`, `/tmp/x`) is refused before anything is read,
 written or approved, with an error that says to use `bash` for a scratch
 file elsewhere; the coding prompt says the same, so scratch scripts are
 piped to the interpreter through `bash` or written to the system temp
-directory from the shell. Commands run through `bash` are governed by the
+directory from the shell. A `bash` `cwd` outside the workspace gets its own
+error instead, saying to `cd` there in the command itself. Commands run through `bash` are governed by the
 shell's approval rules and the [sandbox](sandbox.md), not by this check.
 Under an active sandbox, a path whose real target leaves the workspace
 through a symlink is refused too.

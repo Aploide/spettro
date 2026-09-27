@@ -84,6 +84,18 @@ func TestFileToolsStayInWorkspaceInEveryMode(t *testing.T) {
 	}
 }
 
+// TestShellCwdOutsideWorkspace pins that a bash cwd outside the workspace
+// is refused in words that fit a bash call, not with the file tools' advice
+// to use bash.
+func TestShellCwdOutsideWorkspace(t *testing.T) {
+	r := &toolRuntime{cwd: t.TempDir(), permission: config.PermissionYOLO, readSet: map[string]struct{}{}, allowedShell: map[string]struct{}{}}
+	raw, _ := json.Marshal(map[string]any{"command": "echo hi", "cwd": t.TempDir()})
+	_, err := r.runShellTool(context.Background(), "bash", raw, "bash")
+	if err == nil || !strings.Contains(err.Error(), "is outside the workspace") || !strings.Contains(err.Error(), "cd there") || strings.Contains(err.Error(), "use bash") {
+		t.Fatalf("bash cwd outside the workspace: %v", err)
+	}
+}
+
 // TestShellTimeoutArgumentIsHonored pins the timeout argument the shell
 // schemas and prompts advertise: accepted, enforced, and reported as a timeout.
 func TestShellTimeoutArgumentIsHonored(t *testing.T) {

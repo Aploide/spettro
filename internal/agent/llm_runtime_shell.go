@@ -57,6 +57,10 @@ func (r *toolRuntime) shellDir(prefix string, args shellToolArgs) (string, error
 		return r.cwd, nil
 	}
 	abs, _, err := r.resolvePath(want)
+	var outside *outsideWorkspaceError
+	if errors.As(err, &outside) {
+		return "", fmt.Errorf("%s cwd: %s is outside the workspace; cwd must be a directory under %s (to run somewhere else, cd there in the command itself)", prefix, want, outside.root)
+	}
 	if err != nil {
 		return "", fmt.Errorf("%s cwd: %w", prefix, err)
 	}
