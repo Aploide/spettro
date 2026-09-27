@@ -166,6 +166,55 @@ func TestCodingPromptEvidenceContracts(t *testing.T) {
 	}
 }
 
+// TestCodingPromptActsBeforeDeliberating: the round-10 bench traced most of
+// the gap to one call per run, right after the first reads, that averaged
+// 12.4K completion tokens (OpenCode: 6.8K) and usually ended in a baseline
+// test run rather than an edit. Its reasoning drafted the implementation and
+// the tests in prose, hand-traced state, re-argued ambiguous readings and
+// speculated about grading; the next call then wrote the code again. The
+// "short steps" brake sat at the end of step 2, where it went unheeded. The
+// prompt must put it up front in its own section, take the baseline together
+// with the reads, have the step 6 checks written into files after the edit,
+// settle an ambiguous reading once, and keep the final answer terse, without
+// dropping any of the verification rules pinned above.
+func TestCodingPromptActsBeforeDeliberating(t *testing.T) {
+	raw, ok := agentprompts.Prompt("agents/coding.md")
+	if !ok {
+		t.Fatal("agents/coding.md is not embedded")
+	}
+	body := stripFrontmatter(raw)
+	thinking, rest, found := strings.Cut(body, "# How to work")
+	if !found || !strings.Contains(thinking, "# Thinking") {
+		t.Fatal("coding prompt must have a Thinking section before How to work")
+	}
+	for _, needle := range []string{
+		"only as far as your next tool call",
+		"make the edit in that same step",
+		"Don't write the implementation or its tests out in your reasoning",
+		"stop and run it",
+		"Rigor comes from the checks you run",
+	} {
+		if !strings.Contains(thinking, needle) {
+			t.Errorf("Thinking section missing %q", needle)
+		}
+	}
+	for _, needle := range []string{
+		"in the same step as your first reads",
+		"before you design the fix, not after it",
+		"Check every requirement, in code",
+		"don't draft or pre-verify it in your reasoning",
+		"decide once",
+		"Reopen it only if a test or a run contradicts it",
+		"not on guesses about how the work will be reviewed or graded",
+		"Keep text next to tool calls to one short clause or none",
+		"don't re-verify before answering",
+	} {
+		if !strings.Contains(rest, needle) {
+			t.Errorf("coding prompt missing %q", needle)
+		}
+	}
+}
+
 // TestCodingPromptReadsNarrowly: a benchmark replay showed broad up-front
 // reads (callers, callees, whole files, several at once) and per-task ceremony
 // calls (a separate build-system lookup, deleting scratch scripts) inflating
