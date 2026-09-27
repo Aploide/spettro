@@ -99,5 +99,9 @@ v13 folds nothing: the built-ins keep their own names. v14 folds `skill-read`
 and `skill-list` into `skill` the same way (an agent that held only
 `skill-list` gets `skill`, which also loads skills: both only read the
 SKILL.md files the catalog exposes), and folds nothing when a tool of your
-own is called `skill`. See the v12, v13 and v14 notes in
+own is called `skill`: `skill-read` and `skill-list` then stay built-ins
+under their own names, and the skill list in the system prompt tells the
+model to call `skill-read`. A built-in never runs under a name that one of
+your own tools holds, and is never advertised with that tool's name. See the
+v12, v13 and v14 notes in
 [AGENTS.md](../AGENTS.md#root-fields).

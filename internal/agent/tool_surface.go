@@ -7,7 +7,6 @@ import (
 
 	"spettro/internal/lsp"
 	"spettro/internal/provider"
-	"spettro/internal/skills"
 )
 
 // Deferred tools. Every request carries the schema of every advertised tool,
@@ -41,7 +40,7 @@ var coreTools = map[string]bool{
 	"web-fetch":  true,
 	"lsp":        true,
 	// The retired language-server built-ins, when they stand unfolded (see
-	// unfoldedLSPTool), are the lsp tool under its old names.
+	// unfoldedTool), are the lsp tool under its old names.
 	"diagnostics":   true,
 	"references":    true,
 	"hover":         true,
@@ -251,7 +250,7 @@ func parseToolSearchActivated(output string) []string {
 // canonicalName is the tool a call under name runs: the canonical tool for a
 // retired built-in name, else name itself.
 func (r *toolRuntime) canonicalName(name string) string {
-	if r.userToolNamed(name) || r.unfoldedLSPTool(name) {
+	if r.userToolNamed(name) || r.unfoldedTool(name) {
 		return name
 	}
 	return CanonicalToolName(name)
@@ -305,9 +304,13 @@ func (r *toolRuntime) recordActivations(msgs []provider.Message) {
 // prompt is the agent's system prompt: a held tool it names in backticks
 // (`view-image`) is one the prompt tells the model to use, so it is
 // advertised up front rather than deferred.
+//
+// A name the operator's own tool holds (a script called skill or lsp) gets
+// no built-in spec: the built-in's description and schema would tell the
+// model it is calling something it is not.
 func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *toolSurface {
-	specs := buildToolSpecs(allowedTools)
-	specs = append(specs, r.unfoldedLSPToolSpecs(allowedTools)...)
+	specs := slices.DeleteFunc(buildToolSpecs(allowedTools), func(t provider.ToolSpec) bool { return r.userToolNamed(t.Name) })
+	specs = append(specs, r.unfoldedToolSpecs(allowedTools)...)
 	hidden := map[string]bool{}
 	if slices.ContainsFunc(specs, func(t provider.ToolSpec) bool { return slices.Contains(lspBuiltinTools, t.Name) }) && !lspAvailable(r.cwd) {
 		for _, name := range lspBuiltinTools {
@@ -316,11 +319,12 @@ func (r *toolRuntime) buildToolSurface(allowedTools []string, prompt string) *to
 			}
 		}
 	}
-	// A skill list in the system prompt tells the model to call the skill
-	// tool, so it is advertised whenever the model may load any skill.
-	hasSkills := len(r.skillsCatalog.ForModel()) > 0
+	// The skill list in the system prompt tells the model to call the tool
+	// it loads skills with (r.skillTool), so that tool is advertised
+	// whenever the model may load any skill.
+	hasSkills := r.skillTool != "" && len(r.skillsCatalog.ForModel()) > 0
 	isCore := func(name string) bool {
-		return coreTools[name] || (name == skills.ToolName && hasSkills) || strings.Contains(prompt, "`"+name+"`")
+		return coreTools[name] || (name == r.skillTool && hasSkills) || strings.Contains(prompt, "`"+name+"`")
 	}
 	return newToolSurface(specs, isCore, hidden)
 }

@@ -197,7 +197,7 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		if hasSpec && spec.ID != "" && spec.ID != id {
 			continue
 		}
-		if _, retired := legacyTools[id]; retired && (!hasSpec || isBuiltinTool(spec)) && !r.unfoldedLSPTool(id) {
+		if _, retired := legacyTools[id]; retired && (!hasSpec || isBuiltinTool(spec)) && !r.unfoldedTool(id) {
 			continue
 		}
 		if r.surface.isHidden(id) {

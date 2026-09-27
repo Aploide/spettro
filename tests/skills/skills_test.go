@@ -414,7 +414,7 @@ func TestCatalogPrompt_ContainsSkillsSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	prompt := skills.CatalogPrompt(cat)
+	prompt := skills.CatalogPrompt(cat, skills.ToolName)
 	if !strings.Contains(prompt, "<available_skills>") {
 		t.Errorf("prompt missing <available_skills>: %q", prompt)
 	}
@@ -427,7 +427,7 @@ func TestCatalogPrompt_ContainsSkillsSection(t *testing.T) {
 }
 
 func TestCatalogPrompt_EmptyCatalogReturnsEmpty(t *testing.T) {
-	if got := skills.CatalogPrompt(skills.Catalog{}); got != "" {
+	if got := skills.CatalogPrompt(skills.Catalog{}, skills.ToolName); got != "" {
 		t.Errorf("expected empty string for empty catalog, got %q", got)
 	}
 }

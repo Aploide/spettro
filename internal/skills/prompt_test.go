@@ -39,7 +39,7 @@ func TestCatalogPromptListsModelSkillsOnly(t *testing.T) {
 		{Name: "hidden", Description: "user only", ModelInvocationDisabled: true},
 		{Name: "gone", Description: "disabled", Disabled: true},
 	}}
-	got := CatalogPrompt(cat)
+	got := CatalogPrompt(cat, ToolName)
 	if !strings.Contains(got, "- alpha: First skill &lt;x&gt; when testing\n") {
 		t.Errorf("alpha line missing or not one line:\n%s", got)
 	}
@@ -49,11 +49,17 @@ func TestCatalogPromptListsModelSkillsOnly(t *testing.T) {
 	if !strings.Contains(got, "`"+ToolName+"`") {
 		t.Error("the prompt must name the skill tool in backticks so it is advertised")
 	}
-	if got != CatalogPrompt(cat) {
+	if got != CatalogPrompt(cat, ToolName) {
 		t.Error("the prompt must be deterministic")
 	}
-	if CatalogPrompt(Catalog{Skills: []Skill{{Name: "x", Disabled: true}}}) != "" {
+	if CatalogPrompt(Catalog{Skills: []Skill{{Name: "x", Disabled: true}}}, ToolName) != "" {
 		t.Error("no model-invocable skills means no section")
+	}
+	if CatalogPrompt(cat, "") != "" {
+		t.Error("an agent with no tool to load skills with gets no section")
+	}
+	if got := CatalogPrompt(cat, "skill-read"); !strings.Contains(got, "call the `skill-read` tool") {
+		t.Errorf("the section must name the agent's load tool:\n%s", got)
 	}
 }
 
@@ -62,7 +68,7 @@ func TestCatalogPromptBudget(t *testing.T) {
 	for i := range 200 {
 		cat.Skills = append(cat.Skills, Skill{Name: fmt.Sprintf("skill-%03d", i), Description: strings.Repeat("d", 400)})
 	}
-	got := CatalogPrompt(cat)
+	got := CatalogPrompt(cat, ToolName)
 	if len(got) > maxListingChars+1000 {
 		t.Errorf("prompt is %d chars, budget is %d", len(got), maxListingChars)
 	}

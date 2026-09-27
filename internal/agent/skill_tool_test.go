@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"spettro/internal/config"
+	"spettro/internal/provider"
 	"spettro/internal/skills"
 )
 
@@ -120,7 +122,11 @@ func TestSkillToolListFilter(t *testing.T) {
 // with the skill tool.
 func TestSkillCatalogInSystemPrompt(t *testing.T) {
 	r := skillToolRuntime(t)
-	prompt := buildSystemStringWith(toolLoopConfig{SystemPrompt: "base", SkillsCatalog: r.skillsCatalog}, "")
+	r.skillTool = r.skillLoadTool(map[string]struct{}{"skill": {}})
+	if r.skillTool != "skill" {
+		t.Fatalf("skill load tool = %q, want skill", r.skillTool)
+	}
+	prompt := buildSystemStringWith(toolLoopConfig{SystemPrompt: "base", SkillsCatalog: r.skillsCatalog, skillLoadTool: r.skillTool}, "")
 	if !strings.Contains(prompt, "- greet: Greets someone") {
 		t.Errorf("system prompt lacks the greet line:\n%s", prompt)
 	}
@@ -161,4 +167,107 @@ func TestSkillCatalogForHonoursConfig(t *testing.T) {
 	if got := names(SkillCatalogFor(cwd, config.UserConfig{DisabledSkills: []string{"Native"}})); strings.Join(got, ",") != "claude-one" {
 		t.Errorf("disabled native = %v", got)
 	}
+}
+
+// An agent that cannot load a skill (it holds neither the skill tool nor an
+// unfolded skill-read) gets no skill list: the list would tell the model to
+// call a tool it does not have, and file-read cannot reach the user-level
+// skill folders outside the workspace anyway.
+func TestSkillCatalogOnlyForAgentsThatCanLoadSkills(t *testing.T) {
+	r := skillToolRuntime(t)
+	allowed := map[string]struct{}{"file-read": {}, "glob": {}}
+	r.skillTool = r.skillLoadTool(allowed)
+	if r.skillTool != "" {
+		t.Fatalf("skill load tool = %q for an agent without the skill tool", r.skillTool)
+	}
+	prompt := buildSystemStringWith(toolLoopConfig{SystemPrompt: "base", SkillsCatalog: r.skillsCatalog, skillLoadTool: r.skillTool}, "")
+	if strings.Contains(prompt, "greet") || strings.Contains(prompt, "available_skills") {
+		t.Errorf("an agent without a skill tool was given the skill list:\n%s", prompt)
+	}
+}
+
+// unfoldedSkillRuntime is skillToolRuntime with a manifest in which the
+// operator owns a script called skill, so v14 left the built-in skill-read
+// (with its old aliases) and skill-list unfolded.
+func unfoldedSkillRuntime(t *testing.T) *toolRuntime {
+	t.Helper()
+	r := skillToolRuntime(t)
+	userSkill := config.ToolSpec{ID: "skill", Name: "My skill script", Kind: "script", EntryPoint: "./skill.sh", Enabled: true, PermittedActions: []string{"read"}}
+	read := config.ToolSpec{ID: "skill-read", Name: "Skill Read", Kind: "builtin", Enabled: true, PermittedActions: []string{"read"}, Aliases: []string{"activate-skill", "skill-activate"}}
+	list := config.ToolSpec{ID: "skill-list", Name: "Skill List", Kind: "builtin", Enabled: true, PermittedActions: []string{"read"}}
+	r.manifest = &config.AgentManifest{Tools: []config.ToolSpec{userSkill, read, list}}
+	r.toolPolicies = map[string]config.ToolSpec{
+		"skill": userSkill, "skill-read": read, "activate-skill": read, "skill-activate": read, "skill-list": list,
+	}
+	return r
+}
+
+// With a tool of the operator's own called skill, the built-in skill tools
+// keep their old names: calls are not rewritten into the operator's tool,
+// the one the agent holds runs the built-in, it is advertised under its own
+// name, and the system prompt points the model at it.
+func TestUnfoldedSkillToolsKeepWorking(t *testing.T) {
+	r := unfoldedSkillRuntime(t)
+	ctx := context.Background()
+	held := map[string]struct{}{"skill-read": {}, "activate-skill": {}, "skill-activate": {}, "skill-list": {}}
+
+	for _, name := range []string{"skill-read", "activate-skill", "skill-activate"} {
+		call := aliasCall(t, name, map[string]any{"name": "greet", "args": "Ada"})
+		if got, err := r.canonicalCall(call); err != nil || got.Tool != name {
+			t.Fatalf("%s became %+v, %v", name, got, err)
+		}
+		out, err := r.execute(ctx, call, held)
+		if err != nil || !strings.Contains(out, "Say hello to Ada.") {
+			t.Errorf("%s: out=%q err=%v", name, out, err)
+		}
+	}
+	out, err := r.execute(ctx, aliasCall(t, "skill-list", map[string]any{}), held)
+	if err != nil || !strings.Contains(out, `"name":"greet"`) {
+		t.Errorf("skill-list: out=%q err=%v", out, err)
+	}
+
+	// A retired name the agent does not hold never reaches the operator's
+	// script.
+	res := r.parallelExec(ctx, []toolCall{aliasCall(t, "skill-read", map[string]any{"name": "greet"})}, map[string]struct{}{"skill": {}}, nil)
+	if res[0].status != "error" || !strings.Contains(res[0].output, `tool "skill-read" not allowed`) {
+		t.Errorf("skill-read, not held: %s %q", res[0].status, res[0].output)
+	}
+
+	// The operator's skill is not the built-in: the built-in must neither
+	// run under its name nor lend it its schema.
+	if out, err := r.execute(ctx, aliasCall(t, "skill", map[string]any{"name": "greet"}), map[string]struct{}{"skill": {}}); err == nil || strings.Contains(out, "skill_content") {
+		t.Errorf("the operator's skill ran the built-in: out=%q err=%v", out, err)
+	}
+
+	r.skillTool = r.skillLoadTool(held)
+	if r.skillTool != "skill-read" {
+		t.Fatalf("skill load tool = %q, want skill-read", r.skillTool)
+	}
+	surface := r.buildToolSurface([]string{"skill", "skill-read", "skill-list", "tool-search"}, "")
+	names := map[string]bool{}
+	for _, spec := range append(surface.specs(), deferredSpecs(surface)...) {
+		names[spec.Name] = true
+		if spec.Name != "tool-search" && (len(spec.Schema) == 0 || spec.Description == "") {
+			t.Errorf("%s advertised without a schema or description", spec.Name)
+		}
+	}
+	if !names["skill-read"] || !names["skill-list"] || names["skill"] {
+		t.Errorf("advertised = %v, want skill-read and skill-list but not the operator's skill", names)
+	}
+	if slices.Contains(surface.deferredNames(), "skill-read") {
+		t.Error("the tool the skill list names must be advertised up front")
+	}
+	prompt := buildSystemStringWith(toolLoopConfig{SystemPrompt: "base", SkillsCatalog: r.skillsCatalog, skillLoadTool: r.skillTool}, "")
+	if !strings.Contains(prompt, "`skill-read`") || strings.Contains(prompt, "`skill`") {
+		t.Errorf("the skill list must point at skill-read:\n%s", prompt)
+	}
+}
+
+// deferredSpecs returns the specs a surface holds back behind tool-search.
+func deferredSpecs(s *toolSurface) []provider.ToolSpec {
+	var out []provider.ToolSpec
+	for _, name := range s.deferredNames() {
+		out = append(out, s.deferred[name])
+	}
+	return out
 }

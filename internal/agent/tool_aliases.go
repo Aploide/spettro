@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"spettro/internal/config"
+	"spettro/internal/provider"
+	"spettro/internal/skills"
 )
 
 // Retired tool names. Several built-in tools did the same job under
@@ -99,10 +101,11 @@ func canonicalToolCall(call toolCall) (toolCall, error) {
 // canonicalCall is canonicalToolCall for this run. A retired name that a
 // tool of the operator's own answers to (a script or MCP tool that happens to
 // be called "ls" or "hover") is that tool, not an alias. And when the
-// operator's own tool is called lsp, v13 left the language-server built-ins
-// unfolded: their calls keep their own names (see unfoldedLSPTool).
+// operator's own tool holds a canonical name (lsp, skill), the migration
+// left the built-ins it would have folded into it unfolded: their calls keep
+// their own names (see unfoldedTool).
 func (r *toolRuntime) canonicalCall(call toolCall) (toolCall, error) {
-	if r.userToolNamed(call.Tool) || r.unfoldedLSPTool(call.Tool) {
+	if r.userToolNamed(call.Tool) || r.unfoldedTool(call.Tool) {
 		return call, nil
 	}
 	return canonicalToolCall(call)
@@ -128,14 +131,97 @@ func isBuiltinTool(t config.ToolSpec) bool {
 	return t.Kind == "" || t.Kind == "builtin"
 }
 
-// unfoldedLSPTool reports whether name is one of the retired language-server
-// built-ins while the operator has a tool of their own called lsp. v13 left
-// those built-ins unfolded then, so a call keeps its name and runs the
-// built-in (when the agent holds it) rather than becoming a call of the
-// operator's lsp.
-func (r *toolRuntime) unfoldedLSPTool(name string) bool {
+// unfoldableTools are the canonical tools whose manifest migration (v13 for
+// lsp, v14 for skill) is skipped when the operator already has a tool of
+// their own under the canonical name: folding a built-in into the
+// operator's tool would change what that tool is (see
+// config.consolidateBuiltinTools). The retired built-ins then stay in the
+// manifest under their old names, and the runtime has to keep running and
+// advertising them under those names (see unfoldedTool).
+//
+// The v12 folds (bash, file-edit, grep, glob, todo-write) are not listed:
+// their retired names have no dispatch or schema of their own any more.
+var unfoldableTools = map[string]bool{"lsp": true, skills.ToolName: true}
+
+// unfoldedTool reports whether name is a retired built-in whose fold did not
+// happen because the operator owns its canonical name (see
+// unfoldableTools). Such a call keeps its name and runs the built-in the
+// agent holds, rather than becoming a call of the operator's tool.
+func (r *toolRuntime) unfoldedTool(name string) bool {
 	lt, ok := legacyTools[name]
-	return ok && lt.canonical == "lsp" && r.userToolNamed("lsp")
+	return ok && unfoldableTools[lt.canonical] && r.userToolNamed(lt.canonical)
+}
+
+// unfoldedLSPTool reports whether name is one of the retired language-server
+// built-ins standing unfolded (the operator has a tool of their own called
+// lsp).
+func (r *toolRuntime) unfoldedLSPTool(name string) bool {
+	return r.unfoldedTool(name) && legacyTools[name].canonical == "lsp"
+}
+
+// unfoldedSkillTool reports whether name is one of the retired skill
+// built-ins (skill-read, its old aliases, skill-list) standing unfolded (the
+// operator has a tool of their own called skill).
+func (r *toolRuntime) unfoldedSkillTool(name string) bool {
+	return r.unfoldedTool(name) && legacyTools[name].canonical == skills.ToolName
+}
+
+// unfoldedToolAdvert is the description and schema a retired built-in is
+// advertised with while it stands unfolded: the tool as it was advertised
+// before its fold.
+type unfoldedToolAdvert struct {
+	desc   string
+	schema json.RawMessage
+}
+
+// unfoldedToolAdverts holds the adverts of the retired built-ins that can
+// stand unfolded. Only a manifest tool's own ID is advertised; the old
+// aliases of skill-read (activate-skill, skill-activate) stay callable
+// without being listed.
+var unfoldedToolAdverts = map[string]unfoldedToolAdvert{
+	"diagnostics": {
+		desc:   "Return current language-server diagnostics for a file (or every file seen so far when path is omitted).",
+		schema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	},
+	"references": {
+		desc:   "Language-server lookup: find references to a symbol, or its definition with kind=\"definition\". Position by symbol name or 1-based line/character.",
+		schema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"kind":{"type":"string","enum":["references","definition"]},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	},
+	"hover": {
+		desc:   "Language-server hover: type signature and documentation for a symbol. Position by symbol name or 1-based line/character.",
+		schema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer"},"character":{"type":"integer"}},"required":["path"]}`),
+	},
+	"lsp-restart": {
+		desc:   "Restart a wedged language server (all servers when none named).",
+		schema: json.RawMessage(`{"type":"object","properties":{"server":{"type":"string"}}}`),
+	},
+	"skill-read": {
+		desc:   "Load an Agent Skill by name: returns its instructions and the directory holding its bundled files. args, when given, fill the skill's $ARGUMENTS placeholders.",
+		schema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"the skill to load"},"args":{"type":"string","description":"optional arguments for the skill"}},"required":["name"]}`),
+	},
+	"skill-list": {
+		desc:   "List the Agent Skills you may load (query filters by name or description).",
+		schema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+	},
+}
+
+// unfoldedToolSpecs returns the native tool specs of the unfolded retired
+// built-ins this agent holds, in allow-list order.
+func (r *toolRuntime) unfoldedToolSpecs(allowedTools []string) []provider.ToolSpec {
+	var out []provider.ToolSpec
+	for _, name := range allowedTools {
+		name = strings.TrimSpace(name)
+		spec, ok := r.toolPolicies[name]
+		if !ok || spec.ID != name || !isBuiltinTool(spec) || !r.unfoldedTool(name) {
+			continue
+		}
+		advert, ok := unfoldedToolAdverts[name]
+		if !ok || slices.ContainsFunc(out, func(t provider.ToolSpec) bool { return t.Name == name }) {
+			continue
+		}
+		out = append(out, provider.ToolSpec{Name: name, Description: advert.desc, Schema: advert.schema})
+	}
+	return out
 }
 
 // hookAlias is the retired name the hooks of this (canonical) call also

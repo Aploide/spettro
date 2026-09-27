@@ -342,7 +342,7 @@ func TestUnfoldedLSPToolsKeepWorking(t *testing.T) {
 			t.Errorf("%s, not held, must not reach the user's lsp: %s %q", name, res[0].status, res[0].output)
 		}
 	}
-	specs := rt.unfoldedLSPToolSpecs([]string{"file-read", "diagnostics", "lsp"})
+	specs := rt.unfoldedToolSpecs([]string{"file-read", "diagnostics", "lsp"})
 	if len(specs) != 1 || specs[0].Name != "diagnostics" || len(specs[0].Schema) == 0 || specs[0].Description == "" {
 		t.Fatalf("advertised = %+v, want diagnostics alone", specs)
 	}
@@ -354,7 +354,7 @@ func TestUnfoldedLSPToolsKeepWorking(t *testing.T) {
 	// old names.
 	rt.manifest = &config.AgentManifest{Tools: []config.ToolSpec{{ID: "lsp", Kind: "builtin", Aliases: []string{"diagnostics"}}}}
 	rt.toolPolicies = map[string]config.ToolSpec{"lsp": rt.manifest.Tools[0], "diagnostics": rt.manifest.Tools[0]}
-	if specs := rt.unfoldedLSPToolSpecs([]string{"diagnostics", "lsp"}); len(specs) != 0 {
+	if specs := rt.unfoldedToolSpecs([]string{"diagnostics", "lsp"}); len(specs) != 0 {
 		t.Fatalf("folded: advertised %+v", specs)
 	}
 }

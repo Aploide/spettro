@@ -128,3 +128,50 @@ func (r *toolRuntime) listSkills(query string) (string, error) {
 	}
 	return string(raw), nil
 }
+
+// runUnfoldedSkillTool runs a retired skill built-in under its own name,
+// which happens only while the operator's own tool holds the name skill (see
+// toolRuntime.unfoldedTool): the built-in the agent holds, not the
+// operator's skill, does the work. skill-list only lists, as it always did;
+// skill-read and its old aliases load a skill exactly as the skill tool
+// does.
+func (r *toolRuntime) runUnfoldedSkillTool(call toolCall) (string, error) {
+	if !r.unfoldedSkillTool(call.Tool) {
+		return "", fmt.Errorf("unsupported tool %q", call.Tool)
+	}
+	if call.Tool != "skill-list" {
+		return r.runSkill(call.Args)
+	}
+	var args struct {
+		Query string `json:"query"`
+	}
+	if len(bytes.TrimSpace(call.Args)) > 0 {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
+			return "", fmt.Errorf("skill-list args: %w", err)
+		}
+	}
+	return r.listSkills(args.Query)
+}
+
+// skillLoadTool returns the name under which this run's model loads a skill,
+// which is the tool the system prompt's skill list tells it to call:
+//
+//   - the built-in skill tool, when the agent holds it;
+//   - while the operator owns the name skill (see unfoldedTool), the
+//     unfolded skill-read the agent holds, or one of its old aliases;
+//   - "" when the agent can load no skill. The skill list is then left out
+//     of the system prompt altogether: it would name a tool the model
+//     cannot call, and file-read is no substitute because the user-level
+//     skill folders lie outside the workspace it is confined to.
+func (r *toolRuntime) skillLoadTool(allowed map[string]struct{}) string {
+	candidates := []string{skills.ToolName}
+	if r.userToolNamed(skills.ToolName) {
+		candidates = []string{"skill-read", "activate-skill", "skill-activate"}
+	}
+	for _, name := range candidates {
+		if _, held := allowed[name]; held && !r.userToolNamed(name) {
+			return name
+		}
+	}
+	return ""
+}

@@ -113,7 +113,7 @@ func buildSystemStringWith(cfg toolLoopConfig, sessionCtx string) string {
 	if base == "" {
 		base = "You are an assistant."
 	}
-	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog); catalog != "" {
+	if catalog := skills.CatalogPrompt(cfg.SkillsCatalog, cfg.skillLoadTool); catalog != "" {
 		base = base + catalog
 	}
 	return base + cfg.toolSurfaceNote + sessionCtx

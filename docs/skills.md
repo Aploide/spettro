@@ -193,6 +193,13 @@ characters; past that the list ends with a note telling the agent to call
 `skill` with no name to see the rest. Skills with
 `disable-model-invocation: true` or disabled ones are not listed.
 
+Only agents that hold the `skill` tool get the list. An agent without it
+(a custom agent whose `allowed_tools` leave it out) could not load a skill,
+and `file-read` is no substitute: it is confined to the workspace, and most
+skills live under your home directory. If your manifest has a tool of its
+own called `skill`, the old `skill-read` built-in stands in for it and the
+list names `skill-read` instead (see [tools](tools.md#retired-names)).
+
 The agent then calls the `skill` tool:
 
 | Call | Result |
@@ -258,8 +265,10 @@ Invariants worth keeping:
 - Every consumer gets its catalog from `agent.SkillCatalogFor` (or
   `SkillCatalog`). Discovering directly would bypass the user's settings
   and the cache, and the `/` menu could disagree with what the agent sees.
-- `CatalogPrompt` must depend only on the catalog, never on time or step,
-  to keep the system prompt cacheable.
+- `CatalogPrompt` must depend only on the catalog and the agent's load
+  tool, never on time or step, to keep the system prompt cacheable. The
+  load tool comes from `toolRuntime.skillLoadTool`; an agent without one
+  gets no list.
 - Spettro never writes into a root whose `Root.ReadOnly()` is true.
 - A skill never shadows a command: each host checks its own built-in names
   first (`builtinCommandNames` in the TUI, `acpReservedCommandNames` in ACP,

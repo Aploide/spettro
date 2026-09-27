@@ -211,6 +211,11 @@ type toolLoopConfig struct {
 	// toolSurfaceNote is the system prompt's note on the tools held but not
 	// advertised up front (see toolSurfacePrompt); set by runToolLoop.
 	toolSurfaceNote string
+
+	// skillLoadTool is the tool the system prompt's skill list tells the
+	// model to call (see toolRuntime.skillLoadTool); "" leaves the list out.
+	// Set by runToolLoop.
+	skillLoadTool string
 }
 
 // traceID is the agent identity stamped on emitted ToolTraces: the unique
@@ -296,6 +301,7 @@ type toolRuntime struct {
 	stopRequested        bool
 	stopReason           string
 	skillsCatalog        skills.Catalog
+	skillTool            string // the tool the model loads skills with (see skillLoadTool); "" when none
 	goalMode             bool
 	// workflowPreapproved skips the workflow tool's confirmation prompt: the
 	// user already said yes by writing the keyword.
@@ -600,6 +606,8 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// once tool-search (or a call by name) activated it — in this turn or an
 	// earlier one of the carried conversation. It changes only on an
 	// activation, so the cached prompt prefix survives every other step.
+	runtime.skillTool = runtime.skillLoadTool(allowed)
+	cfg.skillLoadTool = runtime.skillTool
 	runtime.surface = runtime.buildToolSurface(cfg.AllowedTools, cfg.SystemPrompt)
 	runtime.restoreActivations(cfg.Messages)
 	cfg.toolSurfaceNote = toolSurfacePrompt(runtime.surface.deferredNames(), len(runtime.surface.droppedNames()) > 0)
@@ -1199,8 +1207,13 @@ func concurrentCall(call toolCall) bool {
 		return lspCallOp(call.Args) != "restart"
 	}
 	if lt, ok := legacyTools[call.Tool]; ok && lt.canonical == "lsp" {
-		// A language-server built-in left unfolded (see unfoldedLSPTool).
+		// A language-server built-in left unfolded (see unfoldedTool).
 		return call.Tool != "lsp-restart"
+	}
+	if lt, ok := legacyTools[call.Tool]; ok && lt.canonical == skills.ToolName {
+		// A skill built-in left unfolded (see unfoldedTool) only reads, as
+		// the skill tool does.
+		return true
 	}
 	return concurrentTools[call.Tool]
 }
@@ -1467,6 +1480,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
 	}
+	if r.userToolNamed(call.Tool) {
+		// The operator's own script, HTTP or MCP tool. This runtime runs only
+		// built-ins, and the dispatch below is keyed by name: without this
+		// check a tool of the operator's called skill or lsp would silently
+		// run the built-in of that name instead.
+		return "", fmt.Errorf("unsupported tool %q: it is the manifest's own tool, not a built-in", call.Tool)
+	}
 	if spec, ok := r.toolPolicies[call.Tool]; ok {
 		if evaluatePermissionRule("tool", spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
 			return "", fmt.Errorf("tool %q denied by policy", call.Tool)
@@ -1635,6 +1655,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runToolSearch(allowed, call.Args)
 	case "skill":
 		return r.runSkill(call.Args)
+	case "skill-read", "activate-skill", "skill-activate", "skill-list":
+		return r.runUnfoldedSkillTool(call)
 	case "config":
 		return r.runConfigTool(call.Args)
 	case "lsp":

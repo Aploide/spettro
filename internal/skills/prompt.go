@@ -9,9 +9,11 @@ import (
 )
 
 // ToolName is the canonical name of the built-in tool the model calls to
-// load a skill. The system prompt refers to it by this name; the agent
-// runtime keeps the older names (skill-read, skill-list, activate-skill,
-// skill-activate) as hidden aliases.
+// load a skill. The agent runtime keeps the older names (skill-read,
+// skill-list, activate-skill, skill-activate) as hidden aliases, except
+// while the operator's own tool holds the name skill: the old built-ins then
+// keep their own names, and the skill list names skill-read instead (see
+// CatalogPrompt's loadTool).
 const ToolName = "skill"
 
 // Budgets for the skill list in the system prompt. The list is part of the
@@ -26,21 +28,27 @@ const (
 )
 
 // CatalogPrompt renders the model's skill list as a section to append to a
-// system prompt: a short instruction to call the skill tool, then one
+// system prompt: a short instruction to call loadTool, then one
 // "- name: description" line per model-invocable skill, sorted by name.
 //
-// The output depends only on the catalog, never on the step or time, so the
-// system prompt stays byte-identical across steps and keeps its provider
-// prompt-cache prefix. Returns "" when no skill is model-invocable.
-func CatalogPrompt(c Catalog) string {
+// loadTool is the tool the agent the prompt is for loads skills with:
+// ToolName normally, or an unfolded skill-read (see ToolName). An agent that
+// holds no such tool gets no section at all ("" loadTool): the list would
+// only tell it to call a tool it cannot use.
+//
+// The output depends only on the catalog and loadTool, never on the step or
+// time, so the system prompt stays byte-identical across steps and keeps
+// its provider prompt-cache prefix. Returns "" when no skill is
+// model-invocable.
+func CatalogPrompt(c Catalog, loadTool string) string {
 	list := c.ForModel()
-	if len(list) == 0 {
+	if len(list) == 0 || loadTool == "" {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("\n\nAgent Skills:\n")
 	b.WriteString("Skills are instruction packs for specific tasks. When a request matches a skill below, call the `")
-	b.WriteString(ToolName)
+	b.WriteString(loadTool)
 	b.WriteString("` tool with {\"name\": \"<skill>\"} before starting the work; it returns the instructions and the skill's directory. ")
 	b.WriteString("Read the skill's bundled files (scripts/, references/, assets/) with file-read only when the instructions point to them. ")
 	b.WriteString("Do not guess a skill's instructions from its description.\n")
@@ -49,7 +57,7 @@ func CatalogPrompt(c Catalog) string {
 	for i, s := range list {
 		line := fmt.Sprintf("- %s: %s\n", escapeXML(s.Name), escapeXML(truncateRunes(s.ListingDescription(), maxListingDescription)))
 		if used+len(line) > maxListingChars {
-			fmt.Fprintf(&b, "- (%d more skills not listed; call `%s` with no name to list them all)\n", len(list)-i, ToolName)
+			fmt.Fprintf(&b, "- (%d more skills not listed; call `%s` with no name to list them all)\n", len(list)-i, loadTool)
 			break
 		}
 		b.WriteString(line)

@@ -104,7 +104,9 @@ This file lets you define, in one place:
   gets `skill`, which can also load a skill: both halves only read the
   SKILL.md files the catalog already shows, so no new kind of access is
   granted. A tool of your own called `skill` stops the fold, and the two
-  built-ins keep their names.
+  built-ins keep their names: an agent holding `skill-read` loads skills
+  through it (the skill list in its system prompt names `skill-read`), and
+  calls under the old names are never turned into calls of your `skill`.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
