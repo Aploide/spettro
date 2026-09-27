@@ -67,6 +67,12 @@ type Options struct {
 	// that must show a change whole, such as the approval review; with Width
 	// 0 there is nothing to wrap at and it has no effect.
 	Wrap bool
+	// Exact escapes every line with termtext.EscapeExact instead of
+	// termtext.EscapeControls: a tab is drawn as a tab mark rather than as
+	// spaces, and a carriage return at the end of a line as "^M" rather than
+	// dropped. It is for the same views as Wrap, where a tab-indented line
+	// must not pass for a space-indented one.
+	Exact bool
 }
 
 // SideBySideMinWidth is the minimum terminal width for side-by-side layout.
@@ -87,21 +93,66 @@ type parsedLine struct {
 //
 // Diff bodies are file contents, so they carry tabs (Go and Makefiles are
 // tab-indented), carriage returns and occasionally escape sequences. Each
-// line has its control characters made visible here (termtext.EscapeControls),
-// before intra-line spans are computed and before truncation measures it, so
-// every later width calculation sees exactly the cells the terminal will
-// draw. They are escaped rather than stripped because a diff is often shown
-// for approval: a carriage return must not be able to hide part of a line.
-func parseUnified(diffText string) []parsedLine {
+// line has its control characters made visible here (termtext.EscapeControls,
+// or termtext.EscapeExact when exact is set), before intra-line spans are
+// computed and before truncation measures it, so every later width
+// calculation sees exactly the cells the terminal will draw. They are escaped
+// rather than stripped because a diff is often shown for approval: a carriage
+// return must not be able to hide part of a line.
+//
+// A hunk header says how many old and new lines its hunk holds, and every
+// line inside those counts is a body line whatever it starts with: deleting
+// the SQL comment "-- keep row level security on" gives the body line
+// "--- keep row level security on", which must be drawn as a deletion, not
+// taken for a file header (that would hide the deletion and shift every line
+// number after it). File headers are only recognised between hunks. A hunk
+// header without counts (not one any diff tool writes) falls back to reading
+// each line by its prefix until the next header.
+func parseUnified(diffText string, exact bool) []parsedLine {
+	escape := termtext.EscapeControls
+	if exact {
+		escape = termtext.EscapeExact
+	}
 	var out []parsedLine
 	oldNo, newNo := 0, 0
-	inHunk := false
+	// oldLeft and newLeft are the lines the current hunk still holds;
+	// counted is false for a header without counts, where the hunk runs to
+	// the next header line instead.
+	oldLeft, newLeft := 0, 0
+	counted, inHunk := true, false
 	for rawLine := range strings.SplitSeq(strings.TrimRight(diffText, "\n"), "\n") {
-		line := termtext.EscapeControls(rawLine)
+		line := escape(rawLine)
+		if inHunk && counted && oldLeft <= 0 && newLeft <= 0 {
+			inHunk = false
+		}
+		if inHunk && counted && !strings.HasPrefix(line, "@@") && !strings.HasPrefix(line, "\\") {
+			// A body line, whatever it looks like.
+			switch {
+			case strings.HasPrefix(line, "+"):
+				out = append(out, parsedLine{kind: kindAdd, newNo: newNo, text: line[1:], raw: line})
+				newNo++
+				newLeft--
+			case strings.HasPrefix(line, "-"):
+				out = append(out, parsedLine{kind: kindDel, oldNo: oldNo, text: line[1:], raw: line})
+				oldNo++
+				oldLeft--
+			default:
+				text := strings.TrimPrefix(line, " ")
+				out = append(out, parsedLine{kind: kindContext, oldNo: oldNo, newNo: newNo, text: text, raw: line})
+				oldNo++
+				newNo++
+				oldLeft--
+				newLeft--
+			}
+			continue
+		}
 		switch {
 		case strings.HasPrefix(line, "@@"):
-			oldNo, newNo = parseHunkHeader(line)
-			inHunk = oldNo > 0 || newNo > 0
+			var h hunkHeader
+			h, counted = parseHunkHeader(line)
+			oldNo, newNo = h.oldStart, h.newStart
+			oldLeft, newLeft = h.oldCount, h.newCount
+			inHunk = !counted && (oldNo > 0 || newNo > 0) || counted && (oldLeft > 0 || newLeft > 0)
 			out = append(out, parsedLine{meta: true, raw: line})
 		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"),
 			strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "),
@@ -126,17 +177,54 @@ func parseUnified(diffText string) []parsedLine {
 	return out
 }
 
-func parseHunkHeader(line string) (oldStart, newStart int) {
+// hunkHeader is what a "@@ -12,7 +12,9 @@" line says: where the hunk starts
+// in the old and new file and how many lines of each it holds.
+type hunkHeader struct {
+	oldStart, oldCount int
+	newStart, newCount int
+}
+
+// parseHunkHeader reads a hunk header. A range without a count ("-12")
+// holds one line, as in every unified diff. ok is false when the line does
+// not have both ranges in that form.
+func parseHunkHeader(line string) (h hunkHeader, ok bool) {
 	// "@@ -12,7 +12,9 @@ optional context"
-	fields := strings.FieldsSeq(line)
-	for f := range fields {
-		if strings.HasPrefix(f, "-") {
-			oldStart = leadingInt(f[1:])
-		} else if strings.HasPrefix(f, "+") {
-			newStart = leadingInt(f[1:])
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[0] != "@@" || fields[3] != "@@" {
+		// Not a well-formed header: take what start lines it has.
+		for _, f := range fields {
+			if strings.HasPrefix(f, "-") {
+				h.oldStart = leadingInt(f[1:])
+			} else if strings.HasPrefix(f, "+") {
+				h.newStart = leadingInt(f[1:])
+			}
+		}
+		return h, false
+	}
+	var okOld, okNew bool
+	h.oldStart, h.oldCount, okOld = parseHunkRange(fields[1], '-')
+	h.newStart, h.newCount, okNew = parseHunkRange(fields[2], '+')
+	return h, okOld && okNew
+}
+
+// parseHunkRange reads one range of a hunk header ("-12,7" or "+12"), whose
+// first byte must be sign.
+func parseHunkRange(f string, sign byte) (start, count int, ok bool) {
+	if len(f) < 2 || f[0] != sign {
+		return 0, 0, false
+	}
+	startText, countText, hasCount := strings.Cut(f[1:], ",")
+	start, err := strconv.Atoi(startText)
+	if err != nil {
+		return 0, 0, false
+	}
+	count = 1
+	if hasCount {
+		if count, err = strconv.Atoi(countText); err != nil {
+			return start, 0, false
 		}
 	}
-	return oldStart, newStart
+	return start, count, true
 }
 
 func leadingInt(s string) int {
@@ -154,7 +242,7 @@ func Render(diffText string, opts Options) string {
 	if strings.TrimSpace(diffText) == "" {
 		return ""
 	}
-	parsed := parseUnified(diffText)
+	parsed := parseUnified(diffText, opts.Exact)
 
 	avail := 0 // 0 = unlimited
 	if opts.Width > 0 {
@@ -240,7 +328,7 @@ func Overflows(diffText string, opts Options) bool {
 		return false
 	}
 	avail := opts.Width - len(opts.Indent)
-	parsed := parseUnified(diffText)
+	parsed := parseUnified(diffText, opts.Exact)
 	textW := unifiedTextWidth(avail, numWidth(parsed))
 	for _, l := range parsed {
 		limit, text := textW, l.text

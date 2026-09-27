@@ -51,7 +51,7 @@ func SanitizeLine(s string) string {
 	if i := strings.LastIndexByte(s, '\r'); i >= 0 {
 		s = s[i+1:]
 	}
-	if isPlainPrintable(s, false) {
+	if isPlainPrintable(s, modeSanitize, false) {
 		return s
 	}
 	s = strings.ToValidUTF8(s, string(utf8.RuneError))
@@ -78,12 +78,16 @@ func SanitizeLine(s string) string {
 //   - other C0 controls are written in caret notation ("^M" for a carriage
 //     return, "^[" for the escape that starts a colour sequence, "^?" for
 //     DEL);
-//   - C1 controls and Unicode format characters are written as
-//     "\u0085"-style escapes. Format characters (general category Cf) print
-//     nothing but still act: bidi overrides and isolates (U+202A..U+202E,
-//     U+2066..U+2069) make a terminal that applies bidi reorder the text
-//     around them, and zero-width characters (U+200B, U+2060, the U+FEFF
-//     byte-order mark) hide inside a word;
+//   - C1 controls and the characters a terminal draws as nothing or as a
+//     plain space (see Hidden) are written as "\u0085"-style escapes
+//     ("\U000e0100" past U+FFFF). They print nothing, or a blank that is
+//     not a space, but still count: bidi overrides and isolates
+//     (U+202A..U+202E, U+2066..U+2069) make a terminal that applies bidi
+//     reorder the text around them, zero-width characters and variation
+//     selectors hide inside a word (a string of variation selectors can
+//     carry a whole payload that decodes to a command), and a no-break
+//     space looks like the space that separates two shell words while
+//     being part of one;
 //   - a byte that is not valid UTF-8 is written as "\x9b".
 //
 // A trailing "\r" (a CRLF line ending split on "\n") is dropped, since it is
@@ -93,11 +97,83 @@ func SanitizeLine(s string) string {
 // waiting for approval or a file change being shown as a diff. SanitizeLine
 // shows what a terminal would, and a terminal would let "rm -rf ~ #\recho hi"
 // display as "echo hi"; this shows every character that is actually there.
-// The price is that text which legitimately uses a format character (an
-// emoji joined with U+200D, say) shows the escape instead.
+// The price is that text which legitimately uses one of these characters (an
+// emoji joined with U+200D or styled with U+FE0F, French text with no-break
+// spaces) shows the escape instead.
+//
+// Two characters are still shown as something else: a tab as spaces and a
+// trailing carriage return as nothing. That keeps a tab-indented diff
+// readable in a small dialog; where even those must be told apart, use
+// EscapeExact.
 func EscapeControls(s string) string {
-	s = strings.TrimRight(s, "\r")
-	if isPlainPrintable(s, true) {
+	return escape(s, false)
+}
+
+// EscapeExact is EscapeControls with nothing shown as something else, for a
+// view that promises every character (the full approval review, a command
+// preview): a tab is written as TabMark followed by spaces up to TabWidth
+// cells, so it keeps a tab's width but can no longer pass for spaces, a
+// trailing carriage return is written as "^M" like any other, and a literal
+// TabMark in s is escaped ("\u21e5") so it cannot pass for a tab. Both
+// differences matter to a shell: a "<<-EOF" heredoc ends at a tab-indented
+// "EOF" but not at a space-indented one, nor at "EOF\r".
+func EscapeExact(s string) string {
+	return escape(s, true)
+}
+
+// TabMark stands for a tab in text escaped with EscapeExact. It is the
+// symbol of the tab key and one cell wide on every terminal (its East Asian
+// width is neutral).
+const TabMark = "\u21e5"
+
+// EscapeLines applies EscapeExact to every line of multi-line text s,
+// keeping the line breaks: for text that leaves the terminal (an editor's
+// permission prompt, a chat message) and must show every character there
+// too.
+func EscapeLines(s string) string {
+	if isPlainPrintable(s, modeExact, true) {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = EscapeExact(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// HasHidden reports whether multi-line text s holds a character that does
+// not show as itself (anything EscapeExact would rewrite, other than a tab or
+// the "\r" of a CRLF line ending). A host that must present s raw, such as an
+// editor's side-by-side diff, uses it to decide whether to show an escaped
+// copy as well.
+func HasHidden(s string) bool {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			return true
+		case r == '\t', r == '\n':
+		case r == '\r':
+			if i+1 < len(s) && s[i+1] != '\n' {
+				return true
+			}
+		case isControl(r), Hidden(r):
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+// escape is EscapeControls, or EscapeExact when exact is set.
+func escape(s string, exact bool) string {
+	mode := modeEscape
+	if exact {
+		mode = modeExact
+	} else {
+		s = strings.TrimRight(s, "\r")
+	}
+	if isPlainPrintable(s, mode, false) {
 		return s
 	}
 	var b strings.Builder
@@ -107,6 +183,9 @@ func EscapeControls(s string) string {
 		switch {
 		case r == utf8.RuneError && size == 1:
 			fmt.Fprintf(&b, "\\x%02x", s[i])
+		case r == '\t' && exact:
+			b.WriteString(TabMark)
+			b.WriteString(strings.Repeat(" ", TabWidth-1))
 		case r == '\t':
 			b.WriteString(strings.Repeat(" ", TabWidth))
 		case r < 0x20:
@@ -114,8 +193,8 @@ func EscapeControls(s string) string {
 			b.WriteRune(r + 0x40)
 		case r == 0x7f:
 			b.WriteString("^?")
-		case isControl(r), unicode.Is(unicode.Cf, r):
-			fmt.Fprintf(&b, "\\u%04x", r)
+		case isControl(r), Hidden(r), exact && r == tabMarkRune:
+			writeCodePoint(&b, r)
 		default:
 			b.WriteRune(r)
 		}
@@ -124,26 +203,79 @@ func EscapeControls(s string) string {
 	return b.String()
 }
 
+// tabMarkRune is TabMark as a rune.
+const tabMarkRune = '\u21e5'
+
+// writeCodePoint writes r as "\u202e", or "\U000e0100" past U+FFFF, so the
+// escape always has a fixed number of digits and cannot run into the text
+// after it.
+func writeCodePoint(b *strings.Builder, r rune) {
+	if r > 0xffff {
+		fmt.Fprintf(b, "\\U%08x", r)
+		return
+	}
+	fmt.Fprintf(b, "\\u%04x", r)
+}
+
+// Hidden reports whether r is drawn by a terminal as nothing, or as a blank
+// that is not the ASCII space, so that a reader cannot tell it is there or
+// cannot tell it from a space:
+//
+//   - Unicode format characters (general category Cf): bidi controls,
+//     zero-width space and joiners, the byte-order mark, the tag characters;
+//   - variation selectors (U+FE00..U+FE0F, U+E0100..U+E01EF, the Mongolian
+//     ones), which change nothing on screen after most characters and can be
+//     strung together to smuggle data;
+//   - the other default-ignorable code points: U+034F, the Hangul fillers
+//     U+115F, U+1160, U+3164 and U+FFA0, U+17B4..U+17B5 and the unassigned
+//     ranges reserved for them;
+//   - every space separator other than U+0020 (the no-break space, the en
+//     and em spaces, the ideographic space and the rest of category Zs) and
+//     the line and paragraph separators U+2028 and U+2029;
+//   - U+2800, the blank braille pattern, which is not a space to a program
+//     but looks exactly like one.
+func Hidden(r rune) bool {
+	if r < 0x80 {
+		return false
+	}
+	switch {
+	case r == 0x2800:
+		return true
+	case unicode.Is(unicode.Zs, r), r == 0x2028, r == 0x2029:
+		return true
+	}
+	return unicode.In(r, unicode.Cf, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
+}
+
 // isControl reports whether r is a C0 control, DEL or a C1 control: the
 // characters a terminal acts on instead of printing.
 func isControl(r rune) bool {
 	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
-// isPlainPrintable reports whether s is valid UTF-8 with no control
-// character, and, when formatToo is set, no Unicode format character
-// either: text SanitizeLine (formatToo false) or EscapeControls (formatToo
-// true) would return unchanged. It lets the common case, ordinary ASCII,
-// skip the rebuild after one pass over the bytes; only text with a byte at
-// or above 0x80 is decoded rune by rune.
-func isPlainPrintable(s string, formatToo bool) bool {
+// escapeMode is what isPlainPrintable checks text against: the characters
+// SanitizeLine, EscapeControls or EscapeExact would rewrite.
+type escapeMode int
+
+const (
+	modeSanitize escapeMode = iota // control characters
+	modeEscape                     // and hidden characters (Hidden)
+	modeExact                      // and a literal TabMark
+)
+
+// isPlainPrintable reports whether s is valid UTF-8 holding nothing the
+// function mode stands for would rewrite, so that it would return s
+// unchanged. newlines allows "\n" (EscapeLines works on whole texts). It
+// lets the common case, ordinary ASCII, skip the rebuild after one pass over
+// the bytes; only text with a byte at or above 0x80 is decoded rune by rune.
+func isPlainPrintable(s string, mode escapeMode, newlines bool) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c < 0x20 || c == 0x7f {
+		if (c < 0x20 && !(newlines && c == '\n')) || c == 0x7f {
 			return false
 		}
 		if c >= 0x80 {
-			return isPlainUnicode(s[i:], formatToo)
+			return isPlainUnicode(s[i:], mode, newlines)
 		}
 	}
 	return true
@@ -151,12 +283,15 @@ func isPlainPrintable(s string, formatToo bool) bool {
 
 // isPlainUnicode is the rune-by-rune half of isPlainPrintable, for text that
 // is not pure ASCII.
-func isPlainUnicode(s string, formatToo bool) bool {
+func isPlainUnicode(s string, mode escapeMode, newlines bool) bool {
 	if !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if isControl(r) || (formatToo && unicode.Is(unicode.Cf, r)) {
+		if newlines && r == '\n' {
+			continue
+		}
+		if isControl(r) || (mode >= modeEscape && Hidden(r)) || (mode == modeExact && r == tabMarkRune) {
 			return false
 		}
 	}
@@ -219,32 +354,134 @@ func Wrap(s string, width int) []string {
 }
 
 // HardWrap breaks plain text s into rows of at most width display cells,
-// cutting wherever a row is full rather than at spaces. Unlike Wrap it keeps
-// every character: no space is dropped at a break and none is added, so
-// joining the rows gives back s exactly. That is what the approval review
-// needs, where a run of spaces in a command or a line of a file is part of
-// what the user approves. Rows break between grapheme clusters, never inside
-// one; a cluster wider than width (a wide character at width 1) takes a row
-// of its own. s must not contain escape sequences (escape it with
-// EscapeControls first). A width below 1 is treated as 1; an empty s yields
-// one empty row.
+// cutting inside words rather than at spaces. Unlike Wrap it keeps every
+// character: no space is dropped at a break and none is added, so joining
+// the rows gives back s exactly. That is what the approval review needs,
+// where a run of spaces in a command or a line of a file is part of what the
+// user approves.
+//
+// A space next to a break would be the one character of a row nobody can
+// see: at the end of a row it looks like nothing, and "./build/a/ ~/" (which
+// deletes the home directory) would read like "./build/a/~/" (which does
+// not). So a row breaks between two non-space characters, backing up within
+// the row when the cell where it fills up is next to a space. Only when the
+// row has no such place (a row of spaces, a run of one-letter words) does it
+// break just before a space, so the space starts the next row; and only a
+// row of nothing but spaces is cut where it fills up.
+//
+// Rows break between grapheme clusters, never inside one; a cluster wider
+// than width (a wide character at width 1) takes a row of its own. Nor does a
+// row break inside an escape EscapeControls or EscapeExact wrote ("^M",
+// "\x9b", "\u202e", "\U000e0100") when the row can hold it whole: split, "\u"
+// at the end of one row and "202e" at the start of the next would read as two
+// things. s must not contain terminal escape sequences (escape it with
+// EscapeExact first). A width below 1 is treated as 1; an empty s yields one
+// empty row.
 func HardWrap(s string, width int) []string {
 	width = max(width, 1)
 	if ansi.StringWidth(s) <= width {
 		return []string{s}
 	}
 	var rows []string
-	start, used := 0, 0
+	// row holds the clusters of the row being filled, from rowStart.
+	var row []wrapCluster
+	rowStart, used := 0, 0
 	for pos := 0; pos < len(s); {
 		// The same clusters and widths ansi.StringWidth measures, so a row
 		// is never wider than the layout thinks.
 		cluster, w := ansi.FirstGraphemeCluster(s[pos:], ansi.GraphemeWidth)
-		if used+w > width && used > 0 {
-			rows = append(rows, s[start:pos])
-			start, used = pos, 0
+		if n := escapeTokenLen(s[pos:]); n > 0 && n <= width {
+			// An escape is ASCII: its length is its width.
+			cluster, w = s[pos:pos+n], n
 		}
+		next := wrapCluster{pos: pos, w: w, space: cluster == " "}
+		for used+w > width && len(row) > 0 {
+			k := wrapBreak(row, next.space)
+			end := pos
+			if k < len(row) {
+				end = row[k].pos
+			}
+			rows = append(rows, s[rowStart:end])
+			rowStart = end
+			n := copy(row, row[k:])
+			row = row[:n]
+			used = 0
+			for _, c := range row {
+				used += c.w
+			}
+		}
+		row = append(row, next)
 		used += w
 		pos += max(len(cluster), 1)
 	}
-	return append(rows, s[start:])
+	return append(rows, s[rowStart:])
+}
+
+// escapeTokenLen is the length of the escape s starts with, as
+// EscapeControls and EscapeExact write them: "^" and one character of
+// @A-Z[\]^_? (caret notation), "\x" and two hex digits, "\u" and four,
+// "\U" and eight. It is 0 when s does not start with one. Text that happens
+// to look like an escape is kept together too, which costs nothing.
+func escapeTokenLen(s string) int {
+	if len(s) < 2 {
+		return 0
+	}
+	switch {
+	case s[0] == '^' && (s[1] >= '@' && s[1] <= '_' || s[1] == '?'):
+		return 2
+	case s[0] != '\\':
+		return 0
+	}
+	var digits int
+	switch s[1] {
+	case 'x':
+		digits = 2
+	case 'u':
+		digits = 4
+	case 'U':
+		digits = 8
+	default:
+		return 0
+	}
+	if len(s) < 2+digits {
+		return 0
+	}
+	for _, c := range []byte(s[2 : 2+digits]) {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return 0
+		}
+	}
+	return 2 + digits
+}
+
+// wrapCluster is one grapheme cluster of the row HardWrap is filling.
+type wrapCluster struct {
+	pos   int  // byte offset in the text
+	w     int  // cells
+	space bool // an ASCII space
+}
+
+// wrapBreak picks where HardWrap ends a full row: the number of the row's
+// clusters that stay on it (the rest move to the next row, in front of the
+// cluster that did not fit, which is a space when nextSpace is set). See
+// HardWrap for the order of preference. It is at least 1, so every row
+// holds something.
+func wrapBreak(row []wrapCluster, nextSpace bool) int {
+	after := func(k int) bool { // the cluster after the first k
+		if k < len(row) {
+			return row[k].space
+		}
+		return nextSpace
+	}
+	for k := len(row); k >= 1; k-- {
+		if !row[k-1].space && !after(k) {
+			return k
+		}
+	}
+	for k := len(row); k >= 1; k-- {
+		if !row[k-1].space {
+			return k
+		}
+	}
+	return len(row)
 }
