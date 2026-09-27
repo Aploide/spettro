@@ -151,6 +151,11 @@ func TestCachePersistsAcrossInstances(t *testing.T) {
 		t.Fatalf("cache not written: %v", err)
 	}
 	y := NewSymbolIndex(root, cache)
+	// The second index may still be syncing or rewriting the cache in the
+	// background when Lookup returns; without waiting for it, t.TempDir's
+	// cleanup raced that write and failed with "directory not empty" in
+	// about a third of the runs.
+	t.Cleanup(y.Flush)
 	if syms := y.Lookup(context.Background(), "NewServer"); len(syms) == 0 {
 		t.Fatal("cached index returned nothing")
 	}
