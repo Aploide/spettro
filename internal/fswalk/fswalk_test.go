@@ -3,6 +3,7 @@ package fswalk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"math/rand"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // skipNames is the agent's skipDirs list, for tests.
@@ -52,7 +54,7 @@ func sequentialWalk(w Walker, root string) []string {
 			}
 			return nil
 		}
-		if !w.keepFile(path, d) || w.Ignores.Ignored(path, false) {
+		if _, ok := w.keepFile(path, d); !ok || w.Ignores.Ignored(path, false) {
 			return nil
 		}
 		out = append(out, rel)
@@ -158,5 +160,125 @@ func TestCompareWalkOrder(t *testing.T) {
 				t.Errorf("CompareWalkOrder(%q, %q) = %d, want %d", ordered[i], ordered[j], got, want)
 			}
 		}
+	}
+}
+
+// TestWalkBoundsReadAhead checks the read-ahead budget: with a consumer
+// that stalls, the workers stop listing once maxAhead entries wait for it
+// (plus at most one directory's worth per worker that was already
+// listing), instead of listing the whole tree into memory.
+func TestWalkBoundsReadAhead(t *testing.T) {
+	root := t.TempDir()
+	const dirs, perDir = 40, 30
+	files := map[string]string{}
+	for d := range dirs {
+		for f := range perDir {
+			files[filepath.Join(fmt.Sprintf("d%02d", d), fmt.Sprintf("f%02d", f))] = ""
+		}
+	}
+	writeTree(t, root, files)
+	const budget = 64
+	defer func(old int) { maxAhead = old }(maxAhead)
+	maxAhead = budget
+	w := testWalker(root, false)
+	n := 0
+	r, err := w.walk(context.Background(), root, func(Entry) error {
+		if n++; n == 1 {
+			time.Sleep(50 * time.Millisecond) // let the workers run ahead
+		}
+		return nil
+	})
+	if err != nil || n != dirs*perDir {
+		t.Fatalf("walk: err=%v visited=%d", err, n)
+	}
+	if limit := budget + DefaultWorkers*(perDir+1); r.peak > limit {
+		t.Fatalf("read-ahead peaked at %d entries, want <= %d", r.peak, limit)
+	}
+}
+
+// TestWalkReleasesConsumedListings checks that a finished walk leaves no
+// entries reachable from its listings (the consumer clears them).
+func TestWalkReleasesConsumedListings(t *testing.T) {
+	root := randomWorkspace(t, rand.New(rand.NewSource(3)))
+	r, err := testWalker(root, true).walk(context.Background(), root, func(Entry) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ahead != 0 {
+		t.Fatalf("%d entries still counted as waiting after the walk", r.ahead)
+	}
+	for _, l := range r.queue {
+		if l.entries != nil {
+			t.Fatalf("listing %s kept its entries", l.rel)
+		}
+	}
+}
+
+// TestReachableNeedsTheExactName: on a case-insensitive filesystem Lstat
+// finds "SECRET" for a directory named "secret", but a walk from there
+// would report paths .gitignore rules do not recognise.
+func TestReachableNeedsTheExactName(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{".gitignore": "secret/\n", "sub/secret/s.go": "", "sub/open/o.go": ""})
+	w := testWalker(root, false)
+	for _, tc := range []struct {
+		start string
+		want  bool
+	}{
+		{"sub/open", true},
+		{"sub/secret", false}, // ignored
+		{"sub/SECRET", false}, // wrong case: missing, or not the listed name
+		{"SUB/open", false},
+		{"sub/Open", false},
+	} {
+		if got := w.Reachable(root, filepath.Join(root, filepath.FromSlash(tc.start))); got != tc.want {
+			t.Errorf("Reachable(%s) = %v, want %v", tc.start, got, tc.want)
+		}
+	}
+}
+
+// TestIgnoreSetFromStopsAtTop: a set made with NewIgnoreSetFrom ignores the
+// .gitignore files above its top; NewIgnoreSet applies them.
+func TestIgnoreSetFromStopsAtTop(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "proj")
+	writeTree(t, parent, map[string]string{".gitignore": "*.go\n", "proj/a.go": "", "proj/sub/.gitignore": "b.go\n", "proj/sub/b.go": "", "proj/sub/c.go": ""})
+	walkNames := func(set *IgnoreSet) []string {
+		var got []string
+		w := Walker{Base: root, Ignores: set}
+		_ = w.Walk(context.Background(), root, func(e Entry) error {
+			got = append(got, e.Rel)
+			return nil
+		})
+		return got
+	}
+	if got := walkNames(NewIgnoreSet()); len(got) != 1 || got[0] != "sub/.gitignore" {
+		t.Errorf("NewIgnoreSet walk = %v, want only sub/.gitignore (the parent's *.go applies)", got)
+	}
+	want := []string{"a.go", "sub/.gitignore", "sub/c.go"}
+	if got := walkNames(NewIgnoreSetFrom(root)); !reflect.DeepEqual(got, want) {
+		t.Errorf("NewIgnoreSetFrom walk = %v, want %v", got, want)
+	}
+	if NewIgnoreSetFrom(root).Ignored(filepath.Join(root, "a.go"), false) {
+		t.Error("Ignored applied the parent's .gitignore")
+	}
+}
+
+// TestStatReportsASymlinkTarget: with Stat and SymlinkedFiles, a symlinked
+// file's Info is its target's, so a change to the target changes it.
+func TestStatReportsASymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"real/b.go": "package real // longer than a link\n"})
+	if err := os.Symlink(filepath.Join("real", "b.go"), filepath.Join(root, "link.go")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	w := Walker{Base: root, SymlinkedFiles: true, Stat: true}
+	sizes := map[string]int64{}
+	_ = w.Walk(context.Background(), root, func(e Entry) error {
+		sizes[e.Rel] = e.Info.Size()
+		return nil
+	})
+	if sizes["link.go"] != sizes["real/b.go"] || sizes["link.go"] == 0 {
+		t.Fatalf("sizes = %v, want link.go reporting its target's size", sizes)
 	}
 }
