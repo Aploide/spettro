@@ -286,7 +286,7 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 			_ = journal.WriteFile("meta.json", string(encoded))
 		}
 		if args.ResumeFromRunID != "" {
-			prior, err := r.findWorkflowRunDir(args.ResumeFromRunID, args.ScriptPath)
+			prior, err := r.findWorkflowRunDir(args.ResumeFromRunID, origin)
 			if err != nil {
 				return "", fmt.Errorf("workflow: %w", err)
 			}
@@ -412,11 +412,15 @@ func renderWorkflowSaved(meta workflow.Meta, path string) string {
 func (r *toolRuntime) resolveWorkflowScript(args workflowArgs) (script, origin string, err error) {
 	switch {
 	case strings.TrimSpace(args.ScriptPath) != "":
-		data, err := os.ReadFile(args.ScriptPath)
+		path, err := r.workflowScriptPath(args.ScriptPath)
+		if err != nil {
+			return "", "", err
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", "", fmt.Errorf("workflow: read script_path: %w", err)
 		}
-		return string(data), args.ScriptPath, nil
+		return string(data), path, nil
 	case strings.TrimSpace(args.Name) != "":
 		src, path, err := workflow.Load(r.cwd, args.Name)
 		if err != nil {
@@ -441,6 +445,39 @@ func (r *toolRuntime) workflowRunDir(runID string) string {
 	// the user's reusable scripts, and filling it with run directories would
 	// bury them.
 	return filepath.Join(r.cwd, ".spettro", "workflow-runs", runID)
+}
+
+// workflowScriptPath resolves a script_path argument to an absolute path.
+//
+// A relative path is relative to the agent's workspace, like every other
+// tool path; it is never resolved against spettro's process directory,
+// which is not the workspace under ACP (each session has its own cwd) or for
+// a sub-agent in a worktree. The result must lie in the workspace, in one of
+// the session run directories (where every run keeps its script.js, the
+// documented way to resume an edited script, see findWorkflowRunDir), or in
+// a saved-workflow folder; anything else is refused, as the file tools
+// refuse paths outside the workspace.
+func (r *toolRuntime) workflowScriptPath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(r.cwd, p)
+	}
+	p = filepath.Clean(p)
+	if _, _, err := r.resolvePath(p); err == nil {
+		return p, nil
+	}
+	roots := workflow.SearchPaths(r.cwd)
+	if r.sessionDir != "" {
+		// The parent of this session's directory holds every session,
+		// since a run being resumed is often from another one.
+		roots = append(roots, filepath.Dir(filepath.Clean(r.sessionDir)))
+	}
+	for _, root := range roots {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("workflow: script_path %q is outside the workspace, the session's workflow runs and the saved-workflow folders", p)
 }
 
 // findWorkflowRunDir locates a previous run by id.
