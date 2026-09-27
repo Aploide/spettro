@@ -113,7 +113,12 @@ split as above. A longer one is sent as its beginning (up to 40 lines or
 shown here. The full command is attached as approval-bash-command.txt]`,
 and the whole text follows as a file in the same chat (`sendDocument`, up
 to 20 MB). If the attachment cannot be sent, the chat is told so and asked
-to review the change in the TUI before approving.
+to review the change in the TUI before approving. In the message and the
+attachment alike, every character that would not show as itself is written
+out as in the TUI (`^M` for a carriage return, `^[` for an escape, `⇥` for a
+tab, `\u202e`-style escapes for bidi overrides, zero-width characters,
+variation selectors, no-break spaces and the like), since a chat app hides
+them just as a terminal would.
 
 ## Authentication and allowlist semantics
 

@@ -176,7 +176,7 @@ All events share the envelope:
 | `comment` | Agent published a progress comment via the `comment` tool | `message` |
 | `tool` | Any tool started/finished | `name`, `status` (`running`/`success`/`error`), `agent`, `args`/`args_raw`, `output` |
 | `banner` | UI banner shown (info/warn/error/success) | `text`, `level` |
-| `approval_request` | A command, file change or network access needs approval | `command`, `tool_id`, `segments`, `reason`, `diff` (file changes only), `command_bytes`, `command_truncated`, `diff_bytes`, `diff_truncated` — see [Approval requests](#approval-requests) |
+| `approval_request` | A command, file change or network access needs approval | `command`, `tool_id`, `segments`, `reason`, `diff` (file changes only), `command_bytes`, `command_truncated`, `command_hidden_chars`, `command_visible` (only when hidden characters are present), the same four `diff_*` fields, and `approval_id` in headless runs — see [Approval requests](#approval-requests) |
 | `ask_user` | The agent invoked `ask-user` | `version`, `count`, `active`, `questions[]`, plus the v1 fields `question`, `options`, `context`, `default`, `allow_free_response` describing the question numbered `active` — see [Ask-user forms](#ask-user-forms) |
 | `commit` / `commit_error` | Auto-commit agent finished | `message` / `error` |
 | `search` / `search_error` | Repo searcher finished | `result` / `error` |
@@ -202,6 +202,35 @@ Past that the text ends with a line
 matching `command_truncated`/`diff_truncated` is `true`, and
 `command_bytes`/`diff_bytes` give the full size. A client should check the
 flag rather than guess from the text.
+
+`command` and `diff` are the exact bytes. They can hold characters that do
+not show when drawn: a carriage return that sends the cursor back over the
+start of the line, an escape sequence, a bidi override that reorders it, a
+no-break space that looks like the space between two shell words, or
+zero-width characters and variation selectors that can carry a whole
+payload inside what reads as `""`. When one is present,
+`command_hidden_chars`/`diff_hidden_chars` is `true` and
+`command_visible`/`diff_visible` holds the same text with each such
+character written out the way the TUI shows it (`^M`, `^[`, `\u202e`,
+`\U000e0100`, a tab as `⇥`). A client that shows the text to a person
+should show the `_visible` field whenever there is one.
+
+In a headless run (`spettro --headless`), where a client answers approvals, each
+event also carries an `approval_id` (`"a-7"`), and the answer names it:
+
+```http
+POST /approval
+{"approval_id": "a-7", "decision": "allow-once"}
+```
+
+`decision` is `allow-once`, `allow-always` or `deny`; with `deny`, an
+optional `instead` tells the agent what to do instead. Sub-agents run in
+parallel, so two approvals can be pending at once, often of the same tool
+(two `bash` calls), and every network approval has an empty `tool_id`. An
+answer carrying only `tool_id` (the form older clients send) is accepted
+while exactly one approval of that tool is pending, and refused with `409`
+when there are several, rather than given to one of them; an unknown
+`approval_id` gets `404`, and a second answer to the same approval `409`.
 
 ### Ask-user forms
 

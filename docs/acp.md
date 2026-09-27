@@ -284,12 +284,26 @@ The request carries:
   a person reads, and then a `[truncated: N of M bytes not shown; this is
   not the whole text]` line follows the block, so a cut text never reads as
   the whole;
+- every character that would not show as itself written out, as the TUI
+  does: in the command or target block, the text diff and the card title, a
+  carriage return is `^M`, an escape `^[`, a tab `⇥`, and a bidi override,
+  zero-width character, variation selector, no-break space or other
+  invisible character a `\u202e`-style escape (`\U000e0100` past U+FFFF).
+  The editor draws the prompt, but it would hide those just as a terminal
+  does. A structured `diff` block shows the file's own text and cannot be
+  escaped, so when that text holds such a character the prompt adds a line
+  saying so and the unified diff with each one written out;
+- when "Always allow" would remember more than the command itself (a
+  command is remembered as the parts a shell runs separately: `go build &&
+  go test` as `go build` and `go test`, a heredoc as every line of its body),
+  a line saying so and the list of those commands, one per line;
 - options `allow-once` ("Allow once"), `allow-always` and `deny` ("Deny").
   `allow-always` is offered only for commands and network targets, the
   approvals Spettro remembers (in the project's allowed-commands and
   allowed-network lists); a file write is asked about every time, so it is
   not offered there. What is remembered is the exact target, so the label
-  names it: "Always allow this command", "Always allow this URL"
+  names it: "Always allow this command" (or "Always allow the N commands
+  listed" when the list above is shown), "Always allow this URL"
   (`web-fetch`, `download`; one URL, not the whole site), "Always allow this
   search" (`web-search`; that query), "Always allow this MCP server"
   (`mcp-list-resources`, `mcp-auth`) or "Always allow this MCP resource"
