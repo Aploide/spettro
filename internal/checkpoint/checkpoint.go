@@ -107,17 +107,21 @@ type Checkpointer struct {
 	// was staged, recorded or restored in between (see Prepared).
 	gen uint64
 	// unclaimed is the commit of the newest Prepared snapshot that is not
-	// (yet) a checkpoint: pinned by its ref so gc keeps it, deleted by the
-	// next Prepare that does not reuse it, and recorded in the
-	// unclaimedMarker file so Open can delete it after an exit.
+	// (yet) a checkpoint: pinned by its ref so gc keeps it, unpinned by the
+	// next Prepare that does not reuse it, and marked by a file in
+	// pendingDir so a later Open can unpin it after an exit.
 	unclaimed preparedCommit
-	// gcDue is set when a checkpoint made the list a multiple of GCEvery;
-	// the next Prepare runs git gc --auto (off the claim path).
+	// gcDue is set when the list reached a multiple of GCEvery (by a
+	// recorded checkpoint, or found so by Open). The next Prepare runs git
+	// gc --auto before staging, or the current Snapshot right after it
+	// recorded its checkpoint; a claim (Commit) never does.
 	gcDue bool
 	// listCache is checkpoints.json as last read or written (see list).
 	listCache listCache
-	// gitRuns counts the git processes run, for the work-count tests
-	// (Commit must run none).
+	// gitRuns counts the git processes this Checkpointer started. Nothing
+	// in the package acts on it: it is the work-count seam for tests (a
+	// claim must start none), kept per instance so parallel tests do not
+	// share it.
 	gitRuns int
 }
 
@@ -168,8 +172,13 @@ func OpenWith(globalDir, projectPath string, opts Options) (*Checkpointer, error
 	}
 	c.setupAlternates()
 	c.writeDefaultExcludes()
-	c.dropUnclaimedFromLastSession()
+	c.dropAbandonedPrepared()
 	c.enforceRetention()
+	if list, err := c.list(); err == nil {
+		// A process that exited right after the GCEvery-th checkpoint
+		// never ran the gc it made due.
+		c.gcDue = c.gcDueAt(len(list))
+	}
 	c.computeWarning()
 	return c, nil
 }

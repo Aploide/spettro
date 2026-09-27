@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // editScript is a scripted sequence of working-tree edits: step i applies
@@ -235,7 +237,8 @@ func readTree(t *testing.T, root string) map[string]string {
 }
 
 // An unclaimed prepared commit is unpinned by the next Prepare that does not
-// reuse it, and by the next Open after an exit.
+// reuse it, and by a later Open once its marker is old enough that no live
+// session can still claim it.
 func TestUnclaimedPreparedCommitIsUnpinned(t *testing.T) {
 	c, project := newTestCheckpointer(t)
 	applyEdits(t, project, map[string]string{"a.txt": "1"})
@@ -256,16 +259,29 @@ func TestUnclaimedPreparedCommitIsUnpinned(t *testing.T) {
 	if n := refCount(t, c); n != 2 {
 		t.Fatalf("refs after a second unclaimed Prepare = %d, want 2 (the first one unpinned)", n)
 	}
-	// The process "exits" with the prepared commit unclaimed; Open drops it.
-	reopened, err := Open(filepath.Dir(filepath.Dir(c.dir)), project)
+	if n := pendingMarkers(t, c); n != 1 {
+		t.Fatalf("pending markers = %d, want 1", n)
+	}
+	global := filepath.Dir(filepath.Dir(c.dir))
+	// A young marker may belong to a live session: Open leaves it.
+	if _, err := Open(global, project); err != nil {
+		t.Fatal(err)
+	}
+	if n := refCount(t, c); n != 2 {
+		t.Fatalf("refs after opening next to a live session = %d, want 2", n)
+	}
+	// The process "exits" with the prepared commit unclaimed; once the
+	// marker is old enough, Open drops it.
+	agePendingMarkers(t, c, abandonedPreparedAge)
+	reopened, err := Open(global, project)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n := refCount(t, reopened); n != 1 {
 		t.Fatalf("refs after reopening = %d, want only the checkpoint's", n)
 	}
-	if _, err := os.Stat(reopened.unclaimedMarkerPath()); !os.IsNotExist(err) {
-		t.Fatalf("unclaimed marker after reopening: %v, want it removed", err)
+	if n := pendingMarkers(t, reopened); n != 0 {
+		t.Fatalf("pending markers after reopening = %d, want 0", n)
 	}
 	// A Prepare that finds the tree unchanged also unpins a pending one.
 	applyEdits(t, project, map[string]string{"a.txt": "4"})
@@ -278,6 +294,187 @@ func TestUnclaimedPreparedCommitIsUnpinned(t *testing.T) {
 	}
 	if n := refCount(t, reopened); n != 1 {
 		t.Fatalf("refs after an unchanged Prepare = %d, want 1", n)
+	}
+	if n := pendingMarkers(t, reopened); n != 0 {
+		t.Fatalf("pending markers after an unchanged Prepare = %d, want 0", n)
+	}
+}
+
+// pendingMarkers counts the pending prepared-commit markers.
+func pendingMarkers(t *testing.T, c *Checkpointer) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(c.dir, pendingDir))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return len(entries)
+}
+
+// agePendingMarkers backdates every pending marker by age.
+func agePendingMarkers(t *testing.T, c *Checkpointer, age time.Duration) {
+	t.Helper()
+	entries, _ := os.ReadDir(filepath.Join(c.dir, pendingDir))
+	old := time.Now().Add(-age - time.Second)
+	for _, e := range entries {
+		if err := os.Chtimes(filepath.Join(c.dir, pendingDir, e.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Review finding: a second session opening the project while the first has
+// a prepared commit pending must not unpin it, or the first session's claim
+// records a checkpoint that a prune then deletes.
+func TestSecondSessionKeepsLivePreparedCommit(t *testing.T) {
+	c, project := newTestCheckpointer(t)
+	applyEdits(t, project, map[string]string{"a.txt": "a0"})
+	if _, err := c.Snapshot("first", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	applyEdits(t, project, map[string]string{"a.txt": "a1"})
+	p, err := c.Prepare("step") // the model is generating in session A
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := Open(filepath.Dir(filepath.Dir(c.dir)), project) // session B starts
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := c.Commit(p, "file-edit", "p", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned, _ := c.git("for-each-ref", "--format=%(refname)", "refs/checkpoints/"+claimed.ID); pinned == "" {
+		t.Fatalf("claimed checkpoint %s has no pinning ref", claimed.ID[:12])
+	}
+	applyEdits(t, project, map[string]string{"b.txt": "b"})
+	if _, err := other.Snapshot("other", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = other.git("reflog", "expire", "--expire=now", "--all")
+	_, _ = other.git("gc", "--quiet", "--prune=now")
+	if err := c.RestoreFiles(claimed.ID); err != nil {
+		t.Fatalf("rewind to the claimed checkpoint after the other session's gc: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(project, "a.txt")); string(data) != "a1" {
+		t.Fatalf("a.txt after rewind = %q, want a1", data)
+	}
+}
+
+// Review finding: another process rewriting checkpoints.json while a
+// snapshot is between its prepare and commit halves must neither crash nor
+// record an entry that does not match what was prepared.
+func TestCommitSurvivesConcurrentListWrite(t *testing.T) {
+	c, project := newTestCheckpointer(t)
+	applyEdits(t, project, map[string]string{"a.txt": "1"})
+	if _, err := c.Snapshot("file-write", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	listPath := c.listPath()
+	good, err := os.ReadFile(listPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The unchanged tree takes the path that reads the previous entry.
+	for name, rewrite := range map[string][]byte{
+		"truncated": nil,
+		"half":      good[:len(good)/2],
+		"other":     []byte(`{"checkpoints":[{"id":"` + strings.Repeat("b", 40) + `"}]}`),
+	} {
+		// Through Commit: the list is re-checked once and handed on.
+		p, err := c.Prepare("step")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(listPath, rewrite, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Commit(p, "file-edit", "p", []byte(name)); !errors.Is(err, ErrStalePrepared) {
+			t.Fatalf("%s list: Commit = %v, want ErrStalePrepared", name, err)
+		}
+		if err := os.WriteFile(listPath, good, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Inside Snapshot: commitLocked uses the list prepareLocked read.
+		c.mu.Lock()
+		p, list, err := c.prepareLocked("file-edit", stageAll)
+		if err != nil {
+			c.mu.Unlock()
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(listPath, rewrite, 0o600)
+		cp, err := c.commitLocked(p, list, "file-edit", "p", []byte(name))
+		c.mu.Unlock()
+		if err != nil || cp.ID != lastID(list) {
+			t.Fatalf("%s list inside Snapshot: checkpoint %s (%v), want one on %s", name, cp.ID, err, lastID(list))
+		}
+		if err := os.WriteFile(listPath, good, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A Prepared snapshot older than PreparedMaxAge cannot be committed.
+func TestCommitRejectsExpiredPrepared(t *testing.T) {
+	c, project := newTestCheckpointer(t)
+	applyEdits(t, project, map[string]string{"a.txt": "1"})
+	p, err := c.Prepare("step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.at = p.at.Add(-PreparedMaxAge)
+	if _, err := c.Commit(p, "file-edit", "p", nil); !errors.Is(err, ErrStalePrepared) {
+		t.Fatalf("Commit of an expired Prepared = %v, want ErrStalePrepared", err)
+	}
+	if _, err := c.CommitTracked(p, "file-edit", "p", nil); !errors.Is(err, ErrStalePrepared) {
+		t.Fatalf("CommitTracked of an expired Prepared = %v, want ErrStalePrepared", err)
+	}
+}
+
+// git gc --auto, due every GCEvery checkpoints, runs at the next Prepare or
+// right after a synchronous Snapshot, never inside a claim; and a reopened
+// Checkpointer picks up a gc its predecessor left due.
+func TestGCRunsOffTheClaimPath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	global, project := t.TempDir(), t.TempDir()
+	c, err := OpenWith(global, project, Options{GCEvery: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		applyEdits(t, project, map[string]string{"a.txt": fmt.Sprint(i)})
+		p, err := c.Prepare("step")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Commit(p, "file-edit", "p", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !c.gcDue {
+		t.Fatal("gc not due after GCEvery checkpoints")
+	}
+	reopened, err := OpenWith(global, project, Options{GCEvery: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.gcDue {
+		t.Fatal("a reopened Checkpointer lost the due gc")
+	}
+	if _, err := c.Prepare("step"); err != nil {
+		t.Fatal(err)
+	}
+	if c.gcDue {
+		t.Fatal("Prepare left the due gc pending")
+	}
+	applyEdits(t, project, map[string]string{"a.txt": "sync"})
+	if _, err := reopened.Snapshot("bash", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.gcDue {
+		t.Fatal("Snapshot left the due gc pending")
 	}
 }
 
