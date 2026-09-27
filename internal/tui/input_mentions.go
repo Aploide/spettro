@@ -63,9 +63,11 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 			m.mentionCursor = 0
 			return nil
 		}
-		if strings.HasPrefix(val, "/skill") && !strings.HasPrefix(val, "/skills") && len(val) > len("/skill") {
-			filter := strings.TrimPrefix(val, "/skill")
-			filter = strings.TrimPrefix(filter, " ")
+		// Only "/skill " (with the space) opens the sub-command menu, so a
+		// skill whose name starts with "skill" (/skill-creator) is still
+		// found by the main menu below.
+		if strings.HasPrefix(val, "/skill ") {
+			filter := strings.TrimPrefix(val, "/skill ")
 			var items []commandDef
 			for _, c := range skillCommands {
 				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
@@ -93,6 +95,15 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 	m.cmdItems = nil
 	m.cmdCursor = 0
 
+	if query, ok := activeSkillMentionQuery(val); ok {
+		m.mentionItems = m.filterSkillMentions(query, 8)
+		m.mentionKind = mentionSkill
+		if m.mentionCursor >= len(m.mentionItems) {
+			m.mentionCursor = 0
+		}
+		return nil
+	}
+
 	query, ok := activeMentionQuery(val)
 	if !ok {
 		m.mentionItems = nil
@@ -101,12 +112,66 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 	}
 
 	m.mentionItems = filterMentionFiles(m.repoFiles, query, 8)
+	m.mentionKind = mentionFile
 	if m.mentionCursor >= len(m.mentionItems) {
 		m.mentionCursor = 0
 	}
 	// Trigger a background re-scan so newly added/removed files show up
 	// in the @-mention list. Throttled by scheduleRepoScan.
 	return m.scheduleRepoScan()
+}
+
+// mentionKind says what the mention palette is completing.
+type mentionKind int
+
+const (
+	// mentionFile completes an @path mention from the repository files.
+	mentionFile mentionKind = iota
+	// mentionSkill completes a $skill-name mention from the skills the
+	// user may run (Codex style; see skills.ExpandMentions).
+	mentionSkill
+)
+
+// sigil is the character that starts a mention of this kind.
+func (k mentionKind) sigil() string {
+	if k == mentionSkill {
+		return "$"
+	}
+	return "@"
+}
+
+// activeSkillMentionQuery reports whether the last token of the input is a
+// $mention being typed, and returns what follows the "$".
+func activeSkillMentionQuery(input string) (string, bool) {
+	lastSpace := strings.LastIndexAny(input, " \n\t")
+	token := input[lastSpace+1:]
+	if !strings.HasPrefix(token, "$") {
+		return "", false
+	}
+	return strings.TrimPrefix(token, "$"), true
+}
+
+// filterSkillMentions returns up to limit names of user-invocable skills
+// whose name contains query (case-insensitive), names starting with it
+// first. An empty result closes the palette, so "$HOME" or "$5" typed in a
+// prompt shows nothing unless a skill actually matches.
+func (m Model) filterSkillMentions(query string, limit int) []string {
+	q := strings.ToLower(query)
+	var prefix, other []string
+	for _, s := range m.skillCatalog().ForUser() {
+		name := strings.ToLower(s.Name)
+		switch {
+		case strings.HasPrefix(name, q):
+			prefix = append(prefix, s.Name)
+		case strings.Contains(name, q):
+			other = append(other, s.Name)
+		}
+	}
+	out := append(prefix, other...)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func activeMentionQuery(input string) (string, bool) {
@@ -152,7 +217,7 @@ func (m Model) acceptMention() Model {
 	if lastSpace >= 0 {
 		prefix = current[:lastSpace+1]
 	}
-	m.ta.SetValue(prefix + "@" + chosen + " ")
+	m.ta.SetValue(prefix + m.mentionKind.sigil() + chosen + " ")
 	m.mentionItems = nil
 	m.mentionCursor = 0
 	return m

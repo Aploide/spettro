@@ -331,8 +331,12 @@ type Model struct {
 	// ~/.spettro/commands and <cwd>/.spettro/commands at startup.
 	customCommands []commands.Command
 
-	repoFiles     []string
+	repoFiles []string
+	// mentionItems are the completions offered for the token being typed:
+	// file paths for an @mention, skill names for a $mention (mentionKind
+	// says which). Each item is the text inserted after the sigil.
 	mentionItems  []string
+	mentionKind   mentionKind
 	mentionCursor int
 
 	showSetup bool

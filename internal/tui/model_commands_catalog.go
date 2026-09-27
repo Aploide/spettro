@@ -28,7 +28,7 @@ var allCommands = []commandDef{
 	{"/tasks", "manage session tasks"},
 	{"/mcp", "list/read/auth MCP resources"},
 	{"/skill", "manage Agent Skills (list/install/info/enable/disable/uninstall/where/reload)"},
-	{"/skills", "alias of /skill list"},
+	{"/skills", "list discovered skills and where each comes from"},
 	{"/hooks", "list effective runtime hooks"},
 	{"/memory", "show/edit/clear persistent cross-session memory"},
 	{"/memory mine", "scan saved sessions and draft candidate memories into the review inbox"},
@@ -99,6 +99,26 @@ var thinkCommands = []commandDef{
 	{"/think max", "maximum reasoning effort (~100k thinking tokens on Anthropic)"},
 }
 
+// hiddenCommandAliases are names handleCommand accepts that allCommands
+// does not list. Together with allCommands they make up builtinCommandNames;
+// keep this in sync when adding a case to handleCommand's switch.
+var hiddenCommandAliases = []string{"/quit", "/next", "/thinking", "/workflow"}
+
+// builtinCommandNames returns every slash-command name the TUI handles
+// itself, lower-cased, without sub-commands ("/loop stop" counts as /loop).
+// A custom command or skill with one of these names is never reachable as
+// /name: the built-in wins.
+func builtinCommandNames() map[string]bool {
+	names := map[string]bool{}
+	for _, c := range allCommands {
+		names[strings.ToLower(strings.Fields(c.name)[0])] = true
+	}
+	for _, alias := range hiddenCommandAliases {
+		names[alias] = true
+	}
+	return names
+}
+
 // requiresParam reports whether the slash command must be followed by a
 // sub-parameter before it can be executed. Selecting such a command from the
 // completion menu always opens the second-level selector instead of running.
@@ -120,8 +140,9 @@ func (m Model) activeModelSupportsReasoning() bool {
 	return m.providers.SupportsReasoning(m.cfg.ActiveProvider, m.cfg.ActiveModel)
 }
 
-// filterCommands matches query against the built-in catalog plus any
-// user-defined custom commands discovered at startup.
+// filterCommands matches query against the built-in catalog, then the
+// user-defined custom commands discovered at startup, then the skills the
+// user can run (see skillMenuEntries).
 func (m Model) filterCommands(query string) []commandDef {
 	catalog := make([]commandDef, 0, len(allCommands)+len(m.customCommands))
 	for _, c := range allCommands {
@@ -139,6 +160,7 @@ func (m Model) filterCommands(query string) []commandDef {
 		}
 		catalog = append(catalog, commandDef{"/" + c.Name, desc})
 	}
+	catalog = append(catalog, m.skillMenuEntries()...)
 	if query == "" {
 		return catalog
 	}
@@ -148,6 +170,30 @@ func (m Model) filterCommands(query string) []commandDef {
 		if strings.Contains(strings.ToLower(c.name), q) || strings.Contains(strings.ToLower(c.desc), q) {
 			out = append(out, c)
 		}
+	}
+	return out
+}
+
+// skillMenuEntries lists the user-invocable skills as /name entries for the
+// slash-command menu, skipping any name a built-in or custom command already
+// uses (those win when run, so offering the skill would be misleading). The
+// description starts with the skill's argument hint, when it has one.
+func (m Model) skillMenuEntries() []commandDef {
+	taken := builtinCommandNames()
+	for _, c := range m.customCommands {
+		taken["/"+strings.ToLower(c.Name)] = true
+	}
+	var out []commandDef
+	for _, s := range m.skillCatalog().ForUser() {
+		name := "/" + s.Name
+		if taken[strings.ToLower(name)] {
+			continue
+		}
+		desc := "skill: " + s.ListingDescription()
+		if s.ArgumentHint != "" {
+			desc = "skill " + s.ArgumentHint + ": " + s.ListingDescription()
+		}
+		out = append(out, commandDef{name, desc})
 	}
 	return out
 }
@@ -292,7 +338,9 @@ const helpText = `commands:
   /loop status  show loop schedule, iterations, next run
   /tasks         manage tasks (list/add/done/set/show)
   /mcp           manage MCP resources (list/read/auth)
-  /skill         manage Agent Skills (list/install/uninstall/info/enable/disable)
+  /skills        list Agent Skills and where each comes from
+  /<skill> [args]  run a skill (also: mention $skill in a prompt)
+  /skill         manage Agent Skills (install/uninstall/info/enable/disable/where/reload)
   /skill install <source>   install from path, https git URL, or owner/repo
   /hooks         list effective runtime hooks (project + global)
   /memory        show persistent memory (user + project)
