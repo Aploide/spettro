@@ -596,25 +596,3 @@ func primaryAgentIDs(manifest config.AgentManifest) []string {
 	}
 	return ids
 }
-
-func nextMode(mode string) string {
-	switch mode {
-	case "plan":
-		return "coding"
-	case "coding":
-		return "ask"
-	default:
-		return "plan"
-	}
-}
-
-func prevMode(mode string) string {
-	switch mode {
-	case "plan":
-		return "ask"
-	case "coding":
-		return "plan"
-	default:
-		return "coding"
-	}
-}

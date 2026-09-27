@@ -702,7 +702,7 @@ func (m *Manager) unflaggedThinkingFallback(providerName, modelName string, leve
 
 // rememberedThinking returns the level a send at level starts from: level
 // itself, or the lower level an earlier send settled on after the model
-// rejected it (see rememberEffortDowngrade).
+// rejected it (see recordEffortDowngrade).
 func (m *Manager) rememberedThinking(providerName, modelName string, level ThinkingLevel) ThinkingLevel {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

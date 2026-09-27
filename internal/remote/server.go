@@ -297,9 +297,8 @@ func (s *Server) Stop() error {
 }
 
 // SubscriberCount reports how many clients are connected to /events right
-// now. A headless run uses it to tell "nobody could answer this question"
-// apart from "somebody might": with no subscriber an ask-user event would
-// reach no one, so waiting for the answer would wait forever.
+// now, observers included. Whether anyone could answer a question is
+// Answerers' job: an observer never answers.
 func (s *Server) SubscriberCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

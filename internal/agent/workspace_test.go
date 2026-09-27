@@ -326,7 +326,6 @@ func TestConcurrentWorktreeMergesAllLand(t *testing.T) {
 	type outcome struct {
 		name  string
 		merge workspaceMerge
-		err   error
 	}
 	results := make([]outcome, members)
 	spaces := make([]*agentWorkspace, members)

@@ -89,10 +89,6 @@ func modePrompt(agentID string) string {
 	}
 }
 
-func modeLabel(agentID string) string {
-	return agentID
-}
-
 var (
 	styleBold = lipgloss.NewStyle().Bold(true)
 
@@ -104,30 +100,7 @@ var (
 	styleSuccess = lipgloss.NewStyle().Foreground(colorSuccess)
 	styleError   = lipgloss.NewStyle().Foreground(colorError)
 	styleWarn    = lipgloss.NewStyle().Foreground(colorWarn)
-
-	styleToolPend = lipgloss.NewStyle().Foreground(colorToolPend)
-	styleToolRun  = lipgloss.NewStyle().Foreground(colorToolRun)
-	styleToolOK   = lipgloss.NewStyle().Foreground(colorToolOK)
-	styleToolErr  = lipgloss.NewStyle().Foreground(colorToolErr)
 )
-
-func modeStyle(mode string) lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(modeColor(mode)).Bold(true)
-}
-
-func modeBorderStyle(mode string) lipgloss.Style {
-	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(modeColor(mode)).
-		PaddingLeft(1).PaddingRight(1)
-}
-
-func dimBorderStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
-		PaddingLeft(1).PaddingRight(1)
-}
 
 // glareGradient returns 5 color stops for the glare sweep, derived from base:
 // [0]=peak (furthest from the page), [1..3]=fade toward base, [4]=base.

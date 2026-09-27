@@ -152,5 +152,3 @@ var shellApprovalOptions = []string{
 	"Deny",
 	"Tell the agent what to do instead",
 }
-
-const askUserFreeResponseOption = "Type my own answer"

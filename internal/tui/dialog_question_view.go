@@ -467,7 +467,7 @@ func indentLines(lines []string, indent int) []string {
 }
 
 // windowQuestionBlocks keeps the cursor's row visible within budget terminal
-// lines, growing the window outwards from it. Unlike windowPickerRows the rows
+// lines, growing the window outwards from it. The rows
 // are variable-height — a row is its label plus its wrapped description — so
 // the window is measured in lines, not rows. When rows are dropped it reserves
 // one line for the caller's "… N more" marker.

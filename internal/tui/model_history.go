@@ -314,45 +314,6 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	)
 }
 
-func (m Model) runCommitter() (tea.Model, tea.Cmd) {
-	m.thinking = true
-	m.beginRunIndicator()
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
-	cwd := m.cwd
-	pm := m.providers
-	providerName := m.cfg.ActiveProvider
-	modelName := m.cfg.ActiveModel
-	committer := agent.LLMCommitter{
-		ProviderManager: pm,
-		ProviderName:    func() string { return providerName },
-		ModelName:       func() string { return modelName },
-	}
-	return m, tea.Batch(
-		m.spin.Tick,
-		func() tea.Msg {
-			msg, err := committer.Commit(ctx, cwd)
-			return commitDoneMsg{commitMsg: msg, err: err}
-		},
-	)
-}
-
-func (m Model) runSearcher(query string) (tea.Model, tea.Cmd) {
-	m.thinking = true
-	m.beginRunIndicator()
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
-	searcher := m.searcher
-	cwd := m.cwd
-	return m, tea.Batch(
-		m.spin.Tick,
-		func() tea.Msg {
-			result, err := searcher.Search(ctx, cwd, query)
-			return searchDoneMsg{result: result, err: err}
-		},
-	)
-}
-
 func (m Model) runCompact(focus string) (tea.Model, tea.Cmd) {
 	return m.runCompactWithMode(focus, false)
 }
@@ -499,15 +460,3 @@ The file should contain:
 Only include facts you verified in the code; skip sections that don't apply, and don't pad with generic advice. When updating an existing file, keep its structure and any rules the maintainers wrote.
 
 CRITICAL: You MUST write the result to disk: edit the existing instruction file, or, when there is none, use file-write at path "SPETTRO.md" in the repository root. Do not just output the content — the file must exist after you finish.`
-
-func (m Model) runExplore(task string) (tea.Model, tea.Cmd) {
-	if strings.TrimSpace(task) == "" {
-		task = "Explore this codebase: understand the architecture, key types, conventions, and entry points."
-	}
-	spec, ok := m.manifest.AgentByID("explore")
-	if !ok {
-		m.showBanner("explore agent not found in manifest", "error")
-		return m, nil
-	}
-	return m.runAgent(spec, task, nil, nil)
-}

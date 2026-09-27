@@ -367,8 +367,8 @@ func TestRecompactionMergesPreviousSummary(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("want exactly one summary turn, got %d", n)
 	}
-	if SummaryText(second.Messages) != "" && !strings.Contains(SummaryText(second.Messages), "SECOND SUMMARY") {
-		t.Fatal("SummaryText does not return the newest summary")
+	if newestSummaryText(second.Messages) != "" && !strings.Contains(newestSummaryText(second.Messages), "SECOND SUMMARY") {
+		t.Fatal("the newest summary is not the second one")
 	}
 }
 
@@ -481,4 +481,15 @@ func TestHeadTailIsUTF8Safe(t *testing.T) {
 	if truncateStr(s, 7) == "" || strings.ContainsRune(truncateStr(s, 7), '\uFFFD') {
 		t.Fatal("truncateStr cut inside a rune")
 	}
+}
+
+// newestSummaryText returns the text of the newest compaction summary in
+// msgs (without its header), or "" when msgs holds none.
+func newestSummaryText(msgs []provider.Message) string {
+	for _, m := range slices.Backward(msgs) {
+		if isSummary(m) {
+			return strings.TrimSpace(strings.TrimPrefix(m.Content, SummaryHeader))
+		}
+	}
+	return ""
 }

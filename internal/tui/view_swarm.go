@@ -183,21 +183,3 @@ func (m Model) renderSwarmBlock(width, rows int) string {
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
 }
-
-// prioritiseRunning keeps the members worth watching when the block cannot
-// show them all: everything still running first, in launch order, then the
-// most recently finished.
-func prioritiseRunning(members []parallelAgentEntry, limit int) []parallelAgentEntry {
-	out := make([]parallelAgentEntry, 0, limit)
-	for _, a := range members {
-		if a.Status == "running" && len(out) < limit {
-			out = append(out, a)
-		}
-	}
-	for i := len(members) - 1; i >= 0 && len(out) < limit; i-- {
-		if members[i].Status != "running" {
-			out = append(out, members[i])
-		}
-	}
-	return out
-}

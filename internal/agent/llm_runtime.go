@@ -255,12 +255,10 @@ type toolRuntime struct {
 	cwd     string
 	mu      sync.Mutex
 	shellMu sync.Mutex
-	// worktreeMu serializes every git operation that touches the shared
-	// repository — creating a sub-agent worktree, and merging one back. Two of
-	// those running at once contend on the repo's index and ref locks, and git
-	// reports the loser as a plain failure rather than as a conflict, so the
-	// work looks merged when it is not.
-	worktreeMu    sync.Mutex
+	// Git operations on the shared repository (creating a sub-agent
+	// worktree, merging one back) are serialized by the package-level
+	// workspaceMu (workspace.go), not by a field here: every runtime of the
+	// process shares the repository.
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
 	// fileStamps and fileLocks back the stale-read guard and per-file write

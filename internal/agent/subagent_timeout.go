@@ -47,13 +47,15 @@ var subagentTimeUnit = time.Second
 const agentWrapUpMessage = "Time check: you are close to your time limit (about %s left). Do not start new work. Finish or revert the edit in progress so no file is left half-changed, then reply now with a summary: what you changed (files), what you verified, and what remains undone."
 
 // codingAgentTools are the tools that make a sub-agent an implementation
-// worker for timeout purposes.
-var codingAgentTools = []string{"file-write", "file-edit", "multi-edit", "shell-exec", "bash"}
+// worker for timeout purposes, by canonical name: an allow-list entry is
+// resolved through CanonicalToolName, so a retired name (multi-edit,
+// shell-exec, bash-output) counts as its canonical tool.
+var codingAgentTools = []string{"file-write", "file-edit", "bash"}
 
 // isCodingAgent reports whether a sub-agent can modify the workspace.
 func isCodingAgent(spec config.AgentSpec) bool {
 	for _, t := range spec.AllowedTools {
-		if slices.Contains(codingAgentTools, t) {
+		if slices.Contains(codingAgentTools, CanonicalToolName(t)) {
 			return true
 		}
 	}

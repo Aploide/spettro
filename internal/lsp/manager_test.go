@@ -50,9 +50,6 @@ func writeLspJSON(t *testing.T, root string, cfg Config) {
 	}
 }
 
-//go:fix inline
-func boolPtr(b bool) *bool { return new(b) }
-
 func TestLoadConfigZeroConfig(t *testing.T) {
 	root := t.TempDir()
 

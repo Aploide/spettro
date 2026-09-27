@@ -93,42 +93,6 @@ type pickerOption struct {
 	Badge string
 }
 
-// windowPickerRows keeps the cursor's row visible within maxLines of terminal
-// height, growing the window outwards from the cursor. When rows are dropped it
-// reserves one line for the caller's "… N more" marker and returns how many are
-// hidden; the caller must render that marker for the count to add up.
-func windowPickerRows(rows []pickerOption, cursor, maxLines int) (visible []pickerOption, newCursor, hidden int) {
-	if cursor < 0 || cursor >= len(rows) {
-		cursor = 0
-	}
-	if len(rows) == 0 || len(rows) <= max(maxLines, 1) {
-		return rows, cursor, 0
-	}
-	// One line goes to the caller's marker, so the rows themselves get the
-	// rest. A single-line budget cannot show both; the caller reserves for this
-	// and gets one row over budget rather than an empty list if it does not.
-	budget := max(maxLines-1, 1)
-
-	start, end := cursor, cursor+1
-	for end-start < budget {
-		grew := false
-		if end < len(rows) {
-			end++
-			grew = true
-		}
-		if start > 0 && end-start < budget {
-			start--
-			grew = true
-		}
-		if !grew {
-			break
-		}
-	}
-
-	visible = rows[start:end]
-	return visible, cursor - start, len(rows) - len(visible)
-}
-
 func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc color.Color) string {
 	rows := make([]pickerOption, 0, len(options))
 	for _, opt := range options {

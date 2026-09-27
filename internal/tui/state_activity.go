@@ -254,31 +254,6 @@ func (m *Model) finishAgentActivity(agentID, status, content, thinking string) {
 	m.currentRunKey = ""
 }
 
-func (m *Model) recordAssistantActivity(agentID, content, thinking string, isPlan bool) {
-	title := "Assistant response"
-	if isPlan {
-		title = "Plan output"
-	}
-	bodyParts := []string{}
-	if strings.TrimSpace(content) != "" {
-		bodyParts = append(bodyParts, strings.TrimSpace(content))
-	}
-	if strings.TrimSpace(thinking) != "" {
-		bodyParts = append(bodyParts, "Reasoning\n"+strings.TrimSpace(thinking))
-	}
-	m.upsertActivity(activityItem{
-		Key:     fmt.Sprintf("message:%d", time.Now().UnixNano()),
-		Kind:    "message",
-		ID:      title,
-		AgentID: agentID,
-		Title:   title,
-		Detail:  truncateLabel(strings.TrimSpace(content), 120),
-		Body:    strings.Join(bodyParts, "\n\n"),
-		Status:  "done",
-		At:      time.Now(),
-	})
-}
-
 func (m *Model) recordToolActivity(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return

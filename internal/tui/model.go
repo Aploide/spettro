@@ -740,10 +740,6 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	return m
 }
 
-func (m Model) currentAgent() (config.AgentSpec, bool) {
-	return m.manifest.AgentByID(m.mode)
-}
-
 func (m Model) currentColor() color.Color {
 	if spec, ok := m.manifest.AgentByID(m.mode); ok {
 		return modeColor(spec.Color)

@@ -97,13 +97,6 @@ func (a *App) handleSetupInput(line string) error {
 	}
 }
 
-func (a *App) printModels() {
-	a.printLine("available models:")
-	for _, m := range a.providers.Models() {
-		a.printLine(a.ui.Info(fmt.Sprintf("- %s:%s (vision=%t)", m.Provider, m.Name, m.Vision)))
-	}
-}
-
 func (a *App) startModelPicker(prefix string) {
 	a.modelPicker = &modelPicker{filter: strings.ToLower(strings.TrimSpace(prefix))}
 	a.modelPicker.items = a.modelPickerMatches(a.modelPicker.filter)

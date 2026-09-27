@@ -294,7 +294,7 @@ func fallbackSummary(middle []provider.Message) string {
 	var cmds, errs, spools []string
 	for _, m := range middle {
 		for _, tc := range m.ToolCalls {
-			if tc.Name == "shell-exec" || tc.Name == "bash" {
+			if IsShellTool(tc.Name) {
 				var a struct {
 					Command string `json:"command"`
 				}
@@ -344,15 +344,18 @@ func isUserText(m provider.Message) bool {
 	return m.Role == provider.RoleUser && len(m.ToolResults) == 0 && strings.TrimSpace(m.Content) != "" && !isSummary(m)
 }
 
-// SummaryText returns the text of the newest compaction summary in msgs
-// (without its header), or "" when msgs holds none.
-func SummaryText(msgs []provider.Message) string {
-	for _, m := range slices.Backward(msgs) {
-		if isSummary(m) {
-			return strings.TrimSpace(strings.TrimPrefix(m.Content, SummaryHeader))
-		}
+// IsShellTool reports whether name is the shell tool, under its canonical
+// name (bash) or a retired one (shell-exec, bash-output). The summary lists
+// the commands those calls ran. compact cannot import the agent package
+// that owns the retired-name table (agent imports compact), so the names
+// are written out here; a test in internal/agent checks that they match
+// agent.LegacyToolNames("bash").
+func IsShellTool(name string) bool {
+	switch name {
+	case "bash", "shell-exec", "bash-output":
+		return true
 	}
-	return ""
+	return false
 }
 
 // headTail shortens s to about n bytes, keeping the first two thirds and the

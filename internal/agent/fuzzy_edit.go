@@ -1249,8 +1249,6 @@ func stripLineNumberPrefixes(s string) (stripped string, first int, sep string, 
 	return strings.Join(lines, "\n") + trail, first, sep, true
 }
 
-// stripPrefixesWithSep removes a line-number prefix using separator sep from
-// every line of s that has one, leaving the other lines as written.
 // prefixShape describes the line-number prefixes old_string was copied with:
 // the separator, the numbers' range, and whether they were padded (file-read's
 // right-aligned "     7\t") and to which width.
