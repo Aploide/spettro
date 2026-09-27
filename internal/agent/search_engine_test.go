@@ -126,6 +126,53 @@ func TestGlobLiteralPrefixStart(t *testing.T) {
 	}
 }
 
+// A glob whose literal prefix differs from the directory's name only in
+// case must not reach it: on a case-insensitive disk the walk would report
+// "sub/SECRET/s.go", which the case-sensitive "secret/" rule (and the
+// skipDirs names) no longer recognise. The base walk from the root never
+// listed such paths either.
+func TestGlobPrefixNeedsTheExactCase(t *testing.T) {
+	r := newShellTestRuntime(t)
+	writeTree(t, r.cwd, map[string]string{
+		".gitignore":          "secret/\n",
+		"sub/b.go":            "",
+		"sub/secret/s.go":     "",
+		"node_modules/m/m.go": "",
+	})
+	for _, pattern := range []string{"sub/SECRET/*.go", "SUB/*.go", "SUB/**/*.go", "Node_modules/**", "sub/secret/*.go"} {
+		out, err := r.runGlob(context.Background(), pattern, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf("no files match %q", pattern); out != want {
+			t.Errorf("glob %q = %q, want %q", pattern, out, want)
+		}
+	}
+}
+
+// glob with path naming a file matches the pattern against the file's name
+// (and, as before, its workspace path).
+func TestGlobPathNamingAFile(t *testing.T) {
+	r := newShellTestRuntime(t)
+	writeTree(t, r.cwd, map[string]string{"sub/b.go": "", "sub/c.txt": ""})
+	cases := []struct{ pattern, want string }{
+		{"*", "1 files:\nsub/b.go"},
+		{"*.go", "1 files:\nsub/b.go"},
+		{"**", "1 files:\nsub/b.go"},
+		{"sub/*.go", "1 files:\nsub/b.go"},
+		{"*.txt", `no files match "*.txt"`},
+	}
+	for _, c := range cases {
+		out, err := r.runGlob(context.Background(), c.pattern, "sub/b.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != c.want {
+			t.Errorf("glob %q path sub/b.go = %q, want %q", c.pattern, out, c.want)
+		}
+	}
+}
+
 // Glob matching and walk-order comparison run once per walked file: no
 // allocations (deterministic guard for the E4 glob rework).
 func TestGlobMatchDoesNotAllocate(t *testing.T) {
