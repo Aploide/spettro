@@ -457,7 +457,7 @@ func humanizeToolID(name string) string {
 // host name, a query string carrying data out) is what the user has to see
 // before allowing the call.
 func formatApprovalCommandLabel(command string) string {
-	command = strings.TrimSpace(command)
+	command = trimShellBlanks(command)
 	if command == "" {
 		return ""
 	}

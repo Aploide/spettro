@@ -25,6 +25,7 @@ const (
 	modalSelector
 	modalThemePicker
 	modalSetup
+	modalApprovalReview
 )
 
 // activeModal returns the highest-precedence active overlay. The precedence is
@@ -43,6 +44,10 @@ func (m Model) activeModal() modal {
 		// every incidental picker the user may have left open. It stays below
 		// the startup gates, which decide whether the run may happen at all.
 		return modalQuestion
+	case m.pendingAuth != nil && m.approvalReviewOpen:
+		// Opened from the approval dialog, which only takes keys when no
+		// other overlay is up, so nothing else can be open underneath.
+		return modalApprovalReview
 	case m.showResume:
 		return modalResume
 	case m.showMemoryReview:
@@ -94,4 +99,8 @@ var modalHandlers = map[modal]modalHandler{
 	modalSelector:     {update: Model.updateSelector, view: Model.viewSelector},
 	modalThemePicker:  {update: Model.updateThemePicker, view: Model.viewThemePicker},
 	modalSetup:        {update: Model.updateSetup},
+
+	// The approval review takes the whole screen: see
+	// dialog_approval_review.go.
+	modalApprovalReview: {update: Model.updateApprovalReview, view: Model.viewApprovalReview},
 }

@@ -34,6 +34,7 @@ type fakeBot struct {
 	// inspect what the relay tried to deliver.
 	sendMu sync.Mutex
 	sent   []sentMessage
+	docs   []sentDocument
 
 	// stateMu guards everything below: tests mutate canned errors at
 	// runtime while the HTTP handler is reading them concurrently.
@@ -44,6 +45,14 @@ type fakeBot struct {
 	getUpdatesErr    string
 	getMeErr         string
 	getUpdatesCalled atomic.Int64
+}
+
+// sentDocument is one sendDocument upload.
+type sentDocument struct {
+	ChatID   string
+	Filename string
+	Caption  string
+	Data     []byte
 }
 
 type sentMessage struct {
@@ -142,6 +151,22 @@ func (f *fakeBot) handle(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, msg)
 		f.sendMu.Unlock()
 		writeAPI(w, true, "", telegram.Message{MessageID: 1, Date: time.Now().Unix(), Text: msg.Text})
+	case "sendDocument":
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			writeAPI(w, false, "bad multipart: "+err.Error(), nil)
+			return
+		}
+		file, header, err := r.FormFile("document")
+		if err != nil {
+			writeAPI(w, false, "no document: "+err.Error(), nil)
+			return
+		}
+		data, _ := io.ReadAll(file)
+		_ = file.Close()
+		f.sendMu.Lock()
+		f.docs = append(f.docs, sentDocument{ChatID: r.FormValue("chat_id"), Filename: header.Filename, Caption: r.FormValue("caption"), Data: data})
+		f.sendMu.Unlock()
+		writeAPI(w, true, "", telegram.Message{MessageID: 2, Date: time.Now().Unix()})
 	default:
 		writeAPI(w, false, "method "+method+" not implemented", nil)
 	}
@@ -151,6 +176,12 @@ func (f *fakeBot) pushUpdate(u telegram.Update) {
 	f.updatesMu.Lock()
 	f.updates = append(f.updates, u)
 	f.updatesMu.Unlock()
+}
+
+func (f *fakeBot) sentDocuments() []sentDocument {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	return append([]sentDocument(nil), f.docs...)
 }
 
 func (f *fakeBot) sentMessages() []sentMessage {

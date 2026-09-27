@@ -246,6 +246,11 @@ Session policy for `/storage clean` and `spettro clean`; see
   sends the command through the normal approval path.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
+  Normalizing only folds what a shell treats as one word break: a run of
+  spaces and tabs outside quotes and not escaped by a backslash. Everything
+  else is kept, so two commands share an entry only when a shell splits them
+  into the same words (`rm -rf ./x\ ~/` and `rm -rf ./x\  ~/`, or a no-break
+  space or vertical tab where the other has a space, are different entries).
 
 ### Web access (web-search / web-fetch / download)
 

@@ -20,6 +20,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !transcriptOnly(msg) {
 			nm.chromeSeq++
 		}
+		// Settle whether a pending approval offers its review (the picker
+		// grows a row) before the layout measures the input area (see
+		// dialog_approvals.go). The latch is part of the frame memo's key
+		// (chromeKey.approvalReview), so the memoized input area follows it.
+		nm.syncApprovalReview()
+		nm = nm.trackApprovalCover()
 		nm = nm.recalcLayout()
 		if timers := nm.armTimers(); timers != nil {
 			cmd = tea.Batch(cmd, timers)
@@ -61,6 +67,7 @@ func (m *Model) resetRunState() {
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.discardApprovalQueue()
 	m.pendingQuestion = nil
 	m.discardQuestionQueue(fmt.Errorf("run ended"))
 	m.parallelAgents = nil
@@ -490,25 +497,23 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		}
 	case shellApprovalRequestMsg:
-		if m.thinking {
-			m.pendingAuth = &msg
-			m.approvalCursor = 0
-			m.approvalPreviewExpanded = false
-			m.approvalScroll = 0
-			m.ta.Reset()
-			m.showBanner("command approval required", "warn")
-			m.notifyIfUnfocused("Agent is waiting for command approval")
-			m.publishRemote("approval_request", map[string]any{
-				"command":  msg.request.Command,
-				"tool_id":  msg.request.ToolID,
-				"segments": msg.request.Segments,
-				"reason":   msg.request.Reason,
-			})
-			if m.approvalCh != nil {
-				cmds = append(cmds, waitForShellApproval(m.approvalCh))
-			}
-			m.refreshViewport()
+		switch {
+		case !m.thinking:
+			// The run ended while this request was in flight: answer it so
+			// its tool call does not wait for a dialog that never opens.
+			denyApproval(msg)
+		case m.pendingAuth == nil:
+			m = m.presentApproval(msg)
+		default:
+			// Never replace the approval on screen: the user may be reading
+			// it, and their next Enter must answer what they read.
+			m.approvalQueue = append(m.approvalQueue, msg)
+			m.showBanner(fmt.Sprintf("another approval arrived — %d waiting after this one", len(m.approvalQueue)), "warn")
 		}
+		if m.thinking && m.approvalCh != nil {
+			cmds = append(cmds, waitForShellApproval(m.approvalCh))
+		}
+		m.refreshViewport()
 	case askUserRequestMsg:
 		switch {
 		case !m.thinking:
@@ -683,6 +688,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ensureResumeWindow()
 				return m, tea.Batch(cmds...)
 			}
+		}
+		if m.activeModal() == modalApprovalReview {
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				m = m.scrollApprovalReview(-3)
+			case tea.MouseWheelDown:
+				m = m.scrollApprovalReview(3)
+			}
+			return m, tea.Batch(cmds...)
 		}
 		sideW := m.sidePanelWidth()
 		onSidePanel := sideW > 0 && mouse.X >= m.paneWidth()+1

@@ -35,6 +35,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/agent"
+	"spettro/internal/termtext"
 )
 
 const (
@@ -330,11 +331,18 @@ func toolCallTitle(tr agent.ToolTrace) string {
 // finishTitle attributes a card title to its swarm member and bounds it.
 // Swarm members carry instance names like "code#3"; prefixing them keeps
 // every tool call attributable when dozens of agents interleave.
+//
+// The title is escaped first (termtext.EscapeLines), as the TUI escapes a
+// call: an approval prompt is shown on the card of the call that asked,
+// under this title, so a bidi override or a string of variation selectors in
+// a command must be written out here too, and clipLine, which folds
+// whitespace, must not turn a no-break space (part of a shell word) into
+// the space that separates two.
 func finishTitle(tr agent.ToolTrace, title string) string {
 	if strings.ContainsRune(tr.AgentID, '#') && tr.Name != "agent" {
 		title = "[" + tr.AgentID + "] " + title
 	}
-	return clipLine(title, maxTitleRunes)
+	return clipLine(termtext.EscapeLines(title), maxTitleRunes)
 }
 
 // isUserTool reports whether name belongs to a tool of the operator's own

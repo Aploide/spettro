@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
@@ -101,9 +102,12 @@ func IsInstantCommandForTesting(input string) bool {
 	return isInstantCommand(input)
 }
 
+// SetPendingShellApprovalForTesting opens an approval of an empty command
+// (all of it on screen, so the picker is the four base options) with the
+// cursor on option index cursor.
 func (m *Model) SetPendingShellApprovalForTesting(cursor int) {
 	m.pendingAuth = &shellApprovalRequestMsg{response: make(chan shellApprovalResponse, 1)}
-	m.approvalCursor = cursor
+	m.approvalChoice = approvalBaseActions[cursor]
 }
 
 func (m Model) TextareaValueForTesting() string {
@@ -118,8 +122,10 @@ func (m Model) HistoryBrowsingForTesting() bool {
 	return m.historyBrowsing
 }
 
+// ApprovalCursorForTesting is the picker row index of the selected action.
 func (m Model) ApprovalCursorForTesting() int {
-	return m.approvalCursor
+	w := m.approvalContentWidth()
+	return slices.Index(m.approvalActions(w), m.approvalSelected(w))
 }
 
 func (m Model) HasPendingShellApprovalForTesting() bool {

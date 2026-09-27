@@ -397,10 +397,10 @@ func TestApprovalDialogFitsWithHugeArguments(t *testing.T) {
 	for name, req := range approvalRequests() {
 		for _, size := range fitSizes[:3] {
 			for _, expanded := range []bool{false, true} {
-				for _, cursor := range []int{0, approvalInsteadOption} {
+				for _, cursor := range []approvalAction{approvalActDefault, approvalActInstead} {
 					m := approvalModel(size[0], size[1], req)
 					m.approvalPreviewExpanded = expanded
-					m.approvalCursor = cursor
+					m.approvalChoice = cursor
 					m = m.recalcLayout()
 					frame := m.View().Content
 					label := fmt.Sprintf("%s expanded=%v cursor=%d", name, expanded, cursor)
@@ -409,7 +409,7 @@ func TestApprovalDialogFitsWithHugeArguments(t *testing.T) {
 					if !strings.Contains(plain, "  $ ") && !strings.Contains(plain, "Fetching") {
 						t.Fatalf("%s at %v: the summary row is missing:\n%s", label, size, plain)
 					}
-					if cursor == 0 {
+					if cursor == approvalActDefault {
 						for _, option := range []string{"allow this command?", "Allow once", "Allow always", "Deny", "Tell the agent"} {
 							if !strings.Contains(plain, option) {
 								t.Fatalf("%s at %v: %q is not on screen:\n%s", label, size, option, plain)
@@ -418,7 +418,7 @@ func TestApprovalDialogFitsWithHugeArguments(t *testing.T) {
 					} else if !strings.Contains(plain, "what to do instead") {
 						t.Fatalf("%s at %v: the instead prompt is missing:\n%s", label, size, plain)
 					}
-					if name != "network" && !strings.Contains(plain, " of ") && !strings.Contains(plain, "preview hidden") {
+					if name != "network" && !strings.Contains(plain, " of ") && !strings.Contains(plain, "lines not shown - ") {
 						t.Fatalf("%s at %v: a partly shown preview must say so:\n%s", label, size, plain)
 					}
 				}

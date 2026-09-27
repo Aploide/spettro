@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -58,6 +59,20 @@ type Options struct {
 	ExpandHint string
 	// Indent is prefixed to every rendered line.
 	Indent string
+	// Wrap breaks a line wider than Width over as many rows as it needs
+	// instead of cutting it with "…", so every character of the diff is
+	// drawn. Continuation rows leave the line-number gutter and the +/-
+	// column blank. Wrap always uses the unified layout (a wrapped
+	// side-by-side row pairs badly with its other half). It is for views
+	// that must show a change whole, such as the approval review; with Width
+	// 0 there is nothing to wrap at and it has no effect.
+	Wrap bool
+	// Exact escapes every line with termtext.EscapeExact instead of
+	// termtext.EscapeControls: a tab is drawn as a tab mark rather than as
+	// spaces, and a carriage return at the end of a line as "^M" rather than
+	// dropped. It is for the same views as Wrap, where a tab-indented line
+	// must not pass for a space-indented one.
+	Exact bool
 }
 
 // SideBySideMinWidth is the minimum terminal width for side-by-side layout.
@@ -78,21 +93,66 @@ type parsedLine struct {
 //
 // Diff bodies are file contents, so they carry tabs (Go and Makefiles are
 // tab-indented), carriage returns and occasionally escape sequences. Each
-// line has its control characters made visible here (termtext.EscapeControls),
-// before intra-line spans are computed and before truncation measures it, so
-// every later width calculation sees exactly the cells the terminal will
-// draw. They are escaped rather than stripped because a diff is often shown
-// for approval: a carriage return must not be able to hide part of a line.
-func parseUnified(diffText string) []parsedLine {
+// line has its control characters made visible here (termtext.EscapeControls,
+// or termtext.EscapeExact when exact is set), before intra-line spans are
+// computed and before truncation measures it, so every later width
+// calculation sees exactly the cells the terminal will draw. They are escaped
+// rather than stripped because a diff is often shown for approval: a carriage
+// return must not be able to hide part of a line.
+//
+// A hunk header says how many old and new lines its hunk holds, and every
+// line inside those counts is a body line whatever it starts with: deleting
+// the SQL comment "-- keep row level security on" gives the body line
+// "--- keep row level security on", which must be drawn as a deletion, not
+// taken for a file header (that would hide the deletion and shift every line
+// number after it). File headers are only recognised between hunks. A hunk
+// header without counts (not one any diff tool writes) falls back to reading
+// each line by its prefix until the next header.
+func parseUnified(diffText string, exact bool) []parsedLine {
+	escape := termtext.EscapeControls
+	if exact {
+		escape = termtext.EscapeExact
+	}
 	var out []parsedLine
 	oldNo, newNo := 0, 0
-	inHunk := false
+	// oldLeft and newLeft are the lines the current hunk still holds;
+	// counted is false for a header without counts, where the hunk runs to
+	// the next header line instead.
+	oldLeft, newLeft := 0, 0
+	counted, inHunk := true, false
 	for rawLine := range strings.SplitSeq(strings.TrimRight(diffText, "\n"), "\n") {
-		line := termtext.EscapeControls(rawLine)
+		line := escape(rawLine)
+		if inHunk && counted && oldLeft <= 0 && newLeft <= 0 {
+			inHunk = false
+		}
+		if inHunk && counted && !strings.HasPrefix(line, "@@") && !strings.HasPrefix(line, "\\") {
+			// A body line, whatever it looks like.
+			switch {
+			case strings.HasPrefix(line, "+"):
+				out = append(out, parsedLine{kind: kindAdd, newNo: newNo, text: line[1:], raw: line})
+				newNo++
+				newLeft--
+			case strings.HasPrefix(line, "-"):
+				out = append(out, parsedLine{kind: kindDel, oldNo: oldNo, text: line[1:], raw: line})
+				oldNo++
+				oldLeft--
+			default:
+				text := strings.TrimPrefix(line, " ")
+				out = append(out, parsedLine{kind: kindContext, oldNo: oldNo, newNo: newNo, text: text, raw: line})
+				oldNo++
+				newNo++
+				oldLeft--
+				newLeft--
+			}
+			continue
+		}
 		switch {
 		case strings.HasPrefix(line, "@@"):
-			oldNo, newNo = parseHunkHeader(line)
-			inHunk = oldNo > 0 || newNo > 0
+			var h hunkHeader
+			h, counted = parseHunkHeader(line)
+			oldNo, newNo = h.oldStart, h.newStart
+			oldLeft, newLeft = h.oldCount, h.newCount
+			inHunk = !counted && (oldNo > 0 || newNo > 0) || counted && (oldLeft > 0 || newLeft > 0)
 			out = append(out, parsedLine{meta: true, raw: line})
 		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"),
 			strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "),
@@ -117,17 +177,54 @@ func parseUnified(diffText string) []parsedLine {
 	return out
 }
 
-func parseHunkHeader(line string) (oldStart, newStart int) {
+// hunkHeader is what a "@@ -12,7 +12,9 @@" line says: where the hunk starts
+// in the old and new file and how many lines of each it holds.
+type hunkHeader struct {
+	oldStart, oldCount int
+	newStart, newCount int
+}
+
+// parseHunkHeader reads a hunk header. A range without a count ("-12")
+// holds one line, as in every unified diff. ok is false when the line does
+// not have both ranges in that form.
+func parseHunkHeader(line string) (h hunkHeader, ok bool) {
 	// "@@ -12,7 +12,9 @@ optional context"
-	fields := strings.FieldsSeq(line)
-	for f := range fields {
-		if strings.HasPrefix(f, "-") {
-			oldStart = leadingInt(f[1:])
-		} else if strings.HasPrefix(f, "+") {
-			newStart = leadingInt(f[1:])
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[0] != "@@" || fields[3] != "@@" {
+		// Not a well-formed header: take what start lines it has.
+		for _, f := range fields {
+			if strings.HasPrefix(f, "-") {
+				h.oldStart = leadingInt(f[1:])
+			} else if strings.HasPrefix(f, "+") {
+				h.newStart = leadingInt(f[1:])
+			}
+		}
+		return h, false
+	}
+	var okOld, okNew bool
+	h.oldStart, h.oldCount, okOld = parseHunkRange(fields[1], '-')
+	h.newStart, h.newCount, okNew = parseHunkRange(fields[2], '+')
+	return h, okOld && okNew
+}
+
+// parseHunkRange reads one range of a hunk header ("-12,7" or "+12"), whose
+// first byte must be sign.
+func parseHunkRange(f string, sign byte) (start, count int, ok bool) {
+	if len(f) < 2 || f[0] != sign {
+		return 0, 0, false
+	}
+	startText, countText, hasCount := strings.Cut(f[1:], ",")
+	start, err := strconv.Atoi(startText)
+	if err != nil {
+		return 0, 0, false
+	}
+	count = 1
+	if hasCount {
+		if count, err = strconv.Atoi(countText); err != nil {
+			return start, 0, false
 		}
 	}
-	return oldStart, newStart
+	return start, count, true
 }
 
 func leadingInt(s string) int {
@@ -145,17 +242,20 @@ func Render(diffText string, opts Options) string {
 	if strings.TrimSpace(diffText) == "" {
 		return ""
 	}
-	parsed := parseUnified(diffText)
+	parsed := parseUnified(diffText, opts.Exact)
 
 	avail := 0 // 0 = unlimited
 	if opts.Width > 0 {
 		avail = opts.Width - len(opts.Indent)
 	}
 	var rendered []string
-	if opts.Width >= SideBySideMinWidth {
+	switch {
+	case opts.Wrap && avail > 0:
+		rendered = renderUnifiedLines(parsed, avail, true)
+	case opts.Width >= SideBySideMinWidth:
 		rendered = renderSideBySide(parsed, avail)
-	} else {
-		rendered = renderUnifiedLines(parsed, avail)
+	default:
+		rendered = renderUnifiedLines(parsed, avail, false)
 	}
 
 	shown := rendered
@@ -218,35 +318,81 @@ func truncCells(s string, max int) string {
 	return termtext.Fit(s, max)
 }
 
-// renderUnifiedLines renders one row per diff line, each capped at maxW cells
-// (0 = unlimited).
-func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
-	w := numWidth(parsed)
-	textW := 0
-	if maxW > 0 {
-		textW = max(
-			// line numbers + space + sign + space
-			maxW-(2*w+1)-3, 8)
+// Overflows reports whether Render would cut any line of diffText with "…"
+// at opts.Width in the unified layout, so a caller that must show a change
+// whole knows it did not. It assumes the unified layout (opts.Width below
+// SideBySideMinWidth), and is false when opts.Width is 0 (no limit) or
+// opts.Wrap is set (nothing is cut then).
+func Overflows(diffText string, opts Options) bool {
+	if opts.Width <= 0 || opts.Wrap || strings.TrimSpace(diffText) == "" {
+		return false
 	}
+	avail := opts.Width - len(opts.Indent)
+	parsed := parseUnified(diffText, opts.Exact)
+	textW := unifiedTextWidth(avail, numWidth(parsed))
+	for _, l := range parsed {
+		limit, text := textW, l.text
+		if l.meta {
+			limit, text = avail, l.raw
+		}
+		if ansi.StringWidth(text) > limit {
+			return true
+		}
+	}
+	return false
+}
+
+// unifiedTextWidth is the room a unified row leaves for a line's text once
+// the two line-number columns, the sign and the spaces between them are
+// drawn, for a row maxW cells wide (0 = unlimited) and line numbers numW
+// digits wide.
+func unifiedTextWidth(maxW, numW int) int {
+	if maxW <= 0 {
+		return 0
+	}
+	// line numbers + space + sign + space
+	return max(maxW-(2*numW+1)-3, 8)
+}
+
+// renderUnifiedLines renders the diff in the unified layout, each row at
+// most maxW cells (0 = unlimited). A line too long for its row is cut with
+// "…", or, with wrap, continued on further rows under a blank gutter.
+func renderUnifiedLines(parsed []parsedLine, maxW int, wrap bool) []string {
+	w := numWidth(parsed)
+	textW := unifiedTextWidth(maxW, w)
+	blankNums := styleLineNo.Render(strings.Repeat(" ", 2*w+1)) + " "
 	var out []string
 	i := 0
 	for i < len(parsed) {
 		l := parsed[i]
 		if l.meta {
-			raw := truncCells(l.raw, maxW)
-			switch {
-			case strings.HasPrefix(l.raw, "@@"):
-				out = append(out, styleHunk.Render(raw))
-			default:
-				out = append(out, styleMeta.Render(raw))
+			style := styleMeta
+			if strings.HasPrefix(l.raw, "@@") {
+				style = styleHunk
+			}
+			if wrap {
+				for _, row := range termtext.HardWrap(l.raw, maxW) {
+					out = append(out, style.Render(row))
+				}
+			} else {
+				out = append(out, style.Render(truncCells(l.raw, maxW)))
 			}
 			i++
 			continue
 		}
 		if l.kind == kindContext {
-			text := truncCells(l.text, textW)
 			nums := styleLineNo.Render(fmtNo(l.oldNo, w)+" "+fmtNo(l.newNo, w)) + " "
-			out = append(out, nums+styleCtx.Render("  "+text))
+			if !wrap {
+				out = append(out, nums+styleCtx.Render("  "+truncCells(l.text, textW)))
+				i++
+				continue
+			}
+			for r, row := range termtext.HardWrap(l.text, textW) {
+				if r > 0 {
+					nums = blankNums
+				}
+				out = append(out, nums+styleCtx.Render("  "+row))
+			}
 			i++
 			continue
 		}
@@ -267,11 +413,53 @@ func renderUnifiedLines(parsed []parsedLine, maxW int) []string {
 		}
 		for r, d := range dels {
 			nums := styleLineNo.Render(fmtNo(d.oldNo, w)+" "+strings.Repeat(" ", w)) + " "
-			out = append(out, nums+renderBodyLine("- ", d.text, delSpans[r], textW, styleDel, styleDelHi))
+			if wrap {
+				out = append(out, wrapBodyLine(nums, blankNums, "- ", d.text, delSpans[r], textW, styleDel, styleDelHi)...)
+			} else {
+				out = append(out, nums+renderBodyLine("- ", d.text, delSpans[r], textW, styleDel, styleDelHi))
+			}
 		}
 		for r, a := range adds {
 			nums := styleLineNo.Render(strings.Repeat(" ", w)+" "+fmtNo(a.newNo, w)) + " "
-			out = append(out, nums+renderBodyLine("+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi))
+			if wrap {
+				out = append(out, wrapBodyLine(nums, blankNums, "+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi)...)
+			} else {
+				out = append(out, nums+renderBodyLine("+ ", a.text, addSpans[r], textW, styleAdd, styleAddHi))
+			}
+		}
+	}
+	return out
+}
+
+// wrapBodyLine is renderBodyLine for Options.Wrap: the whole of a +/- line
+// over as many rows as it takes, the first under its line numbers and sign,
+// the rest under a blank gutter, with the changed spans still emphasized on
+// whichever row they fall.
+func wrapBodyLine(nums, blankNums, sign, text string, spans []span, textW int, base, hi styler) []string {
+	rows := termtext.HardWrap(text, textW)
+	out := make([]string, 0, len(rows))
+	offset := 0 // rune offset of the row in text
+	for r, row := range rows {
+		n := utf8.RuneCountInString(row)
+		prefix := nums + base.Render(sign)
+		if r > 0 {
+			prefix = blankNums + base.Render(strings.Repeat(" ", len(sign)))
+		}
+		out = append(out, prefix+renderSpans(row, shiftSpans(spans, offset, n), base, hi))
+		offset += n
+	}
+	return out
+}
+
+// shiftSpans returns the part of spans that falls in the runes
+// [offset, offset+n) of a line, relative to offset: the spans of one row of
+// a wrapped line.
+func shiftSpans(spans []span, offset, n int) []span {
+	var out []span
+	for _, sp := range spans {
+		start, end := max(sp.start-offset, 0), min(sp.end-offset, n)
+		if start < end {
+			out = append(out, span{start, end})
 		}
 	}
 	return out
@@ -306,7 +494,7 @@ func renderSideBySide(parsed []parsedLine, width int) []string {
 	col := (width - 3) / 2
 	if col < w+10 {
 		// Too narrow after all; fall back to unified.
-		return renderUnifiedLines(parsed, width)
+		return renderUnifiedLines(parsed, width, false)
 	}
 	textW := col - w - 2
 

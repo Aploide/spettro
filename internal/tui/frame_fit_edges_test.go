@@ -95,12 +95,13 @@ func TestSteerAndPlanPickersFitAlongsideTheRunFooter(t *testing.T) {
 }
 
 // previewText joins the preview rows of an approval dialog (the indented
-// rows under the summary) with their indentation removed, so a URL wrapped
-// across rows can be searched as one string.
+// rows under the summary) with their indentation and continuation marks
+// removed, so a URL wrapped across rows can be searched as one string.
 func previewText(frame string) string {
 	var b strings.Builder
 	for _, row := range strings.Split(ansi.Strip(frame), "\n") {
 		row = strings.Trim(row, " │")
+		row = strings.TrimPrefix(row, strings.TrimSpace(approvalPreviewWrapIndent)+" ")
 		b.WriteString(row)
 	}
 	return b.String()

@@ -134,7 +134,9 @@ func writeSpaces(b *strings.Builder, n int) {
 //     the ones that only touch the transcript (streamed text, see
 //     transcriptOnly), plus the sizes the part was drawn at and the few
 //     fields a caller outside Update commonly changes (mode, banner, input
-//     text); see chromeKey.
+//     text), and whether the pending approval latched its review row, which
+//     drawing the approval dialog itself can set (approvalOffersReview); see
+//     chromeKey.
 //   - Invalidation: any key difference re-renders the part.
 //   - Owner: the Bubble Tea event loop goroutine, which runs both Update and
 //     View. Update creates the memo; a Model that never went through Update
@@ -168,6 +170,11 @@ type chromeKey struct {
 	mode          string
 	banner        string
 	input         string
+	// approvalReview is the pending approval's reviewOffered latch. The
+	// dialog sets it while it is drawn, so a render can change it without
+	// any message advancing seq; keying on it re-renders the input area once
+	// the picker has grown its review row.
+	approvalReview bool
 }
 
 func (m Model) chromeKey(partWidth int) chromeKey {
@@ -184,6 +191,8 @@ func (m Model) chromeKey(partWidth int) chromeKey {
 		mode:      m.mode,
 		banner:    m.banner,
 		input:     m.ta.Value(),
+
+		approvalReview: m.pendingAuth != nil && m.pendingAuth.reviewOffered,
 	}
 }
 

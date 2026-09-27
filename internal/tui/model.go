@@ -244,6 +244,14 @@ type shellApprovalRequestMsg struct {
 	// previewCache is filled by approvalPreviewLines the first time the
 	// dialog is drawn; see approvalPreviewCache.
 	previewCache *approvalPreviewCache
+	// reviewCache is the review's rendered rows, filled the same way (see
+	// approvalReviewDoc).
+	reviewCache *approvalReviewCache
+	// reviewOffered latches once the dialog could not show all of the call,
+	// so the picker keeps its review row (see approvalOffersReview).
+	reviewOffered bool
+	// reviewed is set when the user has opened the review and come back.
+	reviewed bool
 }
 
 type shellApprovalResponse struct {
@@ -436,6 +444,19 @@ type Model struct {
 	askUserCh   chan askUserRequestMsg
 	cancelAgent context.CancelFunc
 	pendingAuth *shellApprovalRequestMsg
+	// approvalQueue holds approvals that arrived while another one was on
+	// screen: sub-agents run in parallel and share one approval callback.
+	// Each is shown, in arrival order, once the one before it is answered;
+	// none replaces the one on screen (see presentApproval).
+	approvalQueue []shellApprovalRequestMsg
+	// approvalShownAt is when pendingAuth was put on screen, or last came
+	// back from under an overlay; Enter is ignored for approvalEnterGuard
+	// after it (see updateShellApproval and trackApprovalCover).
+	approvalShownAt time.Time
+	// approvalCovered records that pendingAuth was under another overlay (a
+	// question, the plan or steer picker) after the last Update, so the
+	// Update that uncovers it can restart the Enter guard.
+	approvalCovered bool
 	// pendingQuestion is the form the question modal is showing, nil when no
 	// form is open. It owns the whole interaction: see dialog_question.go.
 	pendingQuestion *questionForm
@@ -444,8 +465,16 @@ type Model struct {
 	// the user was still typing an answer. They are asked in arrival order as
 	// each is answered; none is ever dropped, because every one of them has a
 	// tool call blocked on its reply.
-	questionQueue  []askUserRequestMsg
-	approvalCursor int
+	questionQueue []askUserRequestMsg
+	// approvalChoice is the approval picker's cursor, as the action it is
+	// on rather than a row index (the review row can appear above it; see
+	// dialog_approvals.go). approvalActDefault until the user moves it.
+	approvalChoice approvalAction
+	// approvalReviewOpen shows the full-screen review of the pending
+	// approval (dialog_approval_review.go) in place of the main view;
+	// approvalReviewScroll is its first row on screen.
+	approvalReviewOpen   bool
+	approvalReviewScroll int
 	// approvalPreviewExpanded toggles (ctrl+o) the approval dialog's preview
 	// (the diff of a file-write/file-edit, or a long command) between its
 	// collapsed cap and every row the terminal can spare.

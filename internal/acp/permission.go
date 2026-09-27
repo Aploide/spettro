@@ -17,11 +17,13 @@ package acp
 // asked (approvalToolCallID). The main agent and its sub-agents run tools in
 // parallel, so the runtime names the asking agent and its working directory
 // on the request (ShellApprovalRequest.AgentID and CWD), and only that
-// agent's cards are candidates. Among them, the card whose arguments name
-// what the approval is about wins; a card already showing a prompt never
-// does, because its call is blocked on that prompt and cannot be asking
-// again. With no candidate left the request describes the call on a card of
-// its own.
+// agent's cards are candidates, and only those whose arguments name what
+// the approval is about: the editor shows the prompt under the card's title,
+// so a card of another call would present the approval under a command or
+// path other than the one approved. A card already showing a prompt is not
+// a candidate either, because its call is blocked on that prompt and cannot
+// be asking again. With no candidate left the request describes the call on
+// a card of its own.
 //
 // Options. Every request offers "Allow once" and "Deny". "Always allow" is
 // offered only where the runtime remembers the answer: for shell commands
@@ -30,6 +32,25 @@ package acp
 // remembered by the runtime, so offering "always" there would be a lie. The
 // label names what is remembered, which for a network approval depends on
 // the tool (see networkTargets): it is never a whole site.
+//
+// Content. What the prompt shows is what is approved, in full: the proposed
+// change as a real diff (or the whole unified diff as text when the file is
+// too large for one), the whole command, or the whole network target. Tool
+// call titles and rawInput are clipped for every card (see tools.go); an
+// approval's content is not, beyond maxApprovalTextBytes, which no command or
+// diff a person reads comes near. Past it the text ends with an explicit
+// "[truncated: ...]" line (remote.ClipApprovalText), so a cut is never shown
+// as the whole: a person must be able to trust what they approve.
+//
+// The editor draws that text, not a terminal, but the same characters can
+// hide in it: a carriage return, an escape sequence, a bidi override that
+// reorders the line, zero-width characters and variation selectors that
+// carry a payload inside what reads as "". So the command, the network
+// target, the text diff and the card title are escaped the way the TUI
+// escapes them (termtext.EscapeExact, line by line). A structured diff
+// cannot be: the editor shows the file's own text. When that text holds
+// such a character, the escaped unified diff follows it, under a line that
+// says why.
 //
 // Timeouts. The request is bound to the tool's own deadline (timeout_sec in
 // the manifest, e.g. 120 s for bash and 60 s for file edits): when it passes
@@ -47,6 +68,8 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/agent"
+	"spettro/internal/remote"
+	"spettro/internal/termtext"
 )
 
 // Permission option IDs. They are echoed back by the client, so they must
@@ -142,7 +165,7 @@ func (t *turnState) requestApproval(ctx context.Context, ar agent.ShellApprovalR
 		{OptionId: permAllowOnce, Name: "Allow once", Kind: acpsdk.PermissionOptionKindAllowOnce},
 	}
 	if remembersApproval(subject) {
-		options = append(options, acpsdk.PermissionOption{OptionId: permAllowAlways, Name: alwaysAllowLabel(subject), Kind: acpsdk.PermissionOptionKindAllowAlways})
+		options = append(options, acpsdk.PermissionOption{OptionId: permAllowAlways, Name: alwaysAllowLabel(subject, ar), Kind: acpsdk.PermissionOptionKindAllowAlways})
 	}
 	options = append(options, acpsdk.PermissionOption{OptionId: permDeny, Name: "Deny", Kind: acpsdk.PermissionOptionKindRejectOnce})
 
@@ -197,17 +220,15 @@ func (t *turnState) settleApprovalCard(id acpsdk.ToolCallId, attached bool, deci
 // approvalToolCallID finds the open tool call an approval belongs to, so the
 // editor shows the prompt on the card it is already rendering. Candidates
 // are the open calls of the asking tool, made by the asking agent (when the
-// request names one), that are not already showing a prompt. Among them a
-// call whose arguments name the approval's subject (the command, the
-// changed file, the network target) wins, then the most recently announced
-// one. The chosen card is marked as awaiting an answer until
-// settleApprovalCard. attached is false when there is no candidate, and a
-// fresh ID is returned.
+// request names one), that are not already showing a prompt and whose
+// arguments name the approval's subject (the command, the changed file, the
+// network target); among several, the most recently announced one wins. The
+// chosen card is marked as awaiting an answer until settleApprovalCard.
+// attached is false when there is no candidate, and a fresh ID is returned.
 func (t *turnState) approvalToolCallID(subject approvalSubject, ar agent.ShellApprovalRequest) (id acpsdk.ToolCallId, attached bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var best openToolCall
-	bestMatches := false
 	found := false
 	for _, queue := range t.open {
 		for _, call := range queue {
@@ -220,12 +241,11 @@ func (t *turnState) approvalToolCallID(subject approvalSubject, ar agent.ShellAp
 			if t.awaiting[call.id] {
 				continue
 			}
-			matches := t.callMatchesApproval(call, subject, ar)
-			better := !found ||
-				(matches && !bestMatches) ||
-				(matches == bestMatches && call.seq > best.seq)
-			if better {
-				best, bestMatches, found = call, matches, true
+			if !t.callMatchesApproval(call, subject, ar) {
+				continue
+			}
+			if !found || call.seq > best.seq {
+				best, found = call, true
 			}
 		}
 	}
@@ -253,8 +273,11 @@ func (t *turnState) callMatchesApproval(call openToolCall, subject approvalSubje
 		}
 		return collapseSpaces(spec.fromArgs(call.args)) == collapseSpaces(subject.target)
 	case subject.command:
+		// Exactly the command, up to the blanks the runtime trims around it
+		// (authorizeShellCommandIn): two calls whose commands differ by a
+		// no-break space where the other has a space are different commands.
 		command := call.args.commandArg()
-		return command != "" && collapseSpaces(command) == collapseSpaces(ar.Command)
+		return command != "" && strings.Trim(command, " \t\n") == ar.Command
 	case ar.Change != nil:
 		p := call.args.pathArg()
 		if p == "" {
@@ -273,8 +296,8 @@ func (t *turnState) callMatchesApproval(call openToolCall, subject approvalSubje
 }
 
 // collapseSpaces trims s and turns every run of whitespace into one space,
-// the normalization the runtime applies to commands and network targets
-// before asking (normalizeCommand in internal/agent).
+// the normalization the runtime applies to network targets before asking
+// (normalizeCommand in internal/agent).
 func collapseSpaces(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
@@ -287,15 +310,39 @@ func remembersApproval(subject approvalSubject) bool {
 
 // alwaysAllowLabel names the "always allow" option after what the runtime
 // will remember: the command's segments, or the network tool's exact target
-// (see networkTargets).
-func alwaysAllowLabel(subject approvalSubject) string {
+// (see networkTargets). Segments that are not simply the whole command (each
+// side of a pipe, each line of a heredoc's body) are listed in the prompt's
+// text (approvalContent), and the label points there.
+func alwaysAllowLabel(subject approvalSubject, ar agent.ShellApprovalRequest) string {
 	if !subject.network {
-		return "Always allow this command"
+		switch {
+		case !remembersOtherThanCommand(ar):
+			return "Always allow this command"
+		case len(ar.Segments) == 1:
+			return "Always allow the command listed"
+		default:
+			return fmt.Sprintf("Always allow the %d commands listed", len(ar.Segments))
+		}
 	}
 	if spec, ok := networkTargets[subject.tool]; ok {
 		return "Always allow this " + spec.noun
 	}
 	return "Always allow this target"
+}
+
+// remembersOtherThanCommand reports whether "always allow" on a command
+// approval remembers something other than exactly that command: more than
+// one segment, or one that is not the whole command. Allowing
+// "cat > notes.md <<'EOF'" for always remembers every line of the heredoc's
+// body as a command of its own.
+func remembersOtherThanCommand(ar agent.ShellApprovalRequest) bool {
+	switch len(ar.Segments) {
+	case 0:
+		return false
+	case 1:
+		return ar.Segments[0] != agent.RememberedCommandKey(ar.Command)
+	}
+	return true
 }
 
 // approvalKind is the card kind for an approval with no open card.
@@ -307,44 +354,123 @@ func approvalKind(subject approvalSubject) acpsdk.ToolKind {
 }
 
 // approvalTitle is the card title for an approval with no open card.
+// Every piece of text it takes from the request is escaped first
+// (termtext.EscapeLines): clipLine folds whitespace, and would turn a no-break
+// space, which a shell keeps inside a word, into the space that separates two.
 func approvalTitle(subject approvalSubject, ar agent.ShellApprovalRequest) string {
 	switch {
 	case subject.network:
-		return clipLine("Access the network: "+subject.target, maxTitleRunes)
+		return clipLine("Access the network: "+termtext.EscapeLines(subject.target), maxTitleRunes)
 	case ar.Change != nil:
 		verb := "Edit "
 		if ar.Change.Created {
 			verb = "Create "
 		}
-		return clipLine(verb+ar.Change.Path, maxTitleRunes)
+		return clipLine(verb+termtext.EscapeLines(ar.Change.Path), maxTitleRunes)
 	case subject.command:
-		return clipLine("Run "+ar.Command, maxTitleRunes)
+		return clipLine("Run "+termtext.EscapeLines(ar.Command), maxTitleRunes)
 	}
-	return clipLine(ar.Command, maxTitleRunes)
+	return clipLine(termtext.EscapeLines(ar.Command), maxTitleRunes)
 }
 
+// maxApprovalTextBytes bounds the command or diff text of one approval
+// prompt (see the package comment: Content).
+const maxApprovalTextBytes = remote.MaxApprovalFieldBytes
+
 // approvalContent is what the prompt shows: the proposed change as a real
-// diff when the runtime supplied one, else the unified diff as text, and
-// the reason plus the command segments that still need approval.
+// diff when the runtime supplied one, else the whole unified diff as text;
+// for anything that is not a file change, the whole command or network
+// target; then the reason plus the command segments that still need
+// approval. Text is escaped (see the package comment: Content).
 func approvalContent(ar agent.ShellApprovalRequest) []acpsdk.ToolCallContent {
 	var out []acpsdk.ToolCallContent
 	switch {
 	case ar.Change != nil:
 		out = append(out, fileChangeContent([]agent.FileChange{*ar.Change})...)
-		if ar.Change.TextOmitted && strings.TrimSpace(ar.Diff) != "" {
+		switch {
+		case strings.TrimSpace(ar.Diff) == "":
+		case fileChangeOmitted(*ar.Change):
 			// The file is too large for a structured diff; the unified diff
 			// the runtime computed still shows what changes.
-			out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes("```diff\n"+ar.Diff+"\n```", maxToolTextBytes))))
+			out = append(out, approvalTextBlock("diff", ar.Diff))
+		case termtext.HasHidden(ar.Change.OldText) || termtext.HasHidden(ar.Change.NewText):
+			// The editor draws the file's own text, invisible characters
+			// and all; show the change once more with them named.
+			out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(hiddenCharsNote)))
+			out = append(out, approvalTextBlock("diff", ar.Diff))
 		}
 	case strings.TrimSpace(ar.Diff) != "":
-		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes("```diff\n"+ar.Diff+"\n```", maxToolTextBytes))))
+		out = append(out, approvalTextBlock("diff", ar.Diff))
+	case subjectOf(ar).network:
+		// The card's title and rawInput are clipped; this is the whole
+		// target ("network <tool> <target>") the user is approving.
+		out = append(out, approvalTextBlock("", ar.Command))
+	case strings.TrimSpace(ar.Command) != "":
+		// Likewise the whole command.
+		out = append(out, approvalTextBlock("sh", ar.Command))
 	}
-	note := strings.TrimSpace(ar.Reason)
-	if len(ar.Segments) > 0 {
-		note = strings.TrimSpace(note + "\nneeds approval: " + strings.Join(ar.Segments, " | "))
+	note := termtext.EscapeLines(strings.TrimSpace(ar.Reason))
+	if len(ar.Segments) > 0 && !remembersOtherThanCommand(ar) {
+		note = strings.TrimSpace(note + "\nneeds approval: " + termtext.EscapeLines(strings.Join(ar.Segments, " | ")))
 	}
 	if note != "" {
 		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes(note, maxToolTextBytes))))
 	}
+	if remembersOtherThanCommand(ar) {
+		// What "Always allow" saves, one command per line and in full: the
+		// choice approves each of them for good.
+		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(fmt.Sprintf(
+			"\"Always allow\" remembers these %d commands, and later runs them without asking:", len(ar.Segments)))))
+		out = append(out, approvalTextBlock("", strings.Join(ar.Segments, "\n")))
+	}
 	return out
+}
+
+// hiddenCharsNote precedes the escaped copy of a file change whose text
+// holds characters that do not show (approvalContent).
+const hiddenCharsNote = "This change contains characters that do not show on screen " +
+	"(control, bidi, zero-width or other invisible characters). " +
+	"Here it is with each of them written out:"
+
+// fileChangeOmitted reports whether fileChangeContent leaves change out of
+// its structured diffs (texts dropped, or too large for one update).
+func fileChangeOmitted(change agent.FileChange) bool {
+	return change.TextOmitted || len(change.OldText)+len(change.NewText) > maxDiffBytesPerUpdate
+}
+
+// approvalTextBlock is text as a fenced code block of language lang, every
+// character that would not show as itself written out
+// (termtext.EscapeLines), cut to maxApprovalTextBytes with an explicit note
+// after the fence when it is longer. The fence is longer than any run of
+// backticks in text, so the text cannot close it early and show part of
+// itself as prose.
+func approvalTextBlock(lang, text string) acpsdk.ToolCallContent {
+	body, cut := remote.ClipApprovalText(termtext.EscapeLines(strings.TrimRight(text, "\n")), maxApprovalTextBytes)
+	note := ""
+	if cut {
+		// ClipApprovalText ends a cut text with its note; move the note out
+		// of the code block so it reads as a statement, not as code.
+		i := strings.LastIndex(body, "\n[truncated:")
+		body, note = body[:i], body[i+1:]
+	}
+	fence := strings.Repeat("`", max(3, longestRun(body, '`')+1))
+	block := fence + lang + "\n" + body + "\n" + fence
+	if note != "" {
+		block += "\n\n" + note
+	}
+	return acpsdk.ToolContent(acpsdk.TextBlock(block))
+}
+
+// longestRun is the length of the longest run of c in s.
+func longestRun(s string, c byte) int {
+	best, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			run++
+			best = max(best, run)
+		} else {
+			run = 0
+		}
+	}
+	return best
 }
