@@ -14,6 +14,7 @@ import (
 	"spettro/internal/homedir"
 	"spettro/internal/provider"
 	"spettro/internal/spettro"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -234,9 +235,15 @@ func (m Model) viewOnboarding() string {
 func (m Model) viewOnboardingPicker() string {
 	mc := m.currentColor()
 	contentH := m.height - 1
-	topPad := max(contentH/3, 2)
+	textW := max(m.width-onboardingIndent, 1)
 
-	instruction := lipgloss.NewStyle().Foreground(mc).Render("To start, let's choose a provider and model.")
+	// Wrapped here, then styled row by row, so the layout below can count
+	// the rows the instruction takes on a narrow terminal.
+	instructionRows := termtext.Wrap("To start, let's choose a provider and model.", textW)
+	for i, row := range instructionRows {
+		instructionRows[i] = lipgloss.NewStyle().Foreground(mc).Render(row)
+	}
+	topPad, maxListH := onboardingPickerLayout(contentH, len(instructionRows))
 
 	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
 	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
@@ -244,7 +251,6 @@ func (m Model) viewOnboardingPicker() string {
 		lipgloss.NewStyle().Foreground(theme.Current().Text).Render(m.onboarding.filter) +
 		cursor
 
-	maxListH := max(contentH-topPad-8, 4)
 	var rows []string
 	selectedRow := 0
 	currentProvider := ""
@@ -285,31 +291,56 @@ func (m Model) viewOnboardingPicker() string {
 		rows = append(rows, styleMuted.Render("  no models found"))
 	}
 
-	// Scroll window so selected item stays visible.
-	start := 0
-	if len(rows) > maxListH {
-		start = max(selectedRow-maxListH/2, 0)
-		if start+maxListH > len(rows) {
-			start = len(rows) - maxListH
-		}
-		rows = rows[start : start+maxListH]
-	}
+	// Scroll window so selected item stays visible. The blank rows around
+	// the list double as "↑ N more" / "↓ N more" markers when it scrolls.
+	start := windowStart(len(rows), maxListH, selectedRow)
+	end := min(start+maxListH, len(rows))
+	above := moreMarker("↑", start, textW)
+	below := moreMarker("↓", len(rows)-end, textW)
+	rows = rows[start:end]
 
-	hint := styleMuted.Render("↑↓ choose  •  enter confirm")
+	hint := styleMuted.Render(termtext.Fit("↑↓ choose  •  enter confirm", textW))
 
 	var lines []string
 	for i := 0; i < topPad; i++ {
 		lines = append(lines, "")
 	}
-	lines = append(lines, instruction, "", filterLine, "")
-	lines = append(lines, rows...)
-	lines = append(lines, "", hint)
+	lines = append(lines, instructionRows...)
+	lines = append(lines, "", filterLine, above)
+	for _, row := range rows {
+		lines = append(lines, termtext.Fit(row, textW))
+	}
+	lines = append(lines, below, hint)
 
 	return lipgloss.NewStyle().
-		Width(m.width).
-		PaddingLeft(2).
+		PaddingLeft(onboardingIndent).
 		Render(strings.Join(lines, "\n"))
 }
+
+// onboardingIndent is the left margin of the onboarding screens.
+const onboardingIndent = 2
+
+// onboardingPickerLayout splits the rows under the header between the top
+// padding and the model list. The picker's fixed rows are the instruction
+// (instructionRows, it wraps on a narrow terminal), the filter line, the
+// blank (or "more") rows around the list and the key hint. The top padding,
+// a third of the screen, gives way first when the list would get fewer than
+// minOnboardingListRows, so on a small terminal (40x15) the key hint stays
+// on screen instead of being pushed off the bottom.
+func onboardingPickerLayout(contentH, instructionRows int) (topPad, listRows int) {
+	fixed := instructionRows + 5 // blank, filter, spacer, spacer, hint
+	topPad = max(contentH/3, 2)
+	listRows = contentH - fixed - topPad
+	if listRows < minOnboardingListRows {
+		topPad = max(contentH-fixed-minOnboardingListRows, 0)
+		listRows = contentH - fixed - topPad
+	}
+	return topPad, max(listRows, 1)
+}
+
+// minOnboardingListRows is the fewest model rows the onboarding picker
+// shows before it gives up its top padding.
+const minOnboardingListRows = 4
 
 func (m Model) viewOnboardingKeyEntry() string {
 	mc := m.currentColor()
