@@ -5,6 +5,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"spettro/internal/jobs"
+	"spettro/internal/pty"
 )
 
 // framePart is a rendered piece of the frame split into rows, each row's
@@ -124,7 +127,7 @@ func writeSpaces(b *strings.Builder, n int) {
 }
 
 // frameMemo keeps the frame's chrome (header, input area, status bar, side
-// panel) from one frame to the next.
+// panel, and the delegation/todo footer) from one frame to the next.
 //
 //   - What: each part rendered and split into measured rows (framePart).
 //   - Key: Model.chromeSeq, which Update advances for every message except
@@ -141,9 +144,11 @@ func writeSpaces(b *strings.Builder, n int) {
 // re-rendering it was most of the per-token cost left after the transcript
 // cache: 0.55 ms for the side panel, 0.2 ms for the input box twice (layout
 // and view), plus their allocations (BenchmarkComponents in the perf
-// harness).
+// harness). The footer (delegations, todos) rendered the input box again to
+// size itself, twice a frame: 14 % of a 200-turn session's CPU in the mem
+// harness before it was memoized too.
 type frameMemo struct {
-	header, input, status, side memoPart
+	header, input, status, side, footer memoPart
 }
 
 // memoPart is one memoized chrome part.
@@ -166,16 +171,35 @@ type chromeKey struct {
 }
 
 func (m Model) chromeKey(partWidth int) chromeKey {
+	frame := 0
+	if m.chromeAnimates() {
+		frame = m.eyeFrame
+	}
 	return chromeKey{
 		seq:       m.chromeSeq,
 		width:     m.width,
 		height:    m.height,
 		partWidth: partWidth,
-		eyeFrame:  m.eyeFrame,
+		eyeFrame:  frame,
 		mode:      m.mode,
 		banner:    m.banner,
 		input:     m.ta.Value(),
 	}
+}
+
+// chromeAnimates reports whether any memoized chrome part changes from one
+// animation tick to the next: the MAX plan label (header), a glowing input
+// keyword, running delegations and in-progress tasks (footer and side
+// panel), a goal's clock or a loop's countdown and the background job and
+// pty counters (status bar). While none does, a tick redraws only the
+// transcript and the working indicator. During a run the tick fires 20 times
+// a second, and re-rendering the whole chrome on each was a fifth of a
+// 200-turn session's UI CPU (mem harness).
+func (m Model) chromeAnimates() bool {
+	return m.spettroPlanName() == "max" || inputMayGlow(m.ta.Value()) ||
+		m.hasRunningDelegation() || m.hasInProgressTodo() ||
+		m.activeGoal != nil || m.activeLoop != nil ||
+		jobs.Default().RunningCount() > 0 || pty.Default().RunningCount() > 0
 }
 
 // memoized returns the part cached in slot for key, rendering it with
@@ -224,11 +248,20 @@ func (m Model) cachedSidePanel(width int) framePart {
 	return p
 }
 
-// transcriptOnly reports whether msg can change nothing but the transcript,
-// so the chrome drawn for the previous frame is still right (frameMemo).
+// cachedParallelAgents is renderParallelAgents through the frame memo;
+// recalcLayout measures it and View draws it.
+func (m Model) cachedParallelAgents() (string, framePart) {
+	return memoized(m.memoSlot(func(f *frameMemo) *memoPart { return &f.footer }), m.chromeKey(m.paneWidth()), m.renderParallelAgents)
+}
+
+// transcriptOnly reports whether msg can change nothing but the transcript
+// (and the working indicator, which is never memoized), so the chrome drawn
+// for the previous frame is still right (frameMemo). An animation tick
+// qualifies: what it moves in the chrome is in the memo key (eyeFrame while
+// chromeAnimates, and the banner it may clear).
 func transcriptOnly(msg tea.Msg) bool {
 	switch msg := msg.(type) {
-	case streamChunkMsg, renderFillMsg:
+	case streamChunkMsg, renderFillMsg, tickMsg:
 		return true
 	case runEventsMsg:
 		for _, ev := range msg.events {

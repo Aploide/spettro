@@ -80,8 +80,8 @@ func (m Model) viewContent() string {
 		sep := fixedWidthPart(m.viewSep(paneW), paneW)
 		parts = []framePart{sep, fixedWidthPart(m.vp.View(), m.vp.Width()), sep}
 		if m.showsParallelFooter() {
-			if pa := m.renderParallelAgents(); pa != "" {
-				parts = append(parts, newFramePart(pa))
+			if pa, part := m.cachedParallelAgents(); pa != "" {
+				parts = append(parts, part)
 			}
 		}
 	}
@@ -698,8 +698,8 @@ func (m Model) parallelFooterHeight() int {
 	if !m.showsParallelFooter() {
 		return 0
 	}
-	if pa := m.renderParallelAgents(); pa != "" {
-		return lipgloss.Height(pa)
+	if pa, part := m.cachedParallelAgents(); pa != "" {
+		return len(part.rows)
 	}
 	return 0
 }

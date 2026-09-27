@@ -57,10 +57,12 @@ does not grow with the length of the session:
   blocks on rendering, and the UI applies whatever accumulated since the last
   frame as one batch (one refresh, one frame). The run's done message is sent
   only after the UI applied the run's last events.
-- **Frame memo** (`frame.go`). The header, input box, status bar and side
-  panel are kept between frames and re-rendered only after a message that can
-  change them; a streamed token redraws the transcript rows and the working
-  indicator only. The frame is joined from rows measured once.
+- **Frame memo** (`frame.go`). The header, input box, status bar, side panel
+  and the delegation/todo footer are kept between frames and re-rendered only
+  after a message that can change them; a streamed token or an animation tick
+  redraws the transcript rows and the working indicator only (a tick also
+  redraws the chrome parts that animate, such as a glaring task). The frame
+  is joined from rows measured once.
 - **Idle**. The 50 ms animation tick runs only while something animates
   (a run, onboarding and sign-in spinners, the MAX plan label, a goal's clock,
   running delegations, in-progress tasks, glowing input keywords); banners

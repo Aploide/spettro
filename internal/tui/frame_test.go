@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"spettro/internal/agent"
+	"spettro/internal/session"
 )
 
 func randomBlock(r *rand.Rand) string {
@@ -82,10 +83,26 @@ func TestStreamedTokensReuseTheChrome(t *testing.T) {
 	if !strings.Contains(frame, "token") {
 		t.Fatal("the streamed token is not in the frame")
 	}
+	// A tick moves the working indicator, which is drawn fresh; the chrome
+	// is reused unless something in it animates.
+	before := m.View().Content
+	sideSlot := m.frameMemo.side
+	for i := 0; i < 12; i++ { // the glare steps every few frames
+		nm, _ = m.Update(tickMsg(time.Now()))
+		m = nm.(Model)
+	}
+	if m.View().Content == before {
+		t.Fatal("ticks did not move the working indicator")
+	}
+	if m.frameMemo.side.key != sideSlot.key {
+		t.Fatal("a tick re-rendered the still side panel")
+	}
+	m.todos = []session.Todo{{Content: "task", Status: "in_progress"}}
+	key := m.chromeKey(m.sidePanelWidth())
 	nm, _ = m.Update(tickMsg(time.Now()))
 	m = nm.(Model)
-	if m.chromeSeq == seq {
-		t.Fatal("a tick did not invalidate the chrome")
+	if m.chromeKey(m.sidePanelWidth()) == key {
+		t.Fatal("a tick did not invalidate chrome that animates (a glaring task)")
 	}
 	tr := agent.ToolTrace{Name: "grep", Status: "running", Args: `{"pattern":"x"}`}
 	seq = m.chromeSeq
