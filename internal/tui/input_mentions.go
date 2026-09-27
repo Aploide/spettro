@@ -12,68 +12,7 @@ import (
 func (m *Model) syncInputSuggestions() tea.Cmd {
 	val := m.ta.Value()
 	if strings.HasPrefix(val, "/") {
-		if strings.HasPrefix(val, "/permission") && len(val) > len("/permission") {
-			filter := strings.TrimPrefix(val, "/permission")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range permissionCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
-			m.cmdItems = items
-			if m.cmdCursor >= len(m.cmdItems) {
-				m.cmdCursor = 0
-			}
-			m.mentionItems = nil
-			m.mentionCursor = 0
-			return nil
-		}
-		if strings.HasPrefix(val, "/thinking") && len(val) > len("/thinking") && m.activeModelSupportsReasoning() {
-			filter := strings.TrimPrefix(val, "/thinking")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range thinkingCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
-			m.cmdItems = items
-			if m.cmdCursor >= len(m.cmdItems) {
-				m.cmdCursor = 0
-			}
-			m.mentionItems = nil
-			m.mentionCursor = 0
-			return nil
-		}
-		if strings.HasPrefix(val, "/think") && !strings.HasPrefix(val, "/thinking") && len(val) > len("/think") && m.activeModelSupportsReasoning() {
-			filter := strings.TrimPrefix(val, "/think")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range thinkCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
-			m.cmdItems = items
-			if m.cmdCursor >= len(m.cmdItems) {
-				m.cmdCursor = 0
-			}
-			m.mentionItems = nil
-			m.mentionCursor = 0
-			return nil
-		}
-		// Only "/skill " (with the space) opens the sub-command menu, so a
-		// skill whose name starts with "skill" (/skill-creator) is still
-		// found by the main menu below.
-		if strings.HasPrefix(val, "/skill ") {
-			filter := strings.TrimPrefix(val, "/skill ")
-			var items []commandDef
-			for _, c := range skillCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
+		if items, ok := m.slashSubMenu(val); ok {
 			m.cmdItems = items
 			if m.cmdCursor >= len(m.cmdItems) {
 				m.cmdCursor = 0
@@ -119,6 +58,46 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 	// Trigger a background re-scan so newly added/removed files show up
 	// in the @-mention list. Throttled by scheduleRepoScan.
 	return m.scheduleRepoScan()
+}
+
+// slashSubMenu returns the completion menu for a command whose argument has
+// its own list of choices (/permission <level>, /thinking <level>, ...),
+// filtered by what was typed after the command, and ok = true when val is
+// such a command.
+//
+// A sub-menu opens only once the command is followed by a space. Matching
+// the bare prefix would capture every name that merely starts with the
+// command: /thinker, /thinking-partner and /permissions-audit (skills), or
+// the built-in /permissions, would open a sub-menu instead of reaching the
+// main menu where they are listed.
+func (m *Model) slashSubMenu(val string) ([]commandDef, bool) {
+	reasoning := m.activeModelSupportsReasoning()
+	subMenus := []struct {
+		command string
+		items   []commandDef
+		// enabled is false when the command itself is hidden: thinking
+		// levels apply only to reasoning-capable models.
+		enabled bool
+	}{
+		{"/permission", permissionCommands, true},
+		{"/thinking", thinkingCommands, reasoning},
+		{"/think", thinkCommands, reasoning},
+		{"/skill", skillCommands, true},
+	}
+	for _, sub := range subMenus {
+		filter, ok := strings.CutPrefix(val, sub.command+" ")
+		if !ok || !sub.enabled {
+			continue
+		}
+		var items []commandDef
+		for _, c := range sub.items {
+			if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
+				items = append(items, c)
+			}
+		}
+		return items, true
+	}
+	return nil, false
 }
 
 // mentionKind says what the mention palette is completing.

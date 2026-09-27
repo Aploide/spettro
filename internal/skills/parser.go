@@ -51,13 +51,13 @@ func splitFrontmatter(content string) (string, string) {
 // Skill.Issues.
 //
 // Every metadata value is cleaned of terminal escape sequences and control
-// characters (see cleanText) before anything else sees it: skill folders
+// characters (see CleanText) before anything else sees it: skill folders
 // come from cloned repositories, and the name, description and argument
 // hint are drawn straight onto the terminal by the TUI's menus.
 func parse(content, dirName string) (Skill, error) {
 	front, body := splitFrontmatter(content)
-	dirName = strings.TrimSpace(cleanText(dirName))
-	skill := parseFrontmatter(cleanText(front))
+	dirName = strings.TrimSpace(CleanText(dirName))
+	skill := parseFrontmatter(CleanText(front))
 	skill.Name = strings.TrimSpace(skill.Name)
 	skill.Description = strings.TrimSpace(skill.Description)
 	if skill.Name == "" {
@@ -73,7 +73,7 @@ func parse(content, dirName string) (Skill, error) {
 			fmt.Sprintf("name %q contains whitespace, so it could not be run as /name; using %q", original, skill.Name))
 	}
 	if skill.Description == "" {
-		skill.Description = cleanText(firstBodyLine(body))
+		skill.Description = CleanText(firstBodyLine(body))
 		if skill.Description == "" {
 			return Skill{}, fmt.Errorf("skill %q has no description and an empty body", skill.Name)
 		}
@@ -105,12 +105,13 @@ func commandSafeName(name, dirName string) string {
 	return strings.Join(strings.Fields(name), "-")
 }
 
-// cleanText removes terminal escape sequences (CSI, OSC and the like) and
+// CleanText removes terminal escape sequences (CSI, OSC and the like) and
 // every other control character from s, keeping newlines and tabs. An
-// invalid UTF-8 byte becomes U+FFFD. Frontmatter is untrusted: without this
-// a description could retitle the terminal window or write the clipboard
-// (OSC 52) the moment the TUI lists it.
-func cleanText(s string) string {
+// invalid UTF-8 byte becomes U+FFFD. Skill files are untrusted: without
+// this a description could retitle the terminal window or write the
+// clipboard (OSC 52) the moment the TUI lists it. parse applies it to the
+// frontmatter; a host showing a skill's body as text applies it itself.
+func CleanText(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
 		case r == '\n' || r == '\t':

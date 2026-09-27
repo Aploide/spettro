@@ -103,6 +103,10 @@ const (
 )
 
 // Skill is a discovered skill ready for disclosure to the model.
+//
+// Name, Description and every other frontmatter value are free of terminal
+// control characters (see CleanText), and Name never contains whitespace
+// (see commandSafeName), so every host can offer a skill as "/<Name>".
 type Skill struct {
 	Name          string            `json:"name"`
 	Description   string            `json:"description"`

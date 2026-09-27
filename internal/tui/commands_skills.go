@@ -275,15 +275,25 @@ func (m Model) runSkillsInfo(args []string) (tea.Model, tea.Cmd) {
 		}
 	}
 	rows = append(rows, "", "description:", skill.ListingDescription())
-	rows = append(rows, "", "instructions (excerpt):", truncateLabel(body, 1500))
+	// The body is shown as text, so it gets the same cleaning as the
+	// frontmatter: a skill from a cloned repository must not be able to
+	// send escape sequences to the terminal.
+	rows = append(rows, "", "instructions (excerpt):", truncateLabel(skills.CleanText(body), 1500))
 	m.pushSystemMsg(strings.Join(rows, "\n"))
 	return m, nil
 }
 
 // runSkillsEnable records a skill as enabled or disabled in the user config
-// (disabled_skills). Enabling also removes a legacy .spettro-disabled marker
-// from a Spettro-owned skill folder, since that marker would otherwise keep
-// the skill off.
+// (disabled_skills).
+//
+// Enabling also deletes a legacy .spettro-disabled marker from the skill's
+// folder, whatever root it is in: older versions of /skill disable wrote
+// that marker into Claude Code and Codex folders too, and it is Spettro's
+// own file, so removing it is cleanup rather than a write into another
+// agent's skill. A skill can still be off after that, when its own SKILL.md
+// says disabled: true (or enabled: false); Spettro does not edit other
+// people's skill files, so the banner says where to change it instead of
+// reporting success.
 func (m Model) runSkillsEnable(args []string, enable bool) (tea.Model, tea.Cmd) {
 	verb := "enable"
 	if !enable {
@@ -305,18 +315,23 @@ func (m Model) runSkillsEnable(args []string, enable bool) (tea.Model, tea.Cmd) 
 		m.showBanner(verb+" failed: "+err.Error(), "error")
 		return m, nil
 	}
-	if enable && skill.Source == skills.SourceSpettro {
-		marker := filepath.Join(skill.Directory, skills.DisabledMarker)
-		if err := os.Remove(marker); err == nil {
-			// The marker was read at discovery; rescan so it takes effect.
-			agent.ReloadSkills()
-		}
-	}
-	state := "enabled"
 	if !enable {
-		state = "disabled"
+		m.showBanner(fmt.Sprintf("skill %q disabled", skill.Name), "success")
+		return m, nil
 	}
-	m.showBanner(fmt.Sprintf("skill %q %s", skill.Name, state), "success")
+	marker := filepath.Join(skill.Directory, skills.DisabledMarker)
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		m.showBanner(fmt.Sprintf("skill %q is still disabled: could not remove %s: %v", skill.Name, marker, err), "error")
+		return m, nil
+	}
+	agent.ReloadSkills()
+	if now, ok := m.skillCatalog().Find(skill.Name); ok && now.Disabled {
+		// The config entry and the marker are gone, so only the skill's own
+		// frontmatter can be keeping it off.
+		m.showBanner(fmt.Sprintf("skill %q is still disabled: its SKILL.md sets disabled: true (or enabled: false); edit %s", skill.Name, now.Location), "error")
+		return m, nil
+	}
+	m.showBanner(fmt.Sprintf("skill %q enabled", skill.Name), "success")
 	return m, nil
 }
 

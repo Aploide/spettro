@@ -95,6 +95,58 @@ func TestSkillPrefixedSkillNameUsesMainMenu(t *testing.T) {
 	}
 }
 
+// The /permission, /thinking and /think sub-menus open only once the
+// command is followed by a space, like /skill: a skill whose name merely
+// starts with one of them (/thinker, /permissions-audit) must be reachable
+// from the main menu. With a reasoning model, /thinker used to open the
+// (empty) /think sub-menu.
+func TestSubMenusNeedTheirCommandAndASpace(t *testing.T) {
+	m := newSkillModel(t)
+	m.cfg.ActiveProvider = "anthropic"
+	m.cfg.ActiveModel = "claude-sonnet-4-5"
+	if !m.activeModelSupportsReasoning() {
+		t.Fatal("test model must support reasoning, or /think's sub-menu never opens")
+	}
+	for _, name := range []string{"thinker", "thinking-partner", "permissions-audit"} {
+		dir := filepath.Join(m.cwd, ".spettro", "skills", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := "---\nname: " + name + "\ndescription: d\n---\nbody\n"
+		if err := os.WriteFile(filepath.Join(dir, skills.SkillFilename), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.ReloadSkills()
+	for _, name := range []string{"thinker", "thinking-partner", "permissions-audit"} {
+		m.ta.SetValue("/" + name)
+		m.syncInputSuggestions()
+		found := false
+		for _, c := range m.cmdItems {
+			found = found || c.name == "/"+name
+		}
+		if !found {
+			t.Errorf("/%s: menu = %+v, want the skill", name, m.cmdItems)
+		}
+	}
+	// With the space, each command still opens its own sub-menu.
+	for input, want := range map[string]string{"/think h": "/think high", "/thinking h": "/thinking high", "/permission y": "/permission yolo"} {
+		m.ta.SetValue(input)
+		m.syncInputSuggestions()
+		cmd, _, _ := strings.Cut(input, " ")
+		found := false
+		for _, c := range m.cmdItems {
+			if !strings.HasPrefix(c.name, cmd+" ") {
+				t.Errorf("%q: %s is not an entry of the %s sub-menu", input, c.name, cmd)
+			}
+			found = found || c.name == want
+		}
+		if !found {
+			t.Errorf("%q: sub-menu = %+v, want it to offer %s", input, m.cmdItems, want)
+		}
+	}
+}
+
 // /greet Ada shows what the user typed and sends the skill's instructions.
 func TestSlashSkillInvocation(t *testing.T) {
 	m := newSkillModel(t)

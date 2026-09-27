@@ -243,7 +243,7 @@ Claude Code's `{"skill": "<name>"}` spelling, still work as hidden aliases
 | `/skill install <source> [--project] [--force] [--as=<name>] [--path=<sub>]` | Install from a local folder, an https git URL, or `owner/repo`. Goes to `~/.spettro/skills/<name>`, or `.spettro/skills/<name>` with `--project`. |
 | `/skill uninstall <name> [--project]` | Remove a skill installed in `.spettro/skills`. Skills in the Claude Code / Codex folders are never deleted by Spettro; disable them instead. |
 | `/skill info <name>` | Metadata, bundled files, warnings and the start of the instructions. |
-| `/skill disable <name>` / `enable <name>` | Hide or show a skill everywhere. Stored in `~/.spettro/config.json` as `disabled_skills`, so nothing is written into the skill's folder. |
+| `/skill disable <name>` / `enable <name>` | Hide or show a skill everywhere. Stored in `~/.spettro/config.json` as `disabled_skills`, so nothing is written into the skill's folder. `enable` also deletes a `.spettro-disabled` file an older Spettro left in the skill's folder (in any family's folder: it is Spettro's own file). A skill whose `SKILL.md` says `disabled: true` stays off, and `enable` tells you to edit that file. |
 | `/skill where` | The discovery folders for the current directory, in priority order. |
 | `/skill reload` | Re-scan the skill folders (see below). |
 
@@ -294,10 +294,16 @@ Invariants worth keeping:
   tool, never on time or step, to keep the system prompt cacheable. The
   load tool comes from `toolRuntime.skillLoadTool`; an agent without one
   gets no list.
-- Spettro never writes into a root whose `Root.ReadOnly()` is true.
+- Spettro never writes into a root whose `Root.ReadOnly()` is true. The
+  one exception is `/skill enable` deleting a legacy `.spettro-disabled`
+  marker, which only an older Spettro could have put there.
 - A skill never shadows a command: each host checks its own built-in names
   first (`builtinCommandNames` in the TUI, `acpReservedCommandNames` in ACP,
   `headlessCommandNames` for the remote). Adding a built-in command means
   adding it to that host's list if it is not already advertised.
 - Legacy `.spettro-disabled` marker files are still honoured when present,
   but nothing creates them any more.
+- The TUI's sub-menus (`/permission `, `/thinking `, `/think `, `/skill `)
+  open only after the command and a space, so a skill whose name starts
+  with a command name stays reachable from the main menu
+  (`slashSubMenu` in `input_mentions.go`).

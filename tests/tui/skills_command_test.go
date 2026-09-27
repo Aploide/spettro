@@ -209,6 +209,60 @@ func TestHandleCommand_SkillEnableRemovesLegacyMarker(t *testing.T) {
 	}
 }
 
+// Older versions of /skill disable wrote the marker into any skill folder,
+// Claude Code's and Codex's included. It is Spettro's own file, so
+// /skill enable removes it there too, and the skill is runnable again.
+func TestHandleCommand_SkillEnableRemovesLegacyMarkerInCompatRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	root := filepath.Join(home, ".claude", "skills", "pdf-processing")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "SKILL.md"), []byte(minimalSKILL), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".spettro-disabled"), nil, 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	m := tui.NewModelForTesting()
+	next, _ := m.HandleCommandForTesting("/skill enable pdf-processing")
+	got := next.(tui.Model)
+	if banner := got.BannerForTesting(); !strings.Contains(banner, "enabled") || got.BannerKindForTesting() != "success" {
+		t.Errorf("expected a success banner, got %q (%s)", banner, got.BannerKindForTesting())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".spettro-disabled")); !os.IsNotExist(err) {
+		t.Errorf("expected legacy marker removed from the Claude Code folder, err=%v", err)
+	}
+	next, _ = got.HandleCommandForTesting("/skills")
+	msgs := next.(tui.Model).MessagesForTesting()
+	if list := msgs[len(msgs)-1].Content; !strings.Contains(list, "pdf-processing  [/pdf-processing]") {
+		t.Errorf("expected the skill runnable again, got %q", list)
+	}
+}
+
+// A skill its own SKILL.md disables (disabled: true) cannot be enabled from
+// Spettro; /skill enable must say so instead of reporting success.
+func TestHandleCommand_SkillEnableReportsFrontmatterDisable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".spettro", "skills", "pdf-processing")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	content := strings.Replace(minimalSKILL, "name: pdf-processing\n", "name: pdf-processing\ndisabled: true\n", 1)
+	if err := os.WriteFile(filepath.Join(root, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	m := tui.NewModelForTesting()
+	next, _ := m.HandleCommandForTesting("/skill enable pdf-processing")
+	got := next.(tui.Model)
+	if got.BannerKindForTesting() == "success" || !strings.Contains(got.BannerForTesting(), "disabled: true") {
+		t.Errorf("expected the frontmatter disable reported, got %q (%s)", got.BannerForTesting(), got.BannerKindForTesting())
+	}
+}
+
 func TestHandleCommand_SkillWhereLists8Roots(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m := tui.NewModelForTesting()
