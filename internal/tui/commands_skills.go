@@ -73,7 +73,7 @@ const skillsHelp = `skills commands:
   /skill info <name>                       show metadata + body excerpt
   /skill enable <name> | disable <name>    show or hide a skill everywhere (saved in your config)
   /skill where                             show discovery roots
-  /skill reload                            re-scan skill directories after editing them`
+  /skill reload                            force a re-scan of the skill directories`
 
 // skillCatalog returns the session's skill catalog under the current config.
 func (m Model) skillCatalog() skills.Catalog {

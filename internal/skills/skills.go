@@ -27,6 +27,11 @@
 // repository root (the first directory holding .git), nearest first, so a
 // skill checked in at the root of a monorepo is found from any package.
 //
+// Most roots hold one skill per subdirectory (<root>/<skill>/SKILL.md), as
+// Claude Code expects. The Codex roots (.codex/skills and .agents/skills)
+// may also group skills in subfolders (<root>/<group>/<skill>/SKILL.md), as
+// Codex allows, so discovery descends into them (see Root.nestsSkills).
+//
 // # Precedence
 //
 // SearchRoots lists the roots in priority order and the first skill with a
@@ -42,6 +47,7 @@ package skills
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -189,6 +195,27 @@ type Root struct {
 // directory that it reads but never writes.
 func (r Root) ReadOnly() bool { return r.Source != SourceSpettro }
 
+// nestsSkills reports whether skills may sit deeper than one directory below
+// the root. Codex finds skills anywhere under its roots (grouped as
+// <root>/<group>/<skill>/SKILL.md), so its two families are searched that
+// way; every other root holds one skill per subdirectory, as Claude Code
+// expects, and a deeper SKILL.md there is not a skill.
+func (r Root) nestsSkills() bool { return r.Source == SourceCodex || r.Source == SourceAgents }
+
+// Limits on the search below a nesting root (see Root.nestsSkills), the
+// same Codex applies: skills at most maxNestedDepth directories down, and
+// at most maxDirsPerRoot directories looked at, so a huge tree cannot stall
+// discovery.
+const (
+	maxNestedDepth = 6
+	maxDirsPerRoot = 2000
+)
+
+// maxSkillFileBytes caps the size of a SKILL.md Spettro will read. The spec
+// recommends keeping a skill's instructions to a few hundred lines; 1 MiB is
+// far above any real skill and still small enough to hold in memory.
+const maxSkillFileBytes = 1 << 20
+
 // SearchRoots returns the skill root directories Discover scans, in
 // precedence order (see the package documentation). A path is listed once
 // even when it is reachable two ways (a working directory inside the home
@@ -280,29 +307,26 @@ func projectDirs(cwd, home string) []string {
 // Discover scans every root SearchRoots returns and builds the catalog. The
 // first skill of a name wins (see the package documentation); the others go
 // to Catalog.Shadowed (not Catalog.Issues: a shadowed skill is expected,
-// and /skills shows the list). Skills are sorted by name. The error is always nil today and is kept for API stability;
-// per-directory problems are reported in Catalog.Issues instead.
+// and /skills shows the list). Skills are sorted by name. The error is
+// always nil today and is kept for API stability; per-directory problems
+// are reported in Catalog.Issues instead.
 func Discover(cwd string, opts LookupOptions) (Catalog, error) {
+	cat, _ := discover(cwd, opts)
+	return cat, nil
+}
+
+// discover is Discover that also returns a stamp of every path the result
+// depends on: each root, each directory looked into, each SKILL.md read.
+// The cache compares them to tell whether a cached catalog is still current
+// (see Cache.Get).
+func discover(cwd string, opts LookupOptions) (Catalog, []pathStamp) {
 	cat := Catalog{}
+	var stamps []pathStamp
 	seen := map[string]bool{} // lower-cased names already in cat.Skills
 	for _, root := range SearchRoots(cwd, opts) {
-		entries, err := os.ReadDir(root.Path)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				cat.Issues = append(cat.Issues, fmt.Sprintf("read %s: %v", root.Path, err))
-			}
-			continue
-		}
-		for _, ent := range entries {
-			dir := filepath.Join(root.Path, ent.Name())
-			if !isDir(ent, dir) {
-				continue
-			}
-			if _, err := os.Stat(filepath.Join(dir, SkillFilename)); err != nil {
-				// A folder without SKILL.md (a shared scripts dir, say) is
-				// not a skill; say nothing about it.
-				continue
-			}
+		stamps = append(stamps, stampOf(root.Path))
+		for _, dir := range skillDirs(root, &cat, &stamps) {
+			stamps = append(stamps, stampOf(filepath.Join(dir, SkillFilename)))
 			skill, err := Read(dir)
 			if err != nil {
 				cat.Issues = append(cat.Issues, fmt.Sprintf("%s: %v", dir, err))
@@ -322,7 +346,59 @@ func Discover(cwd string, opts LookupOptions) (Catalog, error) {
 	sort.SliceStable(cat.Skills, func(i, j int) bool {
 		return cat.Skills[i].Name < cat.Skills[j].Name
 	})
-	return cat, nil
+	return cat, stamps
+}
+
+// skillDirs returns the skill directories under root (those holding a
+// SKILL.md), in the order Discover considers them: breadth first, each
+// directory's entries by name. It appends a stamp for every directory it
+// looks into to stamps, and unreadable directories to cat.Issues.
+//
+// A directory with a SKILL.md is a skill, and the search does not go below
+// it: a skill's own scripts/ or references/ never hold more skills. A folder
+// without one (a shared scripts dir, say) is not a skill and is silently
+// passed over, or, under a root that nests skills, searched in turn.
+// Hidden folders are never searched below.
+func skillDirs(root Root, cat *Catalog, stamps *[]pathStamp) []string {
+	maxDepth := 1
+	if root.nestsSkills() {
+		maxDepth = maxNestedDepth
+	}
+	var found []string
+	visited := 0
+	level := []string{root.Path}
+	for depth := 1; depth <= maxDepth && len(level) > 0; depth++ {
+		var next []string
+		for _, parent := range level {
+			entries, err := os.ReadDir(parent)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					cat.Issues = append(cat.Issues, fmt.Sprintf("read %s: %v", parent, err))
+				}
+				continue
+			}
+			for _, ent := range entries {
+				dir := filepath.Join(parent, ent.Name())
+				if !isDir(ent, dir) {
+					continue
+				}
+				if visited++; visited > maxDirsPerRoot {
+					cat.Issues = append(cat.Issues, fmt.Sprintf("%s: stopped after %d folders; skills further down were not looked for", root.Path, maxDirsPerRoot))
+					return found
+				}
+				*stamps = append(*stamps, stampOf(dir))
+				if _, err := os.Stat(filepath.Join(dir, SkillFilename)); err == nil {
+					found = append(found, dir)
+					continue
+				}
+				if !strings.HasPrefix(ent.Name(), ".") {
+					next = append(next, dir)
+				}
+			}
+		}
+		level = next
+	}
+	return found
 }
 
 // isDir reports whether a directory entry is a directory, following a
@@ -345,7 +421,7 @@ func isDir(ent os.DirEntry, path string) bool {
 // with no description and no body is an error.
 func Read(dir string) (Skill, error) {
 	manifest := filepath.Join(dir, SkillFilename)
-	raw, err := os.ReadFile(manifest)
+	raw, err := readSkillFile(manifest)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -366,13 +442,48 @@ func Read(dir string) (Skill, error) {
 	return skill, nil
 }
 
+// readSkillFile reads a SKILL.md, refusing anything but a regular file of
+// at most maxSkillFileBytes. Skill folders come from cloned repositories
+// (and are looked up in parent directories up to the repository root), so
+// a SKILL.md may be a FIFO, whose open blocks until a writer appears, or a
+// symlink to /dev/zero or to a huge file. Discovery runs under the cache
+// lock, on the TUI's keystroke path among others, so one such file must
+// not be able to hang Spettro or exhaust its memory.
+func readSkillFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", SkillFilename)
+	}
+	if info.Size() > maxSkillFileBytes {
+		return nil, fmt.Errorf("%s is %d bytes, over the %d-byte limit", SkillFilename, info.Size(), maxSkillFileBytes)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// The limit is enforced on the read too, in case the file grew
+	// between the Stat and the Open.
+	raw, err := io.ReadAll(io.LimitReader(f, maxSkillFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxSkillFileBytes {
+		return nil, fmt.Errorf("%s is over the %d-byte limit", SkillFilename, maxSkillFileBytes)
+	}
+	return raw, nil
+}
+
 // LoadBody reads SKILL.md from disk and returns the markdown content following
 // the YAML frontmatter. Use this at activation time (tier 2 disclosure).
 func LoadBody(s Skill) (string, error) {
 	if strings.TrimSpace(s.Location) == "" {
 		return "", fmt.Errorf("skill %q has no location", s.Name)
 	}
-	raw, err := os.ReadFile(s.Location)
+	raw, err := readSkillFile(s.Location)
 	if err != nil {
 		return "", err
 	}

@@ -42,7 +42,7 @@
 | `/skill enable <name>` / `disable <name>` | Show or hide a skill for the agent and the `/` menu (saved as `disabled_skills` in `config.json`). |
 | `/skill uninstall <name>` | Remove a skill installed in `.spettro/skills` (Claude Code / Codex folders are never written to). |
 | `/skill where` | Show the discovery folders, in priority order. |
-| `/skill reload` | Re-scan skill folders after editing a `SKILL.md` by hand. |
+| `/skill reload` | Force a re-scan of the skill folders (changes on disk are otherwise picked up on the next use). |
 | `/stats` | Show session token usage and prompt-cache metrics. |
 | `/hooks` | Show effective runtime hooks (project + global). |
 | `/memory [show]` | Show persistent cross-session memory (user + project). See [Persistent Memory](memory.md). |

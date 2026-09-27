@@ -11,7 +11,8 @@ import (
 // headless invocations always agree on which skills exist:
 //
 //   - discovery is memoised in skills.Shared, so the list (and therefore the
-//     system prompt) is identical for every run of a session;
+//     system prompt) stays identical from run to run until a skill changes
+//     on disk (the cache notices that by itself; see skills.Cache);
 //   - skills_compat_disabled in the user config switches the Claude Code and
 //     Codex directories off;
 //   - disabled_skills in the user config marks skills Disabled.
@@ -39,8 +40,10 @@ func SkillLookupOptions(cfg config.UserConfig) skills.LookupOptions {
 }
 
 // ReloadSkills forgets every cached catalog, so the next SkillCatalog call
-// rescans the skill directories. Call it after anything that adds, removes
-// or edits a skill on disk (/skill install, uninstall, reload).
+// rescans the skill directories. The cache already notices changes on disk
+// by itself; /skill install, uninstall, enable and reload call this anyway
+// so their result shows even when a change falls within the file system's
+// timestamp resolution.
 func ReloadSkills() {
 	skills.Shared.Invalidate()
 }

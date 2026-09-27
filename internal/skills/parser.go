@@ -5,6 +5,9 @@ import (
 	"maps"
 	"regexp"
 	"strings"
+	"unicode"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // nameRE matches the strict spec-defined name: lowercase a-z, 0-9, hyphens,
@@ -46,19 +49,31 @@ func splitFrontmatter(content string) (string, string) {
 // Spec violations that do not stop the skill from working (a name that is
 // not lowercase-hyphenated, an over-long description) are reported in
 // Skill.Issues.
+//
+// Every metadata value is cleaned of terminal escape sequences and control
+// characters (see cleanText) before anything else sees it: skill folders
+// come from cloned repositories, and the name, description and argument
+// hint are drawn straight onto the terminal by the TUI's menus.
 func parse(content, dirName string) (Skill, error) {
 	front, body := splitFrontmatter(content)
-	skill := parseFrontmatter(front)
+	dirName = strings.TrimSpace(cleanText(dirName))
+	skill := parseFrontmatter(cleanText(front))
 	skill.Name = strings.TrimSpace(skill.Name)
 	skill.Description = strings.TrimSpace(skill.Description)
 	if skill.Name == "" {
-		skill.Name = strings.TrimSpace(dirName)
+		skill.Name = dirName
 	}
 	if skill.Name == "" {
 		return Skill{}, fmt.Errorf("skill has no name and no directory name")
 	}
+	if strings.ContainsFunc(skill.Name, unicode.IsSpace) {
+		original := skill.Name
+		skill.Name = commandSafeName(original, dirName)
+		skill.Issues = append(skill.Issues,
+			fmt.Sprintf("name %q contains whitespace, so it could not be run as /name; using %q", original, skill.Name))
+	}
 	if skill.Description == "" {
-		skill.Description = firstBodyLine(body)
+		skill.Description = cleanText(firstBodyLine(body))
 		if skill.Description == "" {
 			return Skill{}, fmt.Errorf("skill %q has no description and an empty body", skill.Name)
 		}
@@ -77,6 +92,36 @@ func parse(content, dirName string) (Skill, error) {
 	return skill, nil
 }
 
+// commandSafeName returns the name a skill whose name has whitespace is
+// known by instead. A skill is run as "/<name> args" and hosts split the
+// command at the first space, so such a name could never be run. The
+// directory name is used when it has no whitespace itself (it is what the
+// name should have matched anyway); otherwise the name's whitespace runs
+// become single hyphens.
+func commandSafeName(name, dirName string) string {
+	if dirName != "" && !strings.ContainsFunc(dirName, unicode.IsSpace) {
+		return dirName
+	}
+	return strings.Join(strings.Fields(name), "-")
+}
+
+// cleanText removes terminal escape sequences (CSI, OSC and the like) and
+// every other control character from s, keeping newlines and tabs. An
+// invalid UTF-8 byte becomes U+FFFD. Frontmatter is untrusted: without this
+// a description could retitle the terminal window or write the clipboard
+// (OSC 52) the moment the TUI lists it.
+func cleanText(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			return -1
+		}
+		return r
+	}, ansi.Strip(s))
+}
+
 // firstBodyLine returns the first non-empty line of a Markdown body with any
 // heading marker ("# ") removed, or "" for an empty body.
 func firstBodyLine(body string) string {
@@ -92,7 +137,9 @@ func firstBodyLine(body string) string {
 // parseFrontmatter is a deliberately small YAML subset parser tailored to
 // the SKILL.md frontmatter shape. It supports:
 //
-//   - Top-level `key: value` pairs (string scalars, optionally quoted).
+//   - Top-level `key: value` pairs (string scalars, optionally quoted),
+//     including values that continue on more-indented lines or start on
+//     the line after the key (see readContinuation).
 //   - Multi-line block scalars with `|` and `>` indicators.
 //   - Lists, either inline (`[a, b]`) or as indented `- item` lines; they
 //     are joined with single spaces (see assignField).
@@ -134,17 +181,25 @@ func parseFrontmatter(front string) Skill {
 			maps.Copy(skill.Metadata, meta)
 			i += 1 + consumed
 		case rest == "":
-			// "key:" followed by "- item" lines is a list; anything else
-			// leaves the value empty.
+			// "key:" followed by "- item" lines is a list, and followed by
+			// more-indented text it is a scalar that starts on the next
+			// line; anything else leaves the value empty.
 			items, consumed := readList(lines[i+1:])
+			if len(items) == 0 {
+				var value string
+				value, consumed = readContinuation("", lines[i+1:])
+				items = []string{unquote(value)}
+			}
 			i += 1 + consumed
 			assignField(&skill, key, strings.Join(items, " "))
 		case strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]"):
 			assignField(&skill, key, strings.Join(splitInlineList(rest), " "))
 			i++
 		default:
-			assignField(&skill, key, unquote(rest))
-			i++
+			// A plain or quoted scalar may go on over more-indented lines.
+			value, consumed := readContinuation(rest, lines[i+1:])
+			assignField(&skill, key, unquote(value))
+			i += 1 + consumed
 		}
 	}
 	return skill
@@ -211,6 +266,32 @@ func readBlockScalar(lines []string) (string, int) {
 		consumed++
 	}
 	return strings.TrimSpace(strings.Join(captured, "\n")), consumed
+}
+
+// readContinuation reads the continuation lines of a scalar that starts
+// with first (possibly empty, when the value starts on the next line): the
+// following lines indented deeper than the key, up to the first blank,
+// comment or top-level line. YAML folds such lines into one, so they are
+// joined with single spaces. It returns the joined value and the number of
+// lines consumed.
+//
+// Without this, "description: Extract text from PDFs." followed by an
+// indented "Use when the user mentions PDFs." kept only the first line.
+func readContinuation(first string, lines []string) (string, int) {
+	parts := []string{}
+	if first = strings.TrimSpace(first); first != "" {
+		parts = append(parts, first)
+	}
+	consumed := 0
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || indentOf(raw) == 0 {
+			break
+		}
+		parts = append(parts, trimmed)
+		consumed++
+	}
+	return strings.Join(parts, " "), consumed
 }
 
 // readList reads the "- item" lines of a block list. It stops at the first

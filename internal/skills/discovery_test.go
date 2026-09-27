@@ -269,9 +269,6 @@ func TestCacheReusesAndInvalidates(t *testing.T) {
 		t.Fatalf("first Get = %d skills", got)
 	}
 	writeSkill(t, root, "second", "second", "d")
-	if got := len(c.Get(cwd, DefaultLookupOptions()).Skills); got != 1 {
-		t.Errorf("cached Get must not rescan, got %d skills", got)
-	}
 	c.Invalidate()
 	if got := len(c.Get(cwd, DefaultLookupOptions()).Skills); got != 2 {
 		t.Errorf("Get after Invalidate = %d skills, want 2", got)

@@ -48,8 +48,8 @@ write the notes for this branch using $changelog
 ```
 
 and in any conversation where you ask for release notes, the agent loads it
-on its own. After editing skill files by hand while Spettro is running, run
-`/skill reload` (see [Caching](#caching)).
+on its own. Skills you add or edit by hand are picked up on the next
+message, in the TUI and in editors alike (see [Caching](#caching)).
 
 ## The SKILL.md format
 
@@ -75,7 +75,7 @@ description: Extract PDF text, fill PDF forms, merge PDFs. Use when handling PDF
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `name` | the folder name | What the skill is called: `/name`, `$name`, and the name the agent loads it by. Lowercase letters, digits and hyphens per the spec (other names still load, with a warning in `/skills`). |
+| `name` | the folder name | What the skill is called: `/name`, `$name`, and the name the agent loads it by. Lowercase letters, digits and hyphens per the spec (other names still load, with a warning in `/skills`). A name with spaces could never be typed as a command, so the folder name is used instead (or, if that has spaces too, the name with its spaces turned into hyphens), with a warning. |
 | `description` | the first line of the body | What the skill does and when to use it. This is all the agent sees before loading the skill, so put the trigger ("Use when ...") in it. |
 | `when_to_use` | none | Extra trigger text, appended to the description in the agent's list (Claude Code). |
 | `argument-hint` | none | Shown in the `/` menu and to ACP clients, e.g. `[issue-number]`. |
@@ -90,9 +90,24 @@ Anything else in the frontmatter (Claude Code's `model`, `context`, `hooks`,
 Codex's extras, ...) is kept as metadata and otherwise ignored, so such
 skills still load. The parser is deliberately forgiving: a file with no
 frontmatter at all loads with its folder name and first line, and lists may
-be written inline (`[a, b]`) or as `- item` lines. Only a skill with neither
-a description nor any body text is rejected (it is reported under
-warnings in `/skills`).
+be written inline (`[a, b]`) or as `- item` lines. A value may go on over
+more-indented lines, or start on the line after its key; the lines are
+joined with spaces, as YAML folds them:
+
+```yaml
+description: Extract text from PDFs and fill forms.
+  Use when the user mentions PDFs.
+```
+
+Only a skill with neither a description nor any body text is rejected (it
+is reported under warnings in `/skills`).
+
+Skill folders often come from repositories you cloned, so Spettro treats
+them as untrusted input: terminal escape sequences and control characters
+are stripped from every frontmatter value (the `/` menu and the `$` list
+draw names and descriptions straight onto the terminal), and a `SKILL.md`
+that is not a regular file (a pipe, a link to a device) or is larger than
+1 MiB is skipped with a warning instead of being read.
 
 ### Arguments and variables in the body
 
@@ -129,6 +144,13 @@ uninstall) to its own folders; the others are read-only to it.
 to the repository root** (the first folder with a `.git`), so a skill checked
 in at the root of a monorepo is found from any package. Outside a
 repository only the working directory counts.
+
+Each skill is a folder directly inside one of these paths
+(`.claude/skills/<skill>/SKILL.md`). The two Codex families, `.agents/skills`
+and `.codex/skills` (with `$CODEX_HOME/skills`), may also group skills in
+subfolders, as Codex allows: `~/.codex/skills/<group>/<skill>/SKILL.md` is
+found too, up to six folders deep. Hidden folders are not searched, and
+neither are a skill's own subfolders.
 
 `/skill where` prints the exact list for the current directory, in priority
 order, marking which folders exist.
@@ -236,13 +258,16 @@ and managing skills is TUI-only.
 
 ## Caching
 
-Skills are discovered once per session and kept in memory, so the skill list
-in the system prompt is byte-identical on every request; providers cache the
-prompt prefix, and a list that changed between requests would throw that
-cache away. The cache is refreshed by `/skill install`, `uninstall`,
-`reload` and by enabling a skill that had a legacy disabled marker. If you
-add or edit a `SKILL.md` by hand while Spettro is running, run
-`/skill reload`. Changing `skills_compat_disabled` or `disabled_skills`
+The discovered skills are kept in memory, so the skill list in the system
+prompt is byte-identical on every request; providers cache the prompt
+prefix, and a list that changed between requests would throw that cache
+away. Before each use, Spettro checks the modification times of the skill
+folders and of every `SKILL.md` it read (a handful of `stat` calls, no file
+reads), and rescans only when something changed. So a skill you add, edit
+or delete by hand shows up on the next message, in the TUI, in an ACP
+editor and through the headless remote, without restarting anything, and
+the prompt changes only when a skill really did. `/skill reload` forces a
+rescan anyway. Changing `skills_compat_disabled` or `disabled_skills`
 applies immediately.
 
 ## For maintainers
@@ -253,7 +278,7 @@ Where the pieces live:
 | --- | --- |
 | Discovery, precedence, parsing | `internal/skills/skills.go`, `parser.go` |
 | Prompt list, activation, argument substitution, `$` mentions | `internal/skills/prompt.go` |
-| Per-session cache | `internal/skills/cache.go` (`skills.Shared`) |
+| Cache, and its freshness check | `internal/skills/cache.go` (`skills.Shared`) |
 | Settings to catalog (the one entry point every host uses) | `internal/agent/skills_catalog.go` (`SkillCatalogFor`, `ReloadSkills`) |
 | The `skill` tool and its aliases | `internal/agent/llm_runtime_skills.go`, `tool_aliases.go`; manifest fold in `internal/config/tool_consolidation.go` (v14) |
 | TUI: `/skill`, `/skills`, `/name`, `$name`, menu entries | `internal/tui/commands_skills.go`, `model_commands_catalog.go`, `input_mentions.go` |
