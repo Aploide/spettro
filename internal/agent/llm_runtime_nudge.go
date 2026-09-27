@@ -34,6 +34,32 @@ const (
 	droppedToolCallNudge = "Your last response stopped for a tool call, but no tool call arrived. Send the tool call again, or give your final answer."
 )
 
+// todoOnlyStepNote is added, once per turn, to the result of a step whose
+// only calls were successful todo-write calls. Such a step spends a whole
+// model round trip on bookkeeping: the round-7 bench still counted 20 of them
+// from Kimi although the prompt and the tool description both say to send
+// todo-write together with real tool calls. The note rides on the tool
+// result the model reads next rather than being a user message, and the
+// result itself is unchanged, so the plan the model wrote is never
+// questioned; a second such step in the turn gets no note, so it cannot
+// become noise.
+const todoOnlyStepNote = "Plan updated. Continue with the next concrete action in the same response next time."
+
+// todoOnlyStep reports whether every call of a step was a todo-write call
+// that succeeded. results are parallelExec's, named after the tool each call
+// reached, so a retired task-* name or a misspelt todo_write counts too.
+func todoOnlyStep(results []parallelResult) bool {
+	if len(results) == 0 {
+		return false
+	}
+	for _, res := range results {
+		if res.name != "todo-write" || res.status != "success" {
+			return false
+		}
+	}
+	return true
+}
+
 // announceMaxChars is the longest reply looksLikeAnnouncement considers.
 // Real final answers that open with "I'll" or "Let me" are usually longer
 // (they report what was done); a bare announcement is one or two sentences.

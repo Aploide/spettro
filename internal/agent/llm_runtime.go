@@ -738,6 +738,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	// llm_runtime_nudge.go); a second such reply is handled as before.
 	announceNudged := false
 	droppedCallNudged := false
+	// todoNoteGiven records that this turn already carried the note for a
+	// step spent on todo-write alone (todoOnlyStepNote).
+	todoNoteGiven := false
 	// thinking starts at the configured level and follows the level the
 	// manager actually succeeded with, so a level the model rejected is not
 	// re-sent (and re-rejected) on every later step.
@@ -1027,6 +1030,11 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 					Images:  res.images,
 					SpoolID: ensureSpooled(res.output),
 				}
+			}
+			if !todoNoteGiven && todoOnlyStep(results) {
+				todoNoteGiven = true
+				last := len(toolResults) - 1
+				toolResults[last].Output = appendToolNote(toolResults[last].Output, todoOnlyStepNote)
 			}
 			// Tool results are appended before any exit check: an assistant
 			// tool-call turn without its matching results is an invalid prefix

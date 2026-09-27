@@ -44,7 +44,11 @@ agent manages it with the `todo-write` tool (the retired `task-create`,
 `task-update`, `task-get`, `task-list` and `task-delete` names still work as
 aliases of it). The tool's description tells the model to use it only for
 genuinely multi-step work and never as the only call in a step: a step spent
-on the list alone does not advance the task. It is advertised in every host,
+on the list alone does not advance the task. When a step's calls are all
+successful `todo-write` calls anyway, the first such step of a turn gets one
+line after its normal result: "Plan updated. Continue with the next concrete
+action in the same response next time." Later ones in the same turn get
+nothing extra. It is advertised in every host,
 headless goal runs included; ACP clients show the list as the session plan.
 
 - `todos` replaces the whole list; with `merge: true` it inserts or updates
