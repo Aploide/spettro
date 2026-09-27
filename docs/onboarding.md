@@ -38,8 +38,11 @@ normal TUI starts immediately.
 ```
 
 - Type to **filter** by provider name or model name.
-- Use `↑` / `↓` to navigate.
+- Use `↑` / `↓` to navigate; when the list scrolls, `↑ N more` / `↓ N more`
+  rows say how much is above and below it.
 - Press `Enter` to select.
+- Press `Esc` to quit spettro without choosing (the key hint under the list
+  says so).
 
 At the top of the list you will also see **Sign in to your Spettro
 subscription** — selecting this starts the device-flow login instead of asking

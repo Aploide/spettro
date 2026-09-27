@@ -243,7 +243,10 @@ func (m Model) viewOnboardingPicker() string {
 	for i, row := range instructionRows {
 		instructionRows[i] = lipgloss.NewStyle().Foreground(mc).Render(row)
 	}
-	topPad, maxListH := onboardingPickerLayout(contentH, len(instructionRows))
+	// Esc leaves spettro from this screen (there is nothing to go back to),
+	// so the hint says so; on a narrow terminal the keys take two rows.
+	hints := packKeyHints([]string{"↑↓ choose", "enter confirm", "esc quit"}, textW)
+	topPad, maxListH := onboardingPickerLayout(contentH, len(instructionRows), len(hints))
 
 	cursor := lipgloss.NewStyle().Foreground(mc).Render("▊")
 	promptStyle := lipgloss.NewStyle().Foreground(mc).Bold(true)
@@ -299,8 +302,6 @@ func (m Model) viewOnboardingPicker() string {
 	below := moreMarker("↓", len(rows)-end, textW)
 	rows = rows[start:end]
 
-	hint := styleMuted.Render(termtext.Fit("↑↓ choose  •  enter confirm", textW))
-
 	var lines []string
 	for i := 0; i < topPad; i++ {
 		lines = append(lines, "")
@@ -310,7 +311,10 @@ func (m Model) viewOnboardingPicker() string {
 	for _, row := range rows {
 		lines = append(lines, termtext.Fit(row, textW))
 	}
-	lines = append(lines, below, hint)
+	lines = append(lines, below)
+	for _, h := range hints {
+		lines = append(lines, styleMuted.Render(h))
+	}
 
 	return lipgloss.NewStyle().
 		PaddingLeft(onboardingIndent).
@@ -323,12 +327,12 @@ const onboardingIndent = 2
 // onboardingPickerLayout splits the rows under the header between the top
 // padding and the model list. The picker's fixed rows are the instruction
 // (instructionRows, it wraps on a narrow terminal), the filter line, the
-// blank (or "more") rows around the list and the key hint. The top padding,
-// a third of the screen, gives way first when the list would get fewer than
-// minOnboardingListRows, so on a small terminal (40x15) the key hint stays
-// on screen instead of being pushed off the bottom.
-func onboardingPickerLayout(contentH, instructionRows int) (topPad, listRows int) {
-	fixed := instructionRows + 5 // blank, filter, spacer, spacer, hint
+// blank (or "more") rows around the list and the key hints (hintRows). The
+// top padding, a third of the screen, gives way first when the list would
+// get fewer than minOnboardingListRows, so on a small terminal (40x15) the
+// key hints stay on screen instead of being pushed off the bottom.
+func onboardingPickerLayout(contentH, instructionRows, hintRows int) (topPad, listRows int) {
+	fixed := instructionRows + 4 + hintRows // blank, filter, two spacers, hints
 	topPad = max(contentH/3, 2)
 	listRows = contentH - fixed - topPad
 	if listRows < minOnboardingListRows {

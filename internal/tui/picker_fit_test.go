@@ -104,6 +104,6 @@ func TestOnboardingPickerFitsWhole(t *testing.T) {
 		m.showOnboarding = true
 		m.onboarding = onboardingState{items: pickerModels(40), cursor: 22}
 		frame := m.View().Content
-		assertWholeDialog(t, "onboarding", frame, size[0], size[1], "› model-22", "enter confirm", "more")
+		assertWholeDialog(t, "onboarding", frame, size[0], size[1], "› model-22", "enter confirm", "esc quit", "more")
 	}
 }
