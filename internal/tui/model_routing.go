@@ -19,6 +19,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// grows a row) before the layout measures the input area (see
 		// dialog_approvals.go).
 		nm.syncApprovalReview()
+		nm = nm.trackApprovalCover()
 		nm = nm.recalcLayout()
 		return nm, cmd
 	}

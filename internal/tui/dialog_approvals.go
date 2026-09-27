@@ -135,6 +135,15 @@ func approvalRemembersOther(req agent.ShellApprovalRequest) bool {
 	return len(req.Segments) > 1 || req.Segments[0] != agent.RememberedCommandKey(req.Command)
 }
 
+// trimShellBlanks trims the spaces, tabs and newlines around a command
+// that a shell ignores, and nothing else, as the runtime does before asking
+// (internal/agent): a no-break space, a vertical tab or a line separator at
+// the end of a command is part of its last word, and trimmed away it would
+// be the one character of the call that is not shown.
+func trimShellBlanks(s string) string {
+	return strings.Trim(s, " \t\n")
+}
+
 // approvalIsNetwork reports whether req approves network access (the
 // runtime asks with the command "network <tool> <target>").
 func approvalIsNetwork(req agent.ShellApprovalRequest) bool {
@@ -296,9 +305,6 @@ func (m Model) updateShellApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// resolveShellApproval answers the approval on screen with decision. When
-// the run goes on (an allow), the next queued approval, if any, takes its
-// place; a deny interrupts the run, which denies the queued ones (stopAgent).
 // approvalEnterGuard is how long after an approval appears Enter does not
 // answer it. An approval can appear under a key already on its way: the
 // second press of a double Enter that answered the approval before it, when
@@ -313,6 +319,37 @@ func (m Model) approvalEnterGuarded() bool {
 	return !m.approvalShownAt.IsZero() && time.Since(m.approvalShownAt) < approvalEnterGuard
 }
 
+// trackApprovalCover restarts the Enter guard when the pending approval
+// comes back from under another overlay. A question from a parallel
+// sub-agent can cover an approval a moment after it appeared, and the plan
+// or steer picker takes the keys ahead of it; the Enter that closes that
+// overlay, pressed twice or held, would otherwise approve a call that has
+// been on screen, by the clock, for as long as the overlay was, without
+// anyone having seen it. Update calls it after every message, so the
+// uncovering and the restart happen in the same Update.
+func (m Model) trackApprovalCover() Model {
+	covered := m.pendingAuth != nil && m.approvalUnderOverlay()
+	if m.approvalCovered && !covered && m.pendingAuth != nil {
+		m.approvalShownAt = time.Now()
+	}
+	m.approvalCovered = covered
+	return m
+}
+
+// approvalUnderOverlay reports whether something other than the approval
+// dialog takes the keys: any modal but the approval's own review, or the
+// plan or steer picker, which updateMain serves first.
+func (m Model) approvalUnderOverlay() bool {
+	switch m.activeModal() {
+	case modalNone, modalApprovalReview:
+		return m.showPlanApproval || m.showSteerChoice
+	}
+	return true
+}
+
+// resolveShellApproval answers the approval on screen with decision. When
+// the run goes on (an allow), the next queued approval, if any, takes its
+// place; a deny interrupts the run, which denies the queued ones (stopAgent).
 func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner string) Model {
 	if m.pendingAuth != nil {
 		select {

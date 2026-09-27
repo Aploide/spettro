@@ -411,9 +411,14 @@ type Model struct {
 	// Each is shown, in arrival order, once the one before it is answered;
 	// none replaces the one on screen (see presentApproval).
 	approvalQueue []shellApprovalRequestMsg
-	// approvalShownAt is when pendingAuth was put on screen; Enter is ignored
-	// for approvalEnterGuard after it (see updateShellApproval).
+	// approvalShownAt is when pendingAuth was put on screen, or last came
+	// back from under an overlay; Enter is ignored for approvalEnterGuard
+	// after it (see updateShellApproval and trackApprovalCover).
 	approvalShownAt time.Time
+	// approvalCovered records that pendingAuth was under another overlay (a
+	// question, the plan or steer picker) after the last Update, so the
+	// Update that uncovers it can restart the Enter guard.
+	approvalCovered bool
 	// pendingQuestion is the form the question modal is showing, nil when no
 	// form is open. It owns the whole interaction: see dialog_question.go.
 	pendingQuestion *questionForm

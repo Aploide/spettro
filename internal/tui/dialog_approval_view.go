@@ -105,20 +105,27 @@ func (m Model) approvalPreview(width int) *approvalPreviewCache {
 // command is escaped exactly (termtext.EscapeExact: a tab is not shown as
 // spaces) and hard-wrapped (termtext.HardWrap: no space is dropped at a
 // break, and none ends a row where it could not be seen), each continuation
-// row marked as one. A diff line wider than the dialog is cut with "…",
+// row marked as one. A diff is escaped exactly too (diff.Options.Exact). A
+// diff line wider than the dialog is cut with "…",
 // which overflow reports so the dialog can offer the review.
 func buildApprovalPreview(req agent.ShellApprovalRequest, width int) (lines []string, overflow bool) {
 	if strings.TrimSpace(req.Diff) != "" {
 		// Stay in the unified layout: the side-by-side one halves the room
 		// each line gets, and a narrow dialog is where this is read most.
+		// Exact, like the review: a script whose "<<-EOF" ends at a
+		// tab-indented "EOF" and one whose terminator is indented with
+		// spaces (so the lines after it are still heredoc data) must not
+		// look the same. A tab mark keeps the tab's width, so the preview
+		// reads as before.
 		opts := diff.Options{
 			Width:  min(width, diff.SideBySideMinWidth-1),
 			Indent: "  ",
+			Exact:  true,
 		}
 		return strings.Split(diff.Render(req.Diff, opts), "\n"), diff.Overflows(req.Diff, opts)
 	}
 	label := formatApprovalCommandLabel(req.Command)
-	text := strings.TrimSpace(req.Command)
+	text := trimShellBlanks(req.Command)
 	if !strings.HasPrefix(label, "$ ") {
 		// A network call: the label is one line (its target has no
 		// newlines, see formatApprovalCommandLabel), previewed whole.
@@ -306,7 +313,13 @@ func (m Model) approvalDialogLines(label string, contentW int) []string {
 		lines = append(lines, styleMuted.Render(termtext.Fit("  why: "+termtext.SingleLine(req.Reason), contentW)))
 	}
 	if lay.showSegments {
-		row := termtext.Fit("  segments: "+termtext.SingleLine(strings.Join(req.Segments, " | ")), contentW)
+		// Permission debug: the segments that needed approval, each written
+		// out like the summary row (a newline inside quotes as "^J").
+		escaped := make([]string, len(req.Segments))
+		for i, seg := range req.Segments {
+			escaped[i] = termtext.EscapeExact(seg)
+		}
+		row := termtext.Fit("  segments: "+strings.Join(escaped, " | "), contentW)
 		if approvalRemembersOther(req) {
 			// What "Allow always" approves: a cut is marked like the
 			// summary row's (the review lists every command whole).

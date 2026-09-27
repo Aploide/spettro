@@ -41,9 +41,8 @@ import (
 // zero-width and other invisible characters are made visible
 // (termtext.EscapeExact, which the diff renderer applies to every diff line
 // too with diff.Options.Exact). Nothing is shown as something else either:
-// a tab is drawn as "⇥" and a carriage return ending a line as "^M", where
-// the dialog's diff preview, built to stay readable in a few rows, shows a
-// tab as spaces and drops that "\r".
+// a tab is drawn as "⇥" and a carriage return ending a line as "^M", as in
+// the dialog's preview.
 //
 // The document is rendered once per width and cached on the pending request
 // (approvalReviewCache), like the dialog's preview: a 60k-line file must not
@@ -238,7 +237,7 @@ func buildApprovalReview(req agent.ShellApprovalRequest, width int) []string {
 	field("tool", approvalReviewToolName(req))
 	switch {
 	case isFile:
-		field("path", strings.TrimPrefix(strings.TrimSpace(req.Command), req.ToolID+" "))
+		field("path", strings.TrimPrefix(trimShellBlanks(req.Command), req.ToolID+" "))
 		if c := req.Change; c != nil {
 			if c.Path != "" {
 				field("file", c.Path)
@@ -289,7 +288,7 @@ func buildApprovalReview(req agent.ShellApprovalRequest, width int) []string {
 	case network:
 		// The fields above hold all of it.
 	default:
-		command := strings.TrimSpace(req.Command)
+		command := trimShellBlanks(req.Command)
 		lines := strings.Split(command, "\n")
 		out = append(out, approvalReviewRule("command · "+plural(len(lines), "line"), width))
 		out = append(out, approvalReviewNumbered(lines, width)...)
