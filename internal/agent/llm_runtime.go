@@ -2149,30 +2149,40 @@ func (e *outsideWorkspaceError) Error() string {
 // exist (file-write creates new files), so only the existing ancestry is
 // resolved and the missing tail is re-appended.
 func realPathEscapes(dir, abs string) bool {
-	realDir, err := filepath.EvalSymlinks(dir)
+	rel, err := filepath.Rel(realDirPath(dir), realTargetPath(abs))
 	if err != nil {
-		realDir = filepath.Clean(dir)
+		return true
 	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// realDirPath is dir with its symlinks resolved, or dir cleaned when it
+// cannot be resolved.
+func realDirPath(dir string) string {
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return real
+	}
+	return filepath.Clean(dir)
+}
+
+// realTargetPath is the file a write to abs lands in: abs with every symlink
+// on its longest existing prefix resolved and the missing tail re-appended
+// (the file itself need not exist).
+func realTargetPath(abs string) string {
 	real, rem := abs, ""
 	for {
-		if resolved, rerr := filepath.EvalSymlinks(real); rerr == nil {
+		if resolved, err := filepath.EvalSymlinks(real); err == nil {
 			real = resolved
 			break
 		}
 		parent := filepath.Dir(real)
 		if parent == real {
-			real = filepath.Clean(abs)
-			break
+			return filepath.Clean(abs)
 		}
 		rem = filepath.Join(filepath.Base(real), rem)
 		real = parent
 	}
-	full := filepath.Clean(filepath.Join(real, rem))
-	rel, err := filepath.Rel(realDir, full)
-	if err != nil {
-		return true
-	}
-	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return filepath.Clean(filepath.Join(real, rem))
 }
 
 // searchLineNumberRE matches ":<digits>" segments in symbol-search output, used

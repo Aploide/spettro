@@ -92,12 +92,18 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	if err != nil {
 		return "", err
 	}
+	// The approval names the directory when it is not the workspace root.
+	relDir, relErr := filepath.Rel(r.cwd, dir)
+	if relErr != nil {
+		relDir = dir
+	}
+	relDir = filepath.ToSlash(relDir)
 	// Approval runs under its own window — the tool's default timeout, as
 	// before per-call timeouts existed — so a short per-call timeout never
 	// shortens the time the user has to read the prompt.
 	approvalWindow := time.Duration(r.defaultToolTimeoutSec(toolID)) * time.Second
 	approveCtx, cancelApproval := context.WithTimeout(ctx, approvalWindow)
-	err = r.authorizeShellCommand(approveCtx, toolID, cmdText)
+	err = r.authorizeShellCommandIn(approveCtx, toolID, cmdText, relDir)
 	approvalExpired := errors.Is(approveCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	cancelApproval()
 	if err != nil {
@@ -379,8 +385,23 @@ var alwaysAllowedCommandTokens = [][]string{
 	{"make", "build"},
 }
 
+// authorizeShellCommand is authorizeShellCommandIn for a command that runs
+// in the workspace root.
 func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command string) error {
-	command = strings.TrimSpace(command)
+	return r.authorizeShellCommandIn(ctx, toolID, command, "")
+}
+
+// authorizeShellCommandIn decides whether command may run, asking the user
+// when the permission mode, rules, hooks and remembered commands leave it
+// to them. dir is the directory the command runs in, relative to the
+// workspace ("" for the workspace root).
+//
+// Only the blanks a shell ignores (spaces, tabs, newlines) are trimmed from
+// the ends of the command and of each segment: a no-break space, a vertical
+// tab or a carriage return at the end of a word is part of it, so trimming
+// it would show, and remember, a command other than the one that runs.
+func (r *toolRuntime) authorizeShellCommandIn(ctx context.Context, toolID, command, dir string) error {
+	command = trimShellBlanks(command)
 	normalized := normalizeCommand(command)
 	if normalized == "" {
 		return fmt.Errorf("%s command is required", toolID)
@@ -454,7 +475,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 	}
 
 	decision, err := r.askApproval(ctx, ShellApprovalRequest{
-		Command:  command,
+		Command:  commandInDir(command, dir),
 		ToolID:   toolID,
 		Segments: append([]string(nil), missingApprovals...),
 		Reason:   "non-whitelisted command requires approval",
@@ -483,6 +504,44 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 	}
 }
 
+// trimShellBlanks trims the spaces, tabs and newlines a shell ignores
+// around a command, and nothing else (see authorizeShellCommandIn).
+func trimShellBlanks(s string) string {
+	return strings.Trim(s, " \t\n")
+}
+
+// commandInDir is how an approval shows command when it runs in dir, a
+// directory under the workspace ("" or "." for the workspace root): with a
+// leading "cd <dir> && ", the way a person would type it. The same command
+// does different things in different directories ("make install" runs the
+// Makefile it finds there), so the directory is part of what is approved.
+// Only the text shown changes: the segments that need approval, and that
+// "Allow always" remembers, are still those of command itself.
+func commandInDir(command, dir string) string {
+	if dir == "" || dir == "." {
+		return command
+	}
+	return "cd " + shellQuoteWord(dir) + " && " + command
+}
+
+// shellQuoteWord quotes s as one shell word, in single quotes unless every
+// character is one no shell treats specially.
+func shellQuoteWord(s string) string {
+	plain := s != ""
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("_-./+,:@%", c):
+		default:
+			plain = false
+		}
+	}
+	if plain {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func normalizeCommand(command string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
 }
@@ -490,25 +549,71 @@ func normalizeCommand(command string) string {
 // RememberedCommandKey is how a command segment is stored in, and looked up
 // in, the set of commands the user chose to always allow; it is also how the
 // segment is written in ShellApprovalRequest.Segments, so a host can compare
-// a segment with the whole command the same way. Like normalizeCommand it folds
-// runs of spaces and tabs into one space, but only ASCII whitespace: a shell
-// splits words there and nowhere else. strings.Fields would also fold a
-// no-break space (U+00A0) or an em space, which a shell keeps inside a word,
-// so approving "rm -rf ./build/<U+00A0>~/" for always (one harmless
-// argument) would have remembered "rm -rf ./build/ ~/", which deletes the
-// home directory.
+// a segment with the whole command the same way.
+//
+// Two commands get the same key only when a shell splits them into the same
+// words. The key folds a run of spaces and tabs into one space, and drops it
+// at either end, only where the shell splits words there: outside quotes and
+// not escaped by a backslash. Everything else is kept byte for byte:
+//
+//   - a no-break space (U+00A0), an em space, a vertical tab, a form feed or
+//     a carriage return is part of a word to a shell, so approving
+//     "rm -rf ./build/<U+000B>~/" for always (one harmless argument) must not
+//     remember "rm -rf ./build/ ~/", which deletes the home directory;
+//   - an escaped space is a character of its word, and the blank after it
+//     still splits: "./x\ ~/" is one argument while "./x\  ~/" is two
+//     ("./x " and the home directory), so the second space is kept;
+//   - spaces inside quotes are part of the argument ("a  b" and "a b" name
+//     different files).
+//
+// It reads quotes and backslashes the way sh does. From the first command
+// substitution or parameter expansion ("$(", "${" or a backtick) on, where
+// quotes nest and a simple reading would go wrong, it keeps the text exactly
+// as it is: that only means a later command that differs there by a space is
+// asked about again.
 func RememberedCommandKey(command string) string {
-	return strings.Join(strings.FieldsFunc(command, func(r rune) bool {
-		switch r {
-		case ' ', '\t', '\n', '\v', '\f', '\r':
-			return true
+	var b strings.Builder
+	b.Grow(len(command))
+	var inSingle, inDouble, escaped, blank, verbatim bool
+	// Byte by byte: every character that matters here is ASCII, and no byte
+	// of a multi-byte UTF-8 character equals one of them.
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if !verbatim && !inSingle && !escaped &&
+			(c == '`' || c == '$' && i+1 < len(command) && (command[i+1] == '(' || command[i+1] == '{')) {
+			verbatim = true
 		}
-		return false
-	}), " ")
+		if (c == ' ' || c == '\t') && !inSingle && !inDouble && !escaped && !verbatim {
+			// A word break: written once, before the next word.
+			blank = b.Len() > 0
+			continue
+		}
+		if blank {
+			b.WriteByte(' ')
+			blank = false
+		}
+		b.WriteByte(c)
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\' && !inSingle:
+			escaped = true
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+		}
+	}
+	if verbatim {
+		// Trailing blanks were written as they are; drop them as at the
+		// start, where nothing splits either.
+		return strings.TrimRight(b.String(), " \t")
+	}
+	return b.String()
 }
 
 func splitShellCommandSegments(command string) []string {
-	command = strings.TrimSpace(command)
+	command = trimShellBlanks(command)
 	if command == "" {
 		return nil
 	}
@@ -519,7 +624,7 @@ func splitShellCommandSegments(command string) []string {
 		subDepth                            int
 	)
 	flush := func() {
-		seg := strings.TrimSpace(buf.String())
+		seg := trimShellBlanks(buf.String())
 		if seg != "" {
 			segments = append(segments, seg)
 		}

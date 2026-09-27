@@ -1148,9 +1148,22 @@ func (r *toolRuntime) authorizeWrite(ctx context.Context, toolID, relPath, diff 
 	if r.shellApproval == nil {
 		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
+	command := toolID + " " + relPath
+	target, realAbs := r.symlinkedWriteTarget(relPath)
+	if target != "" {
+		// The path is, or runs through, a symlink: name the file that is
+		// written, which may be anywhere, even outside the workspace. The
+		// structured change names it too, so an editor shows that file.
+		command += " (through a symlink: writes " + target + ")"
+		if change != nil {
+			redirected := *change
+			redirected.Path = realAbs
+			change = &redirected
+		}
+	}
 	decision, err := r.askApproval(ctx, ShellApprovalRequest{
 		ToolID:  toolID,
-		Command: toolID + " " + relPath,
+		Command: command,
 		Reason:  "file modification requires approval",
 		Diff:    diff,
 		Change:  change,
@@ -1160,10 +1173,33 @@ func (r *toolRuntime) authorizeWrite(ctx context.Context, toolID, relPath, diff 
 	}
 	switch decision {
 	case ShellApprovalAllowOnce, ShellApprovalAllowAlways:
-		return nil
 	default:
 		return fmt.Errorf("%s denied by user", toolID)
 	}
+	if now, _ := r.symlinkedWriteTarget(relPath); now != target {
+		// A symlink changed while the prompt was up: the write would land
+		// somewhere other than the file the user approved.
+		return fmt.Errorf("%s: %s now leads to a different file than the one approved; nothing was written", toolID, relPath)
+	}
+	return nil
+}
+
+// symlinkedWriteTarget reports where a write to relPath (relative to the
+// workspace) lands when a symlink makes that a different file: shown is
+// the file workspace-relative when it is inside the workspace, absolute
+// otherwise, and realAbs is its absolute path. Both are empty when the write
+// lands at relPath itself.
+func (r *toolRuntime) symlinkedWriteTarget(relPath string) (shown, realAbs string) {
+	realCwd := realDirPath(r.cwd)
+	realAbs = realTargetPath(filepath.Join(r.cwd, filepath.FromSlash(relPath)))
+	if realAbs == filepath.Join(realCwd, filepath.FromSlash(relPath)) {
+		return "", ""
+	}
+	rel, err := filepath.Rel(realCwd, realAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return realAbs, realAbs
+	}
+	return filepath.ToSlash(rel), realAbs
 }
 
 // askApproval hands req to the host's approval callback, stamped with who is
