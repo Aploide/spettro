@@ -52,6 +52,24 @@ func KillProcessTree(cmd *exec.Cmd) error {
 // when spettro goes away (KillAllProcessTrees, KillProcessTreesOnHangup).
 var liveTrees sync.Map // *exec.Cmd -> struct{}
 
+// treesMu orders command starts against the kill-all sweep
+// (KillAllProcessTrees). startTracked holds the read lock from cmd.Start until
+// the command is recorded in liveTrees, and the sweep takes the write lock, so
+// the sweep can never run in the window where a command is already running
+// but not yet recorded, and miss it. Starts share the read lock, so parallel
+// tool calls still start their commands concurrently.
+var treesMu sync.RWMutex
+
+// treesClosed is set, under treesMu, once the hangup cleanup has begun (see
+// shutDownProcessTrees). From then on CombinedOutput refuses to start
+// commands: the agent reacting to its killed command must not start a new one
+// after the sweep, because nothing would kill it before spettro exits.
+var treesClosed bool
+
+// ErrShuttingDown is returned by CombinedOutput, without starting the command,
+// once spettro has begun shutting down because its terminal hung up.
+var ErrShuttingDown = errors.New("spettro is shutting down; command not started")
+
 // ErrBackgroundLeft is returned by CombinedOutput when the command exited
 // successfully but left processes running in its process group (started with
 // & or nohup). They keep running, their later output is discarded, and they
@@ -80,7 +98,8 @@ const leftoverPollInterval = time.Second
 // command's tree is recorded as live while it runs so KillAllProcessTrees can
 // reach it. It returns as soon as the command exits (plus outputGrace when a
 // leftover process holds the pipe); leftover processes are reported with
-// ErrBackgroundLeft and remain tracked until they end.
+// ErrBackgroundLeft and remain tracked until they end. After a hangup it
+// starts nothing and returns ErrShuttingDown.
 func CombinedOutput(cmd *exec.Cmd) ([]byte, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -90,13 +109,12 @@ func CombinedOutput(cmd *exec.Cmd) ([]byte, error) {
 	// the command exits, not when every process holding the pipe does.
 	cmd.Stdout = pw
 	cmd.Stderr = pw
-	if err := cmd.Start(); err != nil {
+	if err := startTracked(cmd); err != nil {
 		pr.Close()
 		pw.Close()
 		return nil, err
 	}
 	pw.Close()
-	liveTrees.Store(cmd, struct{}{})
 
 	var mu sync.Mutex
 	buf := newCaptureBuffer(captureHeadBytes, captureTailBytes)
@@ -158,6 +176,22 @@ func CombinedOutput(cmd *exec.Cmd) ([]byte, error) {
 	return out, ErrBackgroundLeft
 }
 
+// startTracked starts cmd and records it in liveTrees as a single step with
+// respect to the kill-all sweep (see treesMu). Once the hangup cleanup has
+// begun it starts nothing and returns ErrShuttingDown.
+func startTracked(cmd *exec.Cmd) error {
+	treesMu.RLock()
+	defer treesMu.RUnlock()
+	if treesClosed {
+		return ErrShuttingDown
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	liveTrees.Store(cmd, struct{}{})
+	return nil
+}
+
 // captureBuffer keeps the first head and the last tail bytes written to it.
 type captureBuffer struct {
 	head, tail []byte
@@ -204,7 +238,13 @@ func (b *captureBuffer) Bytes() []byte {
 // running or left behind. spettro calls it on the way out: without it a
 // foreground command in its own process group (a hung test run, a dev server
 // started with &) would outlive the session.
+//
+// It holds treesMu for writing while it sweeps, so a command whose start is
+// in progress is either recorded before the sweep (and killed by it) or
+// starts after the sweep has finished.
 func KillAllProcessTrees() {
+	treesMu.Lock()
+	defer treesMu.Unlock()
 	liveTrees.Range(func(key, _ any) bool {
 		_ = KillProcessTree(key.(*exec.Cmd))
 		return true

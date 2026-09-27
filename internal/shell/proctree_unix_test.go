@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -148,31 +149,48 @@ const hangupHelperEnv = "SPETTRO_PROCTREE_HANGUP_HELPER"
 // cleanup that creates the named file.
 const hangupMarkerEnv = "SPETTRO_PROCTREE_HANGUP_MARKER"
 
+// hangupHelperLinger is how long the helper stays alive after its command
+// returns, waiting for the hangup handler to re-raise SIGHUP. It only has to
+// outlast the tests' own deadlines: a helper still alive after it is one the
+// hangup failed to end.
+const hangupHelperLinger = time.Minute
+
 func TestMain(m *testing.M) {
 	if pidFile := os.Getenv(hangupHelperEnv); pidFile != "" {
-		var cleanups []func()
-		if marker := os.Getenv(hangupMarkerEnv); marker != "" {
-			cleanups = append(cleanups, func() { _ = os.WriteFile(marker, nil, 0o644) })
-		}
-		KillProcessTreesOnHangup(cleanups...)
-		cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30 & echo $! > "+pidFile+"; wait")
-		ConfigureProcessTree(cmd)
-		_, _ = CombinedOutput(cmd)
-		os.Exit(3) // only reached if the hangup did not end the process
+		runHangupHelper(pidFile)
 	}
 	os.Exit(m.Run())
 }
 
-// Closing the terminal sends SIGHUP to spettro's process group only. The
-// command in its own group must still die, and spettro must still terminate.
-func TestHangupKillsCommandTrees(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "pid")
-	helper := exec.Command(os.Args[0], "-test.run=^$")
-	helper.Env = append(os.Environ(), hangupHelperEnv+"="+pidFile)
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
+// runHangupHelper is the body of the helper process the hangup tests start:
+// a spettro stand-in that installs the hangup handler and then blocks in a
+// long command running in its own process group. It never returns.
+//
+// The command returning does not mean the hangup failed. The handler kills
+// the command first and only re-raises SIGHUP after the extra cleanups ran, so
+// CombinedOutput returns while the handler is still working. Exiting right
+// away would race the re-raise (the test then saw "exit status 3" instead of
+// death by SIGHUP) and could skip the extra cleanups altogether, so the
+// helper waits for the signal instead and exits on its own only if it never
+// comes.
+func runHangupHelper(pidFile string) {
+	var cleanups []func()
+	if marker := os.Getenv(hangupMarkerEnv); marker != "" {
+		cleanups = append(cleanups, func() { _ = os.WriteFile(marker, nil, 0o644) })
 	}
-	pid := waitForPIDFile(t, pidFile)
+	KillProcessTreesOnHangup(cleanups...)
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30 & echo $! > "+pidFile+"; wait")
+	ConfigureProcessTree(cmd)
+	_, _ = CombinedOutput(cmd)
+	time.Sleep(hangupHelperLinger)
+	os.Exit(3) // only reached if the hangup did not end the process
+}
+
+// hangUpAndWaitForDeath sends SIGHUP to a started hangup helper and fails the
+// test unless the helper dies of that signal within a bound: death by SIGHUP
+// is what the handler's re-raise produces once its cleanup has finished.
+func hangUpAndWaitForDeath(t *testing.T, helper *exec.Cmd) {
+	t.Helper()
 	if err := helper.Process.Signal(syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +209,19 @@ func TestHangupKillsCommandTrees(t *testing.T) {
 		_ = helper.Process.Kill()
 		t.Fatal("helper did not exit on SIGHUP")
 	}
+}
+
+// Closing the terminal sends SIGHUP to spettro's process group only. The
+// command in its own group must still die, and spettro must still terminate.
+func TestHangupKillsCommandTrees(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	helper := exec.Command(os.Args[0], "-test.run=^$")
+	helper.Env = append(os.Environ(), hangupHelperEnv+"="+pidFile)
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := waitForPIDFile(t, pidFile)
+	hangUpAndWaitForDeath(t, helper)
 	if !processGone(pid) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("command %d survived the hangup", pid)
@@ -287,11 +318,111 @@ func TestHangupRunsExtraCleanups(t *testing.T) {
 	}
 	pid := waitForPIDFile(t, pidFile)
 	defer syscall.Kill(pid, syscall.SIGKILL)
-	if err := helper.Process.Signal(syscall.SIGHUP); err != nil {
-		t.Fatal(err)
-	}
-	_ = helper.Wait()
+	hangUpAndWaitForDeath(t, helper)
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("extra hangup cleanup did not run")
+	}
+}
+
+// liveTreeCount returns how many commands liveTrees currently records.
+func liveTreeCount() int {
+	n := 0
+	liveTrees.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
+// reopenProcessTrees undoes shutDownProcessTrees so later tests in this
+// process can start commands again.
+func reopenProcessTrees() {
+	treesMu.Lock()
+	treesClosed = false
+	treesMu.Unlock()
+}
+
+// After the hangup sweep no command may start: one started later would run
+// on, unkilled, once spettro is gone. Callers keep starting commands while the
+// sweep happens (the agent reacting to its killed command); every one of them
+// must either be killed by the sweep or be refused with ErrShuttingDown, so
+// every caller returns promptly. A command slipping past the sweep would keep
+// its caller blocked for the whole sleep.
+func TestShutDownProcessTreesLeavesNoCommandBehind(t *testing.T) {
+	t.Cleanup(reopenProcessTrees)
+	const callers = 8
+	finished := make(chan error, callers)
+	// stop tells the callers to quit instead of starting another command. It
+	// only matters when the test fails: then some callers are still looping,
+	// and without it they would keep starting commands once reopenProcessTrees
+	// lets them, leaving the last batch running after the test binary exits.
+	stop := make(chan struct{})
+	var workers sync.WaitGroup
+	// Registered after reopenProcessTrees, so it runs before it (cleanups run
+	// last-in first-out): every caller has returned before commands may start
+	// again.
+	t.Cleanup(func() { stopCallers(stop, &workers) })
+	for range callers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30")
+				ConfigureProcessTree(cmd)
+				if _, err := CombinedOutput(cmd); errors.Is(err, ErrShuttingDown) {
+					finished <- nil
+					return
+				} else if err == nil {
+					finished <- errors.New("a command meant to be killed exited successfully")
+					return
+				}
+				// Killed by the sweep: start another, as an agent retrying would.
+			}
+		}()
+	}
+	// Sweep while commands are running, so the sweep has something to kill.
+	deadline := time.Now().Add(5 * time.Second)
+	for liveTreeCount() < callers/2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	shutDownProcessTrees()
+	for range callers {
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a command started after the shutdown sweep was left running")
+		}
+	}
+}
+
+// stopCallers makes the command-starting goroutines of
+// TestShutDownProcessTreesLeavesNoCommandBehind return, and waits for them.
+// Closing stop keeps each caller from starting another command, and the
+// repeated sweeps kill whatever command a caller is blocked on. A caller that
+// checked stop just before it was closed can still start one more command
+// after a sweep, so the sweep repeats until every caller has returned; treesMu
+// guarantees each sweep sees every command whose start has completed.
+func stopCallers(stop chan struct{}, workers *sync.WaitGroup) {
+	close(stop)
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	for {
+		KillAllProcessTrees()
+		select {
+		case <-done:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }
