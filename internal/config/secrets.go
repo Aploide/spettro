@@ -154,6 +154,17 @@ func keysPath() (string, error) {
 	return filepath.Join(home, ".spettro", "keys.enc"), nil
 }
 
+// SecretsDir returns the directory that holds keys.enc and master.key. It is
+// ~/.spettro, except under sudo, where it is the invoking user's ~/.spettro
+// (see secretsHome).
+func SecretsDir() (string, error) {
+	path, err := keysPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(path), nil
+}
+
 // secretsHome returns the home directory key material lives under. Under
 // sudo the effective user is root, which would move keys.enc and master.key;
 // resolving SUDO_USER keeps secrets readable in elevated sessions. The user

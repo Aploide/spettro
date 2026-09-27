@@ -87,6 +87,12 @@ func confineParentProcess(policy sandbox.Policy, store *storage.Store, cwd strin
 		return
 	}
 	writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, policy.ExtraWritable...)
+	// Config and keys load after confinement. Under sudo the key files live
+	// in the invoking user's home, not in store.GlobalDir, and loading them
+	// can write there (a new master.key, the keys.enc v2 migration).
+	if dir, err := config.SecretsDir(); err == nil && dir != store.GlobalDir {
+		writable = append(writable, dir)
+	}
 	if err := sandbox.ConfineParent(writable); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
 	}
