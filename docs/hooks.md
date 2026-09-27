@@ -59,7 +59,7 @@ Equivalent array form:
 | `event` | string | Yes | — | One of `PreToolUse`, `PostToolUse`, `PermissionRequest`, `SessionStart`. |
 | `matcher` | string | No | `*` (all tools) | Glob pattern or `re:regex` to match tool IDs (`bash`, `file-write`, `file-edit`, `agent`, ...). |
 | `command` | string | Yes | — | Shell command to execute. Receives event data on stdin. |
-| `timeout_sec` | int | No | `15` | Maximum execution time for the command. |
+| `timeout_sec` | int | No | `15` | Maximum execution time for the command. At the limit (or when the run is cancelled) the command and every process it started are killed, and the hook counts as failed. |
 | `enabled` | bool | No | `true` | Set to `false` to disable a rule without deleting it. |
 
 ### Matcher syntax

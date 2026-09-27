@@ -161,6 +161,14 @@ func Match(rule EffectiveRule, toolID string) bool {
 	return ok
 }
 
+// Run executes one hook command with input on stdin and parses the decision
+// envelope from the last line of its stdout.
+//
+// The rule's timeout (15s when unset) and ctx both bound the whole run. The
+// command runs as the root of its own process tree
+// (shell.ConfigureProcessTree), so a timeout or cancellation kills every
+// process it started, not only the shell, and WaitDelay stops a child that
+// still holds the output pipes from keeping Run blocked after that.
 func Run(ctx context.Context, rule EffectiveRule, input RunInput) (RunResult, error) {
 	timeout := rule.TimeoutSec
 	if timeout <= 0 {
@@ -172,6 +180,7 @@ func Run(ctx context.Context, rule EffectiveRule, input RunInput) (RunResult, er
 	raw, _ := json.Marshal(input)
 	hookShell, hookArgs := shell.CommandLine(rule.Command)
 	cmd := exec.CommandContext(runCtx, hookShell, hookArgs...)
+	shell.ConfigureProcessTree(cmd)
 	cmd.Stdin = bytes.NewReader(raw)
 	cmd.Env = append(os.Environ(),
 		"SPETTRO_HOOK_EVENT="+string(input.Event),
