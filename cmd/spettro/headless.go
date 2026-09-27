@@ -150,8 +150,17 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 			}
 
 			msg := strings.TrimSpace(req.Message)
+			// run is what the agent receives; msg stays what the user sent
+			// (a skill invocation or $mention expands into the skill's
+			// instructions, which the event stream should not echo).
+			run, isSkill, skillErr := resolveHeadlessPrompt(cwd, cfg, msg)
+			if skillErr != nil {
+				req.Reply <- remote.SubmitResponse{Accepted: true, Note: "skill failed"}
+				server.Publish("assistant_error", map[string]any{"error": skillErr.Error(), "mode": mode})
+				continue
+			}
 
-			if strings.HasPrefix(msg, "/") {
+			if strings.HasPrefix(msg, "/") && !isSkill {
 				reply, note := handleHeadlessCommand(msg, &mode, &cfg, pm, &manifest)
 				req.Reply <- remote.SubmitResponse{Accepted: true, Note: note}
 				server.Publish("remote_command", map[string]any{
@@ -268,7 +277,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 				}
 				ag.Spec.Permission = cfg.Permission
 
-				result, runErr := ag.Run(runCtx, msg)
+				result, runErr := ag.Run(runCtx, run)
 
 				mu.Lock()
 				cancelRun = nil

@@ -15,6 +15,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/skills"
 	"spettro/internal/version"
 )
 
@@ -354,6 +355,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		sessionID: params.SessionId,
 		open:      make(map[string][]acpsdk.ToolCallId),
 	}
+	// shownTask, when set, is what the transcript records as the user's
+	// message instead of task: a skill invocation or $mention sends the
+	// skill's instructions to the model, but the transcript (replayed on
+	// session/load) keeps what the user typed.
+	shownTask := ""
 
 	if strings.HasPrefix(trimmedTask, "/") {
 		// /plan <task> runs the plan agent on the task as a one-shot turn
@@ -458,6 +464,24 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			})
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 		}
+		// Not one of Spettro's commands: "/<skill-name> [args]" runs that
+		// skill; anything else goes to the model as typed.
+		if prompt, errText, ok := resolveSkillCommand(s.cwd, cfg, trimmedTask); ok {
+			if errText != "" {
+				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+					SessionId: params.SessionId,
+					Update:    acpsdk.UpdateAgentMessageText(errText),
+				})
+				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+			}
+			shownTask = trimmedTask
+			task = prompt
+		}
+	} else if expanded, names := skills.ExpandMentions(task, agent.SkillCatalogFor(s.cwd, cfg)); len(names) > 0 {
+		// $skill-name mentions pull those skills' instructions into the
+		// prompt (Codex style).
+		shownTask = task
+		task = expanded
 	}
 
 	// Claim the session's run slot. If a turn is already executing, this
@@ -563,7 +587,10 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		s.history = result.Messages
 	}
 	now := time.Now()
-	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
+	if shownTask == "" {
+		shownTask = task
+	}
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: shownTask, At: now})
 	if content := strings.TrimSpace(result.Content); content != "" {
 		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
 	} else if runErr != nil {
