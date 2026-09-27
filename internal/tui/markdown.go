@@ -452,6 +452,32 @@ func isTableSeparator(line string) bool {
 	return true
 }
 
+// tableAlign is a table column's alignment, from its delimiter cell:
+// "---" or ":---" left, "---:" right, ":---:" centre (GitHub-flavoured
+// markdown).
+type tableAlign int
+
+const (
+	alignLeft tableAlign = iota
+	alignRight
+	alignCenter
+)
+
+// parseTableAligns reads the column alignments of a delimiter row.
+func parseTableAligns(line string) []tableAlign {
+	cells := parseTableCells(line)
+	aligns := make([]tableAlign, len(cells))
+	for i, c := range cells {
+		switch {
+		case strings.HasPrefix(c, ":") && strings.HasSuffix(c, ":") && len(c) > 1:
+			aligns[i] = alignCenter
+		case strings.HasSuffix(c, ":"):
+			aligns[i] = alignRight
+		}
+	}
+	return aligns
+}
+
 func parseTableCells(line string) []string {
 	trim := strings.TrimSpace(line)
 	trim = strings.TrimPrefix(trim, "|")
@@ -471,10 +497,14 @@ func renderTable(tableLines []string, width int) string {
 	}
 
 	var rows []tableRow
+	var aligns []tableAlign
 	for _, line := range tableLines {
 		if isTableSeparator(line) {
 			if len(rows) > 0 {
 				rows[len(rows)-1].isHeader = true
+			}
+			if aligns == nil {
+				aligns = parseTableAligns(line)
 			}
 			continue
 		}
@@ -538,15 +568,25 @@ func renderTable(tableLines []string, width int) string {
 				cell = r.cells[j]
 			}
 			rendered := termtext.Fit(cell, colWidths[j])
-			padding := strings.Repeat(" ", max(colWidths[j]-ansi.StringWidth(rendered), 0))
+			pad := max(colWidths[j]-ansi.StringWidth(rendered), 0)
+			left := 0
+			if j < len(aligns) {
+				switch aligns[j] {
+				case alignRight:
+					left = pad
+				case alignCenter:
+					left = pad / 2
+				}
+			}
 			if r.isHeader {
 				rendered = headerStyle.Render(rendered)
 			} else {
 				rendered = styleText.Render(rendered)
 			}
 			b.WriteString(" ")
+			b.WriteString(strings.Repeat(" ", left))
 			b.WriteString(rendered)
-			b.WriteString(padding)
+			b.WriteString(strings.Repeat(" ", pad-left))
 			b.WriteString(" ")
 			b.WriteString(border.Render("│"))
 		}

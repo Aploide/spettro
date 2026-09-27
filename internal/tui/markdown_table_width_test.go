@@ -63,3 +63,35 @@ func TestMarkdownTableBordersAlignOnEveryTerminal(t *testing.T) {
 		}
 	}
 }
+
+// Found in the qa-r9 table screenshots: the delimiter row's alignment
+// markers were ignored, so a "---:" numbers column and a ":---:" column were
+// drawn left-aligned. Cells now follow them; wide glyphs are padded by
+// their display width, and the borders stay in place.
+func TestMarkdownTableColumnAlignment(t *testing.T) {
+	md := strings.Join([]string{
+		"| Name | Count | Mark |",
+		"|:---|---:|:---:|",
+		"| a | 7 | 漢 |",
+		"| bb | 1234 | x |",
+	}, "\n")
+	lines := strings.Split(ansi.Strip(renderMarkdown(md, 80)), "\n")
+	var body []string
+	for _, l := range lines {
+		if strings.Contains(l, "│ a") || strings.Contains(l, "│ bb") {
+			body = append(body, l)
+		}
+	}
+	if len(body) != 2 {
+		t.Fatalf("body rows not found:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(body[0], "│     7 │") || !strings.Contains(body[1], "│  1234 │") {
+		t.Errorf("the Count column is not right-aligned:\n%s\n%s", body[0], body[1])
+	}
+	if !strings.Contains(body[0], "│  漢  │") || !strings.Contains(body[1], "│  x   │") {
+		t.Errorf("the Mark column is not centred:\n%s\n%s", body[0], body[1])
+	}
+	if ansi.StringWidth(body[0]) != ansi.StringWidth(body[1]) {
+		t.Errorf("rows differ in width: %d and %d", ansi.StringWidth(body[0]), ansi.StringWidth(body[1]))
+	}
+}
