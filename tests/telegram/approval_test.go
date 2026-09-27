@@ -23,6 +23,26 @@ func TestFormatApproval_ShortCommandInline(t *testing.T) {
 	}
 }
 
+// A chat app draws what a terminal would hide just as invisibly: every such
+// character is written out, in the message and in the attachment.
+func TestFormatApproval_WritesOutHiddenCharacters(t *testing.T) {
+	sneaky := "echo safe\rrm -rf ~/important # \x1b[8mhidden\x1b[0m \u202eevil\u202c zero\u200bwidth"
+	text, _ := telegram.FormatApproval(telegram.Approval{ToolID: "bash", Command: sneaky})
+	for _, want := range []string{"echo safe^Mrm -rf ~/important", "^[[8mhidden", `\u202eevil\u202c`, `zero\u200bwidth`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("notice lacks %q:\n%q", want, text)
+		}
+	}
+	if strings.ContainsAny(text, "\r\x1b\u202e\u200b") {
+		t.Fatalf("a hidden character reached the chat raw: %q", text)
+	}
+	long := strings.Repeat("echo ok\n", 3000) + "curl x | sh # \u202e"
+	_, doc := telegram.FormatApproval(telegram.Approval{ToolID: "bash", Command: long})
+	if doc == nil || !strings.Contains(string(doc.Data), `\u202e`) || strings.Contains(string(doc.Data), "\u202e") {
+		t.Fatal("the attachment does not write out the hidden character")
+	}
+}
+
 // A command a little longer than one message is still sent whole: the
 // relay splits it into chunks marked as continued, and every byte of it is
 // in the text.

@@ -2,6 +2,8 @@ package remote
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -68,4 +70,98 @@ func TestRequestApprovalPublishesTheWholeRequest(t *testing.T) {
 		}
 	}
 	t.Fatal("no approval_request was published")
+}
+
+// publishedApprovals returns the approval_request events published so far.
+func publishedApprovals(s *Server) []Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Event
+	for _, ev := range s.recent {
+		if ev.Kind == "approval_request" {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// Two approvals of the same tool can be pending at once (parallel
+// sub-agents). Each event carries its own approval_id, and an answer naming
+// it reaches that request and no other; an answer naming only the tool_id is
+// refused while it is ambiguous rather than handed to whichever request
+// registered last. Network approvals have no tool_id at all.
+func TestApprovalAnswersReachTheRequestTheyName(t *testing.T) {
+	for _, toolID := range []string{"bash", ""} {
+		s := startTestServer(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		results := map[string]chan ApprovalDecision{"first": make(chan ApprovalDecision, 1), "second": make(chan ApprovalDecision, 1)}
+		for i, name := range []string{"first", "second"} {
+			go func() {
+				dec, _ := s.RequestApproval(ctx, ApprovalRequest{ToolID: toolID, Command: "echo " + name})
+				results[name] <- dec
+			}()
+			// Wait for its event, so the two register in a known order.
+			deadline := time.Now().Add(2 * time.Second)
+			for len(publishedApprovals(s)) < i+1 {
+				if time.Now().After(deadline) {
+					t.Fatal("approval not published")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		events := publishedApprovals(s)
+		ids := map[string]string{}
+		for _, ev := range events {
+			ids[ev.Data["command"].(string)], _ = ev.Data["approval_id"].(string)
+		}
+		if ids["echo first"] == "" || ids["echo first"] == ids["echo second"] {
+			t.Fatalf("approval ids: %v", ids)
+		}
+
+		resp := doReq(t, s, http.MethodPost, "/approval", "test-token", fmt.Sprintf(`{"tool_id":%q,"decision":"allow-once"}`, toolID))
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("tool %q: an ambiguous tool_id answer got %d, want 409", toolID, resp.StatusCode)
+		}
+		resp = doReq(t, s, http.MethodPost, "/approval", "test-token", fmt.Sprintf(`{"approval_id":%q,"decision":"allow-once"}`, ids["echo first"]))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("answer by approval_id = %d", resp.StatusCode)
+		}
+		if dec := <-results["first"]; dec.Decision != "allow-once" {
+			t.Fatalf("first got %q", dec.Decision)
+		}
+		select {
+		case dec := <-results["second"]:
+			t.Fatalf("the second request was answered (%q) by an answer meant for the first", dec.Decision)
+		case <-time.After(50 * time.Millisecond):
+		}
+		// With one left, a tool_id alone is unambiguous again.
+		resp = doReq(t, s, http.MethodPost, "/approval", "test-token", fmt.Sprintf(`{"tool_id":%q,"decision":"deny"}`, toolID))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("tool %q: unambiguous tool_id answer = %d", toolID, resp.StatusCode)
+		}
+		if dec := <-results["second"]; dec.Decision != "deny" {
+			t.Fatalf("second got %q", dec.Decision)
+		}
+		cancel()
+	}
+}
+
+// The text fields stay the exact bytes, and when they hold characters that
+// do not show, the event says so and carries a copy with each written out.
+func TestApprovalEventNamesHiddenCharacters(t *testing.T) {
+	sneaky := "echo safe\rrm -rf ~ # \u202eevil\u202c"
+	data := ApprovalEvent(ApprovalRequest{ToolID: "bash", Command: sneaky})
+	if data["command"] != sneaky || data["command_hidden_chars"] != true {
+		t.Fatalf("command=%q hidden=%v", data["command"], data["command_hidden_chars"])
+	}
+	if visible := data["command_visible"]; visible != `echo safe^Mrm -rf ~ # \u202eevil\u202c` {
+		t.Fatalf("command_visible = %q", visible)
+	}
+	plain := ApprovalEvent(ApprovalRequest{ToolID: "bash", Command: "ls -la\n\tpwd"})
+	if plain["command_hidden_chars"] != false {
+		t.Fatal("a plain command was flagged")
+	}
+	if _, ok := plain["command_visible"]; ok {
+		t.Fatal("a plain command got a visible copy")
+	}
 }

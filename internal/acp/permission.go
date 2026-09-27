@@ -40,6 +40,16 @@ package acp
 // "[truncated: ...]" line (remote.ClipApprovalText), so a cut is never shown
 // as the whole: a person must be able to trust what they approve.
 //
+// The editor draws that text, not a terminal, but the same characters can
+// hide in it: a carriage return, an escape sequence, a bidi override that
+// reorders the line, zero-width characters and variation selectors that
+// carry a payload inside what reads as "". So the command, the network
+// target, the text diff and the card title are escaped the way the TUI
+// escapes them (termtext.EscapeExact, line by line). A structured diff
+// cannot be: the editor shows the file's own text. When that text holds
+// such a character, the escaped unified diff follows it, under a line that
+// says why.
+//
 // Timeouts. The request is bound to the tool's own deadline (timeout_sec in
 // the manifest, e.g. 120 s for bash and 60 s for file edits): when it passes
 // unanswered, or the turn is cancelled, the SDK withdraws the request with
@@ -57,6 +67,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/remote"
+	"spettro/internal/termtext"
 )
 
 // Permission option IDs. They are echoed back by the client, so they must
@@ -152,7 +163,7 @@ func (t *turnState) requestApproval(ctx context.Context, ar agent.ShellApprovalR
 		{OptionId: permAllowOnce, Name: "Allow once", Kind: acpsdk.PermissionOptionKindAllowOnce},
 	}
 	if remembersApproval(subject) {
-		options = append(options, acpsdk.PermissionOption{OptionId: permAllowAlways, Name: alwaysAllowLabel(subject), Kind: acpsdk.PermissionOptionKindAllowAlways})
+		options = append(options, acpsdk.PermissionOption{OptionId: permAllowAlways, Name: alwaysAllowLabel(subject, ar), Kind: acpsdk.PermissionOptionKindAllowAlways})
 	}
 	options = append(options, acpsdk.PermissionOption{OptionId: permDeny, Name: "Deny", Kind: acpsdk.PermissionOptionKindRejectOnce})
 
@@ -297,15 +308,39 @@ func remembersApproval(subject approvalSubject) bool {
 
 // alwaysAllowLabel names the "always allow" option after what the runtime
 // will remember: the command's segments, or the network tool's exact target
-// (see networkTargets).
-func alwaysAllowLabel(subject approvalSubject) string {
+// (see networkTargets). Segments that are not simply the whole command (each
+// side of a pipe, each line of a heredoc's body) are listed in the prompt's
+// text (approvalContent), and the label points there.
+func alwaysAllowLabel(subject approvalSubject, ar agent.ShellApprovalRequest) string {
 	if !subject.network {
-		return "Always allow this command"
+		switch {
+		case !remembersOtherThanCommand(ar):
+			return "Always allow this command"
+		case len(ar.Segments) == 1:
+			return "Always allow the command listed"
+		default:
+			return fmt.Sprintf("Always allow the %d commands listed", len(ar.Segments))
+		}
 	}
 	if spec, ok := networkTargets[subject.tool]; ok {
 		return "Always allow this " + spec.noun
 	}
 	return "Always allow this target"
+}
+
+// remembersOtherThanCommand reports whether "always allow" on a command
+// approval remembers something other than exactly that command: more than
+// one segment, or one that is not the whole command. Allowing
+// "cat > notes.md <<'EOF'" for always remembers every line of the heredoc's
+// body as a command of its own.
+func remembersOtherThanCommand(ar agent.ShellApprovalRequest) bool {
+	switch len(ar.Segments) {
+	case 0:
+		return false
+	case 1:
+		return ar.Segments[0] != agent.RememberedCommandKey(ar.Command)
+	}
+	return true
 }
 
 // approvalKind is the card kind for an approval with no open card.
@@ -317,20 +352,23 @@ func approvalKind(subject approvalSubject) acpsdk.ToolKind {
 }
 
 // approvalTitle is the card title for an approval with no open card.
+// Every piece of text it takes from the request is escaped first
+// (termtext.EscapeLines): clipLine folds whitespace, and would turn a no-break
+// space, which a shell keeps inside a word, into the space that separates two.
 func approvalTitle(subject approvalSubject, ar agent.ShellApprovalRequest) string {
 	switch {
 	case subject.network:
-		return clipLine("Access the network: "+subject.target, maxTitleRunes)
+		return clipLine("Access the network: "+termtext.EscapeLines(subject.target), maxTitleRunes)
 	case ar.Change != nil:
 		verb := "Edit "
 		if ar.Change.Created {
 			verb = "Create "
 		}
-		return clipLine(verb+ar.Change.Path, maxTitleRunes)
+		return clipLine(verb+termtext.EscapeLines(ar.Change.Path), maxTitleRunes)
 	case subject.command:
-		return clipLine("Run "+ar.Command, maxTitleRunes)
+		return clipLine("Run "+termtext.EscapeLines(ar.Command), maxTitleRunes)
 	}
-	return clipLine(ar.Command, maxTitleRunes)
+	return clipLine(termtext.EscapeLines(ar.Command), maxTitleRunes)
 }
 
 // maxApprovalTextBytes bounds the command or diff text of one approval
@@ -341,15 +379,22 @@ const maxApprovalTextBytes = remote.MaxApprovalFieldBytes
 // diff when the runtime supplied one, else the whole unified diff as text;
 // for anything that is not a file change, the whole command or network
 // target; then the reason plus the command segments that still need
-// approval.
+// approval. Text is escaped (see the package comment: Content).
 func approvalContent(ar agent.ShellApprovalRequest) []acpsdk.ToolCallContent {
 	var out []acpsdk.ToolCallContent
 	switch {
 	case ar.Change != nil:
 		out = append(out, fileChangeContent([]agent.FileChange{*ar.Change})...)
-		if fileChangeOmitted(*ar.Change) && strings.TrimSpace(ar.Diff) != "" {
+		switch {
+		case strings.TrimSpace(ar.Diff) == "":
+		case fileChangeOmitted(*ar.Change):
 			// The file is too large for a structured diff; the unified diff
 			// the runtime computed still shows what changes.
+			out = append(out, approvalTextBlock("diff", ar.Diff))
+		case termtext.HasHidden(ar.Change.OldText) || termtext.HasHidden(ar.Change.NewText):
+			// The editor draws the file's own text, invisible characters
+			// and all; show the change once more with them named.
+			out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(hiddenCharsNote)))
 			out = append(out, approvalTextBlock("diff", ar.Diff))
 		}
 	case strings.TrimSpace(ar.Diff) != "":
@@ -362,15 +407,28 @@ func approvalContent(ar agent.ShellApprovalRequest) []acpsdk.ToolCallContent {
 		// Likewise the whole command.
 		out = append(out, approvalTextBlock("sh", ar.Command))
 	}
-	note := strings.TrimSpace(ar.Reason)
-	if len(ar.Segments) > 0 {
-		note = strings.TrimSpace(note + "\nneeds approval: " + strings.Join(ar.Segments, " | "))
+	note := termtext.EscapeLines(strings.TrimSpace(ar.Reason))
+	if len(ar.Segments) > 0 && !remembersOtherThanCommand(ar) {
+		note = strings.TrimSpace(note + "\nneeds approval: " + termtext.EscapeLines(strings.Join(ar.Segments, " | ")))
 	}
 	if note != "" {
 		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(clipBytes(note, maxToolTextBytes))))
 	}
+	if remembersOtherThanCommand(ar) {
+		// What "Always allow" saves, one command per line and in full: the
+		// choice approves each of them for good.
+		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(fmt.Sprintf(
+			"\"Always allow\" remembers these %d commands, and later runs them without asking:", len(ar.Segments)))))
+		out = append(out, approvalTextBlock("", strings.Join(ar.Segments, "\n")))
+	}
 	return out
 }
+
+// hiddenCharsNote precedes the escaped copy of a file change whose text
+// holds characters that do not show (approvalContent).
+const hiddenCharsNote = "This change contains characters that do not show on screen " +
+	"(control, bidi, zero-width or other invisible characters). " +
+	"Here it is with each of them written out:"
 
 // fileChangeOmitted reports whether fileChangeContent leaves change out of
 // its structured diffs (texts dropped, or too large for one update).
@@ -378,12 +436,14 @@ func fileChangeOmitted(change agent.FileChange) bool {
 	return change.TextOmitted || len(change.OldText)+len(change.NewText) > maxDiffBytesPerUpdate
 }
 
-// approvalTextBlock is text as a fenced code block of language lang, cut to
-// maxApprovalTextBytes with an explicit note after the fence when it is
-// longer. The fence is longer than any run of backticks in text, so the text
-// cannot close it early and show part of itself as prose.
+// approvalTextBlock is text as a fenced code block of language lang, every
+// character that would not show as itself written out
+// (termtext.EscapeLines), cut to maxApprovalTextBytes with an explicit note
+// after the fence when it is longer. The fence is longer than any run of
+// backticks in text, so the text cannot close it early and show part of
+// itself as prose.
 func approvalTextBlock(lang, text string) acpsdk.ToolCallContent {
-	body, cut := remote.ClipApprovalText(strings.TrimRight(text, "\n"), maxApprovalTextBytes)
+	body, cut := remote.ClipApprovalText(termtext.EscapeLines(strings.TrimRight(text, "\n")), maxApprovalTextBytes)
 	note := ""
 	if cut {
 		// ClipApprovalText ends a cut text with its note; move the note out

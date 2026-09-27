@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"spettro/internal/termtext"
 )
 
 // Approval notices.
@@ -22,6 +24,12 @@ import (
 // whole text follows as a file attachment (sendDocument). A text the event
 // already carried cut (remote.ClipApprovalText, beyond several megabytes)
 // keeps its "[truncated: ...]" line in both.
+//
+// Every character that would not show as itself is written out, in the chat
+// text and in the attachment alike (termtext.EscapeLines, the TUI's own
+// escaping): a chat app draws a carriage return, a bidi override that
+// reorders the line, or a string of variation selectors carrying a payload
+// inside what reads as "" just as invisibly as a terminal would.
 
 // approvalInlineBytes is the largest command or diff sent as chat text:
 // three messages' worth. Past it the chat gets a head plus an attachment.
@@ -54,7 +62,7 @@ type Document struct {
 // and, when the command or diff is too long for it, the document carrying
 // all of it (nil otherwise).
 func FormatApproval(a Approval) (string, *Document) {
-	tool := strings.TrimSpace(a.ToolID)
+	tool := termtext.EscapeLines(strings.TrimSpace(a.ToolID))
 	if tool == "" {
 		tool = "tool"
 	}
@@ -65,12 +73,12 @@ func FormatApproval(a Approval) (string, *Document) {
 		body, kind = a.Diff, "diff"
 		// A file change's command is "<tool> <path>": short, and the only
 		// place the path is named in full.
-		fmt.Fprintf(&b, "\n  target: %s", strings.TrimSpace(a.Command))
+		fmt.Fprintf(&b, "\n  target: %s", termtext.EscapeLines(strings.TrimSpace(a.Command)))
 	}
 	if reason := strings.TrimSpace(a.Reason); reason != "" {
-		fmt.Fprintf(&b, "\n  reason: %s", reason)
+		fmt.Fprintf(&b, "\n  reason: %s", termtext.EscapeLines(reason))
 	}
-	body = strings.TrimRight(body, "\n")
+	body = termtext.EscapeLines(strings.TrimRight(body, "\n"))
 	lines := strings.Count(body, "\n") + 1
 	var doc *Document
 	if len(body) <= approvalInlineBytes {

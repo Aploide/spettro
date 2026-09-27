@@ -3,6 +3,8 @@ package remote
 import (
 	"fmt"
 	"unicode/utf8"
+
+	"spettro/internal/termtext"
 )
 
 // Approval requests on the wire.
@@ -12,6 +14,15 @@ import (
 // full: the whole command and, for a file change, the whole unified diff, not
 // a preview. A person must be able to trust what they approve, and a command
 // cut short can look harmless when its end is not.
+//
+// The text fields are the exact bytes, for a client to use as data. They can
+// hold characters that do not show when drawn (a carriage return, an escape
+// sequence, a bidi override, zero-width characters and variation selectors
+// that carry a payload inside what reads as ""), so each also has
+// <field>_hidden_chars, and when that is true, <field>_visible: the same text
+// with every such character written out the way the TUI shows it
+// (termtext.EscapeLines). A client showing the text to a person shows
+// <field>_visible when there is one.
 //
 // Each text field is still bounded, by MaxApprovalFieldBytes, because the
 // event is kept in the replay buffer and sent to every subscriber. The bound
@@ -39,7 +50,9 @@ type ApprovalRequest struct {
 
 // ApprovalEvent is the data of an approval_request event for req: tool_id,
 // command, reason, segments, and diff when there is one, each text field
-// with its size and truncation flag (see the comment above).
+// with its size, truncation flag and hidden-character fields (see the
+// comment above). RequestApproval adds the approval_id a client answers
+// with.
 func ApprovalEvent(req ApprovalRequest) map[string]any {
 	data := map[string]any{
 		"tool_id":  req.ToolID,
@@ -54,12 +67,18 @@ func ApprovalEvent(req ApprovalRequest) map[string]any {
 }
 
 // putApprovalText stores text under key, cut to MaxApprovalFieldBytes with an
-// explicit note, and records key_bytes and key_truncated.
+// explicit note, and records key_bytes, key_truncated and key_hidden_chars,
+// plus key_visible when text holds characters that do not show.
 func putApprovalText(data map[string]any, key, text string) {
 	clipped, cut := ClipApprovalText(text, MaxApprovalFieldBytes)
 	data[key] = clipped
 	data[key+"_bytes"] = len(text)
 	data[key+"_truncated"] = cut
+	hidden := termtext.HasHidden(text)
+	data[key+"_hidden_chars"] = hidden
+	if hidden {
+		data[key+"_visible"], _ = ClipApprovalText(termtext.EscapeLines(text), MaxApprovalFieldBytes)
+	}
 }
 
 // ClipApprovalText returns text unchanged when it is at most limit bytes.
