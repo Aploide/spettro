@@ -359,3 +359,20 @@ func TestUnfoldedLSPToolsKeepWorking(t *testing.T) {
 		t.Fatalf("folded: advertised %+v", specs)
 	}
 }
+
+// runLSP turns op references with kind "definition" into op definition, so
+// a rule denying the definition op must see it that way too: the op a rule
+// is checked against is the op that runs.
+func TestLSPOpRuleSeesKindDefinition(t *testing.T) {
+	rt := lspTestRuntime(t)
+	spec := config.ToolSpec{ID: "lsp", Name: "LSP", Kind: "builtin", Enabled: true, PermittedActions: []string{"read", "search"}}
+	rt.agentRules = []config.PermissionRule{{Permission: config.LSPOpPermission, Pattern: "definition", Action: config.RuleDeny}}
+	call := aliasCall(t, "lsp", map[string]any{"op": "references", "kind": "definition", "path": "a.fk", "symbol": "Foo"})
+	if err := rt.lspOpDenied(call, spec); err == nil {
+		t.Fatal("op references with kind definition slipped past a definition deny")
+	}
+	plain := aliasCall(t, "lsp", map[string]any{"op": "references", "path": "a.fk", "symbol": "Foo"})
+	if err := rt.lspOpDenied(plain, spec); err != nil {
+		t.Fatalf("plain references was denied: %v", err)
+	}
+}

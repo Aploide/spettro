@@ -81,12 +81,20 @@ const lspOps = "diagnostics, references, definition, hover or restart"
 // arguments do not name one.
 func lspCallOp(raw []byte) string {
 	var args struct {
-		Op string `json:"op"`
+		Op   string `json:"op"`
+		Kind string `json:"kind"`
 	}
 	if json.Unmarshal(raw, &args) != nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(args.Op))
+	op := strings.ToLower(strings.TrimSpace(args.Op))
+	// runLSP runs op references with kind "definition" as op definition
+	// (the retired references tool's lookup mode). Rules must be checked
+	// against the op that runs, or a definition deny would be skipped.
+	if op == "references" && args.Kind == "definition" {
+		op = "definition"
+	}
+	return op
 }
 
 // lspPosArgs are the arguments of the ops that look at one position
