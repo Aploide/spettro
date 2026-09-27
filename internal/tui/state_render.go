@@ -268,7 +268,9 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 // listings, "  /models p:m    set model directly", so a row too long for the
 // pane is wrapped with a hanging indent at its second column: the wrapped
 // part lines up under the description instead of starting at column 0,
-// where it read as a new entry. A row with no second column hangs at its own
+// where it read as a new entry. When the second column starts past half the
+// width (a narrow terminal), the description moves under its key instead,
+// indented four cells past it. A row with no second column hangs at its own
 // indent. Rows carrying escape sequences (already styled) are wrapped as
 // before, by lipgloss.
 func wrapSystemText(content string, width int) []string {
@@ -284,10 +286,28 @@ func wrapSystemText(content string, width int) []string {
 			out = append(out, line)
 			continue
 		}
+		lead := len(line) - len(strings.TrimLeft(line, " "))
 		cut := systemTextHangColumn(line)
-		if cut == 0 || ansi.StringWidth(line[:cut]) > width/2 {
+		if cut > 0 && ansi.StringWidth(line[:cut]) > width/2 {
+			// The second column is too far right to hang under: the key
+			// keeps its row and the description goes on the rows below,
+			// indented past the key, so no wrapped part of it starts in the
+			// key column where it would read as another entry.
+			key := strings.TrimRight(line[lead:cut], " ")
+			keyIndent := min(lead, width/2)
+			for _, part := range termtext.Wrap(key, width-keyIndent) {
+				out = append(out, line[:keyIndent]+part)
+			}
+			hang := min(lead+4, width/2)
+			pad := strings.Repeat(" ", hang)
+			for _, part := range termtext.Wrap(line[cut:], width-hang) {
+				out = append(out, pad+part)
+			}
+			continue
+		}
+		if cut == 0 {
 			// Leading spaces are one byte a cell, so this is also a width.
-			cut = min(len(line)-len(strings.TrimLeft(line, " ")), width/2)
+			cut = min(lead, width/2)
 		}
 		prefixW := ansi.StringWidth(line[:cut])
 		parts := termtext.Wrap(line[cut:], width-prefixW)

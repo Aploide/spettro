@@ -40,6 +40,31 @@ func TestSystemListingWrapsUnderItsSecondColumn(t *testing.T) {
 	}
 }
 
+// Found in a VHS screenshot of /help at 40x15: with the description column
+// past half the width, "f  toggle favorite (★) for highlighted model"
+// wrapped its second half to the key column, where "(★) for highlighted
+// model" read as a key of its own. The description now moves under its key,
+// indented past it.
+func TestSystemListingNarrowMovesDescriptionUnderKey(t *testing.T) {
+	const width = 32
+	row := "  f               toggle favorite (★) for highlighted model"
+	got := wrapSystemText(row, width)
+	if len(got) < 2 || strings.TrimSpace(got[0]) != "f" {
+		t.Fatalf("the key should keep its own row: %q", got)
+	}
+	for i, line := range got[1:] {
+		if w := ansi.StringWidth(line); w > width {
+			t.Fatalf("row %d is %d cells wide: %q", i+1, w, line)
+		}
+		if lead := len(line) - len(strings.TrimLeft(line, " ")); lead <= 2 {
+			t.Fatalf("description row %d starts in the key column: %q", i+1, line)
+		}
+	}
+	if joined := strings.Join(strings.Fields(strings.Join(got[1:], " ")), " "); joined != "toggle favorite (★) for highlighted model" {
+		t.Fatalf("the description lost words: %q", joined)
+	}
+}
+
 // The /help screen fits the transcript at every width and says what the
 // transcript keys do (it once described ctrl+o as a side panel toggle).
 func TestHelpScreenFitsAndNamesTranscriptKeys(t *testing.T) {
