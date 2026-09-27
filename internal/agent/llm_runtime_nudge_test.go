@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"strings"
 	"testing"
@@ -228,9 +229,16 @@ func TestRunToolLoopTextlessDroppedCallFallsBackToEmptyReply(t *testing.T) {
 // details, so a dropped tool call can be diagnosed from the log.
 func TestRunToolLoopLogsReplyAtDebugLevel(t *testing.T) {
 	var buf bytes.Buffer
-	saved := slog.Default()
+	// slog.SetDefault also redirects the standard log package, and setting
+	// the saved default back does not undo that, so the log output and flags
+	// are restored explicitly; otherwise later tests would log into buf.
+	savedDefault, savedWriter, savedFlags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(saved) })
+	t.Cleanup(func() {
+		slog.SetDefault(savedDefault)
+		log.SetOutput(savedWriter)
+		log.SetFlags(savedFlags)
+	})
 
 	pm, url, _ := newLoopServer(t, loopReply{content: "Nothing to do here.", finish: "tool_calls"}, loopReply{content: "done"})
 	if _, err := runToolLoop(context.Background(), loopCfg(t, pm, url)); err != nil {
