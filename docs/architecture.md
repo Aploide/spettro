@@ -11,7 +11,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 ## Core packages
 
 - `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions. Every frame has to fit the terminal exactly: rows are fitted to their width before lipgloss sees them (a box that wraps a long row grows taller than the layout reserved), and `recalcLayout` measures the rendered input area instead of estimating it. The todo/agent footer is the one flexible block: `parallelFooterBudget` caps it by the rows the rest of the frame needs, so it is what shrinks on a short terminal. Tool labels are chosen by tool name; a name that belongs to a tool of the operator's own (`AgentManifest.UserTool`) gets the generic label instead of the built-in's (ACP cards follow the same rule). The counted wording of a group of calls ("Read 3 files", "Running 2 commands…") comes from one table, `toolWordings` in `tool_wording.go`, which a test keeps complete for every built-in and retired name; the file tools' labels and diffs accept `file_path` as well as `path`. `internal/tui/render_fit_test.go` renders huge tool calls, approvals and dialogs at sizes from 40x15 up and checks every frame; `scripts/tui-e2e/` drives the real binary in a pseudo-terminal against a fake OpenAI-compatible server and checks what reaches the screen (see its README).
-- `internal/termtext`: makes untrusted text safe for the cell grid. `SanitizeLine` shows tool output the way a terminal would (escape sequences removed, tabs expanded, carriage returns resolved to the final state of the line); `EscapeControls` shows text the user must judge (a command waiting for approval, a diff) with every control character, Unicode format character (bidi controls, zero-width characters) and invalid byte visible instead; both replace text that is not valid UTF-8 before a stray byte can act as a C1 control; `Fit`, `FitLeft` and `Wrap` bound text to a number of cells, marking cuts with `…`.
+- `internal/termtext`: makes untrusted text safe for the cell grid. `SanitizeLine` shows tool output the way a terminal would (escape sequences removed, tabs expanded, carriage returns resolved to the final state of the line); `EscapeControls` shows text the user must judge (a command waiting for approval, a diff) with every control character, Unicode format character (bidi controls, zero-width characters) and invalid byte visible instead; both replace text that is not valid UTF-8 before a stray byte can act as a C1 control; `Fit`, `FitLeft` and `Wrap` bound text to a number of cells, marking cuts with `…`. `SanitizeLine` also applies `StableWidth`, which rewrites grapheme clusters whose width terminals disagree on (emoji ZWJ sequences, the emoji variation selector, skin tones, keycaps, flags) into a form every terminal draws at the width the layout measured.
 - `internal/agent`: LLM runtime loop, native tool-call execution, delegation, policy checks, and **tool output spooling** (large results from `file-read`, `grep`, `bash`, `web-fetch` etc. are written to a session-scoped spool file with a truncated head and a pageable offset, so the model can retrieve the full content via `tool-output` with `spool:N` IDs).
 - `internal/config`: config persistence, encrypted keys, trust list, manifest parsing/validation/migration.
 - `internal/provider`: provider adapters, endpoint resolution, connected model routing, and Fantasy-backed text model execution with legacy SDK fallback for vision or legacy completion endpoints.
@@ -22,6 +22,55 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 - `internal/compact`: context usage policy and compaction guardrails.
 - `internal/workflow`: the [workflow](workflows.md) script engine — a goja JavaScript runtime with `agent`/`parallel`/`pipeline`/`phase`/`log`/`budget` globals, an event loop that resolves agent promises from goroutines, meta-header parsing, structured-output validation, and the journal that makes a run resumable. It knows nothing about Spettro's agents: sub-agent execution arrives through a `Runner` interface (implemented in `internal/agent/workflow.go`) and progress leaves through an `Observer`, so the engine is testable without a provider.
 - `internal/skills`: Agent Skills discovery, parsing, install/uninstall, prompt rendering, argument substitution and `$name` mentions, plus the catalog cache, which rescans only when a skill folder or `SKILL.md` changed on disk. Discovers `SKILL.md` packs from `.spettro/skills/` (project, walking up to the repository root, and `~`) and, read-only, from the Claude Code and Codex folders (`.agents`, `.claude`, `.codex`, `.openai`) so their skills work without conversion. Hosts get the catalog through `agent.SkillCatalogFor`. See [skills.md](skills.md).
+
+## TUI render pipeline
+
+The transcript and the frame around it are built so that the work per frame
+does not grow with the length of the session:
+
+- **Render cache** (`render_cache.go`). Each chat message is rendered once into
+  rows and cached by its id; a refresh reuses an entry while the message's
+  fields equal the snapshot taken when it was rendered (string equality, a
+  pointer comparison when nothing changed) and the layout it depends on (pane
+  width, and the ctrl+o/ctrl+g toggles for messages with tool calls) still
+  holds. A message keeps the accent colour of the mode it was written in, so a
+  mode switch re-renders nothing. A message with a running pty tool is never
+  cached (its live tail comes from the pty session).
+- **Frame budget**. When many messages need rendering at once (a resize,
+  ctrl+o, ctrl+g, a theme switch, `/resume`), a refresh renders for about
+  12 ms, newest first, and leaves the older messages' previous rendering (or a
+  one-row placeholder) in place; `renderFillMsg` continues on the following
+  frames until the transcript is complete. The scroll height is approximate
+  until then; a view following the bottom stays at the bottom.
+- **Live drafts**. The streamed answer and thinking are rendered
+  incrementally: completed lines (outside a code fence or table) are rendered
+  once, and only the line being written is rendered per token. The final
+  message replaces the draft at run end and is rendered whole.
+- **Transcript viewport** (`lineview.go`). The viewport holds the rendered
+  blocks as row slices with per-block offsets and draws only the rows on
+  screen; content is wrapped to the pane width before it gets there. It
+  follows the latest output only while it is at the bottom; submitting a
+  prompt jumps to the bottom. Building with `-tags spettro_bubblesviewport`
+  swaps in the previous `bubbles/viewport` for comparison (one release).
+- **Run events** (`run_events.go`). Stream chunks and tool traces travel from
+  the agent to the UI through one unbounded, ordered queue; the agent never
+  blocks on rendering, and the UI applies whatever accumulated since the last
+  frame as one batch (one refresh, one frame). The run's done message is sent
+  only after the UI applied the run's last events.
+- **Frame memo** (`frame.go`). The header, input box, status bar and side
+  panel are kept between frames and re-rendered only after a message that can
+  change them; a streamed token redraws the transcript rows and the working
+  indicator only. The frame is joined from rows measured once.
+- **Idle**. The 50 ms animation tick runs only while something animates
+  (a run, onboarding and sign-in spinners, the MAX plan label, a goal's clock,
+  running delegations, in-progress tasks, glowing input keywords); banners
+  clear with a one-shot timer; the input cursor is steady unless
+  `cursor_blink` is set. An idle TUI does no work between keystrokes.
+- **Off the Update goroutine**. The side panel's git state (`git status`,
+  `git diff --numstat`), `/diff`, and the save of the mode and side panel
+  toggle to `config.json` run as background commands.
+- **Side panel**. Only the rows in the visible window are styled, and the
+  activity feed keeps the newest 2,000 items (the subtitle counts the rest).
 
 ## Agent manifest
 
