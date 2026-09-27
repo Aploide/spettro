@@ -103,6 +103,12 @@ func TestToolCallTitles(t *testing.T) {
 		{"web-fetch", `{"url":"https://example.com"}`, "Fetch https://example.com"},
 		{"todo-write", `{"todos":[]}`, "Update tasks"},
 		{"skill", `{"name":"greet"}`, "Load skill greet"},
+		// argument aliases the runtime accepts (Codex and Claude Code names)
+		{"bash", `{"cmd":"go test ./..."}`, "Run go test ./..."},
+		{"file-read", `{"file_path":"main.go"}`, "Read main.go"},
+		{"file-edit", `{"file_path":"a.go","old_str":"x","new_str":"y"}`, "Edit a.go"},
+		{"file-write", `{"file_path":"a.go","content":"x"}`, "Write a.go"},
+		{"agent", `{"target":"explore","task":"map the repo"}`, "agent explore: map the repo"},
 		// a retired name is titled as its canonical tool
 		{"shell-exec", `{"command":"ls"}`, "Run ls"},
 		{"skill-list", `{}`, "List skills"},
@@ -118,6 +124,29 @@ func TestToolCallTitles(t *testing.T) {
 	// Swarm members are attributed.
 	if got := toolCallTitle(agent.ToolTrace{AgentID: "code#3", Name: "file-read", Args: `{"path":"x"}`}); got != "[code#3] Read x" {
 		t.Errorf("swarm title = %q", got)
+	}
+}
+
+// The generic "<name> <args>" title of a tool that is not a built-in (an MCP
+// or manifest tool) never carries a secret: it is built from the same
+// redacted arguments as rawInput.
+func TestToolCallTitleRedactsSecrets(t *testing.T) {
+	for _, tr := range []agent.ToolTrace{
+		{Name: "mcp__acme__deploy", Args: `{"api_key":"sk-SECRET123","env":"prod"}`},
+		{Name: "mcp__github__create_issue", Args: `{"title":"x","token":"ghp_SECRET"}`},
+		{Name: "deploy", Args: `{"nested":{"password":"hunter2SECRET"}}`},
+	} {
+		title := toolCallTitle(tr)
+		if strings.Contains(title, "SECRET") {
+			t.Errorf("title leaks a secret: %q", title)
+		}
+		if !strings.Contains(title, "[redacted]") || !strings.HasPrefix(title, tr.Name+" ") {
+			t.Errorf("title = %q, want the name and the redacted arguments", title)
+		}
+	}
+	// Arguments are shown as written otherwise, without HTML escaping.
+	if got := toolCallTitle(agent.ToolTrace{Name: "mcp_tool", Args: `{"q":"a<b"}`}); got != `mcp_tool {"q":"a<b"}` {
+		t.Errorf("title = %q", got)
 	}
 }
 

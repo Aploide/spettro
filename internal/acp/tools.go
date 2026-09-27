@@ -179,25 +179,40 @@ func (a toolArgs) firstStr(keys ...string) string {
 	return ""
 }
 
+// commandArg is the command of a bash or pty-start call. bash accepts
+// Codex's "cmd" as an alias for "command" (shellToolArgs in internal/agent),
+// and a trace carries the arguments exactly as the model wrote them, so both
+// names are read.
+func (a toolArgs) commandArg() string {
+	return a.firstStr("command", "cmd")
+}
+
+// pathArg is the file of a file-read, file-write or file-edit call. The
+// runtime accepts Claude Code's "file_path" as an alias for "path" (see
+// decodeFileWriteArgs and friends in internal/agent), so both names are read.
+func (a toolArgs) pathArg() string {
+	return a.firstStr("path", "file_path")
+}
+
 // builtinToolTitles renders the card title of each built-in from its
 // arguments. A function returning "" falls back to the generic
 // "<name> <args>" title (see toolCallTitle).
 var builtinToolTitles = map[string]func(toolArgs) string{
 	"bash": func(a toolArgs) string {
 		if a.flag("run_in_background") {
-			return "Run in background: " + a.str("command")
+			return "Run in background: " + a.commandArg()
 		}
-		return "Run " + a.str("command")
+		return "Run " + a.commandArg()
 	},
-	"file-read":  func(a toolArgs) string { return "Read " + a.str("path") },
+	"file-read":  func(a toolArgs) string { return "Read " + a.pathArg() },
 	"view-image": func(a toolArgs) string { return "View image " + a.str("path") },
 	"file-write": func(a toolArgs) string {
 		if a.flag("append") {
-			return "Append to " + a.str("path")
+			return "Append to " + a.pathArg()
 		}
-		return "Write " + a.str("path")
+		return "Write " + a.pathArg()
 	},
-	"file-edit": func(a toolArgs) string { return "Edit " + a.str("path") },
+	"file-edit": func(a toolArgs) string { return "Edit " + a.pathArg() },
 	"rename-symbol": func(a toolArgs) string {
 		title := "Rename"
 		if s := a.str("symbol"); s != "" {
@@ -282,8 +297,9 @@ func toolCallTitle(tr agent.ToolTrace) string {
 	switch tr.Name {
 	case "agent":
 		// "agent code#3: fix auth tests" tells which swarm or delegation
-		// member is doing what, instead of a raw JSON blob.
-		if name := args.str("agent"); name != "" {
+		// member is doing what, instead of a raw JSON blob. The runtime
+		// also accepts "target" and "id" for the agent to run.
+		if name := args.firstStr("agent", "target", "id"); name != "" {
 			title = "agent " + name
 			if task := args.str("task"); task != "" {
 				title += ": " + task
@@ -306,10 +322,7 @@ func toolCallTitle(tr agent.ToolTrace) string {
 		}
 	}
 	if title == "" {
-		title = tr.Name
-		if tr.Args != "" {
-			title += " " + tr.Args
-		}
+		title = genericToolTitle(tr.Name, tr.Args)
 	}
 	// Swarm members carry instance names like "code#3"; prefixing them keeps
 	// every tool call attributable when dozens of agents interleave.
@@ -317,6 +330,32 @@ func toolCallTitle(tr agent.ToolTrace) string {
 		title = "[" + tr.AgentID + "] " + title
 	}
 	return clipLine(title, maxTitleRunes)
+}
+
+// genericToolTitle is the title of a call no renderer covers (an MCP or
+// manifest tool, or arguments that are not JSON): the tool's name followed
+// by its arguments. JSON arguments are shown after the same clipping and
+// secret redaction as rawInput (boundValue), because the editor displays
+// the title and keeps it in its thread history; a token passed to an MCP
+// tool must not end up there.
+func genericToolTitle(name, rawArgs string) string {
+	if rawArgs == "" {
+		return name
+	}
+	var v any
+	if err := json.Unmarshal([]byte(rawArgs), &v); err != nil {
+		// Not JSON, so there are no field names to redact by; the runtime
+		// rejects such a call before it runs.
+		return name + " " + rawArgs
+	}
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	// Show "<" and "&" as written, not as \u003c escapes.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(boundValue(v)); err != nil {
+		return name
+	}
+	return name + " " + strings.TrimSpace(buf.String())
 }
 
 // clipLine collapses s to a single line (runs of whitespace, newlines
