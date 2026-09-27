@@ -282,3 +282,27 @@ func TestStatReportsASymlinkTarget(t *testing.T) {
 		t.Fatalf("sizes = %v, want link.go reporting its target's size", sizes)
 	}
 }
+
+// FileName filters files by name before anything else; directories are
+// still descended into.
+func TestFileNameFilter(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"a.go": "", "b.txt": "", "sub/c.go": "", "sub/d.md": ""})
+	w := Walker{Base: root, FileName: func(name string) bool { return filepath.Ext(name) == ".go" }}
+	var got []string
+	_ = w.Walk(context.Background(), root, func(e Entry) error {
+		got = append(got, e.Rel)
+		return nil
+	})
+	if want := []string{"a.go", "sub/c.go"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	var root2 []string
+	_ = w.Walk(context.Background(), filepath.Join(root, "b.txt"), func(e Entry) error {
+		root2 = append(root2, e.Rel)
+		return nil
+	})
+	if len(root2) != 0 {
+		t.Fatalf("a root file the filter rejects was visited: %v", root2)
+	}
+}

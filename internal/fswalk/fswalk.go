@@ -51,6 +51,11 @@ type Walker struct {
 	// SymlinkedFiles also visits symlinks to regular files. Symlinked
 	// directories are never followed.
 	SymlinkedFiles bool
+	// FileName, when set, visits only the files whose name it accepts. It
+	// is applied while listing, before any stat or .gitignore check, so a
+	// walk that wants few of the files (the symbol index wants source
+	// files) does not pay for the rest.
+	FileName func(name string) bool
 	// Stat fills Entry.Info.
 	Stat bool
 	// Workers lists that many directories at once (DefaultWorkers if 0).
@@ -379,6 +384,9 @@ func (w Walker) walk(ctx context.Context, root string, visit func(Entry) error) 
 // does: the root itself is the one entry.
 func (w Walker) visitRootFile(root, rel string, info fs.FileInfo, visit func(Entry) error) error {
 	d := fs.FileInfoToDirEntry(info)
+	if w.FileName != nil && !w.FileName(d.Name()) {
+		return nil
+	}
 	target, ok := w.keepFile(root, d)
 	if !ok || w.Ignores.Ignored(root, false) {
 		return nil
@@ -488,6 +496,9 @@ func (r *run) list(l *listing) {
 			}
 			sub := &listing{abs: abs, rel: rel, chain: chain, done: make(chan struct{})}
 			entries = append(entries, entry{Entry: Entry{Abs: abs, Rel: rel, D: de}, sub: sub})
+			continue
+		}
+		if w.FileName != nil && !w.FileName(name) {
 			continue
 		}
 		target, ok := w.keepFile(abs, de)
