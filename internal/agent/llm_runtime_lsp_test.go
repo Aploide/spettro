@@ -14,13 +14,16 @@ import (
 
 	"spettro/internal/lsp"
 	"spettro/internal/lsp/lsptest"
+	"spettro/internal/testhome"
 )
 
 // TestMain lets the test binary double as a scripted language server for the
-// post-edit diagnostics tests.
+// post-edit diagnostics tests, and runs the tests with HOME and the XDG
+// directories pointed at a temporary directory, so no test can touch the
+// user's real ~/.spettro.
 func TestMain(m *testing.M) {
 	lsptest.MaybeServe()
-	os.Exit(m.Run())
+	testhome.Main(m)
 }
 
 // fakeLSPRuntime returns a runtime over a fresh workspace whose .spettro/lsp.json
