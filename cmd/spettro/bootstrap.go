@@ -170,13 +170,10 @@ func (d *modelDiscovery) Wait(timeout time.Duration) bool {
 }
 
 // resolveActiveModel replaces a configured model whose provider has no
-// credentials (fresh install, removed key) with the best connected model.
-// The preferred model can come from a discovered list (a subscription or
-// local model), so in that case it waits up to sessionModelsWait for
-// discovery first; a configured model that is usable needs no wait.
-func resolveActiveModel(cfg *config.UserConfig, pm *provider.Manager, discovery *modelDiscovery) {
-	if !provider.HasCredentials(cfg.APIKeys, cfg.ActiveProvider) {
-		discovery.Wait(sessionModelsWait)
-	}
+// credentials (fresh install, removed key) with the best connected model
+// the provider manager knows now. It does not wait for model discovery: ACP
+// uses the result only as the fallback when a fresh config read fails, and
+// the headless server reloads its config before every submission.
+func resolveActiveModel(cfg *config.UserConfig, pm *provider.Manager) {
 	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
 }

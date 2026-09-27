@@ -30,7 +30,7 @@ func runACP(cwd string, sandboxOverrides sandbox.Overrides) {
 	// for them (bounded) only where it reports a model list.
 	discovery := startModelDiscovery(ctx, boot.cfg, boot.providers, true)
 	cfg := boot.cfg
-	resolveActiveModel(&cfg, boot.providers, discovery)
+	resolveActiveModel(&cfg, boot.providers)
 
 	err = acp.Serve(ctx, acp.Options{
 		CWD:          cwd,

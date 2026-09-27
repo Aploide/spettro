@@ -33,7 +33,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 	// model list instead.
 	discovery := startModelDiscovery(ctx, boot.cfg, pm, true)
 	cfg := boot.cfg
-	resolveActiveModel(&cfg, pm, discovery)
+	resolveActiveModel(&cfg, pm)
 
 	mode := manifest.DefaultAgent
 	if mode == "" {
