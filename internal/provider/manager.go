@@ -44,6 +44,13 @@ type Manager struct {
 	// reasoning_effort value, so later sends start there instead of walking
 	// the ladder again on every call (see rememberedThinking).
 	effortDowngrades map[string]ThinkingLevel
+	// localGen counts, per local endpoint provider id, the changes made to
+	// that endpoint's model list, and spettroGen the changes made to the
+	// Spettro Subscription models. Background model discovery uses them to
+	// apply a late result only if nobody changed the list since it started
+	// (see AddLocalModelsIfUnchanged). Guarded by mu.
+	localGen   map[string]uint64
+	spettroGen uint64
 }
 
 func NewManager() *Manager {
@@ -105,11 +112,17 @@ func (m *Manager) SetCatalog(cat models.Catalog) {
 // in-flight inference still resolves while a fresh list is being fetched.
 func (m *Manager) SetSpettro(inferenceBaseURL string, models []Model) {
 	m.mu.Lock()
+	m.setSpettroLocked(inferenceBaseURL, models)
+	m.mu.Unlock()
+}
+
+// setSpettroLocked is SetSpettro with m.mu held.
+func (m *Manager) setSpettroLocked(inferenceBaseURL string, models []Model) {
 	m.spettroModels = models
 	if inferenceBaseURL != "" {
 		m.providerAPIs[spettroProviderID] = inferenceBaseURL
 	}
-	m.mu.Unlock()
+	m.spettroGen++
 }
 
 // ClearSpettro removes the Spettro Subscription models and endpoint (logout).
@@ -117,6 +130,7 @@ func (m *Manager) ClearSpettro() {
 	m.mu.Lock()
 	m.spettroModels = nil
 	delete(m.providerAPIs, spettroProviderID)
+	m.spettroGen++
 	m.mu.Unlock()
 }
 
@@ -124,9 +138,16 @@ func (m *Manager) AddLocalModels(models []Model) {
 	if len(models) == 0 {
 		return
 	}
+	m.mu.Lock()
+	m.addLocalModelsLocked(models)
+	m.mu.Unlock()
+}
+
+// addLocalModelsLocked replaces the models of the endpoint models come from
+// (models must be non-empty and from one endpoint). m.mu must be held.
+func (m *Manager) addLocalModelsLocked(models []Model) {
 	providerID := models[0].Provider
 	baseURL := strings.TrimRight(providerID, "/") + "/v1"
-	m.mu.Lock()
 	filtered := m.localModels[:0:0]
 	for _, mod := range m.localModels {
 		if mod.Provider != providerID {
@@ -135,7 +156,7 @@ func (m *Manager) AddLocalModels(models []Model) {
 	}
 	m.localModels = append(filtered, models...)
 	m.providerAPIs[providerID] = baseURL
-	m.mu.Unlock()
+	m.bumpLocalGenLocked(providerID)
 }
 
 func (m *Manager) RemoveLocalModels(providerID string) {
@@ -148,6 +169,7 @@ func (m *Manager) RemoveLocalModels(providerID string) {
 	}
 	m.localModels = filtered
 	delete(m.providerAPIs, providerID)
+	m.bumpLocalGenLocked(providerID)
 	m.mu.Unlock()
 }
 

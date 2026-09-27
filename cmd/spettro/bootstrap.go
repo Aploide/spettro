@@ -100,12 +100,19 @@ func confineParentProcess(policy sandbox.Policy, store *storage.Store, cwd strin
 // no front-end waits for them before its first frame or its initialize
 // response.
 //
-// Ordering guarantee: every result is applied to the provider manager (which
-// has its own lock) before Done is closed, so a reader that has seen Done
-// closed sees all of them. Probes run concurrently and apply their models as
-// each one answers; once all have finished the local endpoints are applied
-// once more in config order, so the model picker's order does not depend on
-// which server answered first.
+// Ordering guarantees:
+//   - Every result is applied to the provider manager (which has its own
+//     lock) before Done is closed, so a reader that has seen Done closed sees
+//     all of them.
+//   - A result never overrides a change made after discovery started. The
+//     user can remove or re-probe an endpoint, or sign out, while a probe is
+//     still running; discovery records each list's change count before it
+//     starts and applies a result only if the count is unchanged (see
+//     provider.Manager.AddLocalModelsIfUnchanged).
+//   - Probes run concurrently and apply their models as each one answers.
+//     Once all have finished, the endpoints discovery added are applied once
+//     more in config order (again only if nobody changed them since), so the
+//     model picker's order does not depend on which server answered first.
 type modelDiscovery struct {
 	done chan struct{}
 }
@@ -114,39 +121,53 @@ type modelDiscovery struct {
 // endpoints and, when discoverSubscription is set and the user is signed in,
 // the Spettro Subscription models. The subscription endpoint is registered
 // immediately (no network), so inference with a subscription model resolves
-// before its model list arrives.
+// before its model list arrives. It must be called before the front-end can
+// change the provider manager's model lists, since it reads their change
+// counts as the baseline.
 func startModelDiscovery(ctx context.Context, cfg config.UserConfig, pm *provider.Manager, discoverSubscription bool) *modelDiscovery {
 	d := &modelDiscovery{done: make(chan struct{})}
 	subscriptionKey := strings.TrimSpace(cfg.APIKeys[spettro.ProviderID])
 	discoverSubscription = discoverSubscription && subscriptionKey != ""
+	var subscriptionGen uint64
 	if discoverSubscription {
 		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
+		subscriptionGen = pm.SpettroGeneration()
+	}
+	endpoints := cfg.LocalEndpoints
+	startGen := make([]uint64, len(endpoints))
+	for i, endpoint := range endpoints {
+		startGen[i] = pm.LocalModelsGeneration(provider.LocalProviderID(endpoint))
 	}
 
 	go func() {
 		defer close(d.done)
 		var wg sync.WaitGroup
-		probed := make([][]provider.Model, len(cfg.LocalEndpoints))
-		for i, endpoint := range cfg.LocalEndpoints {
+		// Written by probe i only, read after wg.Wait.
+		applied := make([][]provider.Model, len(endpoints))
+		appliedGen := make([]uint64, len(endpoints))
+		for i, endpoint := range endpoints {
 			wg.Go(func() {
 				localModels, err := provider.ProbeLocalServer(ctx, endpoint, cfg.APIKeys[endpoint])
 				if err != nil {
 					return
 				}
-				probed[i] = localModels
-				pm.AddLocalModels(localModels)
+				if gen, ok := pm.AddLocalModelsIfUnchanged(localModels, startGen[i]); ok {
+					applied[i], appliedGen[i] = localModels, gen
+				}
 			})
 		}
 		if discoverSubscription {
 			wg.Go(func() {
 				if infos, err := spettro.ListModels(ctx, subscriptionKey); err == nil {
-					pm.SetSpettro(spettro.InferenceBaseURL(), spettro.ProviderModels(infos))
+					pm.SetSpettroIfUnchanged(spettro.InferenceBaseURL(), spettro.ProviderModels(infos), subscriptionGen)
 				}
 			})
 		}
 		wg.Wait()
-		for _, localModels := range probed {
-			pm.AddLocalModels(localModels)
+		for i, localModels := range applied {
+			if localModels != nil {
+				pm.AddLocalModelsIfUnchanged(localModels, appliedGen[i])
+			}
 		}
 	}()
 	return d

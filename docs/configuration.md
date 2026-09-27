@@ -63,7 +63,9 @@ The model picker is built from the Spettro provider catalog
 
 Local endpoints (`local_endpoints` in `config.json`) and the Spettro
 Subscription model list are also fetched in the background. Their models
-appear in the TUI as each server answers. ACP `session/new`,
+appear in the TUI as each server answers. A result that arrives after you
+removed or re-probed that endpoint (or signed out of the subscription) is
+dropped, so it never undoes the change. ACP `session/new`,
 `session/load` and `session/resume` wait up to 2 seconds for them; a slower
 server's models reach the editor afterwards as a `config_option_update`.
 The headless server waits the same way before its first submission.

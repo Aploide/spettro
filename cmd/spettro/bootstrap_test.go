@@ -68,3 +68,29 @@ func TestModelDiscoveryWaitIsBounded(t *testing.T) {
 		t.Fatalf("Wait took %v", waited)
 	}
 }
+
+// A probe that answers after the user removed its endpoint does not bring
+// the endpoint back, neither when it answers nor in the config-order pass.
+func TestModelDiscoveryDoesNotUndoRemoval(t *testing.T) {
+	fast := fakeModelsServer(t, "removed-by-user", 0)
+	slow := fakeModelsServer(t, "slow", 300*time.Millisecond)
+	slower := fakeModelsServer(t, "removed-while-probing", 300*time.Millisecond)
+	cfg := config.UserConfig{LocalEndpoints: []string{fast, slow, slower}, APIKeys: map[string]string{}}
+	pm := provider.NewManager()
+
+	d := startModelDiscovery(context.Background(), cfg, pm, false)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(localModelNames(pm)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	// As /connect does: the fast endpoint after it answered, the slower one
+	// while its probe is still running.
+	pm.RemoveLocalModels(provider.LocalProviderID(fast))
+	pm.RemoveLocalModels(provider.LocalProviderID(slower))
+	if !d.Wait(5 * time.Second) {
+		t.Fatal("discovery did not finish")
+	}
+	if got := localModelNames(pm); len(got) != 1 || got[0] != "slow" {
+		t.Fatalf("local models = %v, want only the endpoint nobody removed", got)
+	}
+}
