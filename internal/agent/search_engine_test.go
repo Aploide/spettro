@@ -79,6 +79,37 @@ func TestGrepGoPrefilterKeepsLineSemantics(t *testing.T) {
 	}
 }
 
+// The Go grep stops handing out files once the ordered commit falls a
+// window behind: with a large first file the others used to be searched to
+// the end of the tree while the commit waited on it (work-count guard for
+// the bounded look-ahead).
+func TestGrepGoLookAheadIsBounded(t *testing.T) {
+	r := newShellTestRuntime(t)
+	files := map[string]string{"a0.txt": strings.Repeat("lorem ipsum dolor sit amet\n", 200000) + "foo7bar\n"}
+	for i := range 1500 {
+		files[fmt.Sprintf("d%02d/f%04d.go", i/100, i)] = "x := foo1bar\n"
+	}
+	writeTree(t, r.cwd, files)
+	q, err := r.newGrepQuery(grepArgs{Pattern: `foo\d+bar`, MaxResults: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		var stats grepWalkStats
+		results, err := r.grepWithWalkStats(context.Background(), q, &stats)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 6 || results[0].path != "a0.txt" {
+			t.Fatalf("results = %d files, first %q; want the first 6 in walk order", len(results), results[0].path)
+		}
+		// 6 committed, plus at most one window handed out past the cut.
+		if limit := int64(6 + fileWorkers()*grepWindowPerWorker); stats.searched.Load() > limit {
+			t.Fatalf("searched %d files for a 6-file answer, want <= %d", stats.searched.Load(), limit)
+		}
+	}
+}
+
 // Both grep backends list files in walk order ("a/b" before "a.go"), rg
 // included now that it runs unsorted.
 func TestGrepBackendsAgreeOnOrder(t *testing.T) {

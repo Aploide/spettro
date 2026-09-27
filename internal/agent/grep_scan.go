@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"regexp/syntax"
 	"sync"
+	"sync/atomic"
 )
 
 // The pure-Go grep backend, used when ripgrep is not available.
@@ -207,8 +208,9 @@ const maxRetainedGrepBuffer = 2 << 20
 
 // searchFile searches one file of a walk (never an explicit path: those are
 // streamed by grepStream); ok is false when it has no match or is not a
-// searchable text file.
-func (w *grepWorker) searchFile(ctx context.Context, abs, rel string) (grepFileResult, bool, error) {
+// searchable text file. In content mode it stops after budget+1 matches
+// (and their context).
+func (w *grepWorker) searchFile(ctx context.Context, abs, rel string, budget int) (grepFileResult, bool, error) {
 	f, err := os.Open(abs)
 	if err != nil {
 		return grepFileResult{}, false, nil
@@ -225,7 +227,7 @@ func (w *grepWorker) searchFile(ctx context.Context, abs, rel string) (grepFileR
 	if !can {
 		return grepFileResult{}, false, nil
 	}
-	c := grepCollector{q: w.q, budget: w.q.max, fr: grepFileResult{path: rel}}
+	c := grepCollector{q: w.q, budget: budget, fr: grepFileResult{path: rel}}
 	start := 0
 	for num := 1; start < len(data); num++ {
 		if num%4096 == 0 {
@@ -293,6 +295,20 @@ func retainBuffer(buf []byte) []byte {
 	return buf[:0]
 }
 
+// grepWindowPerWorker sets how far the search may run ahead of the file
+// the results wait on: fileWorkers() times this many files. Unbounded, the
+// walk and the workers kept going while the ordered commit waited on one
+// slow file, so an early max_results cut had already searched (and held
+// the matches of) thousands of files: a 15 MB first file followed by 20k
+// matching files cost 104 ms of CPU and +25 MB of heap against 32 ms and
+// +2 MB for the sequential search (perf review, TestReviewGrepLookahead).
+const grepWindowPerWorker = 16
+
+// grepWalkStats counts a search's work, for tests.
+type grepWalkStats struct {
+	searched atomic.Int64 // files opened and searched
+}
+
 // grepWithWalk is the pure-Go grep backend.
 //
 // Ordering guarantee: the walk numbers files in walk order and hands them to
@@ -302,7 +318,19 @@ func retainBuffer(buf []byte) []byte {
 // walk and the workers) once the committed files hold more than max_results
 // matches (content mode) or files (the other modes); the files after that
 // point that were already searched are discarded.
+//
+// Bounded look-ahead: the walk hands out file number n only once file
+// n - window has been committed (window = fileWorkers() *
+// grepWindowPerWorker), so at most window files are searched or held past
+// the one the commit waits on. In content mode each file also stops after
+// max_results minus the matches committed when it was handed out (plus
+// one, to detect the cut): enough, since the matches committed before it
+// can only have grown by the time it is committed.
 func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFileResult, error) {
+	return r.grepWithWalkStats(ctx, q, &grepWalkStats{})
+}
+
+func (r *toolRuntime) grepWithWalkStats(ctx context.Context, q grepQuery, stats *grepWalkStats) ([]grepFileResult, error) {
 	if q.rootIsFile {
 		fr, ok, err := grepStream(ctx, q.root, q.rootRel, q, q.max, true)
 		if err != nil || !ok {
@@ -317,6 +345,7 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 	type job struct {
 		seq      int
 		abs, rel string
+		budget   int // content mode: matches this file may still need
 	}
 	type done struct {
 		seq int
@@ -324,18 +353,24 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 		ok  bool
 		err error
 	}
-	jobs := make(chan job, 256)
-	dones := make(chan done, 256)
-	var workers sync.WaitGroup
-	for range fileWorkers() {
-		workers.Add(1)
+	workers := fileWorkers()
+	window := workers * grepWindowPerWorker
+	jobs := make(chan job, window)
+	dones := make(chan done, window)
+	// slots holds one token per file handed out but not yet committed.
+	slots := make(chan struct{}, window)
+	var committedMatches atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
 		go func() {
-			defer workers.Done()
+			defer wg.Done()
 			w := grepWorker{m: m, q: &q}
 			for j := range jobs {
 				var d done
 				if sctx.Err() == nil {
-					fr, ok, err := w.searchFile(sctx, j.abs, j.rel)
+					stats.searched.Add(1)
+					fr, ok, err := w.searchFile(sctx, j.abs, j.rel, j.budget)
 					d = done{seq: j.seq, fr: fr, ok: ok, err: err}
 				} else {
 					d = done{seq: j.seq, err: sctx.Err()}
@@ -353,7 +388,13 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 				return nil
 			}
 			select {
-			case jobs <- job{seq: seq, abs: abs, rel: rel}:
+			case slots <- struct{}{}:
+			case <-sctx.Done():
+				return sctx.Err()
+			}
+			j := job{seq: seq, abs: abs, rel: rel, budget: q.max - int(committedMatches.Load())}
+			select {
+			case jobs <- j:
 				seq++
 				return nil
 			case <-sctx.Done():
@@ -362,7 +403,7 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 		})
 	}()
 	go func() {
-		workers.Wait()
+		wg.Wait()
 		close(dones)
 	}()
 
@@ -381,11 +422,13 @@ func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFile
 			}
 			delete(pending, next)
 			next++
+			<-slots
 			if p.err != nil || !p.ok {
 				continue
 			}
 			results = append(results, p.fr)
 			total += p.fr.count
+			committedMatches.Store(int64(total))
 			if q.mode == "content" && total > q.max || q.mode != "content" && len(results) > q.max {
 				stopped = true
 				stop()
