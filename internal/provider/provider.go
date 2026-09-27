@@ -353,6 +353,30 @@ type Response struct {
 	Thinking ThinkingLevel
 	// MaxOutputTokens is the output cap actually sent (0 when none was).
 	MaxOutputTokens int
+	// Diagnostics describes the raw reply before normalization, for debug
+	// logs only; see ResponseDiagnostics.
+	Diagnostics ResponseDiagnostics
+}
+
+// ResponseDiagnostics describes a reply as the provider SDK delivered it,
+// before finish-reason mapping and tool-call finalization. Nothing acts on
+// it: the agent loop only logs it at debug level with every reply, so that a
+// tool call lost between the provider and the loop (a reply that says it
+// stopped for tool calls yet carries none) can be confirmed after the fact.
+// Only the native tool-calling backends fill it in; elsewhere it is zero.
+type ResponseDiagnostics struct {
+	// RawFinishReason is the finish reason the SDK reported, before
+	// FinishReason normalized it and the truncation checks rewrote it.
+	RawFinishReason string
+	// ToolCallsSeen counts the tool calls the reply introduced, finished or
+	// not, before finalization dropped any.
+	ToolCallsSeen int
+	// UnnamedToolCalls counts introduced calls that never received a tool
+	// name; finalization drops them because there is nothing to run.
+	UnnamedToolCalls int
+	// OrphanToolDeltas counts streamed argument fragments whose call id the
+	// stream never introduced; they are ignored.
+	OrphanToolDeltas int
 }
 
 // Truncated reports whether the reply was cut at the output token limit.

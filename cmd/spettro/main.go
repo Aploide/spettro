@@ -29,6 +29,9 @@ func main() {
 	// otherwise.
 	sandbox.RunChildIfRequested()
 
+	// Opt-in debug log (SPETTRO_DEBUG_LOG); a no-op when the variable is unset.
+	setupDebugLog()
+
 	// Foreground shell commands, background jobs and PTY sessions run in
 	// their own process groups or sessions, so the SIGHUP a closing terminal
 	// sends spettro's group never reaches them; kill them on the way out

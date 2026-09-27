@@ -64,6 +64,33 @@
 - To force a palette without saving it, set `SPETTRO_THEME=light` (or `dark`).
 - See [Themes](theme.md) for the full precedence and detection rules.
 
+## The agent stops early or ends without doing anything
+
+The run loop does not accept every reply without tool calls as the final
+answer. Each case below gets a bounded nudge (a short user message asking
+the model to go on), reported in the transcript as a note:
+
+- An empty reply is nudged up to twice; a third ends the turn with an error.
+- A short reply that only announces work ("I'll start by exploring the
+  repository...") before the turn has made any tool call is nudged once.
+- A reply whose finish reason says it stopped for tool calls, but which
+  carries none, is nudged once to send the call again.
+
+A second announce-only or dropped-call reply in the same turn ends it, so
+none of these can loop. To see what the provider actually returned, set
+`SPETTRO_DEBUG_LOG` to a file path before starting spettro (TUI, `--acp` or
+`--goal`):
+
+```bash
+SPETTRO_DEBUG_LOG=/tmp/spettro-debug.log spettro --goal "fix the failing test"
+```
+
+Every reply is then logged at debug level with its normalized and raw
+finish reason, the number of tool calls parsed and seen in the stream
+(unnamed calls and orphan argument fragments included), text and reasoning
+sizes, output tokens and the first characters of the text. Without the
+variable nothing is logged.
+
 ## Reset local state
 
 If needed, remove local Spettro state:
