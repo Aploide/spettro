@@ -194,10 +194,14 @@ func loadConfig(root string) (Config, bool) {
 		}
 		for key, sc := range user.Servers {
 			if strings.TrimSpace(sc.Command) == "" {
-				// no command in the override: keep the detected one, but let
-				// the entry toggle it (e.g. {"enabled": false})
+				// no command in the override: keep the detected one (and
+				// whatever an earlier file set), overriding only the fields
+				// this entry sets. So {"python":{"settle_ms":200}} in the
+				// project keeps {"python":{"enabled":false}} from home.
 				if base, ok := cfg.Servers[key]; ok {
-					base.Enabled = sc.Enabled
+					if sc.Enabled != nil {
+						base.Enabled = sc.Enabled
+					}
 					if len(sc.Filetypes) > 0 {
 						base.Filetypes = sc.Filetypes
 					}

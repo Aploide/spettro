@@ -125,7 +125,9 @@ Per entry:
 
 - `command` / `args` — replace the detected server for that key. Omitting
   `command` keeps the detected one, so `{ "enabled": false }` alone just turns
-  a language off.
+  a language off. An entry without `command` changes only the fields it
+  sets: a project's `{ "settle_ms": 200 }` keeps an `"enabled": false` from
+  `~/.spettro/lsp.json`.
 - `enabled` — defaults to `true`; set `false` to disable a server.
 - `filetypes` — extensions the server claims (defaults to the built-in list
   for known keys; required for custom keys like `zig` above).
