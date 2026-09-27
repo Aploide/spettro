@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"spettro/internal/config"
+	"spettro/internal/jobs"
 	"spettro/internal/provider"
 )
 
@@ -157,5 +158,33 @@ func TestHandleSlashCommand_Memory(t *testing.T) {
 	reply, _, _ = handleSlashCommand(s, &cfg, pm, "/memory bogus")
 	if !strings.Contains(reply, "usage: /memory") {
 		t.Fatalf("expected usage message, got %q", reply)
+	}
+}
+
+// The spool is process-wide and one ACP process serves several sessions:
+// /clear in one session drops only the outputs its own history referenced,
+// never another live session's.
+func TestHandleSlashCommand_ClearKeepsOtherSessionsSpool(t *testing.T) {
+	mine, err := jobs.Spool().Add("my output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := jobs.Spool().Add("their output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := testSession(t)
+	s.history = []provider.Message{
+		{Role: provider.RoleUser, ToolResults: []provider.ToolResult{{ID: "c1", Name: "bash", Output: "…", SpoolID: mine}}},
+	}
+	cfg := config.UserConfig{}
+	if _, _, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/clear"); !handled {
+		t.Fatal("/clear not handled")
+	}
+	if _, _, _, err := jobs.Spool().Read(theirs, 0, 0); err != nil {
+		t.Fatalf("another session's spooled output was deleted: %v", err)
+	}
+	if _, _, _, err := jobs.Spool().Read(mine, 0, 0); err == nil {
+		t.Fatal("the cleared session's own spooled output was kept")
 	}
 }

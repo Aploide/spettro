@@ -94,6 +94,21 @@ func (s *SpoolStore) Read(id string, offset, max int) (chunk string, next, size 
 	return string(data[offset:end]), end, len(data), nil
 }
 
+// Remove deletes the given spool entries and their files. Unknown IDs are
+// ignored. A host that serves several conversations from one process (ACP)
+// uses it to drop one conversation's outputs without touching the others'.
+func (s *SpoolStore) Remove(ids ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if path, ok := s.files[id]; ok {
+			_ = os.Remove(path)
+			delete(s.files, id)
+		}
+	}
+}
+
 // Cleanup deletes every spool file and resets the store; call on session end.
 func (s *SpoolStore) Cleanup() {
 	s.mu.Lock()

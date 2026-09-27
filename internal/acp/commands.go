@@ -201,13 +201,29 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		return handleMemoryCommand(s.cwd, fields[1:]), false, true
 
 	case "/clear":
-		s.history = nil
 		// Spooled tool outputs are only reachable through the cleared
-		// history's references; drop them with the conversation.
-		jobs.Spool().Cleanup()
+		// history's references; drop them with the conversation. Only
+		// this session's: the spool is process-wide, and the other
+		// sessions this process serves still reference theirs.
+		jobs.Spool().Remove(historySpoolIDs(s.history)...)
+		s.history = nil
 		return "conversation history cleared", false, true
 	}
 	return "", false, false
+}
+
+// historySpoolIDs lists the spool entries a conversation's tool results
+// point at.
+func historySpoolIDs(history []provider.Message) []string {
+	var ids []string
+	for _, m := range history {
+		for _, tr := range m.ToolResults {
+			if tr.SpoolID != "" {
+				ids = append(ids, tr.SpoolID)
+			}
+		}
+	}
+	return ids
 }
 
 // handleMemoryCommand is the ACP text stand-in for the TUI's /memory command
