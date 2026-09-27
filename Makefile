@@ -13,7 +13,7 @@ ifeq ($(OS),Windows_NT)
 EXE := .exe
 endif
 
-.PHONY: test bench build build-all install size
+.PHONY: test bench build build-all release-binary install size
 
 test:
 	go test ./...
@@ -31,6 +31,12 @@ build-all:
 	CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build $(GOFLAGS_RELEASE) -ldflags="$(LDFLAGS)" -o bin/$(APP)-darwin-arm64 ./cmd/spettro
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GOFLAGS_RELEASE) -ldflags="$(LDFLAGS)" -o bin/$(APP)-windows-amd64.exe ./cmd/spettro
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build $(GOFLAGS_RELEASE) -ldflags="$(LDFLAGS)" -o bin/$(APP)-windows-arm64.exe ./cmd/spettro
+
+# release-binary builds one packaged binary for the release workflow, which
+# sets GOOS, GOARCH and CGO_ENABLED in the environment and names the output:
+#   make release-binary VERSION=v1.2.3 OUT=spettro.exe
+release-binary:
+	go build $(GOFLAGS_RELEASE) -ldflags="$(LDFLAGS)" -o $(OUT) ./cmd/spettro
 
 # size prints the release binary's size and the number of packages linked
 # into it, so a dependency that bloats either shows up in review.

@@ -57,11 +57,8 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY=spettro.exe
           fi
-          go build \
-            -trimpath \
-            -ldflags="-s -w -X spettro/internal/version.App=${VERSION}" \
-            -o "${BINARY}" \
-            ./cmd/spettro
+          # The release build flags are defined once, in the Makefile.
+          make release-binary VERSION="${VERSION}" OUT="${BINARY}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             zip -q "${ARCHIVE_NAME}.zip" "${BINARY}"
           else
