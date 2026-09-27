@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -127,6 +126,11 @@ type searchDoneMsg struct {
 type memoryEditDoneMsg struct{ err error }
 
 type bannerClearMsg struct{}
+
+// bannerExpiredMsg is the one-shot timer of a banner that clears itself at
+// at (see armTimers). A newer banner has another bannerClearAt, so a stale
+// timer finds nothing to clear.
+type bannerExpiredMsg struct{ at time.Time }
 type quitWarningMsg struct{}
 
 type compactDoneMsg struct {
@@ -279,9 +283,8 @@ type Model struct {
 	ready     bool
 	startedAt time.Time
 
-	vp   viewport.Model
-	ta   textarea.Model
-	spin spinner.Model
+	vp viewport.Model
+	ta textarea.Model
 
 	// renderCache memoizes per-message rendered blocks so the chat transcript
 	// is not re-rendered (markdown regex and all) on every frame. See
@@ -309,6 +312,9 @@ type Model struct {
 
 	eyeFrame int
 	thinking bool
+	// tickArmed records that a tickMsg is on its way, so armTimers never
+	// starts a second tick chain (which would double the animation speed).
+	tickArmed bool
 
 	showSelector bool
 	selItems     []provider.Model
@@ -373,6 +379,9 @@ type Model struct {
 	banner        string
 	bannerKind    string
 	bannerClearAt time.Time // when set, banner auto-clears at this time
+	// bannerTimerAt is the bannerClearAt a bannerExpiredMsg is already
+	// scheduled for (see armTimers).
+	bannerTimerAt time.Time
 
 	ctrlCAt time.Time
 
@@ -638,12 +647,8 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
-	ta.SetStyles(textareaStyles(pal))
+	ta.SetStyles(textareaStyles(pal, cfg.CursorBlink))
 	ta.Focus()
-
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(colorMuted)
 
 	favs := map[string]bool{}
 	for _, f := range cfg.Favorites {
@@ -685,7 +690,6 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		providers:     pm,
 		manifest:      manifest,
 		ta:            ta,
-		spin:          sp,
 		favorites:     favs,
 		showSidePanel: cfg.ShowSidePanel,
 		startedAt:     time.Now(),
@@ -697,6 +701,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		searcher:     agent.NewRepoSearcher(cwd),
 		sandboxState: sb,
 		historyIndex: -1,
+		tickArmed:    true, // Init sends the first tick
 		themeAuto:    wanted == theme.AutoKind,
 		livePerm:     &livePermission{},
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
@@ -756,7 +761,10 @@ func (m Model) currentColor() color.Color {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, tick(), m.spin.Tick}
+	// The first animation tick is armed here (New sets tickArmed to match);
+	// from then on Update re-arms it only while something animates (see
+	// armTimers).
+	cmds := []tea.Cmd{textarea.Blink, tick()}
 	// Only "auto" asks the terminal what colour it is. An explicit selection
 	// must never put an OSC 11 query on the wire, and neither must a
 	// redirected stdout — Bubble Tea writes the sequence whether or not the
@@ -772,8 +780,10 @@ func (m Model) Init() tea.Cmd {
 // textareaStyles adapts bubbles' input chrome — placeholder, cursor line,
 // line numbers, end-of-buffer markers — to the palette. Only the polarity is
 // taken from the theme; the prompt and cursor-line overrides are the same
-// blanking the input box has always done.
-func textareaStyles(p theme.Palette) textarea.Styles {
+// blanking the input box has always done. blink is the cursor_blink setting:
+// a steady cursor (the default) never wakes the TUI, a blinking one repaints
+// the frame every 530 ms.
+func textareaStyles(p theme.Palette, blink bool) textarea.Styles {
 	var s textarea.Styles
 	if p.IsDark() {
 		s = textarea.DefaultDarkStyles()
@@ -789,6 +799,7 @@ func textareaStyles(p theme.Palette) textarea.Styles {
 		// exactly what shipped before themes existed.
 		s.Cursor.Color = p.Text
 	}
+	s.Cursor.Blink = blink
 	s.Focused.CursorLine = lipgloss.NewStyle()
 	s.Focused.Prompt = lipgloss.NewStyle()
 	s.Blurred.Prompt = lipgloss.NewStyle()
@@ -803,7 +814,7 @@ func textareaStyles(p theme.Palette) textarea.Styles {
 // lines" footer is styled at cache-fill time.
 func (m Model) applyTheme(k theme.Kind) Model {
 	pal := theme.Set(k)
-	m.ta.SetStyles(textareaStyles(pal))
+	m.ta.SetStyles(textareaStyles(pal, m.cfg.CursorBlink))
 	m.renderCache = nil
 	if m.pendingQuestion != nil {
 		m.pendingQuestion.previewKey, m.pendingQuestion.previewLines = "", nil
@@ -812,6 +823,11 @@ func (m Model) applyTheme(k theme.Kind) Model {
 	return m
 }
 
+// tick is the 50 ms animation frame: the working indicator, glare, the MAX
+// plan label, onboarding and sign-in spinners, running delegations and
+// in-progress tasks all advance on eyeFrame. It is armed only while one of
+// them is on screen (needsAnimation); an idle TUI used to wake 20 times a
+// second for nothing, most of its 4-5 % idle CPU.
 func tick() tea.Cmd {
 	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }

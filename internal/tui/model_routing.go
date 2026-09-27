@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/config"
@@ -16,6 +15,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	newModel, cmd := m.update(msg)
 	if nm, ok := newModel.(Model); ok {
 		nm = nm.recalcLayout()
+		if timers := nm.armTimers(); timers != nil {
+			cmd = tea.Batch(cmd, timers)
+		}
 		return nm, cmd
 	}
 	return newModel, cmd
@@ -90,6 +92,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.themeDetected = msg.Color != nil
 		}
 	case tickMsg:
+		// Update re-arms the next tick only while something animates (see
+		// armTimers).
+		m.tickArmed = false
 		m.eyeFrame++
 		// Auto-clear expired banners so the status bar falls back to
 		// goal info (or empty) after 5 seconds.
@@ -98,11 +103,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bannerKind = ""
 			m.bannerClearAt = time.Time{}
 		}
-		cmds = append(cmds, tick())
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spin, cmd = m.spin.Update(msg)
-		cmds = append(cmds, cmd)
+	case bannerExpiredMsg:
+		if m.banner != "" && m.bannerClearAt.Equal(msg.at) {
+			m.banner = ""
+			m.bannerKind = ""
+			m.bannerClearAt = time.Time{}
+		}
 	case agentDoneMsg:
 		if !m.thinking {
 			break

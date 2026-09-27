@@ -62,6 +62,7 @@ light palette re-tunes.
 | `config.json` key | Default | Meaning |
 | --- | --- | --- |
 | `theme` | `""` (treated as `auto`) | `dark`, `light` or `auto`. Written by `/theme`; an unrecognised value is cleared to the default on load. |
+| `cursor_blink` | `false` | Set `true` to make the input cursor blink. A blinking cursor repaints the screen twice a second while the TUI is open; the steady default leaves an idle TUI asleep. |
 
 Precedence at startup is `SPETTRO_THEME` (environment, never persisted) >
 `theme` in `config.json` > auto-detection > dark. `auto` seeds from `COLORFGBG`

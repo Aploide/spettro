@@ -282,7 +282,6 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	}
 
 	return m, tea.Batch(
-		m.spin.Tick,
 		waitForTool(toolCh),
 		waitForStream(streamCh),
 		waitForUsage(usageCh),
@@ -342,7 +341,6 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 			params = m.autoCompactParams(history, focus)
 		}
 		return m, tea.Batch(
-			m.spin.Tick,
 			func() tea.Msg {
 				return runStructuredCompact(ctx, pm, providerName, modelName, history, params)
 			},
@@ -362,7 +360,6 @@ func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) 
 	}
 	transcript := sb.String()
 	return m, tea.Batch(
-		m.spin.Tick,
 		func() tea.Msg {
 			compactPrompt := "Summarize the following conversation concisely, preserving all key decisions, facts, code snippets, and action items. Output only the summary, no preamble."
 			if focus != "" {
