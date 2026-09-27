@@ -2096,7 +2096,14 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 		return "", "", err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("path outside workspace is not allowed")
+		// Every file tool is confined to the workspace, in every permission
+		// mode, yolo included: this is the file tools' scope, not an
+		// approval that a mode could grant. Models still aim file-write at
+		// /tmp for scratch scripts (ten such calls in the round-7 bench),
+		// so the error says where they can go instead, as the coding prompt
+		// does. Shell commands are governed by the shell's own approval
+		// and sandbox rules, not by this check.
+		return "", "", fmt.Errorf("path outside workspace is not allowed: the file tools only reach files under %s; for a scratch file elsewhere, use bash (e.g. pipe a heredoc to the interpreter)", r.cwd)
 	}
 	// Under an active sandbox, also reject paths whose *real* target escapes the
 	// workspace through a symlink. Without this, an agent could `ln -s` a secret

@@ -18,6 +18,20 @@ only carries the schemas of the tools that agent may use.
 | Skills and tools | `skill` (load a skill by `name`, or list them; see [skills](skills.md)), `tool-search` |
 | MCP | `mcp-list-resources`, `mcp-read-resource`, `mcp-auth` |
 
+## Workspace scope
+
+The tools that take a path (`file-read`, `file-write`, `file-edit`,
+`view-image`, `grep`, `glob`, `download`, `lsp`, a `bash` `cwd`) only reach
+files under the workspace, in every permission mode, `yolo` included. A path
+that leaves it (`../x`, `/tmp/x`) is refused before anything is read,
+written or approved, with an error that says to use `bash` for a scratch
+file elsewhere; the coding prompt says the same, so scratch scripts are
+piped to the interpreter through `bash` or written to the system temp
+directory from the shell. Commands run through `bash` are governed by the
+shell's approval rules and the [sandbox](sandbox.md), not by this check.
+Under an active sandbox, a path whose real target leaves the workspace
+through a symlink is refused too.
+
 ## Deferred tools
 
 An agent holding `tool-search` gets only its core tools advertised up front:

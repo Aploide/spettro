@@ -53,6 +53,37 @@ func TestGrepPathScopesTheSearch(t *testing.T) {
 	}
 }
 
+// TestFileToolsStayInWorkspaceInEveryMode pins that the file tools never
+// reach outside the workspace, yolo included, and that the refusal points
+// scratch files at bash, as the coding prompt does.
+func TestFileToolsStayInWorkspaceInEveryMode(t *testing.T) {
+	outside := t.TempDir()
+	target := filepath.Join(outside, "scratch.py")
+	seen := filepath.Join(outside, "seen.txt")
+	writeFileAt(t, seen, "secret\n")
+	quote := func(s string) string {
+		raw, _ := json.Marshal(s)
+		return string(raw)
+	}
+	calls := map[string]string{
+		"file-write": `{"path":` + quote(target) + `,"content":"print(1)"}`,
+		"file-read":  `{"path":` + quote(seen) + `}`,
+	}
+	allowed := map[string]struct{}{"file-read": {}, "file-write": {}}
+	for _, mode := range []config.PermissionLevel{config.PermissionYOLO, config.PermissionAskFirst, config.PermissionRestricted} {
+		r := &toolRuntime{cwd: t.TempDir(), permission: mode, readSet: map[string]struct{}{}, requiredReads: map[string]struct{}{}}
+		for tool, args := range calls {
+			_, err := r.execute(context.Background(), toolCall{Tool: tool, Args: json.RawMessage(args)}, allowed)
+			if err == nil || !strings.Contains(err.Error(), "outside workspace") || !strings.Contains(err.Error(), "use bash") {
+				t.Errorf("%s %s outside the workspace: %v", mode, tool, err)
+			}
+		}
+		if fileExists(target) {
+			t.Fatalf("%s: file-write created %s outside the workspace", mode, target)
+		}
+	}
+}
+
 // TestShellTimeoutArgumentIsHonored pins the timeout argument the shell
 // schemas and prompts advertise: accepted, enforced, and reported as a timeout.
 func TestShellTimeoutArgumentIsHonored(t *testing.T) {
