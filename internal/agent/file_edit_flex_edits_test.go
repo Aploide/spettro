@@ -23,7 +23,7 @@ func TestFileEditEditsAcceptsLenientShapes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r, dir := newEditTestRuntime(t)
 			p := writeTestFile(t, dir, "e.txt", "a b\n")
-			if _, err := r.runFileEdit(context.Background(), []byte(tc.args)); err != nil {
+			if _, err := r.runFileEdit(context.Background(), "file-edit", []byte(tc.args)); err != nil {
 				t.Fatal(err)
 			}
 			if got := readTestFile(t, p); got != "A b\n" {
