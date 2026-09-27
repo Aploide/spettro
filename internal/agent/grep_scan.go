@@ -296,13 +296,66 @@ func retainBuffer(buf []byte) []byte {
 }
 
 // grepWindowPerWorker sets how far the search may run ahead of the file
-// the results wait on: fileWorkers() times this many files. Unbounded, the
-// walk and the workers kept going while the ordered commit waited on one
-// slow file, so an early max_results cut had already searched (and held
+// the results wait on: at most fileWorkers() times this many files. Unbounded,
+// the walk and the workers kept going while the ordered commit waited on
+// one slow file, so an early max_results cut had already searched (and held
 // the matches of) thousands of files: a 15 MB first file followed by 20k
 // matching files cost 104 ms of CPU and +25 MB of heap against 32 ms and
 // +2 MB for the sequential search (perf review, TestReviewGrepLookahead).
 const grepWindowPerWorker = 16
+
+// grepLookahead is the look-ahead window of one Go grep: file number seq
+// may be handed out only while seq < committed + window. The window starts
+// at one file per worker and grows by one with every committed file, up to
+// its maximum, so an answer complete after the first file or two reads few
+// files it will not use (a max_results cut in the corpus's first file read
+// 64 files, up to 16 MB each, and allocated 16 MB; now it reads about 4),
+// while a long search reaches the full window after a few dozen files.
+//
+// Ordering guarantee: commit is called by the consumer in seq order; wait
+// is called by the walk goroutine in seq order; close wakes the walk for
+// good. mu guards all fields.
+type grepLookahead struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	committed int // files committed so far
+	window    int
+	max       int
+	closed    bool
+}
+
+func newGrepLookahead(start, max int) *grepLookahead {
+	la := &grepLookahead{window: start, max: max}
+	la.cond = sync.NewCond(&la.mu)
+	return la
+}
+
+// wait blocks until file seq may be handed out; false once closed.
+func (la *grepLookahead) wait(seq int) bool {
+	la.mu.Lock()
+	defer la.mu.Unlock()
+	for seq >= la.committed+la.window && !la.closed {
+		la.cond.Wait()
+	}
+	return !la.closed
+}
+
+// commit records one more committed file and widens the window.
+func (la *grepLookahead) commit() {
+	la.mu.Lock()
+	la.committed++
+	la.window = min(la.window+1, la.max)
+	la.mu.Unlock()
+	la.cond.Signal()
+}
+
+// close releases the walk; wait returns false from now on.
+func (la *grepLookahead) close() {
+	la.mu.Lock()
+	la.closed = true
+	la.mu.Unlock()
+	la.cond.Broadcast()
+}
 
 // grepWalkStats counts a search's work, for tests.
 type grepWalkStats struct {
@@ -320,12 +373,12 @@ type grepWalkStats struct {
 // point that were already searched are discarded.
 //
 // Bounded look-ahead: the walk hands out file number n only once file
-// n - window has been committed (window = fileWorkers() *
-// grepWindowPerWorker), so at most window files are searched or held past
-// the one the commit waits on. In content mode each file also stops after
-// max_results minus the matches committed when it was handed out (plus
-// one, to detect the cut): enough, since the matches committed before it
-// can only have grown by the time it is committed.
+// n - window has been committed (see grepLookahead; the window is at most
+// fileWorkers() * grepWindowPerWorker), so at most window files are
+// searched or held past the one the commit waits on. In content mode each
+// file also stops after max_results minus the matches committed when it was
+// handed out (plus one, to detect the cut): enough, since the matches
+// committed before it can only have grown by the time it is committed.
 func (r *toolRuntime) grepWithWalk(ctx context.Context, q grepQuery) ([]grepFileResult, error) {
 	return r.grepWithWalkStats(ctx, q, &grepWalkStats{})
 }
@@ -357,8 +410,8 @@ func (r *toolRuntime) grepWithWalkStats(ctx context.Context, q grepQuery, stats 
 	window := workers * grepWindowPerWorker
 	jobs := make(chan job, window)
 	dones := make(chan done, window)
-	// slots holds one token per file handed out but not yet committed.
-	slots := make(chan struct{}, window)
+	ahead := newGrepLookahead(workers, window)
+	defer context.AfterFunc(sctx, ahead.close)()
 	var committedMatches atomic.Int64
 	var wg sync.WaitGroup
 	for range workers {
@@ -387,9 +440,7 @@ func (r *toolRuntime) grepWithWalkStats(ctx context.Context, q grepQuery, stats 
 			if !q.wantsFile(rel) {
 				return nil
 			}
-			select {
-			case slots <- struct{}{}:
-			case <-sctx.Done():
+			if !ahead.wait(seq) {
 				return sctx.Err()
 			}
 			j := job{seq: seq, abs: abs, rel: rel, budget: q.max - int(committedMatches.Load())}
@@ -422,7 +473,7 @@ func (r *toolRuntime) grepWithWalkStats(ctx context.Context, q grepQuery, stats 
 			}
 			delete(pending, next)
 			next++
-			<-slots
+			ahead.commit()
 			if p.err != nil || !p.ok {
 				continue
 			}

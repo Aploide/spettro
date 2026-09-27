@@ -103,10 +103,20 @@ func TestGrepGoLookAheadIsBounded(t *testing.T) {
 		if len(results) != 6 || results[0].path != "a0.txt" {
 			t.Fatalf("results = %d files, first %q; want the first 6 in walk order", len(results), results[0].path)
 		}
-		// 6 committed, plus at most one window handed out past the cut.
-		if limit := int64(6 + fileWorkers()*grepWindowPerWorker); stats.searched.Load() > limit {
+		// 6 committed, plus a window that started at one file per worker
+		// and grew by one per committed file.
+		if limit := int64(6 + fileWorkers() + 6); stats.searched.Load() > limit {
 			t.Fatalf("searched %d files for a 6-file answer, want <= %d", stats.searched.Load(), limit)
 		}
+	}
+	// An answer complete in the first file reads about one file per worker.
+	q.max = 1
+	var stats grepWalkStats
+	if _, err := r.grepWithWalkStats(context.Background(), q, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if limit := int64(1 + fileWorkers() + 1); stats.searched.Load() > limit {
+		t.Fatalf("searched %d files for a first-file answer, want <= %d", stats.searched.Load(), limit)
 	}
 }
 
