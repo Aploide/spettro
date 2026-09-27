@@ -61,27 +61,39 @@ const (
 	listDialogCompactChrome = 3
 )
 
-// hintRows packs the key hints into rows of at most width cells, two spaces
-// between hints, so a narrow terminal gets two short rows rather than one
-// row wrapped mid-hint. A hint wider than width on its own is cut.
+// hintRows packs the dialog's key hints; see packKeyHints.
 func (d listDialog) hintRows(width int) []string {
+	return packKeyHints(d.hints, width)
+}
+
+// packKeyHints packs key hints ("enter select", "esc close") into rows of
+// at most width cells, two spaces between hints, so a narrow dialog gets two
+// short rows with every key rather than one row cut ("esc ca…") or wrapped
+// mid-hint. A hint wider than width on its own is cut. The rows are plain
+// text; the caller styles them.
+func packKeyHints(hints []string, width int) []string {
 	var rows []string
 	var cur strings.Builder
-	for _, h := range d.hints {
+	curW := 0
+	for _, h := range hints {
 		h = termtext.Fit(h, width)
+		w := ansi.StringWidth(h)
 		switch {
-		case cur.Len() == 0:
+		case curW == 0:
 			cur.WriteString(h)
-		case ansi.StringWidth(cur.String())+2+ansi.StringWidth(h) <= width:
+			curW = w
+		case curW+2+w <= width:
 			cur.WriteString("  ")
 			cur.WriteString(h)
+			curW += 2 + w
 		default:
 			rows = append(rows, cur.String())
 			cur.Reset()
 			cur.WriteString(h)
+			curW = w
 		}
 	}
-	if cur.Len() > 0 {
+	if curW > 0 {
 		rows = append(rows, cur.String())
 	}
 	return rows

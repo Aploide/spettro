@@ -136,14 +136,19 @@ func (m Model) viewThemePicker() string {
 	// chosen theme is visible behind the dialog once applied anyway.
 	preview := m.previewKind()
 	previewRows := themePreview(theme.For(preview), innerW)
-	const chrome = 2 + 2 + 2 // border, vertical padding, the hint and the blank row above it
+	// The keys wrap onto a second row on a narrow dialog rather than being
+	// cut, so "esc cancel" is always on screen.
+	hints := packKeyHints([]string{"↑↓ preview", "enter apply", "esc cancel"}, innerW)
+	chrome := 2 + 2 + 1 + len(hints) // border, vertical padding, the blank row above the hints, the hints
 	if len(rows)+2+len(previewRows)+chrome <= m.height || m.height <= 0 {
 		rows = append(rows, "",
 			lipgloss.NewStyle().Foreground(pal.TextMuted).Render("  preview — "+preview.String()))
 		rows = append(rows, previewRows...)
 	}
-	rows = append(rows, "",
-		lipgloss.NewStyle().Foreground(pal.TextMuted).Render(termtext.Fit("↑↓ preview  enter apply  esc cancel", innerW)))
+	rows = append(rows, "")
+	for _, h := range hints {
+		rows = append(rows, lipgloss.NewStyle().Foreground(pal.TextMuted).Render(h))
+	}
 
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).

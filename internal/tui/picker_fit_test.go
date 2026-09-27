@@ -81,6 +81,23 @@ func TestResumeDialogFitsWhole(t *testing.T) {
 	}
 }
 
+// The connect and theme dialogs cut their key hint to one row, so at 40x15
+// it ended "esc…" / "esc ca…"; the keys now wrap onto a second row.
+func TestConnectAndThemeDialogsShowEveryKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, size := range fitSizes {
+		for command, keys := range map[string][]string{
+			"/connect": {"enter connect", "esc close"},
+			"/theme":   {"enter apply", "esc cancel"},
+		} {
+			m := footerModel(size[0], size[1])
+			next, _ := m.handleCommand(command)
+			m = next.(Model).recalcLayout()
+			assertWholeDialog(t, command, m.View().Content, size[0], size[1], append([]string{"╭", "╰"}, keys...)...)
+		}
+	}
+}
+
 func TestOnboardingPickerFitsWhole(t *testing.T) {
 	for _, size := range fitSizes {
 		m := footerModel(size[0], size[1])
