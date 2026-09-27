@@ -77,33 +77,42 @@ func (m *Model) resetRunState() {
 	m.refreshModifiedFiles()
 }
 
+// applyWindowSize lays the model out for a width x height terminal. The
+// first size it is given makes the model ready: the trust prompt or the
+// "spettro ready" line, and the first real frame instead of "loading…". It
+// runs for every WindowSizeMsg, and from New when the host passed the size
+// (WithInitialSize); the same size again changes nothing.
+func (m Model) applyWindowSize(width, height int) Model {
+	oldTranscriptW := m.transcriptWidth()
+	m.width = width
+	m.height = height
+	m = m.recalcLayout()
+	if m.ready && m.transcriptWidth() != oldTranscriptW {
+		// The transcript is rendered for one width, and the viewport
+		// cuts rows wider than itself without a trace. Nothing else
+		// re-renders it while the run is idle or waiting on an
+		// approval, so a narrower terminal would keep showing rows
+		// cut mid-word, and a wider one rows wrapped too early.
+		m.refreshViewport()
+	}
+	if !m.ready {
+		m.ready = true
+		if !config.IsTrusted(m.cwd) {
+			m.showTrust = true
+		} else {
+			m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+		}
+		m.refreshViewport()
+	}
+	return m
+}
+
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		oldTranscriptW := m.transcriptWidth()
-		m.width = msg.Width
-		m.height = msg.Height
-		m = m.recalcLayout()
-		if m.ready && m.transcriptWidth() != oldTranscriptW {
-			// The transcript is rendered for one width, and the viewport
-			// cuts rows wider than itself without a trace. Nothing else
-			// re-renders it while the run is idle or waiting on an
-			// approval, so a narrower terminal would keep showing rows
-			// cut mid-word, and a wider one rows wrapped too early.
-			m.refreshViewport()
-		}
-		if !m.ready {
-			m.ready = true
-			if !config.IsTrusted(m.cwd) {
-				m.showTrust = true
-			} else {
-				msg := "spettro ready — /help for commands, shift+tab to switch mode"
-				m.pushSystemMsg(msg)
-			}
-			m.refreshViewport()
-		}
+		m = m.applyWindowSize(msg.Width, msg.Height)
 	case tea.BackgroundColorMsg:
 		// The answer to Init's OSC 11 query, and occasionally an unsolicited
 		// report after the user switches their terminal's own theme mid

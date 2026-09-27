@@ -13,6 +13,9 @@ type newOptions struct {
 	hasManifest bool
 	// modelUpdates is the host's model-change signal (WithModelUpdates).
 	modelUpdates <-chan struct{}
+	// width and height are the terminal size (WithInitialSize), 0 when
+	// unknown.
+	width, height int
 }
 
 // WithManifest hands New the project's agent manifest, as
@@ -40,6 +43,18 @@ func WithManifest(m config.AgentManifest) Option {
 // both changes.
 func WithModelUpdates(updates <-chan struct{}) Option {
 	return func(o *newOptions) { o.modelUpdates = updates }
+}
+
+// WithInitialSize hands New the terminal's size, so the model is laid out
+// and ready before the program starts. Bubble Tea renders the model once
+// before it delivers the first WindowSizeMsg; without a size that render is
+// the "loading…" placeholder, and on a busy machine the renderer can flush
+// it before the size arrives, so the first frame on screen was a blank page
+// with "loading…" (seen in the qa-r9 first-frame captures). The
+// WindowSizeMsg that follows with the same size changes nothing. A size of
+// zero in either direction is ignored.
+func WithInitialSize(width, height int) Option {
+	return func(o *newOptions) { o.width, o.height = width, height }
 }
 
 // collectOptions applies opts in order; a later option overrides an earlier

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/term"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -135,9 +136,14 @@ func main() {
 	}
 	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
-	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb,
-		tui.WithManifest(boot.manifest),
-		tui.WithModelUpdates(boot.modelsChanged))
+	opts := []tui.Option{tui.WithManifest(boot.manifest), tui.WithModelUpdates(boot.modelsChanged)}
+	// The size Bubble Tea is about to read itself: with it the model is
+	// ready before the first render, so that render is the real first frame
+	// rather than a "loading…" placeholder (see tui.WithInitialSize).
+	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
+		opts = append(opts, tui.WithInitialSize(w, h))
+	}
+	m := tui.New(cwd, boot.cfg, boot.store, boot.providers, sb, opts...)
 
 	// Alt screen and mouse mode are declared on the tea.View in Model.View
 	// (bubbletea v2 removed the imperative program options).

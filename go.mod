@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/openai-go v0.0.0-20260319145158-d0740cc34266
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/json v0.2.0
+	github.com/charmbracelet/x/term v0.2.2
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/creack/pty v1.1.24
 	github.com/dop251/goja v0.0.0-20260822123354-58e940e0d230
@@ -48,7 +49,6 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 // indirect
 	github.com/charmbracelet/x/exp/slice v0.0.0-20250904123553-b4e2667e5ad5 // indirect
-	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect

@@ -831,6 +831,9 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 			items: m.allOnboardingModels(""),
 		}
 	}
+	if options.width > 0 && options.height > 0 {
+		m = m.applyWindowSize(options.width, options.height)
+	}
 	return m
 }
 

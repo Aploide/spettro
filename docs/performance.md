@@ -225,6 +225,14 @@ an upstream pull request, and the frame will drop to about 30 ms once
 upstream has it. Raising the frame rate with `tea.WithFPS(120)` gets 33.5 ms
 but raises idle CPU from 0.45 % to 0.65 %, so it was not adopted.
 
+The first tick paints whatever the model rendered by then. Bubble Tea renders
+the model once before it delivers the first `WindowSizeMsg`, and without a
+size that render is a `loading…` placeholder; on a busy machine (qa-r9, with
+eight VHS terminals running) the tick flushed it before the size arrived, so
+the first frame on screen was a blank page reading `loading…`. The host now
+passes the terminal size to `tui.New` (`tui.WithInitialSize`), so the render
+before the first tick is already the real frame.
+
 The process-start share is also why the frame is 21 ms before Spettro runs a
 line of its own code: see the next section.
 
