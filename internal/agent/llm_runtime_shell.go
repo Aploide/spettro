@@ -137,13 +137,19 @@ func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs [
 	// the output pipes: a grandchild holding stdout (go test's test binaries,
 	// a server started with &) can no longer hang the call past its deadline.
 	shell.ConfigureProcessTree(cmd)
+	// Files the command itself changes (a formatter, a code generator) are
+	// re-stamped, so the stale-read guard does not refuse the agent's next
+	// edit of them; see file_stamps.go for what stays guarded.
+	stamped := r.snapshotStampsForShell()
 	out, err := shell.CombinedOutput(cmd)
+	restampNote := r.restampNote(r.restampAfterShell(stamped))
 	// The output is sized as the shell's ("bash": a generous budget, head and
 	// tail kept), not by toolID. toolID is the call's identity, which for an
 	// unfolded retired name (shell-exec, bash-output) is that name; it decides
 	// approval and timeouts above, but the code that ran is the shell's, and
 	// the end of a build or test log is where its errors are.
 	text := r.spoolResult("bash", string(out))
+	text = appendToolNote(text, restampNote)
 	status := shellFailureStatus(runCtx, cmd, err, timeout)
 	if status == "" {
 		if errors.Is(err, shell.ErrBackgroundLeft) {
@@ -247,6 +253,18 @@ func appendToolStatus(output, status string) string {
 		return "[" + status + "]"
 	}
 	return strings.TrimRight(output, "\n") + "\n[" + status + "]"
+}
+
+// appendToolNote appends a note line to a tool's output; an empty note
+// leaves the output as it is.
+func appendToolNote(output, note string) string {
+	switch {
+	case note == "":
+		return output
+	case output == "":
+		return note
+	}
+	return strings.TrimRight(output, "\n") + "\n" + note
 }
 
 // toolErrorOutput renders a failed call's result for the model. Output the

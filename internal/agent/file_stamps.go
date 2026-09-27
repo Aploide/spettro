@@ -29,6 +29,71 @@ import (
 // restores them from the messages it carries, so a file read in an earlier
 // turn still counts as read, and an edit the user made between turns is still
 // caught.
+//
+// The agent's own shell commands. A formatter, code generator or sed the
+// agent runs through a foreground bash call changes files it has stamped,
+// and the guard used to refuse its next edit of them as "modified on disk"
+// although nobody else touched them. Around each foreground bash command
+// (runShellTool) the guard now re-stamps the files that command changed:
+//
+//   - Every stamp recorded by a read or write also records the file's
+//     identity then (size, mtime, inode; stampIDs): a file-read takes it from
+//     the open file before reading, so it is never newer than the content;
+//     a write takes it right after writing, under the file's lock.
+//   - Just before the command starts, snapshotStampsForShell stats the
+//     stamped files. Only a file whose identity still equals the recorded one
+//     is eligible: one that already differs was changed from outside since
+//     the agent saw it, and the guard must keep firing for it. A stamp
+//     restored from an earlier turn has no identity; its content is hashed
+//     once (bounded by maxShellVerifyFiles and maxShellVerifyBytes) and, when
+//     it still matches, gets one.
+//   - Right after the command, restampAfterShell stats the eligible files
+//     again and re-stamps each whose identity changed, with its new content.
+//     The read stamp is left alone: the model has not seen the new lines, so
+//     line numbers from its last file-read no longer hold.
+//
+// The work is a stat of the stamped set (at most maxShellStampFiles), never
+// a tree walk, and re-reading is bounded by maxShellRestampBytes; a file
+// past a bound simply keeps its old stamp, which errs on the side of the
+// guard. Background jobs are not covered: they outlive the call, so their
+// changes cannot be told apart from anyone else's. What the rule cannot
+// tell apart is a change another process makes to an eligible file while
+// the command runs: it is taken for the command's own. Outside that window
+// (between calls, or while an approval prompt is open, which is before the
+// snapshot) every outside change is still caught.
+
+// Bounds on the work around one foreground shell command (see above).
+const (
+	maxShellStampFiles   = 1024
+	maxShellVerifyFiles  = 32
+	maxShellVerifyBytes  = 8 << 20
+	maxShellRestampBytes = 32 << 20
+)
+
+// fileIdentity is the cheap fingerprint the shell re-stamp compares: size,
+// modification time and inode (0 where the platform has none).
+type fileIdentity struct {
+	size  int64
+	mtime int64
+	inode uint64
+}
+
+// identityOf returns fi's identity; false for a missing or non-regular file.
+func identityOf(fi os.FileInfo) (fileIdentity, bool) {
+	if fi == nil || !fi.Mode().IsRegular() {
+		return fileIdentity{}, false
+	}
+	return fileIdentity{size: fi.Size(), mtime: fi.ModTime().UnixNano(), inode: fileInode(fi)}, true
+}
+
+// statIdentity stats path and returns its identity.
+func statIdentity(path string) (fileIdentity, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fileIdentity{}, false
+	}
+	return identityOf(fi)
+}
 
 // stampKey is the key rel's stamps are stored under: its real path.
 func (r *toolRuntime) stampKey(rel string) string {
@@ -56,11 +121,23 @@ func resolveExistingPath(abs string) string {
 	}
 }
 
-func (r *toolRuntime) setStampLocked(key string, sum [32]byte, read bool) {
+// setStampLocked records sum as key's stamp (and, with read, its read
+// stamp). hasID says whether id is the file's identity when it held exactly
+// that content; without one any identity recorded earlier is dropped, since
+// it described other content.
+func (r *toolRuntime) setStampLocked(key string, sum [32]byte, read bool, id fileIdentity, hasID bool) {
 	if r.fileStamps == nil {
 		r.fileStamps = map[string][32]byte{}
 	}
 	r.fileStamps[key] = sum
+	if hasID {
+		if r.stampIDs == nil {
+			r.stampIDs = map[string]fileIdentity{}
+		}
+		r.stampIDs[key] = id
+	} else {
+		delete(r.stampIDs, key)
+	}
 	if read {
 		if r.readStamps == nil {
 			r.readStamps = map[string][32]byte{}
@@ -73,27 +150,37 @@ func (r *toolRuntime) setStampLocked(key string, sum [32]byte, read bool) {
 	r.stampsChanged[key] = struct{}{}
 }
 
-// recordFileStamp remembers content as rel's last-seen state.
+// recordFileStamp remembers content as rel's last-seen state. Callers have
+// just written or read content under the file's lock, so the identity is
+// taken now, after the content.
 func (r *toolRuntime) recordFileStamp(rel string, content []byte) {
 	key := r.stampKey(rel)
 	sum := sha256.Sum256(content)
+	id, hasID := statIdentity(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.setStampLocked(key, sum, false)
+	r.setStampLocked(key, sum, false, id, hasID)
 }
 
 // recordReadStamp stamps rel after a file-read and remembers that content as
 // the one whose line numbers the model was shown.
 func (r *toolRuntime) recordReadStamp(rel string, content []byte) {
-	r.recordReadStampSum(rel, sha256.Sum256(content))
+	key := r.stampKey(rel)
+	fi, _ := os.Stat(key)
+	r.recordReadStampSum(rel, sha256.Sum256(content), fi)
 }
 
 // recordReadStampSum is recordReadStamp for a hash computed while streaming.
-func (r *toolRuntime) recordReadStampSum(rel string, sum [32]byte) {
+// opened is the file's stat from before the content was read (nil when
+// unknown), so the identity recorded is never newer than the content: if
+// the file changed during the read, the identity no longer matches and the
+// shell re-stamp leaves the file to the guard.
+func (r *toolRuntime) recordReadStampSum(rel string, sum [32]byte, opened os.FileInfo) {
 	key := r.stampKey(rel)
+	id, hasID := identityOf(opened)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.setStampLocked(key, sum, true)
+	r.setStampLocked(key, sum, true, id, hasID)
 }
 
 // unchangedSinceRead reports whether content is exactly what the last
@@ -133,9 +220,11 @@ func (r *toolRuntime) hasFileStamp(rel string) bool {
 }
 
 // checkFileStamp rejects a write when rel has a stamp and its current content
-// differs from it: the user, a formatter, a shell command or another agent
-// changed the file after the agent last saw it. A file the agent never read
-// has no stamp and passes; edits then rely on old_string matching.
+// differs from it: the user, another process, a background job or another
+// agent changed the file after the agent last saw it (the agent's own
+// foreground shell commands re-stamp what they change; see the top of this
+// file). A file the agent never read has no stamp and passes; edits then
+// rely on old_string matching.
 func (r *toolRuntime) checkFileStamp(tool, rel string, current []byte) error {
 	key := r.stampKey(rel)
 	r.mu.Lock()
@@ -147,8 +236,143 @@ func (r *toolRuntime) checkFileStamp(tool, rel string, current []byte) error {
 	return staleReadError(tool, rel)
 }
 
+// shellStamp is one stamped file a foreground shell command may re-stamp:
+// its stamp and identity when the command started.
+type shellStamp struct {
+	key    string
+	sum    [32]byte
+	before fileIdentity
+}
+
+// snapshotStampsForShell returns the stamped files whose content is known to
+// still match their stamp, with their identity now, for restampAfterShell
+// once the command has run. A file changed since the agent saw it is left
+// out, so its stale stamp keeps guarding it.
+func (r *toolRuntime) snapshotStampsForShell() []shellStamp {
+	type stamped struct {
+		key   string
+		sum   [32]byte
+		id    fileIdentity
+		hasID bool
+	}
+	r.mu.Lock()
+	entries := make([]stamped, 0, min(len(r.fileStamps), maxShellStampFiles))
+	for key, sum := range r.fileStamps {
+		if len(entries) == maxShellStampFiles {
+			break
+		}
+		id, hasID := r.stampIDs[key]
+		entries = append(entries, stamped{key, sum, id, hasID})
+	}
+	r.mu.Unlock()
+
+	out := make([]shellStamp, 0, len(entries))
+	verifiedFiles, verifiedBytes := 0, int64(0)
+	for _, e := range entries {
+		now, ok := statIdentity(e.key)
+		switch {
+		case !ok:
+			continue
+		case e.hasID:
+			if now == e.id {
+				out = append(out, shellStamp{key: e.key, sum: e.sum, before: now})
+			}
+			continue
+		case verifiedFiles >= maxShellVerifyFiles || verifiedBytes+now.size > maxShellVerifyBytes:
+			continue
+		}
+		// A stamp restored from an earlier turn: trust it only once its
+		// content is confirmed, then remember the identity so later
+		// commands need only a stat.
+		verifiedFiles++
+		verifiedBytes += now.size
+		data, err := os.ReadFile(e.key)
+		if err != nil || sha256.Sum256(data) != e.sum {
+			continue
+		}
+		r.mu.Lock()
+		if cur, ok := r.fileStamps[e.key]; ok && cur == e.sum {
+			if r.stampIDs == nil {
+				r.stampIDs = map[string]fileIdentity{}
+			}
+			r.stampIDs[e.key] = now
+		}
+		r.mu.Unlock()
+		out = append(out, shellStamp{key: e.key, sum: e.sum, before: now})
+	}
+	return out
+}
+
+// restampAfterShell re-stamps the files of snap that the shell command just
+// run changed (their identity differs from the snapshot's), and returns
+// their paths for the note on the command's output. A file deleted by the
+// command keeps its stamp; one whose stamp something else replaced while
+// the command ran (a concurrent write tool) is left to that stamp.
+func (r *toolRuntime) restampAfterShell(snap []shellStamp) []string {
+	var changed []string
+	budget := int64(maxShellRestampBytes)
+	for _, s := range snap {
+		now, ok := statIdentity(s.key)
+		if !ok || now == s.before || now.size > budget {
+			continue
+		}
+		budget -= now.size
+		// now was taken before this read, so if the file changes again
+		// meanwhile the recorded identity is the older one and the next
+		// command leaves the file to the guard.
+		data, err := os.ReadFile(s.key)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(data)
+		r.mu.Lock()
+		cur, stamped := r.fileStamps[s.key]
+		if stamped && cur == s.sum {
+			if sum == s.sum {
+				// Same content (a touch, a no-op format): only the
+				// identity moved.
+				if r.stampIDs != nil {
+					r.stampIDs[s.key] = now
+				}
+			} else {
+				r.setStampLocked(s.key, sum, false, now, true)
+				changed = append(changed, s.key)
+			}
+		}
+		r.mu.Unlock()
+	}
+	sort.Strings(changed)
+	return changed
+}
+
+// maxRestampNotePaths caps the paths the shell re-stamp note lists.
+const maxRestampNotePaths = 5
+
+// restampNote tells the model which files it had read that its command just
+// changed: they are no longer what it saw, so line numbers and old_string
+// text from its last read may not hold. keys are stamp keys (real paths),
+// shown relative to the workspace when inside it.
+func (r *toolRuntime) restampNote(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	root := resolveExistingPath(r.cwd)
+	shown := make([]string, 0, min(len(keys), maxRestampNotePaths))
+	for _, key := range keys[:min(len(keys), maxRestampNotePaths)] {
+		if rel, err := filepath.Rel(root, key); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			key = filepath.ToSlash(rel)
+		}
+		shown = append(shown, key)
+	}
+	list := strings.Join(shown, ", ")
+	if more := len(keys) - len(shown); more > 0 {
+		list += fmt.Sprintf(" and %d more", more)
+	}
+	return fmt.Sprintf("note: this command changed files you had read (%s); file-read them before quoting them in old_string", list)
+}
+
 func staleReadError(tool, rel string) error {
-	return fmt.Errorf("%s: %s was modified on disk since you last read it (by the user, a formatter, a shell command or another agent); file-read it again, then redo the change against the current content", tool, rel)
+	return fmt.Errorf("%s: %s was modified on disk since you last read it (by the user, another process, a background job or another agent); file-read it again, then redo the change against the current content", tool, rel)
 }
 
 // recheckBeforeWrite re-reads abs after a write was approved and refuses the
@@ -228,6 +452,9 @@ func (r *toolRuntime) restoreStamps(msgs []provider.Message) {
 					r.fileStamps = map[string][32]byte{}
 				}
 				r.fileStamps[fs.Path] = seen
+				// A restored stamp has no identity: the shell re-stamp
+				// verifies its content before trusting one.
+				delete(r.stampIDs, fs.Path)
 			}
 			if read, ok := decodeStampSum(fs.Read); ok {
 				if r.readStamps == nil {

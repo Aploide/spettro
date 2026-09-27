@@ -61,6 +61,32 @@ and is given 5 seconds: on timeout the whole group is killed and no line is
 added. Like the language-server check it runs once per process: the Environment
 section is part of the cached system prompt and never changes mid-session.
 
+## Stale-read guard
+
+`file-edit` and an overwriting `file-write` are refused when the file changed
+on disk since the agent last saw all of it (its last `file-read`, or its own
+write): "modified on disk since you last read it". The agent must read it
+again, so it never writes over an edit the user, another process or another
+agent made in between. What the agent saw is a hash of the content, so a
+touch or a same-content rewrite does not count, and it is carried in the
+conversation, so a file read in an earlier turn still counts as read.
+
+Changes the agent's own foreground `bash` commands make (a formatter, a code
+generator, `sed -i`) do not trip the guard. Just before such a command runs,
+Spettro stats the files it holds a hash for; right after, it re-hashes those
+whose size, modification time or inode the command changed, and the
+command's output ends with a note naming them (`note: this command changed
+files you had read (...)`), since their line numbers moved. A file that had
+already changed from outside before the command started is left alone, so
+that change is still caught. A file whose hash was carried from an earlier
+turn is re-read once to confirm it still matches before it is tracked this
+way. The work is bounded (a stat of at most 1024 files per command, never a
+directory walk, and at most 32 MiB re-read), and a file past a bound keeps
+its old hash, which errs on the side of the guard. Two cases are not told
+apart: a change another process makes to such a file while the agent's
+command runs counts as the command's, and changes made by background jobs
+(`run_in_background`) are never treated as the agent's own.
+
 ## Retired names
 
 Several tools used to exist twice under different names, and the read-only

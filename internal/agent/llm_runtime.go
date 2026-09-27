@@ -268,6 +268,11 @@ type toolRuntime struct {
 	fileStamps    map[string][32]byte
 	readStamps    map[string][32]byte
 	stampsChanged map[string]struct{} // stamp keys changed since takeStampDelta
+	// stampIDs holds, for a stamp whose content is known to be what the file
+	// held at the time, the file's size, mtime and inode then: the cheap
+	// check that lets a foreground shell command re-stamp the files it
+	// changed itself (restampAfterShell).
+	stampIDs      map[string]fileIdentity
 	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel

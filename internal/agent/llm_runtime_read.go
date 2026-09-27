@@ -101,6 +101,9 @@ func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, 
 		unlock()
 		return "", err
 	}
+	// Stat the open file before reading it: the identity stamped with the
+	// content must never be newer than the content (file_stamps.go).
+	opened, _ := f.Stat()
 	pg, err := readFilePage(ctx, f, start, end, budget)
 	f.Close()
 	if err != nil {
@@ -115,7 +118,7 @@ func (r *toolRuntime) runFileRead(ctx context.Context, rawArgs []byte) (string, 
 	r.readSet[rel] = struct{}{}
 	delete(r.requiredReads, rel)
 	r.mu.Unlock()
-	r.recordReadStampSum(rel, pg.sum)
+	r.recordReadStampSum(rel, pg.sum, opened)
 	unlock()
 	r.warmLSP(abs)
 
