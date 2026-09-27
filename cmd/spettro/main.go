@@ -126,6 +126,7 @@ func main() {
 
 	pm := provider.NewManager()
 	pm.SetStreamAll(true)
+	pm.SetWireMode(cfg.ProviderWire)
 	pm.SetAPIKeys(cfg.APIKeys)
 
 	manifest, err := config.LoadAgentManifestForProject(cwd)

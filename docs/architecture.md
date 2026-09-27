@@ -51,7 +51,9 @@ Spettro deliberately splits the agent roster into **orchestrators** (`plan`, `co
 
 ## Provider abstraction
 
-- Text requests route through Charm's `fantasy` SDK for `anthropic`, `openai`, and OpenAI-compatible providers.
-- Image requests and legacy completion-only backends fall back to Spettro's direct SDK adapters so existing compatibility is preserved.
+- Streamed requests to OpenAI-compatible chat-completions endpoints (catalog providers with an OpenAI-style API, the Spettro Subscription, local servers) go through Spettro's own client in `internal/provider/wire/chatcompletions` (encoder, SSE reader, chunk decoder, tool-argument tracker) driven by `internal/provider/native*.go`. It sends the same request JSON as fantasy (pinned by golden tests) but caches each message's encoding across the steps of a run, so a step re-encodes only what it added, and it decodes streamed tool-call arguments in linear time. `provider_wire = "fantasy"` in `config.json` or `SPETTRO_PROVIDER_WIRE=fantasy` switches back; an encoder failure falls back to fantasy on its own.
+- Everything else (Anthropic-protocol providers, the official `openai` provider, non-streamed requests) routes through Charm's `fantasy` SDK. Both streaming paths feed the same collector (`stream_collect.go`), so replies, finish reasons, usage and errors come out identical.
+- Legacy completion-only backends fall back to Spettro's direct SDK adapters, which use the same OpenAI and Anthropic SDK copies fantasy links.
+- Per-request model metadata (vision, tool calling, context window, output limit) comes from an index rebuilt whenever a model list changes (`Manager.Lookup`), and attached images and tool schemas are cached across requests (`request_cache.go`).
 - Known provider base URLs and local endpoints still resolve through the same manager layer.
 - Catalog-backed model lists are preferred; fallback models are used when catalog is unavailable.

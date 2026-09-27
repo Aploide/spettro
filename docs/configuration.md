@@ -79,6 +79,23 @@ start.
 SPETTRO_THEME=light spettro     # override for one run
 ```
 
+## Provider wire
+
+Which client carries streamed requests to OpenAI-compatible chat-completions
+endpoints: catalog providers with an OpenAI-style API, the Spettro
+Subscription and local servers. Anthropic-protocol providers, the official
+`openai` provider (Responses API) and non-streamed requests always use the
+fantasy SDK.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `provider_wire` | `""` (treated as `native`) | `native`: Spettro's own client, which re-encodes only the messages a step added and decodes streamed tool calls in linear time. `fantasy`: the fantasy SDK, as before the native client existed. An unknown value means `native`. |
+
+`SPETTRO_PROVIDER_WIRE` (`native` or `fantasy`) overrides the key for one
+process. Both clients send the same request JSON and report replies, errors
+and rate limits the same way; the native one falls back to fantasy by itself
+if it ever fails to encode a request. See [Architecture](architecture.md#provider-abstraction).
+
 ## Notifications
 
 When the terminal is unfocused (or a run took more than 10 s), Spettro alerts

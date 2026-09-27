@@ -39,6 +39,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 
 	pm := provider.NewManager()
 	pm.SetStreamAll(true)
+	pm.SetWireMode(cfg.ProviderWire)
 	pm.SetAPIKeys(cfg.APIKeys)
 
 	if cat, err := models.Load(); err == nil {
