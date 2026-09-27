@@ -152,6 +152,8 @@ func buildInitialUserMessage(cfg toolLoopConfig) string {
 // lines will actually be executed by (rendered inside the environment section). Without it the model defaults to POSIX
 // pipelines everywhere, which on a PowerShell host fail in confusing ways
 // (`2>/dev/null` redirects to a file named "null", `&&` is a parse error).
+// It also names the interpreter to call when only a versioned one such as
+// python3 is installed (see interpreterHintLines).
 func environmentBrief() string {
 	lines := []string{
 		"- OS: " + runtime.GOOS + "/" + runtime.GOARCH,
@@ -165,6 +167,7 @@ func environmentBrief() string {
 			"- Native exit codes are propagated, so a failing command still reports failure.",
 		)
 	}
+	lines = append(lines, cachedInterpreterHints()...)
 	return strings.Join(lines, "\n")
 }
 

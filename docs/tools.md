@@ -48,6 +48,17 @@ once per process, for the life of that process: a server installed while
 spettro runs is picked up only after spettro restarts (a new session in the
 same TUI or ACP process does not re-check).
 
+## Shell environment
+
+The system prompt's Environment section tells the agent which OS and shell
+its `bash` calls run under. When `python` is not installed but `python3` is,
+it adds a line saying to use `python3`, and likewise for `pip` and `pip3`,
+since models type the bare names by habit. The check asks the same login
+shell the `bash` tool uses (`command -v`), so PATH additions from the user's
+profile count; on a PowerShell or cmd host it searches spettro's own PATH.
+Like the language-server check it runs once per process: the Environment
+section is part of the cached system prompt and never changes mid-session.
+
 ## Retired names
 
 Several tools used to exist twice under different names, and the read-only
