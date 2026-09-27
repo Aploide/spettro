@@ -258,6 +258,9 @@ func FuzzDecodeChunkFast(f *testing.F) {
 		`null`,
 		`{"id":"c","choices":[{"delta":{"content":"a\u0000b"}}]}`,
 		`{"id":"c","choices":[{"index":01}]}`,
+		`{"choices":[{"index":0,"delta":{"cont\u0065nt":"hi"}}]}`,
+		`{"\u0069d":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"n\u0061me":"x"}}]}}]}`,
+		`{"id":"a","choices":[],"\u0065rror":{"message":"boom"}}`,
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))
@@ -276,6 +279,27 @@ func FuzzDecodeChunkFast(f *testing.F) {
 			t.Fatalf("decoding %q:\nfast %+v\nstd  %+v", data, a, b)
 		}
 	})
+}
+
+// TestDecodeChunkEscapedMemberName pins that a member name written with an
+// escape sequence decodes like the plain name, as encoding/json decodes it:
+// the fast path compares raw names, so it must hand such a chunk over.
+func TestDecodeChunkEscapedMemberName(t *testing.T) {
+	var c Chunk
+	if err := DecodeChunk([]byte(`{"choices":[{"index":0,"delta":{"cont\u0065nt":"hi"}}]}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Choices) != 1 || c.Choices[0].Delta.Content != "hi" {
+		t.Fatalf("decoded %+v, want one choice with content \"hi\"", c)
+	}
+	// A mid-stream error must not be skipped as an unknown member.
+	c = Chunk{}
+	if err := DecodeChunk([]byte(`{"id":"a","choices":[],"\u0065rror":{"message":"boom"}}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"message":"boom"}`; string(c.Error) != want {
+		t.Fatalf("decoded error %s, want %s", c.Error, want)
+	}
 }
 
 func BenchmarkDecodeChunk(b *testing.B) {

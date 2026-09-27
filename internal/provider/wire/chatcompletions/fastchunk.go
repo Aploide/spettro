@@ -15,7 +15,8 @@ import (
 //
 // It handles well-formed chunks whose members have the expected types and
 // returns false for anything else (a syntax error, a mistyped or duplicate
-// member, a member name differing only in case, an "error" member), which
+// member, a member name differing only in case or written with an escape
+// sequence, an "error" member), which
 // DecodeChunk then hands to encoding/json. When it returns true, c holds
 // exactly what encoding/json would have decoded (FuzzDecodeChunkFast
 // checks this against the encoding/json path).
@@ -143,10 +144,16 @@ func (p *chunkParser) field(bit int) bool {
 	return true
 }
 
-// other skips the value of a member this decoder does not read. A name
-// that matches a known one only case-insensitively is left to
-// encoding/json, which matches names that way.
+// other skips the value of a member this decoder does not read. Two kinds
+// of name are left to encoding/json instead: a name with an escape
+// sequence (key is the raw, still escaped text, so "cont\u0065nt" would
+// otherwise be skipped although it decodes to "content"), and a name that
+// matches a known one only case-insensitively, which encoding/json also
+// accepts.
 func (p *chunkParser) other(key []byte, known ...string) bool {
+	if bytes.IndexByte(key, '\\') >= 0 {
+		return false
+	}
 	for _, k := range known {
 		if strings.EqualFold(string(key), k) {
 			return false
