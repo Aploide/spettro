@@ -15,14 +15,6 @@ import (
 	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 )
 
-// TestMain lets a re-executed sandbox child apply Landlock and exec the real
-// command before the test runner takes over. For a normal `go test` invocation
-// (no child sentinel in os.Args) RunChildIfRequested is a no-op.
-func TestMain(m *testing.M) {
-	RunChildIfRequested()
-	os.Exit(m.Run())
-}
-
 func requireLandlock(t *testing.T, minABI int) {
 	t.Helper()
 	abi, err := llsys.LandlockGetABIVersion()

@@ -155,11 +155,12 @@ const hangupMarkerEnv = "SPETTRO_PROCTREE_HANGUP_MARKER"
 // hangup failed to end.
 const hangupHelperLinger = time.Minute
 
-func TestMain(m *testing.M) {
+// runTestHelperIfRequested turns the test binary into the hangup helper when
+// a hangup test started it as one; see TestMain in home_isolation_test.go.
+func runTestHelperIfRequested() {
 	if pidFile := os.Getenv(hangupHelperEnv); pidFile != "" {
 		runHangupHelper(pidFile)
 	}
-	os.Exit(m.Run())
 }
 
 // runHangupHelper is the body of the helper process the hangup tests start:
