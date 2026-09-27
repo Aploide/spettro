@@ -100,9 +100,9 @@ var builtinToolKinds = map[string]acpsdk.ToolKind{
 // their canonical or a retired name, come from builtinToolKinds; any other
 // name (an MCP or manifest tool) is guessed from words in the name.
 //
-// A tool of the operator's own that takes a built-in's name is classified
-// as that built-in: the trace carries only the name, and the kind is a
-// presentation hint, never a permission decision.
+// It knows names only; a tool of the operator's own that takes a built-in's
+// name is told apart by turnState.cardKind, which has the session's
+// manifest.
 func toolKind(name string) acpsdk.ToolKind {
 	canonical := agent.CanonicalToolName(strings.ToLower(strings.TrimSpace(name)))
 	if kind, ok := builtinToolKinds[canonical]; ok {
@@ -324,12 +324,47 @@ func toolCallTitle(tr agent.ToolTrace) string {
 	if title == "" {
 		title = genericToolTitle(tr.Name, tr.Args)
 	}
-	// Swarm members carry instance names like "code#3"; prefixing them keeps
-	// every tool call attributable when dozens of agents interleave.
+	return finishTitle(tr, title)
+}
+
+// finishTitle attributes a card title to its swarm member and bounds it.
+// Swarm members carry instance names like "code#3"; prefixing them keeps
+// every tool call attributable when dozens of agents interleave.
+func finishTitle(tr agent.ToolTrace, title string) string {
 	if strings.ContainsRune(tr.AgentID, '#') && tr.Name != "agent" {
 		title = "[" + tr.AgentID + "] " + title
 	}
 	return clipLine(title, maxTitleRunes)
+}
+
+// isUserTool reports whether name belongs to a tool of the operator's own
+// (kind mcp, script or http) in the session's manifest. Such a tool owns
+// its name even when it is a built-in's: a call under it never reaches the
+// built-in (see agent/tool_names.go).
+func (t *turnState) isUserTool(name string) bool {
+	_, ok := t.manifest.UserTool(name)
+	return ok
+}
+
+// cardTitle is toolCallTitle for this session: a tool of the operator's own
+// gets the generic "<name> <args>" title instead of the wording of the
+// built-in whose name it may share ("List ." for an "ls" script that lists
+// a bucket would misreport what ran).
+func (t *turnState) cardTitle(tr agent.ToolTrace) string {
+	if t.isUserTool(tr.Name) {
+		return finishTitle(tr, genericToolTitle(tr.Name, tr.Args))
+	}
+	return toolCallTitle(tr)
+}
+
+// cardKind is toolKind for this session: a tool of the operator's own is
+// classified by the words in its name, like any tool that is not a
+// built-in, never as the built-in of that name.
+func (t *turnState) cardKind(name string) acpsdk.ToolKind {
+	if t.isUserTool(name) {
+		return guessToolKind(strings.ToLower(strings.TrimSpace(name)))
+	}
+	return toolKind(name)
 }
 
 // genericToolTitle is the title of a call no renderer covers (an MCP or

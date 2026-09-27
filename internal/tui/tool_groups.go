@@ -291,142 +291,15 @@ func hasRunningTool(items []ToolItem) bool {
 	return false
 }
 
+// formatRunningToolGroupLabel is the header of a group of consecutive calls
+// of one tool while one of them still runs: the calls' descriptors when
+// their arguments give some ("Editing a.go, b.go…"), else the count in the
+// tool's wording ("Running 2 commands…").
 func formatRunningToolGroupLabel(name string, group []ToolItem) string {
-	count := len(group)
 	if desc := formatDetailedGroupLabel(name, true, group); desc != "" {
 		return desc
 	}
-	if isLSPTool(name) || isSkillTool(name) {
-		return runningVerb(name) + " " + toolNounCount(name, count) + "…"
-	}
-	switch name {
-	case "file-read":
-		if count == 1 {
-			return "Reading 1 file…"
-		}
-		return fmt.Sprintf("Reading %d files…", count)
-	case "file-write":
-		if count == 1 {
-			return "Writing 1 file…"
-		}
-		return fmt.Sprintf("Writing %d files…", count)
-	case "file-edit", "multi-edit":
-		if count == 1 {
-			return "Editing 1 file…"
-		}
-		return fmt.Sprintf("Editing %d files…", count)
-	case "repo-search":
-		if count == 1 {
-			return "Searching 1 query…"
-		}
-		return fmt.Sprintf("Searching %d queries…", count)
-	case "tool-search":
-		if count == 1 {
-			return "Searching 1 tool query…"
-		}
-		return fmt.Sprintf("Searching %d tool queries…", count)
-	case "web-search":
-		if count == 1 {
-			return "Searching 1 web query…"
-		}
-		return fmt.Sprintf("Searching %d web queries…", count)
-	case "web-fetch":
-		if count == 1 {
-			return "Fetching 1 page…"
-		}
-		return fmt.Sprintf("Fetching %d pages…", count)
-	case "download":
-		if count == 1 {
-			return "Downloading 1 file…"
-		}
-		return fmt.Sprintf("Downloading %d files…", count)
-	case "shell-exec", "bash", "bash-output":
-		if count == 1 {
-			return "Running 1 command…"
-		}
-		return fmt.Sprintf("Running %d commands…", count)
-	case "glob":
-		if count == 1 {
-			return "Matching 1 pattern…"
-		}
-		return fmt.Sprintf("Matching %d patterns…", count)
-	case "grep":
-		if count == 1 {
-			return "Grepping 1 pattern…"
-		}
-		return fmt.Sprintf("Grepping %d patterns…", count)
-	case "ls":
-		if count == 1 {
-			return "Listing 1 directory…"
-		}
-		return fmt.Sprintf("Listing %d directories…", count)
-	case "task-create":
-		if count == 1 {
-			return "Creating 1 task…"
-		}
-		return fmt.Sprintf("Creating %d tasks…", count)
-	case "task-get":
-		if count == 1 {
-			return "Reading 1 task…"
-		}
-		return fmt.Sprintf("Reading %d tasks…", count)
-	case "task-update":
-		if count == 1 {
-			return "Updating 1 task…"
-		}
-		return fmt.Sprintf("Updating %d tasks…", count)
-	case "task-list":
-		if count == 1 {
-			return "Listing tasks…"
-		}
-		return fmt.Sprintf("Listing tasks %d times…", count)
-	case "task-delete":
-		if count == 1 {
-			return "Deleting 1 task…"
-		}
-		return fmt.Sprintf("Deleting %d tasks…", count)
-	case "ask-user":
-		if count == 1 {
-			return "Asking 1 question…"
-		}
-		return fmt.Sprintf("Asking %d questions…", count)
-	case "mcp-list-resources":
-		if count == 1 {
-			return "Listing MCP resources…"
-		}
-		return fmt.Sprintf("Listing MCP resources %d times…", count)
-	case "mcp-read-resource":
-		if count == 1 {
-			return "Reading 1 MCP resource…"
-		}
-		return fmt.Sprintf("Reading %d MCP resources…", count)
-	case "mcp-auth":
-		if count == 1 {
-			return "Updating MCP auth…"
-		}
-		return fmt.Sprintf("Updating MCP auth %d times…", count)
-	case "enter-worktree":
-		if count == 1 {
-			return "Entering 1 worktree…"
-		}
-		return fmt.Sprintf("Entering %d worktrees…", count)
-	case "exit-worktree":
-		if count == 1 {
-			return "Exiting 1 worktree…"
-		}
-		return fmt.Sprintf("Exiting %d worktrees…", count)
-	case "send-message":
-		if count == 1 {
-			return "Sending 1 message…"
-		}
-		return fmt.Sprintf("Sending %d messages…", count)
-	case "agent":
-		if count == 1 {
-			return "Delegating 1 task…"
-		}
-		return fmt.Sprintf("Delegating %d tasks…", count)
-	}
-	return fmt.Sprintf("Using %s %d time(s)…", humanizeToolID(name), count)
+	return runningVerb(name) + " " + toolNounCount(name, len(group)) + "…"
 }
 
 func formatToolGroupLabel(name string, group []ToolItem) string {
@@ -480,12 +353,9 @@ func formatDetailedGroupLabel(name string, running bool, group []ToolItem) strin
 
 func toolDescriptor(name, argsJSON string) string {
 	switch name {
-	case "file-read", "file-write", "file-edit", "multi-edit", "enter-worktree", "exit-worktree", "ls":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
-			return termtext.FitLeft(termtext.SingleLine(args.Path), 36)
+	case "file-read", "file-write", "file-edit", "multi-edit", "view-image", "enter-worktree", "exit-worktree", "ls":
+		if p := strings.TrimSpace(filePathArg(argsJSON)); p != "" {
+			return termtext.FitLeft(termtext.SingleLine(p), 36)
 		}
 	case "repo-search", "tool-search", "web-search", "grep":
 		var args struct {
@@ -556,76 +426,6 @@ func toolDescriptor(name, argsJSON string) string {
 		}
 	}
 	return ""
-}
-
-func runningVerb(name string) string {
-	switch {
-	case isLSPTool(name):
-		return "Querying"
-	case isSkillTool(name):
-		return "Loading"
-	}
-	switch name {
-	case "file-read":
-		return "Reading"
-	case "file-write":
-		return "Writing"
-	case "file-edit", "multi-edit":
-		return "Editing"
-	case "repo-search", "tool-search", "web-search":
-		return "Searching"
-	case "web-fetch":
-		return "Fetching"
-	case "download":
-		return "Downloading"
-	case "shell-exec", "bash", "bash-output":
-		return "Running"
-	case "pty-start":
-		return "Starting"
-	case "pty-write":
-		return "Driving"
-	case "pty-kill":
-		return "Closing"
-	case "glob":
-		return "Matching"
-	case "grep":
-		return "Grepping"
-	case "ls":
-		return "Listing"
-	case "todo-write":
-		return "Writing"
-	case "task-create":
-		return "Creating"
-	case "task-get":
-		return "Reading"
-	case "task-update":
-		return "Updating"
-	case "task-list":
-		return "Listing"
-	case "task-delete":
-		return "Deleting"
-	case "ask-user":
-		return "Asking"
-	case "enter-plan-mode":
-		return "Entering"
-	case "exit-plan-mode":
-		return "Exiting"
-	case "mcp-list-resources":
-		return "Listing"
-	case "mcp-read-resource":
-		return "Reading"
-	case "mcp-auth":
-		return "Updating"
-	case "enter-worktree":
-		return "Entering"
-	case "exit-worktree":
-		return "Exiting"
-	case "send-message":
-		return "Sending"
-	case "agent":
-		return "Delegating"
-	}
-	return "Using"
 }
 
 func humanizeToolID(name string) string {

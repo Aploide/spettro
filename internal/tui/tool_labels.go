@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"spettro/internal/agent"
 	"spettro/internal/termtext"
 )
 
@@ -164,23 +165,35 @@ func approvalLabel(argsJSON string) string {
 }
 
 // isLSPTool reports whether name is the lsp tool or one of the retired
-// language-server tools it replaced.
+// language-server tools it replaced. The retired names come from the
+// runtime's own table (agent.CanonicalToolName), so the TUI cannot drift
+// from what the runtime routes to lsp.
 func isLSPTool(name string) bool {
-	switch name {
-	case "lsp", "diagnostics", "references", "hover", "lsp-restart":
-		return true
-	}
-	return false
+	return agent.CanonicalToolName(name) == "lsp"
 }
 
 // isSkillTool reports whether name is the skill tool or one of its retired
-// names.
+// names (see isLSPTool).
 func isSkillTool(name string) bool {
-	switch name {
-	case "skill", "skill-read", "skill-list", "activate-skill", "skill-activate":
-		return true
+	return agent.CanonicalToolName(name) == "skill"
+}
+
+// filePathArg returns the file a file tool call names: its "path", or
+// "file_path", the spelling Claude Code uses, which the runtime accepts as
+// an alias (models trained on Claude Code often send it). Without this a
+// transcript row read "Edited file" and showed no diff for such an edit.
+func filePathArg(argsJSON string) string {
+	var args struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
 	}
-	return false
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return ""
+	}
+	if strings.TrimSpace(args.Path) != "" {
+		return args.Path
+	}
+	return args.FilePath
 }
 
 // Labels for tools of the operator's own.
@@ -231,8 +244,9 @@ func userToolLabel(name string, running bool) string {
 // userToolGroupLabel is the header of a run of consecutive calls of a tool
 // of the operator's own.
 func userToolGroupLabel(name string, count int, running bool) string {
+	w := genericWording(name)
 	if running {
-		return fmt.Sprintf("Using %s %d time(s)…", humanizeToolID(name), count)
+		return w.running + " " + w.phrase(count) + "…"
 	}
-	return fmt.Sprintf("Used %s %d times", humanizeToolID(name), count)
+	return w.done + " " + w.phrase(count)
 }

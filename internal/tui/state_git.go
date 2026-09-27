@@ -237,13 +237,11 @@ func computeFileDiff(cwd, name, argsJSON, status string) string {
 	if name != "file-write" && name != "file-edit" && name != "multi-edit" {
 		return ""
 	}
-	var args struct {
-		Path string `json:"path"`
-	}
-	if json.Unmarshal([]byte(argsJSON), &args) != nil || strings.TrimSpace(args.Path) == "" {
+	path := strings.TrimSpace(filePathArg(argsJSON))
+	if path == "" {
 		return ""
 	}
-	return gitPathDiff(cwd, strings.TrimSpace(args.Path))
+	return gitPathDiff(cwd, path)
 }
 
 // gitPathDiff returns a unified diff for path against HEAD: working-tree

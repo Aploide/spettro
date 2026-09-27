@@ -206,29 +206,25 @@ func formatToolLabel(name, argsJSON string) string {
 	}
 	switch name {
 	case "file-read":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Read " + labelPath(args.Path)
+		if p := filePathArg(argsJSON); p != "" {
+			return "Read " + labelPath(p)
 		}
 		return "Read file"
 	case "file-write":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Wrote " + labelPath(args.Path)
+		if p := filePathArg(argsJSON); p != "" {
+			return "Wrote " + labelPath(p)
 		}
 		return "Wrote file"
 	case "file-edit", "multi-edit":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Edited " + labelPath(args.Path)
+		if p := filePathArg(argsJSON); p != "" {
+			return "Edited " + labelPath(p)
 		}
 		return "Edited file"
+	case "view-image":
+		if p := filePathArg(argsJSON); p != "" {
+			return "Viewed " + labelPath(p)
+		}
+		return "Viewed image"
 	case "repo-search":
 		var args struct {
 			Query string `json:"query"`
@@ -485,6 +481,11 @@ func formatToolLabel(name, argsJSON string) string {
 			return fmt.Sprintf("Delegated to %s", label)
 		}
 	}
+	// A built-in without a case of its own: its counted wording for one
+	// call ("Read 1 job output", "Configured settings").
+	if w, ok := wordingFor(name); ok {
+		return strings.TrimSpace(w.done + " " + w.single())
+	}
 	return humanizeToolID(name)
 }
 
@@ -497,29 +498,25 @@ func formatRunningLabel(name, argsJSON string) string {
 	}
 	switch name {
 	case "file-read":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Reading " + labelPath(args.Path) + "…"
+		if p := filePathArg(argsJSON); p != "" {
+			return "Reading " + labelPath(p) + "…"
 		}
 		return "Reading…"
 	case "file-write":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Writing " + labelPath(args.Path) + "…"
+		if p := filePathArg(argsJSON); p != "" {
+			return "Writing " + labelPath(p) + "…"
 		}
 		return "Writing…"
 	case "file-edit", "multi-edit":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Editing " + labelPath(args.Path) + "…"
+		if p := filePathArg(argsJSON); p != "" {
+			return "Editing " + labelPath(p) + "…"
 		}
 		return "Editing…"
+	case "view-image":
+		if p := filePathArg(argsJSON); p != "" {
+			return "Viewing " + labelPath(p) + "…"
+		}
+		return "Viewing image…"
 	case "repo-search":
 		var args struct {
 			Query string `json:"query"`
@@ -661,221 +658,40 @@ func formatRunningLabel(name, argsJSON string) string {
 	case "agent":
 		return "Delegating to sub-agent…"
 	}
+	if w, ok := wordingFor(name); ok {
+		return inProgress(strings.TrimSpace(w.running + " " + w.single()))
+	}
 	return "Using " + humanizeToolID(name) + "…"
 }
 
 func extractToolPath(name, argsJSON string) string {
 	switch name {
 	case "file-read", "file-write":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil {
-			return args.Path
-		}
+		return filePathArg(argsJSON)
 	}
 	return ""
-}
-
-func toolActionVerb(name string) string {
-	switch {
-	case isLSPTool(name):
-		return "Queried"
-	case isSkillTool(name):
-		return "Loaded"
-	}
-	switch name {
-	case "file-read":
-		return "Read"
-	case "file-write":
-		return "Wrote"
-	case "file-edit", "multi-edit":
-		return "Edited"
-	case "repo-search", "tool-search", "web-search":
-		return "Searched"
-	case "web-fetch":
-		return "Fetched"
-	case "download":
-		return "Downloaded"
-	case "shell-exec", "bash", "bash-output":
-		return "Ran"
-	case "pty-start":
-		return "Started"
-	case "pty-write":
-		return "Drove"
-	case "pty-kill":
-		return "Closed"
-	case "glob":
-		return "Matched"
-	case "grep":
-		return "Grepped"
-	case "ls":
-		return "Listed"
-	case "todo-write":
-		return "Wrote"
-	case "task-create":
-		return "Created"
-	case "task-get":
-		return "Read"
-	case "task-update":
-		return "Updated"
-	case "task-list":
-		return "Listed"
-	case "task-delete":
-		return "Deleted"
-	case "ask-user":
-		return "Asked"
-	case "enter-plan-mode":
-		return "Entered"
-	case "exit-plan-mode":
-		return "Exited"
-	case "mcp-list-resources":
-		return "Listed"
-	case "mcp-read-resource":
-		return "Read"
-	case "mcp-auth":
-		return "Updated"
-	case "enter-worktree":
-		return "Entered"
-	case "exit-worktree":
-		return "Exited"
-	case "send-message":
-		return "Sent"
-	case "agent":
-		return "Delegated"
-	}
-	return "Used"
-}
-
-func toolNounCount(name string, count int) string {
-	switch {
-	case isLSPTool(name):
-		if count == 1 {
-			return "the language server once"
-		}
-		return fmt.Sprintf("the language server %d times", count)
-	case isSkillTool(name):
-		if count == 1 {
-			return "1 skill"
-		}
-		return fmt.Sprintf("%d skills", count)
-	}
-	switch name {
-	case "file-read", "file-write", "file-edit", "multi-edit":
-		if count == 1 {
-			return "1 file"
-		}
-		return fmt.Sprintf("%d files", count)
-	case "repo-search", "tool-search", "web-search", "grep":
-		if count == 1 {
-			return "1 query"
-		}
-		return fmt.Sprintf("%d queries", count)
-	case "shell-exec", "bash", "bash-output":
-		if count == 1 {
-			return "1 command"
-		}
-		return fmt.Sprintf("%d commands", count)
-	case "pty-start", "pty-write", "pty-kill":
-		if count == 1 {
-			return "1 terminal session"
-		}
-		return fmt.Sprintf("%d terminal sessions", count)
-	case "glob":
-		if count == 1 {
-			return "1 pattern"
-		}
-		return fmt.Sprintf("%d patterns", count)
-	case "web-fetch":
-		if count == 1 {
-			return "1 page"
-		}
-		return fmt.Sprintf("%d pages", count)
-	case "download":
-		if count == 1 {
-			return "1 download"
-		}
-		return fmt.Sprintf("%d downloads", count)
-	case "ls":
-		if count == 1 {
-			return "1 listing"
-		}
-		return fmt.Sprintf("%d listings", count)
-	case "todo-write":
-		if count == 1 {
-			return "1 todo batch"
-		}
-		return fmt.Sprintf("%d todo batches", count)
-	case "task-create", "task-get", "task-update", "task-list", "task-delete":
-		if count == 1 {
-			return "1 task"
-		}
-		return fmt.Sprintf("%d tasks", count)
-	case "ask-user":
-		if count == 1 {
-			return "1 prompt"
-		}
-		return fmt.Sprintf("%d prompts", count)
-	case "enter-plan-mode", "exit-plan-mode":
-		if count == 1 {
-			return "1 mode change"
-		}
-		return fmt.Sprintf("%d mode changes", count)
-	case "mcp-list-resources", "mcp-read-resource":
-		if count == 1 {
-			return "1 MCP resource"
-		}
-		return fmt.Sprintf("%d MCP resources", count)
-	case "mcp-auth":
-		if count == 1 {
-			return "1 MCP auth update"
-		}
-		return fmt.Sprintf("%d MCP auth updates", count)
-	case "enter-worktree", "exit-worktree":
-		if count == 1 {
-			return "1 worktree"
-		}
-		return fmt.Sprintf("%d worktrees", count)
-	case "send-message":
-		if count == 1 {
-			return "1 message"
-		}
-		return fmt.Sprintf("%d messages", count)
-	case "agent":
-		if count == 1 {
-			return "1 delegation"
-		}
-		return fmt.Sprintf("%d delegations", count)
-	}
-	if count == 1 {
-		return "1 call"
-	}
-	return fmt.Sprintf("%d calls", count)
 }
 
 func summarizeToolArgs(name, argsJSON string) string {
 	switch name {
 	case "file-read":
 		var args struct {
-			Path      string `json:"path"`
-			StartLine int    `json:"start_line"`
-			EndLine   int    `json:"end_line"`
+			StartLine int `json:"start_line"`
+			EndLine   int `json:"end_line"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil {
-			if args.Path == "" {
+			path := filePathArg(argsJSON)
+			if path == "" {
 				return "Reads a file from the workspace."
 			}
 			if args.StartLine > 0 || args.EndLine > 0 {
-				return fmt.Sprintf("Reads %s (lines %d-%d).", args.Path, args.StartLine, args.EndLine)
+				return fmt.Sprintf("Reads %s (lines %d-%d).", path, args.StartLine, args.EndLine)
 			}
-			return fmt.Sprintf("Reads %s.", args.Path)
+			return fmt.Sprintf("Reads %s.", path)
 		}
 	case "file-write":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return fmt.Sprintf("Writes %s.", args.Path)
+		if path := filePathArg(argsJSON); path != "" {
+			return fmt.Sprintf("Writes %s.", path)
 		}
 	case "repo-search":
 		var args struct {

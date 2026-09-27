@@ -551,6 +551,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	b.mu.Lock()
 	agentID := s.agentID
 	manifest := s.manifest
+	turn.manifest = manifest
 	steering := s.steering
 	// Seed the session's live permission from the freshly loaded config; a
 	// mid-run /permission or config-option change overwrites it and the

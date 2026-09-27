@@ -290,3 +290,33 @@ func jsonString(v any) string {
 	raw, _ := json.Marshal(v)
 	return string(raw)
 }
+
+// A tool of the operator's own that shares a built-in's name is never
+// labelled as that built-in: its card gets the generic "<name> <args>"
+// title and a kind guessed from its name, like any other tool of theirs.
+func TestOperatorToolsAreNotLabelledAsBuiltins(t *testing.T) {
+	turn := &turnState{manifest: config.AgentManifest{Tools: []config.ToolSpec{
+		{ID: "ls", Kind: "script"},
+		{ID: "skill-list", Kind: "http"},
+		{ID: "references", Kind: "mcp"},
+		{ID: "bash", Kind: "script"},
+	}}}
+	for _, tc := range []struct{ name, args string }{
+		{"ls", `{"bucket":"b"}`},
+		{"skill-list", `{}`},
+		{"references", `{"symbol":"Foo"}`},
+		{"bash", `{"command":"deploy"}`},
+	} {
+		tr := agent.ToolTrace{Name: tc.name, Args: tc.args}
+		if got, want := turn.cardTitle(tr), genericToolTitle(tc.name, tc.args); got != want {
+			t.Errorf("%s: title %q, want %q", tc.name, got, want)
+		}
+	}
+	if got := turn.cardKind("references"); got == acpsdk.ToolKindSearch {
+		t.Errorf("the operator's references tool got the built-in's kind %q", got)
+	}
+	// A built-in is still titled as one.
+	if got := turn.cardTitle(agent.ToolTrace{Name: "file-read", Args: `{"path":"x"}`}); got != "Read x" {
+		t.Errorf("built-in title = %q", got)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/agent"
+	"spettro/internal/config"
 	"spettro/internal/session"
 )
 
@@ -31,6 +32,9 @@ type turnState struct {
 	// words reach the chat as agent messages; a sub-agent's narration would
 	// read as the main agent talking.
 	agentID string
+	// manifest is the session's agent manifest, which says which tool names
+	// belong to tools of the operator's own (see cardTitle).
+	manifest config.AgentManifest
 
 	mu  sync.Mutex
 	seq int
@@ -150,8 +154,8 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 		t.mu.Unlock()
 		t.sessionUpdate(acpsdk.StartToolCall(
 			call.id,
-			toolCallTitle(tr),
-			acpsdk.WithStartKind(toolKind(tr.Name)),
+			t.cardTitle(tr),
+			acpsdk.WithStartKind(t.cardKind(tr.Name)),
 			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
 			acpsdk.WithStartLocations(toolLocations(tr.Args, t.cwd)),
 			acpsdk.WithStartRawInput(boundedRawInput(tr.Args)),
@@ -186,8 +190,8 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 		// single already-finished tool call.
 		t.sessionUpdate(acpsdk.StartToolCall(
 			t.nextToolCallID("call"),
-			toolCallTitle(tr),
-			acpsdk.WithStartKind(toolKind(tr.Name)),
+			t.cardTitle(tr),
+			acpsdk.WithStartKind(t.cardKind(tr.Name)),
 			acpsdk.WithStartStatus(status),
 			acpsdk.WithStartLocations(toolLocations(tr.Args, t.cwd)),
 			acpsdk.WithStartRawInput(boundedRawInput(tr.Args)),
