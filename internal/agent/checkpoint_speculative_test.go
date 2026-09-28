@@ -165,10 +165,11 @@ func TestSpeculativeCheckpointReuse(t *testing.T) {
 	prepareAndWait(r)
 	// A read-only shell command counts as read-only only where the classifier
 	// can parse it (POSIX shells); under PowerShell every command may write,
-	// so the step uses a read-only tool there instead.
+	// so the step uses a second read-only file tool there instead (one of the
+	// tools in speculativeAllowed).
 	readOnly := toolCall{Tool: "bash", Args: mustJSON(t, map[string]string{"command": "ls"})}
 	if shell.Dialect() != shell.KindPOSIX {
-		readOnly = toolCall{Tool: "grep", Args: mustJSON(t, map[string]string{"pattern": "a"})}
+		readOnly = toolCall{Tool: "file-read", Args: mustJSON(t, map[string]string{"path": "a.txt"})}
 	}
 	runStep(t, r,
 		toolCall{Tool: "file-read", Args: mustJSON(t, map[string]string{"path": "a.txt"})},
