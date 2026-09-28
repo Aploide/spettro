@@ -176,8 +176,8 @@ func TestPromptRunsSkillCommandAndMention(t *testing.T) {
 		text          string
 		want, notWant []string
 	}{
-		{"skill command", "/greet Ada", []string{"(/greet Ada)", "Say hello to Ada.\n", "Context from /proj/main.go:"}, nil},
-		{"mention in the file", "look at this", []string{"Context from /proj/main.go:"}, []string{"skill_content"}},
+		{"skill command", "/greet Ada", []string{"(/greet Ada)", "Say hello to Ada.\n", "Context from " + filepath.FromSlash("/proj/main.go") + ":"}, nil},
+		{"mention in the file", "look at this", []string{"Context from " + filepath.FromSlash("/proj/main.go") + ":"}, []string{"skill_content"}},
 	} {
 		if _, err := b.Prompt(context.Background(), acpsdk.PromptRequest{
 			SessionId: acpsdk.SessionId(s.id),

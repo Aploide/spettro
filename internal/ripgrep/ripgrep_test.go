@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -141,7 +142,8 @@ func TestDownloadInstallsVerifiedBinary(t *testing.T) {
 	if err != nil || string(data) != "#!/bin/sh\necho fake rg\n" {
 		t.Fatalf("installed binary = %q, %v", data, err)
 	}
-	if info, _ := os.Stat(got); info.Mode().Perm()&0o100 == 0 {
+	// Windows file systems have no Unix execute bit to check.
+	if info, _ := os.Stat(got); runtime.GOOS != "windows" && info.Mode().Perm()&0o100 == 0 {
 		t.Fatalf("binary not executable: %v", info.Mode())
 	}
 	// No temporary files are left behind.

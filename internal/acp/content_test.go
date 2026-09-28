@@ -70,7 +70,9 @@ func TestReadPromptContent_EmbeddedResource(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	task := p.task()
-	if !strings.Contains(task, "Context from /tmp/proj/util.go:") || !strings.Contains(task, "package util") {
+	// The label is the URI's local path in the host's own form (backslashes
+	// on Windows).
+	if !strings.Contains(task, "Context from "+filepath.FromSlash("/tmp/proj/util.go")+":") || !strings.Contains(task, "package util") {
 		t.Fatalf("embedded context missing from task: %q", task)
 	}
 	// The typed text is kept apart from the attached file, so a skill

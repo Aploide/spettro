@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -75,6 +76,18 @@ func randomRule(rng *rand.Rand) string {
 	return line
 }
 
+// treeNames is gitNames minus the names the host cannot create: Windows
+// reserves '?' in file names, so "q?" is only exercised elsewhere. Rules
+// still use every atom, so wildmatch coverage of '?' is unchanged.
+func treeNames() []string {
+	if runtime.GOOS != "windows" {
+		return gitNames
+	}
+	return slices.DeleteFunc(slices.Clone(gitNames), func(n string) bool {
+		return strings.ContainsAny(n, `<>:"|?*`)
+	})
+}
+
 // randomTree returns slash paths of a small random tree: files and the
 // directories that hold them.
 func randomTree(rng *rand.Rand) (files, dirs []string) {
@@ -82,8 +95,9 @@ func randomTree(rng *rand.Rand) (files, dirs []string) {
 	for range 60 {
 		depth := 1 + rng.Intn(4)
 		var parts []string
+		names := treeNames()
 		for range depth {
-			parts = append(parts, gitNames[rng.Intn(len(gitNames))])
+			parts = append(parts, names[rng.Intn(len(names))])
 		}
 		p := strings.Join(parts, "/")
 		if slices.Contains(dirs, p) || slices.Contains(files, p) {

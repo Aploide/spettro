@@ -710,7 +710,9 @@ func TestPostToolHookRewriteRestampsFile(t *testing.T) {
 	if _, err := call("file-edit", map[string]any{"path": "f.go", "edits": []map[string]any{{"old_string": "a := 10", "new_string": "a := 11"}}}); err != nil {
 		t.Fatalf("edits[] after hook: %v", err)
 	}
-	if got := readTestFile(t, path); !strings.HasPrefix(got, "a := 11\nb := 20\n// formatted\n") {
+	// The hook's echo ends its lines with CRLF on Windows; only the edits and
+	// the hook's line matter here, not the host's line ending.
+	if got := strings.ReplaceAll(readTestFile(t, path), "\r\n", "\n"); !strings.HasPrefix(got, "a := 11\nb := 20\n// formatted\n") {
 		t.Fatalf("file: %q", got)
 	}
 

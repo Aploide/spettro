@@ -301,7 +301,9 @@ func TestShellOutputKeepsHeadAndTailWithSpoolPath(t *testing.T) {
 	if len(out) > shellOutputHistoryLimit+1 || len(out) < shellOutputHistoryLimit/2 {
 		t.Fatalf("output length %d not near the %d budget", len(out), shellOutputHistoryLimit)
 	}
-	if !strings.HasPrefix(out, "log line 1\n") || !strings.HasSuffix(strings.TrimSpace(out), "log line 20000") {
+	// PowerShell ends each line with CRLF; compare the text, not the line ending.
+	text := strings.ReplaceAll(out, "\r\n", "\n")
+	if !strings.HasPrefix(text, "log line 1\n") || !strings.HasSuffix(strings.TrimSpace(text), "log line 20000") {
 		t.Fatalf("head or tail missing: %q ... %q", out[:40], out[len(out)-40:])
 	}
 	if !strings.Contains(out, "full output saved to ") {

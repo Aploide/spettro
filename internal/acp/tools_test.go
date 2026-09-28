@@ -168,8 +168,13 @@ func TestToolLocationsAreAbsolute(t *testing.T) {
 	if len(locs) != 1 || locs[0].Path != filepath.Join("/proj", "src/a.go") || locs[0].Line == nil || *locs[0].Line != 12 {
 		t.Fatalf("relative path: %s", jsonString(locs))
 	}
-	locs = toolLocations(`{"path":"/tmp/a.go","content":"x"}`, "/proj")
-	if len(locs) != 1 || locs[0].Path != "/tmp/a.go" || locs[0].Line != nil {
+	// An absolute path is kept as it is. It is built from a temp dir so it
+	// is absolute on every OS: on Windows "/tmp/a.go" has no drive and is
+	// resolved against the workspace, as the file tools themselves do.
+	abs := filepath.Join(t.TempDir(), "a.go")
+	args, _ := json.Marshal(map[string]string{"path": abs, "content": "x"})
+	locs = toolLocations(string(args), "/proj")
+	if len(locs) != 1 || locs[0].Path != abs || locs[0].Line != nil {
 		t.Fatalf("absolute path: %s", jsonString(locs))
 	}
 	if locs := toolLocations("not json", "/proj"); locs != nil {

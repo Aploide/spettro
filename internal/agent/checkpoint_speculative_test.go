@@ -16,6 +16,7 @@ import (
 	"spettro/internal/checkpoint"
 	"spettro/internal/hooks"
 	"spettro/internal/jobs"
+	"spettro/internal/shell"
 )
 
 // fakePrepared records how the runtime used a prepared snapshot.
@@ -162,9 +163,16 @@ func TestSpeculativeCheckpointReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepareAndWait(r)
+	// A read-only shell command counts as read-only only where the classifier
+	// can parse it (POSIX shells); under PowerShell every command may write,
+	// so the step uses a read-only tool there instead.
+	readOnly := toolCall{Tool: "bash", Args: mustJSON(t, map[string]string{"command": "ls"})}
+	if shell.Dialect() != shell.KindPOSIX {
+		readOnly = toolCall{Tool: "grep", Args: mustJSON(t, map[string]string{"pattern": "a"})}
+	}
 	runStep(t, r,
 		toolCall{Tool: "file-read", Args: mustJSON(t, map[string]string{"path": "a.txt"})},
-		toolCall{Tool: "bash", Args: mustJSON(t, map[string]string{"command": "ls"})},
+		readOnly,
 	)
 	prepareAndWait(r)
 	if *preparations != 1 {

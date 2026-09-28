@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"spettro/internal/provider"
+	"spettro/internal/shell"
 )
 
 func writeFileAt(t *testing.T, path, content string) {
@@ -213,7 +214,7 @@ func TestInstructionsBudgetFavorsSpecificFiles(t *testing.T) {
 		t.Errorf("truncation note for a file above cwd must name its absolute path and the shell, not file-read")
 	}
 	globalAbs := filepath.Join(home, ".spettro", "AGENTS.md")
-	if strings.Contains(got, `file="~/.spettro/AGENTS.md"`) || !strings.Contains(got, "file-read cannot open them: read them with a read-only shell command such as sed -n if relevant): "+globalAbs) {
+	if strings.Contains(got, `file="~/.spettro/AGENTS.md"`) || !strings.Contains(got, "file-read cannot open them: read them with "+shellReadCommand(shell.Dialect())+" if relevant): "+globalAbs) {
 		t.Errorf("the global file is the least specific: it is the one left out, listed by absolute path:\n%s", got[len(got)-min(len(got), 600):])
 	}
 	if len(got) > instructionTotalMaxBytes+2048 {
