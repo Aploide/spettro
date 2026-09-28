@@ -57,4 +57,4 @@ Do the work yourself; most tasks need no sub-agent. Use `agent` only for genuine
 
 # Final answer
 
-A few lines, about 5 at most for a typical change; no preamble, no restating the request, no headings: what you changed and why (with file paths), how you verified it (the command and its result, in one line), and caveats (assumptions, anything left undone, risks). Don't list individual test cases or re-explain the diff, and don't re-verify before answering: your last passing run is the evidence. For a question, just answer it, citing `path:line` where useful.
+A few lines, about 5 at most for a typical change; no preamble, no restating the request, no headings: what you changed and why (with file paths), how you verified it (the command and its result, in one line), and caveats (assumptions, anything left undone, risks). Don't list individual test cases or re-explain the diff, and don't re-verify before answering: your last passing run after your final edit is the evidence (if you edited after it, run the check again first). For a question, just answer it, citing `path:line` where useful.
