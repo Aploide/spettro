@@ -76,7 +76,7 @@ banner is attributed to PowerShell. Notifications must be enabled for
 
 Not available. The `pty-*` tools report unsupported; see
 [`docs/pty.md`](pty.md#platform-support). Long-running commands still work
-through `shell-exec` with `run_in_background`.
+through `bash` with `run_in_background`.
 
 ## Where files live
 
@@ -95,4 +95,6 @@ the guarantee is expressed directly instead.
 go build ./cmd/spettro
 ```
 
-`make build` also works under Git Bash or MSYS2 and produces `bin/spettro.exe`.
+`make build` also works under Git Bash or MSYS2 and produces `bin/spettro.exe`,
+built like a release (`-trimpath`, `-ldflags "-s -w"`, a much smaller
+binary). `make size` prints the size and the number of linked packages.

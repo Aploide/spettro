@@ -11,10 +11,14 @@ import (
 	"spettro/internal/version"
 )
 
-// updateCheckMsg carries the result of the background startup version check.
+// updateCheckMsg carries the result of a version check: the background
+// startup check, or the live check /update runs when no update is pending.
 type updateCheckMsg struct {
 	rel *update.Release
 	err error
+	// explicit marks the check /update asked for: its outcome is reported
+	// either way, and a newer release is installed at once.
+	explicit bool
 }
 
 // updateAppliedMsg carries the result of downloading and installing an
@@ -37,6 +41,18 @@ func checkUpdateCmd() tea.Cmd {
 	}
 }
 
+// recheckUpdateCmd asks GitHub for the latest release, bypassing the
+// release-check cache: the startup check may be up to a day old (see
+// update.LatestRelease), and /update must not miss a newer release.
+func recheckUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		rel, err := update.RefreshLatestRelease(ctx)
+		return updateCheckMsg{rel: rel, err: err, explicit: true}
+	}
+}
+
 // applyUpdateCmd downloads and installs rel, replacing the running binary.
 func applyUpdateCmd(rel *update.Release) tea.Cmd {
 	return func() tea.Msg {
@@ -48,6 +64,9 @@ func applyUpdateCmd(rel *update.Release) tea.Cmd {
 }
 
 func (m Model) handleUpdateCheck(msg updateCheckMsg) (tea.Model, tea.Cmd) {
+	if msg.explicit {
+		return m.handleExplicitUpdateCheck(msg)
+	}
 	// Silent on failure (offline, rate-limited, etc.) — this is a passive
 	// background check, not something worth interrupting the user for.
 	if msg.err != nil || msg.rel == nil || !update.IsNewer(version.App, msg.rel.Version) {
@@ -57,6 +76,22 @@ func (m Model) handleUpdateCheck(msg updateCheckMsg) (tea.Model, tea.Cmd) {
 	m.pushSystemMsg(fmt.Sprintf("update available: %s → %s — type /update to install", version.App, msg.rel.Version))
 	m.refreshViewport()
 	return m, nil
+}
+
+// handleExplicitUpdateCheck reports the live check /update ran and, when it
+// found a newer release, installs it as /update asked.
+func (m Model) handleExplicitUpdateCheck(msg updateCheckMsg) (tea.Model, tea.Cmd) {
+	m.updateBusy = false
+	switch {
+	case msg.err != nil:
+		m.showBanner("update check failed: "+msg.err.Error(), "error")
+		return m, nil
+	case msg.rel == nil || !update.IsNewer(version.App, msg.rel.Version):
+		m.showBanner("spettro "+version.App+" is already up to date", "info")
+		return m, nil
+	}
+	m.updateAvailable = msg.rel
+	return m.runUpdateCommand()
 }
 
 func (m Model) handleUpdateApplied(msg updateAppliedMsg) (tea.Model, tea.Cmd) {
@@ -73,7 +108,8 @@ func (m Model) handleUpdateApplied(msg updateAppliedMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-// runUpdateCommand kicks off the download/install for a pending update.
+// runUpdateCommand kicks off the download/install for a pending update, or,
+// when none is pending, a live check that installs a newer release it finds.
 // Invoked from /update.
 func (m Model) runUpdateCommand() (tea.Model, tea.Cmd) {
 	if m.updateBusy {
@@ -81,8 +117,9 @@ func (m Model) runUpdateCommand() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.updateAvailable == nil {
-		m.showBanner("spettro "+version.App+" is already up to date", "info")
-		return m, nil
+		m.updateBusy = true
+		m.showBanner("checking for updates…", "info")
+		return m, recheckUpdateCmd()
 	}
 	m.updateBusy = true
 	m.showBanner("downloading "+m.updateAvailable.Version+"…", "info")

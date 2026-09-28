@@ -40,24 +40,42 @@ project-specific hash combined with a timestamp:
 ### Task graph
 
 Session tasks form a persistent dependency graph, not just a flat list. The
-agent manages it with the `task-create`, `task-update`, `task-get`,
-`task-list` and `task-delete` tools (the flat `todo-write` tool remains as an
-alias writing to the same store):
+agent manages it with the `todo-write` tool (the retired `task-create`,
+`task-update`, `task-get`, `task-list` and `task-delete` names still work as
+aliases of it). The tool's description tells the model to use it only for
+genuinely multi-step work and never as the only call in a step: a step spent
+on the list alone does not advance the task. When a step's calls are all
+successful `todo-write` calls anyway, the first such step of a turn gets one
+line after its normal result: "Plan updated. Continue with the next concrete
+action in the same response next time." Later ones in the same turn get
+nothing extra. It is advertised in every host,
+headless goal runs included; ACP clients show the list as the session plan.
+
+- `todos` replaces the whole list; with `merge: true` it inserts or updates
+  only the given tasks by `id`, and fields left out keep their stored value.
+  `delete` removes tasks by id and `clear_completed` prunes completed and
+  cancelled ones. A call with none of these only reads the list.
+- Every call returns the full list in dependency order, each task with a
+  derived `blocked_by` (its incomplete dependencies) and `ready` (pending,
+  all dependencies met).
+- Sub-agents share their parent's session folder, so below the top level a
+  full replace is merged instead: a worker can add and update tasks but
+  never wipe the orchestrator's list. In that merge a task written without
+  an `id` updates the stored task with exactly the same `content`, so a
+  worker that rewrites its whole list does not add copies.
 
 - Each task has an `id`, `content`, `status` (`pending`, `in_progress`,
   `completed`, `blocked`, `cancelled`) and optional `dependencies` (IDs of
   tasks that must be completed first).
-- Dependencies are validated on every change: unknown IDs, self-references and
-  cycles are rejected, and a task cannot be moved to `in_progress` or
-  `completed` while any dependency is incomplete.
-- `task-list` returns tasks in dependency order with a derived `blocked_by`
-  field, and supports the pseudo-filters `ready` (pending, all dependencies
-  met) and `blocked`.
+- Dependencies are validated on every change: self-references and cycles are
+  rejected, dependencies on unknown IDs are dropped with a note in the
+  result, and a merged task cannot be moved to `in_progress` or `completed`
+  while any dependency is incomplete. Tasks written without an `id` get the
+  next free `task-N`.
 - The TUI side panel and `/tasks list` render the graph live during runs;
   pending tasks gated by incomplete dependencies show as blocked.
-- `task-delete` removes a task by id (or prunes all completed/cancelled
-  tasks with `clear_completed`); references to deleted tasks are stripped
-  from other tasks' dependencies so the graph stays valid.
+- References to deleted tasks are stripped from other tasks' dependencies so
+  the graph stays valid.
 - The graph is persisted per session, so a `/resume` restores the plan
   exactly where it was left.
 
@@ -93,13 +111,19 @@ Choose a session to resume:
 
 When a session is loaded:
 
-1. The chat transcript is restored exactly as it appeared (user messages,
-   assistant responses, system messages, tool traces, plan cards).
-2. The structured conversation history (`convHistory`) is rebuilt, so the LLM
-   has full context of what was said and done before.
+1. The chat messages are restored: your prompts, the assistant's answers
+   (with their thinking) and system messages. Tool-call rows and plan cards
+   are not saved with the messages, so they do not reappear in the
+   transcript (step 3 shows what the tools did).
+2. The model's context for the first new turn is the saved transcript as
+   flattened text, since the structured history of that conversation (tool
+   calls and their outputs) is not saved. From that turn on the structured
+   history grows again as usual.
 3. Session events (tool activity, approval decisions, agent spawns) are
    replayed into the activity feed and side panel.
 4. Session tasks (todos) are restored.
+5. What belonged to the conversation you left is dropped: the context gauge
+   starts from zero again, and a plan waiting for `/approve` is discarded.
 
 If the session had an **unfinished goal** in progress, Spettro remembers its
 state (objective, iteration count, no-progress counter, elapsed time) and
@@ -113,16 +137,27 @@ transcript. Use `/resume` explicitly to return to a previous session.
 ## Compact (`/compact`)
 
 When the conversation grows long, the context window fills up. Compaction
-replaces the entire transcript with a summary, freeing token budget for new
-work:
+shrinks the conversation the model sees, freeing token budget for new work:
 
 ```text
 /compact
 ```
 
-The LLM reads the full conversation and produces a condensed summary. The
-summary is injected as a system message prefixed with `── conversation
-compacted ──`, and the old messages are discarded.
+The TUI, ACP and the run loop (every mode, headless and `/goal` included)
+share one compaction core, which always keeps, verbatim:
+
+- **the original task**: the conversation's first message (with its
+  environment snapshot), even many turns later;
+- **the latest user messages**: up to three of the most recent user
+  requests and steering messages from the compacted span, so the current
+  request is never summarized away however long the run on it has been;
+- **the most recent tool exchanges**: the last three tool calls with their
+  results (two on a forced compaction), with call/result pairing checked
+  before the history is used, so providers never see an orphaned tool result
+  or an unanswered call.
+
+In the TUI the transcript view is replaced by the summary, prefixed with
+`── conversation compacted ──`.
 
 You can focus the compaction on a specific topic:
 
@@ -132,36 +167,51 @@ You can focus the compaction on a specific topic:
 
 This gives the LLM a hint about what to prioritise in the summary.
 
-### Two-stage compaction (reference-based)
+### Two-stage compaction: prune, then summarize
 
-Compaction is two-stage. Stage 1 is cheap and lossless-by-reference; stage 2
-is the summarizer.
+Stage 1 is cheap and needs no model call; stage 2 is the summarizer.
 
-- **Stage 1 — offload tool results.** Every tool result larger than ~500
+- **Stage 1: prune old tool outputs.** Every tool result larger than ~500
   tokens is already persisted to the session spool at execution time. Before
-  summarizing anything, compaction replaces each such result in the older
-  turns with a short stub that keeps the tool name, an args digest, the size,
-  the ok/error status, and the first/last line:
+  summarizing anything, compaction replaces old results with a short stub
+  that keeps the size, the spool ID, the tool name, an args digest, the
+  ok/error status, and the first and last line:
 
   ```text
-  [offloaded: re-read with tool-output {"id":"spool:7"}] shell-exec args={"command":"go test ./..."} — 48210 chars, 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
+  [output elided: 48210 chars, spool:7 — re-read with tool-output {"id":"spool:7"}] bash args={"command":"go test ./..."} — 1204 lines, status error, head: "…", tail: "FAIL spettro/internal/agent"
   ```
 
-  The full output stays on disk and the model can re-read it at any time with
-  the `tool-output` tool (`{"id":"spool:7","offset":0,"limit":4000}`). If
-  offloading alone brings the estimate back under the auto-compact threshold,
-  compaction stops here — no summarizer call, no token spend, nothing lost.
+  Spooled outputs go first, and the most recent ones (about a fifth of the
+  window, up to 40k tokens) are left alone. If that is not enough, every
+  large output before the verbatim tail is stubbed, with a head/tail excerpt
+  for outputs that have no spool copy, and very large strings in old tool-call
+  arguments (such as a whole file passed to `file-write`) are elided. The full
+  output stays on disk and the model can re-read it at any time with the
+  `tool-output` tool (`{"id":"spool:7","offset":0,"limit":4000}`). If pruning
+  brings the estimate back under the auto-compact threshold, compaction stops
+  here: no summarizer call and no turn dropped.
 
-- **Stage 2 — summarize.** If the history is still too large (or on an
-  explicit `/compact`), the older turns are summarized as before, but the
-  summarizer sees the stubs instead of raw truncations and is instructed to
-  carry the `tool-output` IDs into the summary verbatim, so dropped outputs
-  remain re-readable after summarization.
+- **Stage 2: summarize.** If the history is still too large, or on an
+  explicit `/compact`, the turns between the task and the verbatim tail are
+  replaced by one structured summary with these sections: *Goal*, *Decisions
+  and findings*, *Files modified* (each path and what changed), *Current
+  state* (test and build status, with exact failing tests and error text),
+  *Next steps* and *References* (spool IDs worth re-reading). The summarizer
+  sees edits, commands and error output (bounded per item to fit its window,
+  keeping the head and tail of long outputs), plus any earlier summary to
+  merge. The list of files changed by the edit tools is also derived straight
+  from the tool log and attached to the summary, so no edited file can be
+  forgotten. If the summarizer fails while the run is recovering from an
+  overflowing context, a summary extracted from the transcript (user
+  messages, files modified, recent commands and errors) is used instead of
+  failing the run (not when the run itself was cancelled: the history is then
+  left as it was). A compaction that would not make the history smaller is
+  discarded.
 
 After compaction:
 
 - Token usage and context pressure are reset to zero.
-- The structured conversation history is rebuilt from the summary (one cache
+- The compacted structured history is carried to the next turn (one cache
   miss on the next request, then the new prefix caches again).
 - Session tasks are kept.
 
@@ -179,11 +229,14 @@ configured threshold:
 When enabled, Spettro compacts in two places:
 
 - **Between turns** (TUI and ACP): after an agent turn, if context occupancy
-  is above the threshold percentage.
+  is above the threshold percentage. This goes cheapest first like the run
+  loop: pruning before summarizing, and no summarizer call when the pressure
+  comes from the system prompt and tool schemas rather than the history (it
+  then waits, silently, for the history to grow before trying again).
 - **Inside the run loop** (all modes, including headless and `/goal`): before
   each model step, the runtime estimates context pressure and, past the
-  threshold, summarizes older turns into a single message while keeping the
-  first turn (the task) and the most recent turns verbatim. A one-line notice
+  threshold, prunes old tool outputs and, if that is not enough, summarizes
+  older turns as described above. A one-line notice
   ("compacted 42k → 6k tokens …") appears in the transcript. This is what
   lets long unattended goal runs survive without anyone watching the gauge.
 
@@ -194,9 +247,11 @@ below apply to both triggers.
 Auto-compact uses a failure budget: if the summarizer fails 3 times in a row
 (provider errors), auto-compaction pauses instead of burning a failing call
 every step; a successful compaction (e.g. manual `/compact`) resets the
-counter. Failures never abort the run — the runtime warns and retries at the
-next threshold crossing, and an over-budget request still gets one forced
-compaction as a last resort.
+counter. Failures never abort the run: the runtime notes each one in the
+transcript ("failure 1 of 3 before it pauses") and tries again at the next
+step while the context is still over the threshold, says so when it pauses,
+and an over-budget request still gets one forced compaction as a last
+resort.
 
 ### Configuration
 
@@ -262,8 +317,8 @@ is returned on the `session/prompt` response.
 
 - **Saves** the current conversation to disk (exactly as `/resume` would find
   it).
-- **Clears** the chat transcript, the structured conversation history, and the
-  token counters.
+- **Clears** the chat transcript, the structured conversation history, the
+  token counters and context gauge, and a plan waiting for `/approve`.
 - Starts a fresh session.
 
 Use `/clear` when you want to start a new topic without losing the previous
@@ -339,43 +394,61 @@ Terminates every running job at once.
 
 ### Lifecycle
 
-- Jobs are created when the agent calls `bash` or `shell-exec` with
+- Jobs are created when the agent calls `bash` with
   `run_in_background: true`.
 - Output is captured in a per-job ring buffer (up to 1 MiB of combined
   stdout/stderr, oldest bytes dropped when exceeded).
 - When the session ends (TUI exit, `/exit`), all remaining jobs are killed
   automatically.
+- When the terminal or tmux pane spettro runs in is closed (SIGHUP), spettro
+  kills every foreground shell command, background job and PTY session before
+  it exits. From that moment it also refuses to start new foreground shell
+  commands (they fail with "spettro is shutting down; command not started"), so
+  an agent reacting to its killed command cannot leave a new one running.
+  Under `nohup` the hangup
+  is ignored and everything keeps running.
 - Jobs survive `/clear` (which only resets the conversation). Use `/jobs kill all`
   to clean up explicitly.
 
 ### Tool output spooling
 
-Oversized tool results (from `file-read`, `grep`, `repo-search`, `shell-exec`,
-`bash`, `web-fetch`) are automatically spooled to disk instead of being
+Oversized tool results (from `file-read`, `grep`, `glob`, `bash`, `web-fetch`)
+are automatically spooled to disk instead of being
 hard-truncated. The model receives a truncated head with a footer containing a
-`spool:N` ID and an offset, and can page through the full result using
-`job-output {"job_id":"spool:N","offset":Z}` or the dedicated `tool-output`
-tool (`{"id":"spool:N","offset":Z,"limit":M}`).
+`spool:N` ID and an offset, and can page through the full result with the
+`tool-output` tool (`{"id":"spool:N","offset":Z,"limit":M}`), which every agent
+holding `file-read` has.
 
 In addition, *every* tool result over ~500 tokens — even ones small enough to
 stay in context untruncated — is written to the spool at execution time. This
 backs reference-based compaction (see [Compact](#compact-compact)): when the
-context fills up, oversized results are swapped for `[offloaded: …]` stubs
+context fills up, old oversized results are swapped for `[output elided: …]` stubs
 pointing at their spool IDs rather than being lost to summarization.
 
 Spool files are tied to the conversation, not to a single run: they survive
 run end, and are deleted on `/clear` and when the process exits (TUI exit,
 `/exit`).
 
+The files are written in the background, in the order the results were
+produced. Until a file is on disk, `tool-output` pages through the result from
+memory. Only a truncated shell result names its spool file, and it waits for
+that one write so the path always exists by the time the result is returned;
+every other result returns without waiting for its file. `/clear` and a
+normal exit wait for pending writes before deleting the directory. If a write
+fails (for example, the disk is full), the result stays readable through
+`tool-output` from memory, up to 32 MB of such results per session; past that,
+`tool-output` reports the result as lost.
+
 ```text
 # example: model receives truncated grep output with a footer
-[truncated: 12,400 of 13,000 lines omitted; use job-output {"job_id":"spool:2","offset":1800} to read more]
+[truncated: 12,400 of 13,000 lines omitted; use tool-output {"id":"spool:2","offset":1800} to read more]
 
 # model pages through the omitted portion
-~> job-output {"job_id":"spool:2","offset":1800}
-<~ spool=spool:2 size=280000 next_offset=9800 (more available)
+~> tool-output {"id":"spool:2","offset":1800}
+<~ output=spool:2 size=280000 next_offset=9800 (more available)
 # the next chunk of content...
 ```
 
-The `bash-output` tool also accepts `job_id` and `offset` fields (in addition
-to `command`), so it can double as a spool reader.
+`bash` (and its retired `bash-output` alias) also accepts `job_id` and
+`offset` in place of `command`, and then reads a background job's output like
+`job-output`.

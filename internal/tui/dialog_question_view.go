@@ -17,22 +17,23 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/agent"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
-// questionMinContentH is the smallest conversation pane the question block is
-// allowed to leave behind.
-const questionMinContentH = 3
+// questionMinBlockRows is the smallest block the form is drawn in: the
+// question, one answer, the "… N more" marker and the key hint. The footer
+// yields rows to keep this much on a short terminal (parallelFooterBudget).
+const questionMinBlockRows = 4
 
 // questionBlockBudget is how many lines the form may occupy inside the input
 // box. Everything else on screen — header, separators, status bar, the
 // box's own border and agent label, the parallel-agent strip — keeps its space,
-// and the conversation pane keeps a minimum. The renderer windows its answer
-// list to fit this; without it a question with many options pushes the input
-// box off the bottom of the terminal.
+// and the conversation pane keeps a minimum (dialogMinTranscriptRows). The
+// renderer windows its answer list to fit this; without it a question with
+// many options pushes the input box off the bottom of the terminal.
 func (m Model) questionBlockBudget() int {
 	if m.height <= 0 {
 		// No WindowSizeMsg yet: nothing is on screen to overflow, and guessing
@@ -48,13 +49,9 @@ func (m Model) questionBlockBudget() int {
 		m.workingIndicatorHeight() +
 		2 + // the separators bracketing the conversation pane
 		lipgloss.Height(m.viewStatusBar(paneW)) +
-		3 // the input box's border plus the agent label inside it
-	if m.sidePanelWidth() <= 0 {
-		if pa := m.renderParallelAgents(); pa != "" {
-			fixed += lipgloss.Height(pa)
-		}
-	}
-	return max(m.height-fixed-questionMinContentH, 4)
+		3 + // the input box's border plus the agent label inside it
+		m.parallelFooterHeight()
+	return max(m.height-fixed-dialogMinTranscriptRows(m.height), questionMinBlockRows)
 }
 
 // questionSpacedMinBudget is the block height from which the form can afford a
@@ -124,15 +121,14 @@ func (m Model) renderQuestionForm() string {
 
 	// A line wider than the box wraps inside it, and the wrap is a row the
 	// layout did not reserve — the input box would then hang off the bottom of
-	// the terminal. Cut instead: the tail of a hint is worth less than the frame.
+	// the terminal. Cut instead, with a "…" so the cut reads as one: the tail
+	// of a hint is worth less than the frame.
 	// Split first: a block like the answer list arrives as one multi-line entry,
 	// and cutting that as a single string would eat its newlines with it.
 	boxW := max(m.paneWidth()-4, 12)
 	out := strings.Split(strings.Join(joined, "\n"), "\n")
 	for i, line := range out {
-		if ansi.StringWidth(line) > boxW {
-			out[i] = ansi.Cut(line, 0, boxW)
-		}
+		out[i] = termtext.Fit(line, boxW)
 	}
 	return strings.Join(out, "\n")
 }
@@ -147,13 +143,14 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 		return nil
 	}
 
-	head := wrapPlainLines("  "+question.Question, width)
+	head := wrapIndentedLines(question.Question, "  ", width)
 	questionLines := len(head)
-	head = append(head, wrapPlainLines("  "+strings.TrimSpace(q.form.Context), width)...)
+	head = append(head, wrapIndentedLines(strings.TrimSpace(q.form.Context), "  ", width)...)
 
-	// Reserve the footer, one option row, and the line the "… N more" marker
-	// takes when the list has to be windowed.
-	head = clampTextLines(head, max(budget-3, 1), width)
+	// Reserve the key legend, one option row, and the line the "… N more"
+	// marker takes when the list has to be windowed.
+	hints := m.questionHintRows(width)
+	head = clampTextLines(head, max(budget-2-len(hints), 1), width)
 	headLines := m.styleQuestionHead(head, questionLines)
 	if question.MultiSelect {
 		// The checkboxes say the question takes more than one answer; this says
@@ -161,8 +158,8 @@ func (m Model) renderQuestionPage(width, budget int) [][]string {
 		headLines = append(headLines, styleMuted.Render("  select all that apply"))
 	}
 
-	body := m.renderQuestionBody(question, width, budget-len(headLines)-1)
-	return [][]string{headLines, body, {styleMuted.Render("  " + m.questionHint())}}
+	body := m.renderQuestionBody(question, width, budget-len(headLines)-len(hints))
+	return [][]string{headLines, body, hints}
 }
 
 // renderQuestionBody is the answer list plus everything that sits with it: the
@@ -471,7 +468,7 @@ func indentLines(lines []string, indent int) []string {
 }
 
 // windowQuestionBlocks keeps the cursor's row visible within budget terminal
-// lines, growing the window outwards from it. Unlike windowPickerRows the rows
+// lines, growing the window outwards from it. The rows
 // are variable-height — a row is its label plus its wrapped description — so
 // the window is measured in lines, not rows. When rows are dropped it reserves
 // one line for the caller's "… N more" marker.
@@ -527,25 +524,36 @@ func (m Model) styleQuestionHead(head []string, questionLines int) []string {
 	return out
 }
 
-// questionHint is the key legend under the answer list; it names only the keys
-// that do something on the page being shown.
-func (m Model) questionHint() string {
+// questionHints is the key legend under the answer list, one entry per key;
+// it names only the keys that do something on the page being shown.
+func (m Model) questionHints() []string {
 	q := m.pendingQuestion
 	switch {
 	case q.editing:
-		return "enter sends  esc goes back"
+		return []string{"enter sends", "esc goes back"}
 	case q.notesEditing:
-		return "enter attaches the note  esc keeps what you typed"
+		return []string{"enter attaches the note", "esc keeps what you typed"}
 	case q.onSubmitTab():
-		return "↑↓ or 1-2 pick  enter confirms  ctrl+d sends  esc goes back"
+		return []string{"↑↓ or 1-2 pick", "enter confirms", "ctrl+d sends", "esc goes back"}
 	case q.singlePage():
-		return "↑↓ or 1-9 pick  enter answers  n notes  esc declines"
+		return []string{"↑↓ or 1-9 pick", "enter answers", "n notes", "esc declines"}
 	default:
 		if question, ok := q.question(); ok && question.MultiSelect {
-			return "space or 1-9 toggle  " + questionSubmitRow + " records  n notes  tab/←→ switch  esc declines"
+			return []string{"space or 1-9 toggle", questionSubmitRow + " records", "n notes", "tab/←→ switch", "esc declines"}
 		}
-		return "↑↓ or 1-9 pick  enter records  n notes  tab/←→ switch  esc declines"
+		return []string{"↑↓ or 1-9 pick", "enter records", "n notes", "tab/←→ switch", "esc declines"}
 	}
+}
+
+// questionHintRows is the key legend packed into rows of the dialog's
+// width (packKeyHints), indented and styled: a narrow dialog gets a second
+// row with every key rather than one row cut before "esc declines".
+func (m Model) questionHintRows(width int) []string {
+	rows := packKeyHints(m.questionHints(), max(width-2, 8))
+	for i, row := range rows {
+		rows[i] = styleMuted.Render("  " + row)
+	}
+	return rows
 }
 
 // renderQuestionSubmitPage is the review page behind the ✓ Submit chip: what
@@ -565,7 +573,8 @@ func (m Model) renderQuestionSubmitPage(width, budget int) [][]string {
 	// go first — the strip's ✓ Submit chip already says where the user is, and
 	// the rows say what they do — leaving the summary, which is the only part
 	// carrying information the rest of the form does not.
-	room := budget - len(actions) - 1
+	hints := m.questionHintRows(width)
+	room := budget - len(actions) - len(hints)
 	headings := room >= 3
 	bodyBudget := room
 	if headings {
@@ -583,7 +592,7 @@ func (m Model) renderQuestionSubmitPage(width, budget int) [][]string {
 	if headings {
 		sections = append(sections, []string{title.Render("  " + truncateLabel("Ready to submit your answers?", max(width-2, 8)))})
 	}
-	return append(sections, actions, []string{styleMuted.Render("  " + m.questionHint())})
+	return append(sections, actions, hints)
 }
 
 // renderQuestionReview is the middle of the review page: one bullet per

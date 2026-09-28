@@ -20,7 +20,7 @@ metadata:
 # Body
 
 Instructions here.
-`)
+`, "dir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ description: |
   line two
 disabled: true
 ---
-body`)
+body`, "dir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ body`)
 		t.Error("disabled: true not honored")
 	}
 
-	s, err = parse("---\nname: en\ndescription: d\nenabled: false\n---\n")
+	s, err = parse("---\nname: en\ndescription: d\nenabled: false\n---\n", "dir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,16 +67,13 @@ body`)
 }
 
 func TestParseErrorsAndIssues(t *testing.T) {
-	if _, err := parse("no frontmatter at all"); err == nil {
-		t.Error("missing frontmatter must error")
+	if _, err := parse("---\nname: x\n---\n", "dir"); err == nil {
+		t.Error("no description and an empty body must error")
 	}
-	if _, err := parse("---\ndescription: d\n---\n"); err == nil {
-		t.Error("missing name must error")
+	if _, err := parse("", ""); err == nil {
+		t.Error("no name and no directory name must error")
 	}
-	if _, err := parse("---\nname: x\n---\n"); err == nil {
-		t.Error("missing description must error")
-	}
-	s, err := parse("---\nname: Bad_Name\ndescription: d\n---\n")
+	s, err := parse("---\nname: Bad_Name\ndescription: d\n---\n", "dir")
 	if err != nil {
 		t.Fatal(err)
 	}

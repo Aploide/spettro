@@ -10,7 +10,6 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/provider"
 	"spettro/internal/session"
 )
 
@@ -91,6 +90,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 		return reply("agent not found: " + agentID)
 	}
 	spec.Permission = cfg.Permission
+	turn.agentID = spec.ID
 
 	if cfg.Permission != config.PermissionYOLO {
 		turn.sessionUpdate(acpsdk.UpdateAgentMessageText(fmt.Sprintf(
@@ -98,10 +98,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 			cfg.Permission)))
 	}
 
-	thinking := provider.ThinkingLevel("")
-	if b.opts.Providers.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		thinking = provider.ThinkingLevel(cfg.ThinkingLevel)
-	}
+	thinking := b.opts.Providers.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 
 	startedAt := time.Now()
 	iteration := 0
@@ -145,6 +142,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
 			MaxTokens:       cfg.TokenBudget,
+			MaxOutputTokens: cfg.MaxOutputTokens,
 			Thinking:        thinking,
 			Ultra:           cfg.UltraActive(),
 			Messages:        history,
@@ -161,7 +159,7 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 				if livePermission() == config.PermissionYOLO {
 					return agent.ShellApprovalAllowOnce, nil
 				}
-				return turn.requestShellApproval(sctx, ar)
+				return turn.requestApproval(sctx, ar)
 			},
 			AskUser: turn.askForm,
 		}

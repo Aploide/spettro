@@ -98,6 +98,11 @@ Authorization: Bearer <token>
 Accept: text/event-stream
 ```
 
+A client that only follows the stream and never answers questions (a log
+tailer, a CI job) should connect with `GET /events?observe=1`, so a headless
+run does not wait on it for an `ask_user` answer (see
+[Ask-user forms](#ask-user-forms)).
+
 Each event is delivered with the SSE structure:
 
 ```
@@ -171,7 +176,7 @@ All events share the envelope:
 | `comment` | Agent published a progress comment via the `comment` tool | `message` |
 | `tool` | Any tool started/finished | `name`, `status` (`running`/`success`/`error`), `agent`, `args`/`args_raw`, `output` |
 | `banner` | UI banner shown (info/warn/error/success) | `text`, `level` |
-| `approval_request` | Shell approval is needed | `command`, `tool_id`, `segments`, `reason` |
+| `approval_request` | A command, file change or network access needs approval | `command`, `tool_id`, `segments`, `reason`, `diff` (file changes only), `command_bytes`, `command_truncated`, `command_hidden_chars`, `command_visible` (only when hidden characters are present), the same four `diff_*` fields, and `approval_id` in headless runs — see [Approval requests](#approval-requests) |
 | `ask_user` | The agent invoked `ask-user` | `version`, `count`, `active`, `questions[]`, plus the v1 fields `question`, `options`, `context`, `default`, `allow_free_response` describing the question numbered `active` — see [Ask-user forms](#ask-user-forms) |
 | `commit` / `commit_error` | Auto-commit agent finished | `message` / `error` |
 | `search` / `search_error` | Repo searcher finished | `result` / `error` |
@@ -181,6 +186,59 @@ All events share the envelope:
 
 The `kind` field is also reflected as the `event:` SSE name for clients
 that filter by event name.
+
+### Approval requests
+
+An `approval_request` carries what is being approved in full: the whole
+`command` (a heredoc of any length, not its first line) and, for a
+`file-write`/`file-edit`, the whole unified `diff`. A client that lets the
+user decide must show all of it, or say plainly that it does not; a
+command cut short can look harmless when its end is not.
+
+Each of the two text fields is bounded at 4 MiB, far above anything a
+person reads (the diff of the largest file Spettro diffs at all fits).
+Past that the text ends with a line
+`[truncated: N of M bytes not shown; this is not the whole text]`, the
+matching `command_truncated`/`diff_truncated` is `true`, and
+`command_bytes`/`diff_bytes` give the full size. A client should check the
+flag rather than guess from the text.
+
+`command` and `diff` are the exact bytes. They can hold characters that do
+not show when drawn: a carriage return that sends the cursor back over the
+start of the line, an escape sequence, a bidi override that reorders it, a
+no-break space that looks like the space between two shell words, or
+zero-width characters and variation selectors that can carry a whole
+payload inside what reads as `""`. When one is present,
+`command_hidden_chars`/`diff_hidden_chars` is `true` and
+`command_visible`/`diff_visible` holds the same text with each such
+character written out the way the TUI shows it (`^M`, `^[`, `\u202e`,
+`\U000e0100`, a tab as `⇥`, a look-alike letter posing as Latin as
+`\u0456`). A client that shows the text to a person should show the
+`_visible` field whenever there is one. `segments` (what `allow-always`
+remembers) comes with `segments_visible`, the same list written out, when
+one of them holds such a character.
+
+In a headless run (`spettro --headless`), where a client answers approvals, each
+event also carries an `approval_id` (`"a-7"`), and the answer names it:
+
+```http
+POST /approval
+{"approval_id": "a-7", "decision": "allow-once"}
+```
+
+`decision` is `allow-once`, `allow-always` or `deny`; with `deny`, an
+optional `instead` tells the agent what to do instead. Sub-agents run in
+parallel, so two approvals can be pending at once, often of the same tool
+(two `bash` calls), and every network approval has an empty `tool_id`. An
+allow must carry the `approval_id` of the request it approves; without one
+it is refused with `409`. A `tool_id` alone cannot say which request the
+client showed: the one on its screen may have been withdrawn (its time ran
+out, the run was cancelled) and another call of the same tool asked since,
+so "allow" on a stale card would approve a command nobody saw. An answer
+carrying only `tool_id` (the form older clients send) is still accepted for
+`deny`, while exactly one approval of that tool is pending, and refused with
+`409` when there are several; an unknown `approval_id` gets `404`, and a
+second answer to the same approval `409`.
 
 ### Ask-user forms
 
@@ -255,6 +313,18 @@ A multi-select question takes several option names separated by commas.
 Answering is one-shot per `question_id`: a second POST gets `409`, and a
 question whose run was cancelled or interrupted gets `404` because the pending
 answer was already resolved.
+
+**When nobody answers.** A headless run never waits on a question nobody can
+answer: with no client connected to `/events` — observers connected with
+`?observe=1` do not count — the tool returns at once, telling the agent that
+no user is available and to proceed on its best judgment. The exception is a
+client that dropped off within the last 30 seconds: the question waits for it
+to reconnect (a phone backgrounding the app, a proxy recycling the stream)
+before giving up. With a client connected it waits up to 5 minutes (override
+with `SPETTRO_ASK_USER_TIMEOUT_SEC`, in seconds; `0` waits indefinitely), then
+the agent is told the same thing and the question expires: every question gets
+a fresh `question_id`, so a late answer gets `404` rather than answering a
+later question. Sub-agents and goal-mode runs never ask at all.
 
 ## Quick examples
 

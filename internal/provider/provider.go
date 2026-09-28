@@ -104,18 +104,25 @@ func NextLowerThinking(level ThinkingLevel) ThinkingLevel {
 }
 
 type Model struct {
-	Provider      string
-	ProviderName  string
-	Name          string
-	DisplayName   string
-	Vision        bool
-	Reasoning     bool
+	Provider     string
+	ProviderName string
+	Name         string
+	DisplayName  string
+	Vision       bool
+	Reasoning    bool
+	// NoReasoning marks a model its source explicitly lists as
+	// non-reasoning where Reasoning alone would not decide it (the Spettro
+	// plan's reasoning:false; see Manager.SupportsReasoning).
+	NoReasoning   bool
 	ToolCall      bool
 	PromptCaching bool
 	Context       int
 	Status        string
 	EnvKey        string
 	Local         bool
+	// MaxOutput is the model's maximum output tokens (0 = unknown; see
+	// Manager.MaxOutputTokens for the built-in fallback table).
+	MaxOutput int
 }
 
 type ProviderInfo struct {
@@ -160,6 +167,16 @@ type NativeTool struct {
 	ID   string // provider-assigned call ID
 	Name string
 	Args json.RawMessage
+	// ArgsError is set when the model's raw arguments could not be decoded
+	// (cut off at the output token limit, or malformed JSON that the repair
+	// pass could not fix). Args is then "{}" so the call still replays as a
+	// valid history entry; the tool runtime must not execute the call and
+	// instead feeds ArgsError back to the model as the tool's error result.
+	ArgsError string `json:"args_error,omitempty"`
+	// RawArgs keeps the model's argument text when ArgsError is set, so a
+	// caller can still tell two failed calls apart (Args is "{}" for both).
+	// It is not persisted or sent back to a provider.
+	RawArgs string `json:"-"`
 }
 
 // ToolResult is the executed output of a NativeTool, fed back in the next turn.
@@ -183,10 +200,30 @@ type ToolResult struct {
 	SpoolID string `json:"spool_id,omitempty"`
 }
 
+// ReasoningBlock is one reasoning/thinking segment produced by a model turn.
+// It is stored on the assistant message so it can be replayed on the next
+// request where the provider requires (Anthropic extended thinking with tool
+// use needs the signed thinking block of the in-progress turn) or benefits
+// from it (OpenAI-compatible reasoning_content round-trip). Provider/Model
+// record who produced it: signatures are only valid for the model that
+// signed them, so adapters replay a block only to that same model.
+type ReasoningBlock struct {
+	Text string `json:"text,omitempty"`
+	// Signature is Anthropic's opaque thinking signature.
+	Signature string `json:"signature,omitempty"`
+	// RedactedData is Anthropic's encrypted redacted_thinking payload.
+	RedactedData string `json:"redacted_data,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model,omitempty"`
+}
+
 // Message is one turn in a structured conversation.
 type Message struct {
 	Role    Role
 	Content string
+	// Reasoning is set on assistant turns whose response carried reasoning /
+	// thinking content (see ReasoningBlock).
+	Reasoning []ReasoningBlock `json:",omitempty"`
 	// ToolCalls is set on assistant turns that issued native tool calls.
 	ToolCalls []NativeTool
 	// ToolResults is set on user turns that return native tool results.
@@ -196,6 +233,37 @@ type Message struct {
 	// re-sent with every step of a tool loop and survive into carried history,
 	// so the model still sees them when composing its final answer.
 	Images []string
+	// FileStamps records, on a tool-results turn, the file content hashes the
+	// agent's file tools saw during that step (the stale-read guard's state),
+	// so a later run carrying this history keeps enforcing it. Never sent to
+	// a provider.
+	FileStamps []FileStamp `json:",omitempty"`
+	// SessionContext, on a conversation's first message, is the environment
+	// and project-instructions snapshot taken when the conversation started
+	// (the tail of its system prompt). Carrying it with the conversation keeps
+	// the system prompt byte-stable across turns without sharing it between
+	// conversations. Never sent to a provider as message content.
+	SessionContext string `json:",omitempty"`
+	// LoadedTools, on a conversation's first message, lists the deferred
+	// tools the conversation has loaded (through tool-search or a call by
+	// name), so a later turn advertises the same tool list even after
+	// compaction summarized away the calls that loaded them. Never sent to
+	// a provider.
+	LoadedTools []string `json:",omitempty"`
+}
+
+// FileStamp is one file's stale-read guard state: the SHA-256 (hex) of the
+// content the agent last saw in full (Seen) and last saw through file-read,
+// with line numbers (Read). Shell says Seen was set by the agent's own
+// shell command rather than shown to the model, so overwriting the file
+// needs a file-read first; a record with Seen set is the path's whole
+// state, so a false Shell there clears an earlier mark. Path is the file's
+// real absolute path.
+type FileStamp struct {
+	Path  string `json:"path"`
+	Seen  string `json:"seen,omitempty"`
+	Read  string `json:"read,omitempty"`
+	Shell bool   `json:"shell,omitempty"`
 }
 
 type Request struct {
@@ -209,7 +277,30 @@ type Request struct {
 	Prompt      string
 	Images      []string
 	RequireFast bool
-	MaxTokens   int
+	// MaxTokens caps the OUTPUT of this request (max_tokens /
+	// max_output_tokens on the wire). 0 means "auto": the manager sends a
+	// sensible per-model default (see DefaultMaxOutputTokens) so providers
+	// with a tiny implicit default (Anthropic: 4096) don't truncate tool calls.
+	MaxTokens int
+	// PromptTokens, when positive, is the caller's own estimate of this
+	// request's prompt (EstimateRequestTokens of the same request): Send
+	// uses it for the input budget and the output cap instead of estimating
+	// again. 0 means Send estimates. Send ignores it when it has to change
+	// the request first (images stripped for a model without vision). The
+	// agent run loop sets it from its incremental estimate (promptSizer),
+	// which saves a walk over the whole history per step.
+	PromptTokens int
+	// InputBudget is the user's per-request INPUT token budget
+	// (config token_budget). Requests whose estimated prompt is at or above
+	// it are refused locally before any network call. 0 disables the check.
+	// It is deliberately separate from MaxTokens: one number cannot be both
+	// an output cap and a prompt-size limit.
+	InputBudget int
+	// ContextWindow is the model's context window in tokens when the caller
+	// knows it better than the catalog (a configured window, or one learned
+	// from an overflow error). 0 → the catalog / local probe value. It only
+	// bounds the output cap: prompt + max_tokens must fit the window.
+	ContextWindow int
 	// Thinking selects extended-thinking compute. Empty == ThinkingOff.
 	Thinking ThinkingLevel
 	// Tools, when non-empty, enables native tool calling for capable backends.
@@ -224,7 +315,30 @@ type Request struct {
 	// honour a provider-issued rate limit (currently: the Spettro Subscription
 	// overflow tier's 429/Retry-After) instead of surfacing it as an error.
 	OnRateLimit func(time.Duration)
+	// StreamIdleTimeout bounds the silence on a streamed response (keep-alives
+	// count as activity); a stream that goes quiet longer fails with
+	// ErrStreamIdle (retryable) so a stalled connection cannot hang the run
+	// forever. 0 → defaults (see DefaultStreamIdleTimeout: longer before the
+	// first chunk, for reasoning, and for local servers).
+	StreamIdleTimeout time.Duration
+
+	// localEndpoint is set by the manager for local model servers, whose
+	// first token may take minutes of prompt processing (see streamTimeouts).
+	localEndpoint bool
 }
+
+// FinishReason is why the model stopped generating, normalized across
+// providers. The zero value means the backend did not report one.
+type FinishReason string
+
+const (
+	FinishStop          FinishReason = "stop"
+	FinishLength        FinishReason = "length" // hit the output token limit
+	FinishToolCalls     FinishReason = "tool-calls"
+	FinishContentFilter FinishReason = "content-filter"
+	FinishError         FinishReason = "error"
+	FinishOther         FinishReason = "other"
+)
 
 type Response struct {
 	Content         string
@@ -237,7 +351,49 @@ type Response struct {
 	Model    string
 	// ToolCalls is populated on the native tool-calling path.
 	ToolCalls []NativeTool
+	// FinishReason is why generation stopped. FinishLength means the reply
+	// was cut at the output token limit: text is incomplete and any tool call
+	// whose arguments were still streaming carries an ArgsError.
+	FinishReason FinishReason
+	// Reasoning holds the reasoning/thinking blocks of this reply (with
+	// Anthropic signatures), stamped with the producing provider/model.
+	// Callers store it on the assistant message so it is replayed next step.
+	Reasoning []ReasoningBlock
+	// Thinking is the thinking level the request finally succeeded with. It
+	// differs from Request.Thinking when the manager stepped the level down
+	// because the model rejected it; callers should reuse it for later
+	// requests instead of paying the rejected attempt again every step.
+	Thinking ThinkingLevel
+	// MaxOutputTokens is the output cap actually sent (0 when none was).
+	MaxOutputTokens int
+	// Diagnostics describes the raw reply before normalization, for debug
+	// logs only; see ResponseDiagnostics.
+	Diagnostics ResponseDiagnostics
 }
+
+// ResponseDiagnostics describes a reply as the provider SDK delivered it,
+// before finish-reason mapping and tool-call finalization. Nothing acts on
+// it: the agent loop only logs it at debug level with every reply, so that a
+// tool call lost between the provider and the loop (a reply that says it
+// stopped for tool calls yet carries none) can be confirmed after the fact.
+// Only the native tool-calling backends fill it in; elsewhere it is zero.
+type ResponseDiagnostics struct {
+	// RawFinishReason is the finish reason the SDK reported, before
+	// FinishReason normalized it and the truncation checks rewrote it.
+	RawFinishReason string
+	// ToolCallsSeen counts the tool calls the reply introduced, finished or
+	// not, before finalization dropped any.
+	ToolCallsSeen int
+	// UnnamedToolCalls counts introduced calls that never received a tool
+	// name; finalization drops them because there is nothing to run.
+	UnnamedToolCalls int
+	// OrphanToolDeltas counts streamed argument fragments whose call id the
+	// stream never introduced; they are ignored.
+	OrphanToolDeltas int
+}
+
+// Truncated reports whether the reply was cut at the output token limit.
+func (r Response) Truncated() bool { return r.FinishReason == FinishLength }
 
 type Adapter interface {
 	Send(context.Context, string, Request) (Response, error)

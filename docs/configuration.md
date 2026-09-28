@@ -7,17 +7,80 @@ Spettro uses both project-local and user-global storage.
 | Path | Purpose |
 | --- | --- |
 | `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md). |
-| `keys.enc` | Encrypted API keys map by provider ID. |
+| `keys.enc` | Encrypted API keys map by provider ID (see [Encrypted API keys](#encrypted-api-keys)). |
+| `keys.enc.v1` | Backup of a pre-v2 `keys.enc`, written when it is migrated; kept for one release. |
+| `master.key` | Random secret `keys.enc` is encrypted under (created on first use). |
 | `trusted.json` | Permanently trusted project paths. |
-| `models.json` | Cached `models.dev` catalog. |
+| `catalog.json` | Cached provider/model catalog (see [Model catalog](#model-catalog)). |
+| `catalog-meta.json` | When the server last confirmed `catalog.json`, and the server's `ETag`/`Last-Modified` for it. |
+| `update-check.json` | Result of the last GitHub release check, reused for 24 hours by the startup notice (`/update` always checks live). |
 | `hooks.json` | Global runtime hooks fallback/default. |
 | `lsp.json` | Optional [LSP](lsp.md) overrides; servers are auto-detected on PATH with zero config. |
+| `bin/rg`, `bin/rg.version` | ripgrep, downloaded on first use when it is not on PATH (see [Search tools](tools.md#search-tools)); `rg.version` names the pinned release it came from. |
 | `memory.md` | [Persistent memory](memory.md): user-scope facts loaded into agent context each session. |
 | `memory-inbox.json` | Drafted memory candidates awaiting `/memory review` approval (never loaded into context). |
 | `commands/` | Global [custom slash commands](custom-commands.md) (`.toml` / `.md` prompt files). |
+| `skills/` | User [Agent Skills](skills.md) (one folder with a `SKILL.md` per skill). |
 | `history/<project-hash>/` | [Checkpointing](checkpointing.md) shadow git repo and conversation snapshots (auto-created; reclaimable via [`/storage clean`](storage.md)). |
 | `sessions/<session-id>/` | Session metadata, messages, tasks/todos, and agent events. |
 | `conversations/<project-slug>/` | Legacy conversation storage path kept for compatibility tooling. |
+
+## Encrypted API keys
+
+`keys.enc` holds the provider API keys, encrypted with AES-256-GCM. The file
+key is derived from the random secret in `master.key` (or from
+`SPETTRO_MASTER_KEY` when that variable is set) and a per-file salt.
+
+- **Format v2** (`"kdf": "hkdf-sha256-v2"` in the file) derives the key with
+  HKDF-SHA256, which takes microseconds. Earlier versions used scrypt, which
+  added about 60 ms to every start of the TUI, ACP and headless modes. The
+  security does not change: the input is 32 random bytes, which a slow KDF
+  cannot strengthen, and `master.key` sits next to `keys.enc`.
+- **Migration.** The first start of a v2-capable build rewrites an older
+  `keys.enc` in format v2 (temp file, fsync, rename, so a crash leaves the
+  old or the new file, never a partial one). Before replacing it, the old
+  file is copied byte for byte to `keys.enc.v1`.
+- **Downgrading.** Older builds cannot read a v2 file. To go back, restore
+  the backup: `cp ~/.spettro/keys.enc.v1 ~/.spettro/keys.enc`. Keys added
+  after the upgrade are not in the backup and must be entered again.
+- **Removal timeline.** `keys.enc.v1` is kept for one release: the release
+  that introduces format v2 creates it, and the release after that stops
+  creating it and deletes an existing copy. Reading older files stays
+  supported, so an installation that skips a release still migrates.
+- **`SPETTRO_MASTER_KEY`.** A passphrase set in this variable is not
+  random, so files encrypted under it keep scrypt and are not migrated.
+
+## Model catalog
+
+The model picker is built from the Spettro provider catalog
+(`catalog.spettro.app`). Startup never waits for it:
+
+- A cached copy in `~/.spettro/catalog.json` is used when present.
+- Otherwise (first run, cache deleted, offline or behind a broken proxy) the
+  snapshot embedded in the binary at build time is used.
+- A background refresh then asks the server for a newer catalog only when
+  the server last confirmed the cached copy more than 6 hours ago. The
+  request is conditional: it carries the `ETag` and `Last-Modified` the server
+  sent with that copy (kept in `catalog-meta.json`), so an unchanged catalog
+  is not downloaded again. A cache without that file (written by an older
+  build, or left behind after `spettro clean`) is downloaded again once
+  stale.
+- Long sessions re-check hourly under the same rule. The cache is shared by
+  every spettro process: when another one (an ACP server, a second TUI) has
+  downloaded a newer catalog, a running session switches to it at its next
+  hourly check, without a request of its own.
+
+Local endpoints (`local_endpoints` in `config.json`) and the Spettro
+Subscription model list are also fetched in the background. Their models
+appear in the TUI as each server answers. A result that arrives after you
+removed or re-probed that endpoint (or signed out of the subscription) is
+dropped, so it never undoes the change. If the configured model cannot run
+(no key for its provider) and only a local endpoint can supply a
+replacement, the TUI waits up to 2 seconds for the endpoints before it picks
+and saves one. ACP `session/new`,
+`session/load` and `session/resume` wait up to 2 seconds for them; a slower
+server's models reach the editor afterwards as a `config_option_update`.
+The headless server waits the same way before its first submission.
 
 ## Project-local (`<repo>/.spettro/`)
 
@@ -29,6 +92,7 @@ Spettro uses both project-local and user-global storage.
 | `lsp.json` | Optional project [LSP](lsp.md) overrides (wins over the global file per server key). |
 | `memory.md` | [Persistent memory](memory.md): project-scope facts loaded into agent context each session. |
 | `commands/` | Project [custom slash commands](custom-commands.md); override global commands on name conflict. |
+| `skills/` | Project [Agent Skills](skills.md); win over user skills of the same name. |
 | `index.json` | Optional project snapshot when indexer-style flow is used. |
 
 ## Project root
@@ -60,6 +124,7 @@ light palette re-tunes.
 | `config.json` key | Default | Meaning |
 | --- | --- | --- |
 | `theme` | `""` (treated as `auto`) | `dark`, `light` or `auto`. Written by `/theme`; an unrecognised value is cleared to the default on load. |
+| `cursor_blink` | `false` | Set `true` to make the input cursor blink. A blinking cursor repaints the screen twice a second while the TUI is open; the steady default leaves an idle TUI asleep. |
 
 Precedence at startup is `SPETTRO_THEME` (environment, never persisted) >
 `theme` in `config.json` > auto-detection > dark. `auto` seeds from `COLORFGBG`
@@ -77,6 +142,45 @@ start.
 SPETTRO_THEME=light spettro     # override for one run
 ```
 
+## Provider wire
+
+Which client carries streamed requests to OpenAI-compatible chat-completions
+endpoints: catalog providers with an OpenAI-style API, the Spettro
+Subscription and local servers. Anthropic-protocol providers, the official
+`openai` provider (Responses API) and non-streamed requests always use the
+fantasy SDK.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `provider_wire` | `""` (treated as `native`) | `native`: Spettro's own client, which re-encodes only the messages a step added and decodes streamed tool calls in linear time. `fantasy`: the fantasy SDK, as before the native client existed. An unknown value means `native`. |
+
+`SPETTRO_PROVIDER_WIRE` (`native` or `fantasy`) overrides the key for one
+process. Both clients send the same request JSON and report replies, errors
+and rate limits the same way; the native one falls back to fantasy by itself
+if it ever fails to encode a request. See [Architecture](architecture.md#provider-abstraction).
+
+The native client differs from fantasy only in these points, all but the
+last on replies where fantasy fails or loses data:
+
+- a chunk whose delta carries both text and a tool-call fragment keeps both
+  (fantasy drops the fragment);
+- a choice without a `delta` member counts as an empty delta (fantasy fails
+  the request);
+- a read error after the `[DONE]` terminator is ignored (fantasy fails the
+  request);
+- tool arguments that do not start as a JSON object, array or string stop
+  being re-checked for completeness after 4 KB;
+- requests carry the User-Agent `Spettro/<version>`.
+
+Like the SDK, the native client sends `OPENAI_ORG_ID` and
+`OPENAI_PROJECT_ID`, when set, as the `OpenAI-Organization` and
+`OpenAI-Project` headers.
+
+Between the steps of a run the native client keeps each conversation's
+encoded messages (up to 48 conversations and 8 MB in all; a request of a
+single message is not kept) and the images it sent (up to 6 MB); both are
+released after 5 minutes without use.
+
 ## Notifications
 
 When the terminal is unfocused (or a run took more than 10 s), Spettro alerts
@@ -91,6 +195,21 @@ macOS).
 | --- | --- | --- |
 | `notifications_disabled` | `false` | Set `true` to turn all notifications off. |
 | `notify_quiet_sec` | `5` | Minimum seconds between notifications; events inside the window are dropped so bursts don't spam. |
+
+## Search
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `ripgrep_download_disabled` | `false` | Set `true` to never download ripgrep into `~/.spettro/bin`; `grep` then uses rg only when it is on PATH and its built-in Go search otherwise. Read once per process (at the first `grep` without rg), so a change applies from the next start. See [Search tools](tools.md#search-tools). |
+
+## Agent Skills
+
+See [Agent Skills](skills.md) for how skills are found and used.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `skills_compat_disabled` | `false` | Set `true` to read skills only from `.spettro/skills` and `~/.spettro/skills`, ignoring the Claude Code and Codex folders (`.claude/skills`, `.agents/skills`, `.codex/skills`, `.openai/skills`). |
+| `disabled_skills` | `[]` | Skill names hidden from the agent and the `/` menu; edited by `/skill disable` and `/skill enable`. |
 
 ## Checkpointing storage
 
@@ -117,10 +236,21 @@ Session policy for `/storage clean` and `spettro clean`; see
 
 ### Shell command approvals
 
-- Shell tools run via `bash -lc` (`shell-exec`/`bash`).
-- Some safe read-only commands are always allowed.
+- The `bash` tool runs commands via `bash -lc` (PowerShell on Windows; see [Windows](windows.md)).
+- Some safe commands are always allowed without a prompt: `ls`, `pwd`, `cat`,
+  `head`, `tail`, `wc`, `grep`, `rg`, `stat`, `git status`, `git diff`,
+  `go test`/`build`/`vet` and `make test`/`build`. The arguments are checked
+  too: a flag that runs another program or writes a file (`rg --pre`,
+  `git diff --output`/`--ext-diff`, `go test -exec`/`-o`/`-coverprofile`,
+  `make test SHELL=...`, a leading `GIT_EXTERNAL_DIFF=...` or `GOFLAGS=...`)
+  sends the command through the normal approval path.
 - In non-`yolo` modes, non-default commands require approval.
 - Choosing "allow always" stores normalized command approvals in `.spettro/allowed_commands.json`.
+  Normalizing only folds what a shell treats as one word break: a run of
+  spaces and tabs outside quotes and not escaped by a backslash. Everything
+  else is kept, so two commands share an entry only when a shell splits them
+  into the same words (`rm -rf ./x\ ~/` and `rm -rf ./x\  ~/`, or a no-break
+  space or vertical tab where the other has a space, are different entries).
 
 ### Web access (web-search / web-fetch / download)
 
@@ -131,17 +261,9 @@ Session policy for `/storage clean` and `spettro clean`; see
 
 ### Commit co-authoring (mandatory)
 
-- Every commit Spettro produces — directly via the built-in committer or indirectly when an agent runs `git commit` through `shell-exec`/`bash` — carries the trailer `Co-Authored-By: Spettro <spettro@eyed.to>`.
+- Every commit Spettro produces — directly via the built-in committer or indirectly when an agent runs `git commit` through the `bash` tool — carries the trailer `Co-Authored-By: Spettro <spettro@eyed.to>`.
 - The trailer is auto-injected by the runtime when missing. It is idempotent: if you (or the agent) already supplied the trailer, no second copy is added.
 - Only the porcelain `git commit` is rewritten; plumbing such as `git commit-tree` is left untouched.
-
-### Media generation (xAI Grok Imagine)
-
-- `grok-image` and `grok-video` are built-in tools that call `https://api.x.ai/v1/images/generations` and `https://api.x.ai/v1/videos/generations` respectively.
-- Both look up the xAI key from the encrypted store (`x-ai`/`xai`) or `$XAI_API_KEY`; configure it once via `/connect x-ai` or by exporting the env var.
-- Outputs are written into the workspace. When no `path` is given, Spettro picks `public/` for Next.js projects and `assets/` everywhere else, slugging the prompt for the filename.
-- These tools are listed in `coding`/`code` agents by default; add them to other agents in `spettro.agents.toml` if you want broader access.
-- When the Telegram relay is running and at least one chat is bound, every successful `grok-image` / `grok-video` call is also broadcast to those chats: images via `sendPhoto`, videos via `sendVideo`, falling back to `sendDocument` for files that exceed Telegram's inline-media caps (10 MB for photos, 50 MB for videos). The originating prompt becomes the Telegram caption (truncated). Upload errors surface through `/telegram status`.
 
 ## Runtime hooks
 
@@ -157,10 +279,14 @@ Session policy for `/storage clean` and `spettro clean`; see
 
 Spettro loads `spettro.agents.toml` from the project root if present; otherwise it falls back to built-ins.
 
-See [`AGENTS.md`](../AGENTS.md) for full schema and validation.
+See [`AGENTS.md`](../AGENTS.md) for full schema and validation. The
+snippet below shows the root and `[runtime]` fields only; a complete manifest
+also lists its `[[tools]]` and `[[agents]]`. Write the current `version`
+(14): an older one is migrated, and the file rewritten with a `.bak`, on the
+first load.
 
 ```toml
-version = 3
+version = 14
 default_agent = "plan"
 
 [runtime]

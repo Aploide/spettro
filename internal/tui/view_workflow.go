@@ -462,8 +462,8 @@ func (m Model) workflowSummaryLines(width, rows int) []string {
 			truncateLabel(strings.ReplaceAll(detail, "\n", " "), max(6, budget-lipgloss.Width(prefix)-1))))
 	}
 	if hidden := len(live) - shown; hidden > 0 {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running · ctrl+b for the full tree", hidden)))
-	} else if len(w.Phases) > 1 && len(lines)+shown < rows {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running%s", hidden, m.panelKeyHint(" · ", "the full tree"))))
+	} else if len(w.Phases) > 1 && len(lines)+shown < rows && m.sidePanelFits() {
 		// The hint only earns a row when one is going spare; on a short
 		// terminal every row belongs to the conversation.
 		lines = append(lines, styleMuted.Render("  ctrl+b for the full tree"))

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"spettro/internal/indexer"
 )
@@ -67,5 +68,58 @@ func TestRepoSearchWithoutIndexUnchanged(t *testing.T) {
 	}
 	if strings.Contains(out, "definitions:") || !strings.Contains(out, "a.go:1") {
 		t.Fatalf("zero-value searcher behavior changed:\n%s", out)
+	}
+}
+
+// When the index was cut short, the symbol search says so even when it
+// found no definition: the definition may be in the files never indexed.
+func TestRepoSearchReportsATruncatedIndexWithoutDefinitions(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"a.go": "package pkg\n\nfunc Early() {}\n",
+		"z.go": "package pkg\n\nfunc LateDefinition() {}\n\nvar _ = LateDefinition\n",
+	})
+	idx := indexer.NewSymbolIndex(dir, "")
+	idx.SetLimits(1, time.Minute)
+	out, err := RepoSearcher{Index: idx}.Search(context.Background(), dir, "LateDefinition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, `(no definitions of "LateDefinition" in the symbol index, which stopped at 1 source files`) {
+		t.Fatalf("no truncation notice:\n%s", out)
+	}
+	if !strings.Contains(out, "z.go:3:") {
+		t.Fatalf("usages missing:\n%s", out)
+	}
+	out, _ = RepoSearcher{Index: idx}.Search(context.Background(), dir, "Early")
+	if !strings.Contains(out, "(the symbol index stopped at 1 source files") {
+		t.Fatalf("no truncation notice under the definitions:\n%s", out)
+	}
+}
+
+// The files the usage grep matched are re-checked before the definitions
+// are listed, so an edit made outside Spettro right after the index synced
+// shows at once (no stale line numbers, no vanished definitions).
+func TestRepoSearchSeesOutsideEditsOfMatchedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"a.go": "package pkg\n\nfunc StartServer() {}\n"})
+	s := RepoSearcher{Index: indexer.NewSymbolIndex(dir, "")}
+	if out, _ := s.Search(context.Background(), dir, "StartServer"); !strings.Contains(out, "a.go:3  func StartServer") {
+		t.Fatalf("first search:\n%s", out)
+	}
+	writeTree(t, dir, map[string]string{
+		"a.go": "package pkg\n\n// moved down\n\nfunc StartServer() {}\n",
+		"b.go": "package pkg\n\nfunc StartServerLater() {}\n",
+	})
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "a.go"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.Search(context.Background(), dir, "StartServer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "2 definitions:\na.go:5  func StartServer") || !strings.Contains(out, "b.go:3  func StartServerLater") {
+		t.Fatalf("definitions not current after an outside edit:\n%s", out)
 	}
 }

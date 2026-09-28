@@ -37,6 +37,8 @@ func (s *acpSession) persistState() session.State {
 			ProjectPath: s.cwd,
 			ProjectHash: session.ProjectHash(s.cwd),
 			StartedAt:   s.startedAt,
+			Goal:        s.storedGoal,
+			Stats:       s.storedStats,
 		},
 		Messages: append([]session.Message(nil), s.transcript...),
 	}
@@ -111,9 +113,9 @@ func (b *bridge) restoreSession(sessionID acpsdk.SessionId, reqCwd string) (*acp
 		return nil, session.State{}, acpsdk.NewInvalidParams(map[string]any{"error": "cwd must be an absolute path"})
 	}
 
-	manifest, err := config.LoadAgentManifestForProject(cwd)
+	manifest, err := b.projectManifest(cwd)
 	if err != nil {
-		manifest = b.opts.Manifest
+		return nil, session.State{}, err
 	}
 	agentID := manifest.DefaultAgent
 	if agentID == "" {
@@ -125,13 +127,15 @@ func (b *bridge) restoreSession(sessionID acpsdk.SessionId, reqCwd string) (*acp
 	}
 
 	s := &acpSession{
-		id:         string(sessionID),
-		cwd:        cwd,
-		agentID:    agentID,
-		manifest:   manifest,
-		mediaDir:   filepath.Join(session.SessionDir(b.opts.GlobalDir, string(sessionID)), "acp-media"),
-		transcript: state.Messages,
-		startedAt:  startedAt,
+		id:          string(sessionID),
+		cwd:         cwd,
+		agentID:     agentID,
+		manifest:    manifest,
+		mediaDir:    filepath.Join(session.SessionDir(b.opts.GlobalDir, string(sessionID)), "acp-media"),
+		transcript:  state.Messages,
+		startedAt:   startedAt,
+		storedGoal:  state.Metadata.Goal,
+		storedStats: state.Metadata.Stats,
 	}
 	b.mu.Lock()
 	b.sessions[string(sessionID)] = s
@@ -176,6 +180,7 @@ func (b *bridge) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 		}
 	}
 
+	b.awaitModels(ctx)
 	cfg := b.opts.Cfg
 	if fresh, err := config.LoadFull(); err == nil {
 		cfg = fresh
@@ -198,11 +203,12 @@ func (b *bridge) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 
 // ResumeSession reattaches to a stored session without transcript replay:
 // the client declares it already holds the conversation view.
-func (b *bridge) ResumeSession(_ context.Context, params acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
+func (b *bridge) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
 	s, _, err := b.restoreSession(params.SessionId, params.Cwd)
 	if err != nil {
 		return acpsdk.ResumeSessionResponse{}, err
 	}
+	b.awaitModels(ctx)
 
 	cfg := b.opts.Cfg
 	if fresh, err := config.LoadFull(); err == nil {

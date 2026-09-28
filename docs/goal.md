@@ -136,8 +136,10 @@ In headless mode:
 
 - Permission is **forced to `yolo`** (unattended operation).
 - Tool traces are printed to stdout with `[✓]` / `[✗]` markers.
-- The `ask-user` tool is unavailable — if the agent tries to ask a question,
-  the goal fails with an error.
+- The `ask-user` tool does not wait for anyone — if the agent asks a
+  question, the tool returns at once telling it that no user is available
+  and to proceed on its best judgment, stating its assumptions. (The same
+  holds in every goal-mode run and for sub-agents.)
 - Exit codes: `0` for goal complete, `1` for stall/error/interrupt.
 
 Output:

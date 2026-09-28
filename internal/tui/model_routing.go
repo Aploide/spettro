@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/config"
@@ -15,10 +14,42 @@ import (
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	newModel, cmd := m.update(msg)
 	if nm, ok := newModel.(Model); ok {
+		if nm.frameMemo == nil {
+			nm.frameMemo = &frameMemo{}
+		}
+		if !transcriptOnly(msg) {
+			nm.chromeSeq++
+		}
+		// Settle whether a pending approval offers its review (the picker
+		// grows a row) before the layout measures the input area (see
+		// dialog_approvals.go). The latch is part of the frame memo's key
+		// (chromeKey.approvalReview), so the memoized input area follows it.
+		nm.syncApprovalReview()
+		nm = nm.trackApprovalCover()
 		nm = nm.recalcLayout()
+		if timers := nm.armTimers(); timers != nil {
+			cmd = tea.Batch(cmd, timers)
+		}
+		if git := nm.gitRefreshCmd(); git != nil {
+			cmd = tea.Batch(cmd, git)
+		}
+		if fill := nm.fillCmd(); fill != nil {
+			cmd = tea.Batch(cmd, fill)
+		}
+		if save := nm.uiStateSaveCmd(); save != nil {
+			cmd = tea.Batch(cmd, save)
+		}
 		return nm, cmd
 	}
 	return newModel, cmd
+}
+
+// isActiveRun reports whether a message from the run identified by queue
+// belongs to the run in progress. A stopped run's messages do not, even
+// when a new run has started since. A nil queue (tests build messages
+// without one) matches whatever run is in progress.
+func (m *Model) isActiveRun(queue *runEventQueue) bool {
+	return m.thinking && (queue == nil || queue == m.runEvents)
 }
 
 // resetRunState clears every per-run field when an agent or plan run ends, so
@@ -29,13 +60,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) resetRunState() {
 	m.thinking = false
 	m.cancelAgent = nil
-	m.toolCh = nil
+	m.runEvents = nil
 	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.discardApprovalQueue()
 	m.pendingQuestion = nil
 	m.discardQuestionQueue(fmt.Errorf("run ended"))
 	m.parallelAgents = nil
@@ -45,24 +77,42 @@ func (m *Model) resetRunState() {
 	m.refreshModifiedFiles()
 }
 
+// applyWindowSize lays the model out for a width x height terminal. The
+// first size it is given makes the model ready: the trust prompt or the
+// "spettro ready" line, and the first real frame instead of "loading…". It
+// runs for every WindowSizeMsg, and from New when the host passed the size
+// (WithInitialSize); the same size again changes nothing.
+func (m Model) applyWindowSize(width, height int) Model {
+	oldTranscriptW := m.transcriptWidth()
+	m.width = width
+	m.height = height
+	m = m.recalcLayout()
+	if m.ready && m.transcriptWidth() != oldTranscriptW {
+		// The transcript is rendered for one width, and the viewport
+		// cuts rows wider than itself without a trace. Nothing else
+		// re-renders it while the run is idle or waiting on an
+		// approval, so a narrower terminal would keep showing rows
+		// cut mid-word, and a wider one rows wrapped too early.
+		m.refreshViewport()
+	}
+	if !m.ready {
+		m.ready = true
+		if !config.IsTrusted(m.cwd) {
+			m.showTrust = true
+		} else {
+			m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+		}
+		m.refreshViewport()
+	}
+	return m
+}
+
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m = m.recalcLayout()
-		if !m.ready {
-			m.ready = true
-			if !config.IsTrusted(m.cwd) {
-				m.showTrust = true
-			} else {
-				msg := "spettro ready — /help for commands, shift+tab to switch mode"
-				m.pushSystemMsg(msg)
-			}
-			m.refreshViewport()
-		}
+		m = m.applyWindowSize(msg.Width, msg.Height)
 	case tea.BackgroundColorMsg:
 		// The answer to Init's OSC 11 query, and occasionally an unsolicited
 		// report after the user switches their terminal's own theme mid
@@ -80,7 +130,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.applyTheme(theme.Resolve(theme.AutoKind, msg.Color))
 			m.themeDetected = msg.Color != nil
 		}
+	case clockTickMsg:
+		// Only re-renders the chrome (clockTickMsg is not transcriptOnly);
+		// Update re-arms the next one while needsClock holds.
+		m.clockArmed = false
 	case tickMsg:
+		// Update re-arms the next tick only while something animates (see
+		// armTimers).
+		m.tickArmed = false
 		m.eyeFrame++
 		// Auto-clear expired banners so the status bar falls back to
 		// goal info (or empty) after 5 seconds.
@@ -89,13 +146,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bannerKind = ""
 			m.bannerClearAt = time.Time{}
 		}
-		cmds = append(cmds, tick())
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spin, cmd = m.spin.Update(msg)
-		cmds = append(cmds, cmd)
+		if m.transcriptHasLiveTail() {
+			// A running pty tool's live tail comes from the pty session,
+			// not from the message, so only a repaint shows it moving.
+			m.refreshViewport()
+		}
+	case bannerExpiredMsg:
+		if m.banner != "" && m.bannerClearAt.Equal(msg.at) {
+			m.banner = ""
+			m.bannerKind = ""
+			m.bannerClearAt = time.Time{}
+		}
 	case agentDoneMsg:
-		if !m.thinking {
+		if !m.isActiveRun(msg.run) {
 			break
 		}
 		m.resetRunState()
@@ -198,7 +261,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoSave()
 		}
 	case planDoneMsg:
-		if !m.thinking {
+		if !m.isActiveRun(msg.run) {
 			break
 		}
 		m.resetRunState()
@@ -328,8 +391,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoCompactFailures++
 			}
 			m.showBanner("compact error: "+msg.err.Error(), "error")
+		} else if msg.noop {
+			if wasAutoCompact {
+				// Nothing worth compacting yet (see autoCompactParams): stay
+				// quiet, and don't try again until the history has grown.
+				m.autoCompactNoopLen = len(m.convHistory)
+			} else {
+				m.showBanner("history is small enough already; nothing was compacted", "info")
+			}
 		} else {
 			m.autoCompactFailures = 0
+			m.autoCompactNoopLen = 0
 			m.autoSave()
 			m.sessionID = ""
 			m.todos = nil
@@ -341,10 +413,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content: compactSummaryPrefix + "\n\n" + msg.summary,
 				At:      time.Now(),
 			}}
-			// Reseed the carried structured history from the summary. The old
-			// prefix is gone (one deliberate cache miss); every turn after this
+			// Carry the compacted structured history (or, after summarizing
+			// the flat transcript, reseed it from the summary). The old prefix
+			// is gone (one deliberate cache miss); every turn after this
 			// extends the new prefix and caches again.
-			m.convHistory = compactedHistorySeed(msg.summary)
+			if msg.messages != nil {
+				m.convHistory = msg.messages
+			} else {
+				m.convHistory = compactedHistorySeed(msg.summary)
+			}
 		}
 		m.publishRemoteState("compact_done")
 		m.refreshViewport()
@@ -366,95 +443,35 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		m.vp.SetContent(m.renderMessages())
+		m.refreshViewport()
+	case runEventsMsg:
+		// A batch left over from a stopped run is dropped: its queue is no
+		// longer the active one (tests deliver batches with no queue).
+		if m.isActiveRun(msg.queue) {
+			for _, ev := range msg.events {
+				if ev.chunk != nil {
+					m.applyStreamChunk(*ev.chunk)
+				} else if ev.trace != nil {
+					cmds = append(cmds, m.applyToolTrace(*ev.trace)...)
+				}
+			}
+			// One refresh for the whole batch, however many events it held.
+			m.refreshViewport()
+			if m.runEvents != nil {
+				cmds = append(cmds, waitForRunEvents(m.runEvents))
+			}
+		}
 	case toolProgressMsg:
+		// A single trace, as tests deliver them; a live run delivers
+		// runEventsMsg batches.
 		if m.thinking {
-			t := msg.trace
-			m.applyToolTraceToObservability(t)
-			m.publishRemoteToolTrace(t)
-			// When an agent finishes generating an image/video, push the
-			// produced files into every bound Telegram chat. The
-			// dispatcher is a no-op when the relay is offline or nobody
-			// is subscribed, so it stays cheap on the hot path.
-			m.dispatchTelegramMedia(t)
-			if t.Name == "comment" {
-				if t.Status == "success" {
-					if message := extractCommentMessage(t.Args, t.Output); message != "" {
-						m.setProgressNote(message)
-					}
-				}
-				if m.toolCh != nil {
-					cmds = append(cmds, waitForTool(m.toolCh))
-				}
-				m.vp.SetContent(m.renderMessages())
-				m.vp.GotoBottom()
-				break
-			}
-			switch t.Name {
-			case "todo-write", "task-create", "task-update", "task-delete":
-				if t.Status != "running" {
-					m.syncTodosFromSession()
-				}
-			}
-			m.trackSessionEditFromTrace(t)
-			if t.Status != "running" {
-				switch t.Name {
-				case "file-write", "shell-exec", "bash", "agent":
-					// Refresh the side-panel file list off the Update
-					// goroutine, throttled so a burst of traces does not
-					// spawn git serially on the hot path.
-					if cmd := m.scheduleModifiedRefresh(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-					// Re-scan repo files so @-mention suggestions pick
-					// up files created or deleted by the tool.
-					if cmd := m.scheduleRepoScan(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
-			}
-			if t.Status == "running" {
-				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
-				m.currentTool = &item
-				m.appendToolStreamMessage(item)
-			} else {
-				m.toolSeq++
-				completed := ToolItem{
-					Name:   t.Name,
-					Status: t.Status,
-					Args:   t.Args,
-					Output: t.Output,
-					Seq:    m.toolSeq,
-				}
-				// Compute the diff off the Update goroutine: computeFileDiff
-				// shells out to git, which used to block Update per edit. The
-				// result is attached later via toolDiffMsg keyed on Seq.
-				cmds = append(cmds, computeFileDiffCmd(completed.Seq, m.cwd, t.Name, t.Args, t.Status))
-				// Cap m.liveTools to bound memory and the run summary built
-				// at interrupt time. When the LLM emits very large tool
-				// batches we keep the most recent maxLiveTools entries so
-				// the most useful context (what just happened) survives.
-				m.liveTools = append(m.liveTools, completed)
-				if len(m.liveTools) > maxLiveTools {
-					m.liveTools = append([]ToolItem(nil), m.liveTools[len(m.liveTools)-maxLiveTools:]...)
-				}
-				m.currentTool = nil
-				m.updateToolStreamMessage(completed)
-			}
-			if m.toolCh != nil {
-				cmds = append(cmds, waitForTool(m.toolCh))
-			}
-			m.vp.SetContent(m.renderMessages())
-			m.vp.GotoBottom()
+			cmds = append(cmds, m.applyToolTrace(msg.trace)...)
+			m.refreshViewport()
 		}
 	case streamChunkMsg:
 		if m.thinking {
 			m.applyStreamChunk(msg.chunk)
-			if m.streamCh != nil {
-				cmds = append(cmds, waitForStream(m.streamCh))
-			}
-			m.vp.SetContent(m.renderMessages())
-			m.vp.GotoBottom()
+			m.refreshViewport()
 		}
 	case usageEventMsg:
 		if m.thinking {
@@ -473,29 +490,39 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modifiedFilesMsg:
 		m.gitBranch = msg.branch
 		m.modifiedFiles = msg.files
+	case renderFillMsg:
+		if m.renderCache != nil {
+			m.renderCache.fillArmed = false
+		}
+		m.refreshViewport()
+	case diffCommandMsg:
+		m.applyDiffCommand(msg)
 	case toolDiffMsg:
 		if msg.seq > 0 && strings.TrimSpace(msg.diff) != "" {
 			m.attachToolDiff(msg.seq, msg.diff)
-			m.vp.SetContent(m.renderMessages())
-		}
-	case shellApprovalRequestMsg:
-		if m.thinking {
-			m.pendingAuth = &msg
-			m.approvalCursor = 0
-			m.ta.Reset()
-			m.showBanner("command approval required", "warn")
-			m.notifyIfUnfocused("Agent is waiting for command approval")
-			m.publishRemote("approval_request", map[string]any{
-				"command":  msg.request.Command,
-				"tool_id":  msg.request.ToolID,
-				"segments": msg.request.Segments,
-				"reason":   msg.request.Reason,
-			})
-			if m.approvalCh != nil {
-				cmds = append(cmds, waitForShellApproval(m.approvalCh))
-			}
+			// The diff lands on an earlier tool row after later output may
+			// already be on screen; refreshViewport keeps a view that was
+			// following the latest output at the bottom as the row grows.
 			m.refreshViewport()
 		}
+	case shellApprovalRequestMsg:
+		switch {
+		case !m.thinking:
+			// The run ended while this request was in flight: answer it so
+			// its tool call does not wait for a dialog that never opens.
+			denyApproval(msg)
+		case m.pendingAuth == nil:
+			m = m.presentApproval(msg)
+		default:
+			// Never replace the approval on screen: the user may be reading
+			// it, and their next Enter must answer what they read.
+			m.approvalQueue = append(m.approvalQueue, msg)
+			m.showBanner(fmt.Sprintf("another approval arrived — %d waiting after this one", len(m.approvalQueue)), "warn")
+		}
+		if m.thinking && m.approvalCh != nil {
+			cmds = append(cmds, waitForShellApproval(m.approvalCh))
+		}
+		m.refreshViewport()
 	case askUserRequestMsg:
 		switch {
 		case !m.thinking:
@@ -537,6 +564,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case localProbeDoneMsg:
 		newModel, cmd := m.handleLocalProbeDone(msg)
 		return newModel, cmd
+	case modelsChangedMsg:
+		return m.handleModelsChanged()
 	case loginInitiatedMsg:
 		return m.handleLoginInitiated(msg)
 	case loginPolledMsg:
@@ -557,6 +586,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalFocused = true
 	case tea.BlurMsg:
 		m.terminalFocused = false
+	case skillInstalledMsg:
+		m = m.finishSkillInstall(msg)
+		m.refreshViewport()
 	case bannerClearMsg:
 		m.banner = ""
 		m.bannerKind = ""
@@ -667,6 +699,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ensureResumeWindow()
 				return m, tea.Batch(cmds...)
 			}
+		}
+		if m.activeModal() == modalApprovalReview {
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				m = m.scrollApprovalReview(-3)
+			case tea.MouseWheelDown:
+				m = m.scrollApprovalReview(3)
+			}
+			return m, tea.Batch(cmds...)
 		}
 		sideW := m.sidePanelWidth()
 		onSidePanel := sideW > 0 && mouse.X >= m.paneWidth()+1
@@ -800,10 +841,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.syncInputSuggestions(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-
-		var vpCmd tea.Cmd
-		m.vp, vpCmd = m.vp.Update(msg)
-		cmds = append(cmds, vpCmd)
+		// The transcript viewport needs no passthrough: keys reach it
+		// through updateMain (pgup/pgdown) and the wheel through the
+		// tea.MouseMsg case above.
 	}
 
 	return m, tea.Batch(cmds...)

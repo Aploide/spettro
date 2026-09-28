@@ -1,11 +1,10 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,10 +18,8 @@ import (
 	"spettro/internal/budget"
 	compactpkg "spettro/internal/compact"
 	"spettro/internal/config"
-	"spettro/internal/diff"
 	"spettro/internal/hooks"
 	"spettro/internal/provider"
-	"spettro/internal/session"
 	"spettro/internal/skills"
 )
 
@@ -64,6 +61,22 @@ type ShellApprovalRequest struct {
 	// file-edit approvals only); the UI renders it so the user sees exactly
 	// what will change before approving.
 	Diff string
+	// Change is the proposed change itself, the file's whole text before and
+	// after, when the approval is for one file (file-write, file-edit); nil
+	// otherwise. Hosts that render real diffs (ACP editors) use it instead of
+	// Diff. Its texts are dropped for very large files (see FileChange).
+	Change *FileChange
+	// AgentID is the agent asking, under the same name its ToolTraces carry
+	// (the per-instance name such as "code#3" for swarm members, else the
+	// agent's ID). Sub-agents run in parallel with the main agent and with
+	// each other, so a host that shows the request on a tool call card uses
+	// it to pick a card of the asking agent. Set by toolRuntime.askApproval.
+	AgentID string
+	// CWD is the asking agent's working directory: a worktree for an
+	// isolated sub-agent, else the session's directory. Relative paths in
+	// that agent's tool arguments are relative to it. Set by
+	// toolRuntime.askApproval.
+	CWD string
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
@@ -85,7 +98,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "job-output", "job-kill", "tool-output", "glob", "grep", "diagnostics", "references", "hover", "rename-symbol"},
+		AllowedTools:    []string{"file-read", "file-write", "bash", "job-output", "job-kill", "tool-output", "glob", "grep", "lsp", "rename-symbol"},
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -160,11 +173,21 @@ type toolLoopConfig struct {
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
-	MaxTokens       int                    // max tokens per request; 0 = unlimited
-	Thinking        provider.ThinkingLevel // forwarded to provider.Request.Thinking
-	RequiredReads   []string
-	Images          []string        // attached to this turn's user message (re-sent every step)
-	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
+	// MaxTokens is the per-request INPUT token budget (config token_budget):
+	// a prompt estimated at or above it is force-compacted once, then the run
+	// fails. 0 = unlimited. It is never sent as the output cap.
+	MaxTokens int
+	// MaxOutputTokens caps each reply (max_tokens on the wire); 0 = auto, the
+	// provider manager's per-model default (see provider.Manager.MaxOutputTokens).
+	MaxOutputTokens int
+	// parentSnapshot and parentCWD are a parent run's snapshot and
+	// directory, for a sub-agent's system prompt (see sessionContextFor).
+	parentSnapshot string
+	parentCWD      string
+	Thinking       provider.ThinkingLevel // forwarded to provider.Request.Thinking
+	RequiredReads  []string
+	Images         []string        // attached to this turn's user message (re-sent every step)
+	ToolCallback   func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	// StreamCallback, when set, receives demultiplexed thinking/answer chunks as
 	// the model streams. Only the top-level run sets it; sub-agents stay silent.
 	StreamCallback StreamCallback
@@ -180,8 +203,9 @@ type toolLoopConfig struct {
 	PermissionFn  func() config.PermissionLevel
 	ShellApproval ShellApprovalCallback
 	AskUser       AskUserCallback
-	// Checkpoint, when set, is invoked synchronously right before any
-	// file-modifying tool executes (file-write, file-edit, shell), so the host
+	// Checkpoint, when set, is invoked synchronously right before the first
+	// file-modifying tool call of each step (file-write, file-edit, a shell
+	// command not provably read-only; see checkpoint_policy.go), so the host
 	// can snapshot the working tree and conversation for /rewind.
 	Checkpoint      func(tool string)
 	Manifest        *config.AgentManifest
@@ -194,10 +218,26 @@ type toolLoopConfig struct {
 	MaxDepth        int
 	MaxToolCalls    int            // max tool calls per LLM step (0 → default 32)
 	SkillsCatalog   skills.Catalog // discovered skills to disclose in prompts
+
+	// CheckpointPrepare prepares a step's snapshot ahead of its first
+	// mutating call (see LLMAgent.CheckpointPrepare); nil means every
+	// snapshot is taken synchronously through Checkpoint.
+	CheckpointPrepare func() PreparedCheckpoint
+
 	// Steering, when set, is drained at every step boundary; each pending
 	// message is appended to the conversation as a user turn so the model sees
-	// it before its next step. Top-level runs only — sub-agents never get one.
+	// it before its next step. Top-level runs get the host's queue; a delegated
+	// sub-agent gets one that only ever carries its time-limit wrap-up notice.
 	Steering *SteeringQueue
+
+	// toolSurfaceNote is the system prompt's note on the tools held but not
+	// advertised up front (see toolSurfacePrompt); set by runToolLoop.
+	toolSurfaceNote string
+
+	// skillLoadTool is the tool the system prompt's skill list tells the
+	// model to call (see toolRuntime.skillLoadTool); "" leaves the list out.
+	// Set by runToolLoop.
+	skillLoadTool string
 }
 
 // traceID is the agent identity stamped on emitted ToolTraces: the unique
@@ -212,20 +252,38 @@ func (r *toolRuntime) traceID() string {
 type toolCall struct {
 	Tool string          `json:"tool"`
 	Args json.RawMessage `json:"args"`
+	// CalledAs is the name the model used when it differs from Tool: the
+	// retired name canonicalToolCall rewrote, or the misspelt name
+	// routeNearMissCall corrected. Hooks match it as well.
+	CalledAs string `json:"-"`
 }
 
 type toolRuntime struct {
 	cwd     string
 	mu      sync.Mutex
 	shellMu sync.Mutex
-	// worktreeMu serializes every git operation that touches the shared
-	// repository — creating a sub-agent worktree, and merging one back. Two of
-	// those running at once contend on the repo's index and ref locks, and git
-	// reports the loser as a plain failure rather than as a conflict, so the
-	// work looks merged when it is not.
-	worktreeMu    sync.Mutex
+	// Git operations on the shared repository (creating a sub-agent
+	// worktree, merging one back) are serialized by the package-level
+	// workspaceMu (workspace.go), not by a field here: every runtime of the
+	// process shares the repository.
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
+	// fileStamps and fileLocks back the stale-read guard and per-file write
+	// serialization (file_stamps.go); readStamps holds the content hash of
+	// each path's last file-read. All are created lazily.
+	fileStamps    map[string][32]byte
+	readStamps    map[string][32]byte
+	stampsChanged map[string]struct{} // stamp keys changed since takeStampDelta
+	// stampIDs holds, for a stamp whose content is known to be what the file
+	// held at the time, the file's identity then and when that was known:
+	// the cheap check that lets a foreground shell command re-stamp the
+	// files it changed itself (restampAfterShell).
+	stampIDs map[string]stampedIdentity
+	// shellStamped holds the stamp keys whose stamp a shell re-stamp set:
+	// content the agent's own command wrote but the model was never shown,
+	// so a file-write overwrite needs a file-read first (file_stamps.go).
+	shellStamped  map[string]struct{}
+	fileLocks     map[string]*sync.Mutex
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
 	permissionFn  func() config.PermissionLevel
@@ -238,11 +296,19 @@ type toolRuntime struct {
 	agentRules    []config.PermissionRule
 	sandboxState  *SandboxState
 	// sub-agent support
-	manifest      *config.AgentManifest
-	providerMgr   *provider.Manager
-	providerName  func() string
-	modelName     func() string
-	maxTokens     int
+	manifest     *config.AgentManifest
+	providerMgr  *provider.Manager
+	providerName func() string
+	modelName    func() string
+	maxTokens    int
+	// sessionCtx is this run's environment/instructions snapshot, handed
+	// to sub-agents working in the same directory.
+	sessionCtx string
+	// maxOutputTokens is the user's output cap (config max_output_tokens),
+	// handed on to sub-agents; 0 = the provider manager's default.
+	maxOutputTokens int
+	// thinkingLevel is the level sub-agents start from: the configured one,
+	// then whatever level the model last accepted (see subAgentThinking).
 	thinkingLevel provider.ThinkingLevel
 	toolCallback  func(ToolTrace)
 	checkpoint    func(tool string)
@@ -250,6 +316,22 @@ type toolRuntime struct {
 	agentID       string
 	instanceID    string
 	parentID      string
+
+	// stepCheckpointed records that the current step already snapshotted the
+	// working tree (checkpoint_policy.go); parallelExec clears it per step.
+	stepCheckpointMu sync.Mutex
+	stepCheckpointed bool
+	// checkpointPrepare, runCheckpointed, speculative and speculativeDirty
+	// implement the snapshot prepared while the model generates
+	// (checkpoint_speculative.go). runCheckpointed records that this run
+	// took a checkpoint, which turns preparing ahead on; speculative is the
+	// pending preparation; speculativeDirty records that a call that may
+	// write the tree ran since it started. The last three are guarded by
+	// stepCheckpointMu.
+	checkpointPrepare func() PreparedCheckpoint
+	runCheckpointed   bool
+	speculative       *speculativeCheckpoint
+	speculativeDirty  bool
 
 	delegationDepth      int
 	maxParallelWorkers   int
@@ -260,6 +342,7 @@ type toolRuntime struct {
 	stopRequested        bool
 	stopReason           string
 	skillsCatalog        skills.Catalog
+	skillTool            string // the tool the model loads skills with (see skillLoadTool); "" when none
 	goalMode             bool
 	// workflowPreapproved skips the workflow tool's confirmation prompt: the
 	// user already said yes by writing the keyword.
@@ -292,6 +375,15 @@ type toolRuntime struct {
 	// loopDetect spots the agent repeating itself (manifest
 	// [runtime.loop_detection]); nil when disabled.
 	loopDetect *loopDetector
+
+	// lspWarm makes file-read start the file's language server in the
+	// background: set when the agent has a tool that uses one.
+	lspWarm bool
+
+	// surface is the set of tool schemas the run advertises: the core tools
+	// plus the deferred ones activated so far (tool_surface.go). nil means
+	// no deferral (runtimes built outside runToolLoop).
+	surface *toolSurface
 
 	// visionCheck overrides the provider manager's SupportsVision lookup for
 	// the view-image tool. Nil in production (test seam).
@@ -406,6 +498,12 @@ type toolLoopResult struct {
 	messages      []provider.Message
 }
 
+// ErrContentFiltered is the error a run fails with when the provider's
+// content filter stopped the model's reply before it said anything. Hosts
+// test for it with errors.Is to report a refusal rather than a failure (ACP
+// maps it to the "refusal" stop reason).
+var ErrContentFiltered = errors.New("the provider's content filter stopped the response")
+
 // stepCapMessage closes an iteration that hit cfg.MaxSteps. It is returned as
 // the run's content (and recorded as the final assistant turn), so the goal
 // host's transcript shows why the iteration ended before the next one starts.
@@ -456,6 +554,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		providerName:    cfg.ProviderName,
 		modelName:       cfg.ModelName,
 		maxTokens:       cfg.MaxTokens,
+		maxOutputTokens: cfg.MaxOutputTokens,
 		thinkingLevel:   cfg.Thinking,
 		toolCallback:    cfg.ToolCallback,
 		checkpoint:      cfg.Checkpoint,
@@ -466,12 +565,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		delegationDepth: cfg.DelegationDepth,
 		skillsCatalog:   cfg.SkillsCatalog,
 		compactCfg:      cfg.Compact,
+		lspWarm:         usesLanguageServer(allowed),
 	}
 	var loopPolicy config.LoopDetectionPolicy
 	if cfg.Manifest != nil {
 		loopPolicy = cfg.Manifest.Runtime.LoopDetection
 	}
 	runtime.loopDetect = newLoopDetector(loopPolicy)
+	// The stale-read guard spans the conversation: earlier runs' stamps ride
+	// on the carried tool-results messages.
+	runtime.restoreStamps(cfg.Messages)
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
 	}
@@ -519,34 +622,53 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	runtime.goalMode = cfg.GoalMode
 	runtime.workflowPreapproved = cfg.WorkflowPreapproved
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
-	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
+	// Project state (.spettro/) comes from the main checkout when this run
+	// is a sub-agent inside an agent worktree; see projectStateDir.
+	allowedShell, err := loadAllowedCommandSet(projectStateDir(cfg.CWD))
 	if err != nil {
 		return toolLoopResult{}, err
 	}
 	runtime.allowedShell = allowedShell
-	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
+	hooksCfg, err := hooks.LoadEffective(projectStateDir(cfg.CWD))
 	if err != nil {
 		return toolLoopResult{}, err
 	}
 	runtime.hooksConfig = hooksCfg
+	// Preparing snapshots ahead is only safe when nothing but the tools
+	// themselves changes files between steps (checkpoint_speculative.go),
+	// and only useful when a tool can take a snapshot at all. Only the
+	// host's own run is handed a preparer; sub-agents sharing the checkout
+	// snapshot synchronously (subagentCheckpoint).
+	if !hooksMayWriteFiles(hooksCfg) && mayCheckpoint(allowed) {
+		runtime.checkpointPrepare = cfg.CheckpointPrepare
+	}
 	if err := runtime.runSessionStartHooks(ctx); err != nil {
 		return toolLoopResult{}, err
 	}
+	// Required reads are keyed by workspace-relative path, the key
+	// runFileRead clears. The prompt lists the same normalized paths.
+	cfg.RequiredReads = runtime.readableRequiredReads(cfg.RequiredReads)
 	for _, p := range cfg.RequiredReads {
-		p = filepath.ToSlash(strings.TrimSpace(p))
-		if p != "" {
-			runtime.requiredReads[p] = struct{}{}
-		}
+		runtime.requiredReads[p] = struct{}{}
 	}
 	var traces []ToolTrace
 
 	// Native tool calling is always used: tool schemas ride on the API request
-	// for every model. The spec list is built once (it doesn't change between
-	// steps). Models whose catalog entry claims no tool support still get the
-	// schemas — local OpenAI-compatible servers accept them, and the old
-	// TOOL_CALL text-protocol fallback caused tool-capable local models to
+	// for every model. Models whose catalog entry claims no tool support still
+	// get the schemas — local OpenAI-compatible servers accept them, and the
+	// old TOOL_CALL text-protocol fallback caused tool-capable local models to
 	// emit unparsed TOOL_CALL strings instead of real tool calls.
-	nativeToolSpecs := buildToolSpecs(cfg.AllowedTools)
+	//
+	// The list is the tool surface: the core tools, plus each deferred tool
+	// once tool-search (or a call by name) activated it — in this turn or an
+	// earlier one of the carried conversation. It changes only on an
+	// activation, so the cached prompt prefix survives every other step.
+	runtime.skillTool = runtime.skillLoadTool(allowed)
+	cfg.skillLoadTool = runtime.skillTool
+	runtime.surface = runtime.buildToolSurface(cfg.AllowedTools, cfg.SystemPrompt)
+	runtime.restoreActivations(cfg.Messages)
+	cfg.toolSurfaceNote = toolSurfacePrompt(runtime.surface.deferredNames(), len(runtime.surface.droppedNames()) > 0)
+	nativeToolSpecs := runtime.surface.specs()
 
 	// Seed the message array. With a carried structured history the new turn is
 	// appended after it — the carried prefix must stay byte-identical to what
@@ -564,9 +686,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 
 	// finish appends the final assistant turn so the returned conversation is
-	// complete and reusable as the next turn's prefix.
+	// complete and reusable as the next turn's prefix. When the loop already
+	// stored that turn itself (with its reasoning, or as continued pieces) it
+	// sets answerRecorded first.
+	answerRecorded := false
 	finish := func(content string, goalDone bool, goalSummary string) (toolLoopResult, error) {
-		if strings.TrimSpace(content) != "" {
+		if strings.TrimSpace(content) != "" && !answerRecorded {
 			last := len(convMsgs) - 1
 			if last < 0 || convMsgs[last].Role != provider.RoleAssistant || convMsgs[last].Content != content {
 				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: content})
@@ -599,20 +724,91 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	}
 
 	// The system prompt is intentionally built once: it must not vary between
-	// steps or the provider-side prompt cache misses on every call.
-	system := buildSystemString(cfg)
+	// steps or the provider-side prompt cache misses on every call. The
+	// session snapshot in it travels with the conversation (on its first
+	// message) so later turns rebuild the exact same prompt.
+	sessionCtx := sessionContextFor(cfg)
+	system := buildSystemStringWith(cfg, sessionCtx)
+	runtime.sessionCtx = sessionCtx
+	if cfg.DelegationDepth == 0 && sessionCtx != "" && len(convMsgs) > 0 && carriedSessionContext(convMsgs) == "" {
+		convMsgs[0].SessionContext = sessionCtx
+	}
 
-	// Resilience state: transient provider failures are retried in-loop and an
-	// over-budget context gets one forced compaction attempt, so a single bad
-	// step (huge tool output, provider hiccup) doesn't kill the whole run.
-	const maxSendRetries = 2
-	sendRetries := 0
+	// Resilience state. Provider failures are classified
+	// (provider.ClassifyRetry): transient ones (rate limit, overload, 5xx,
+	// network, stalled stream) are retried with exponential backoff that
+	// honors Retry-After; deterministic ones (auth, bad request) fail fast; a
+	// context overflow forces one compaction and a resend. An over-budget
+	// context also gets one forced compaction attempt, so a single bad step
+	// (huge tool output, provider hiccup) doesn't kill the whole run.
+	retryPolicy := provider.DefaultRetryPolicy
+	sendFailures := 0
 	budgetCompacted := false
+	overflowCompacted := false
+	// overflowResent is set once an overflow was retried with a newly learned
+	// window and no compaction (see the overflow branch below).
+	overflowResent := false
+	// learnedWindow is the context window a provider stated in an overflow
+	// error. It overrides a missing (URL/local endpoints) or larger window.
+	learnedWindow := 0
+	// emptyReplies counts consecutive replies with neither text nor tool
+	// calls; each one appends a nudge, which a run that gives up drops from
+	// the history again (see dropEmptyNudges).
+	emptyReplies := 0
+	// truncatedText collects the pieces of a text answer that hit the output
+	// limit and was continued; they are joined into the final answer.
+	var truncatedText []string
+	// toolCallsThisTurn counts the tool calls this run has executed. The
+	// announce-only nudge applies only while it is zero: once the model has
+	// done real work, a short closing line is a legitimate final answer.
+	toolCallsThisTurn := 0
+	// announceNudged and droppedCallNudged record that this turn already
+	// spent its one announce-only or dropped-tool-call nudge (see
+	// llm_runtime_nudge.go); a second such reply is handled as before.
+	announceNudged := false
+	droppedCallNudged := false
+	// todoNoteGiven records that this turn already carried the note for a
+	// step spent on todo-write alone (todoOnlyStepNote).
+	todoNoteGiven := false
+	// thinking starts at the configured level and follows the level the
+	// manager actually succeeded with, so a level the model rejected is not
+	// re-sent (and re-rejected) on every later step.
+	thinking := cfg.Thinking
+	// measure is the calibrated prompt size of a would-be request: history +
+	// system + tool schemas, scaled by what the provider reported for the
+	// previous step (see usageCalibration). The sizer re-counts only the
+	// messages that changed since its last call (prompt_size.go), so the
+	// several measurements a step makes cost a comparison pass each, not a
+	// full count of the history.
+	var calibration usageCalibration
+	var sizer promptSizer
+	measure := func(system string, msgs []provider.Message) int {
+		return calibration.apply(sizer.requestTokens(system, msgs, nativeToolSpecs))
+	}
+	contextWindow := func() int {
+		w := cfg.ContextWindow
+		if w <= 0 {
+			// Hosts that don't wire the window (sub-agents, URL endpoints):
+			// ask the catalog / local probe.
+			m := runtime.effectiveModel()
+			w = cfg.ProviderManager.ModelContext(m.Provider, m.Model)
+		}
+		if learnedWindow > 0 && (w <= 0 || learnedWindow < w) {
+			w = learnedWindow
+		}
+		return w
+	}
+	notify := func(msg string) {
+		if cfg.ToolCallback != nil {
+			cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: msg})
+		}
+	}
 	// steps counts successful LLM calls; when cfg.MaxSteps is set (goal-mode
 	// iterations) the loop yields back to the host once the cap is reached.
 	steps := 0
 
 	for {
+		nativeToolSpecs = runtime.surface.specs()
 		// Mid-run steering: deliver any guidance the user typed while the run
 		// was executing. Each message is appended as a user turn at this step
 		// boundary — the conversation only ever grows, so the cached prompt
@@ -632,35 +828,30 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		// honoring the user's auto-compact settings via runtime.compactCfg.
 		// On error, keep convMsgs as-is — never abort a run for compaction;
 		// the trigger fires again at the next step until MaxFailures pauses it.
-		beforeTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
-		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, false); err != nil {
-			if cfg.ToolCallback != nil {
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("auto-compaction failed (%s) — continuing; will retry at the next threshold crossing", truncate(err.Error(), 200))})
-			}
+		beforeTokens := measure(system, convMsgs)
+		if compacted, did, err := runtime.compactConv(ctx, system, convMsgs, contextWindow(), false, measure); err != nil {
+			notify(compactFailureNotice(err, runtime.compactFailures, runtime.compactCfg.FailureLimit()))
 		} else {
 			convMsgs = compacted
-			if did && cfg.ToolCallback != nil {
-				afterTokens := compactpkg.EstimateHistoryTokens(system, convMsgs)
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(afterTokens))})
+			if did {
+				notify(fmt.Sprintf("compacted %s → %s tokens to stay within the context window", formatTokens(beforeTokens), formatTokens(measure(system, convMsgs))))
 			}
 		}
-		// Budget validation: sum system + all messages.
-		allContent := make([]string, 0, 1+len(convMsgs))
-		allContent = append(allContent, system)
-		for _, m := range convMsgs {
-			allContent = append(allContent, m.Content)
-		}
-		if err := budget.Validate(cfg.MaxTokens, allContent...); err != nil {
+		// promptTokens is this step's uncalibrated request estimate, taken
+		// once the history is final: the input budget checks its calibrated
+		// value, and the calibration samples it against the reported usage.
+		promptTokens := sizer.requestTokens(system, convMsgs, nativeToolSpecs)
+		// Input budget (config token_budget): the whole prompt — tool results
+		// and tool schemas included — must stay under it.
+		if err := budget.CheckTokens(cfg.MaxTokens, calibration.apply(promptTokens)); err != nil {
 			// Over budget (e.g. an oversized tool result blew up the history):
 			// force-compact once instead of failing the run. Only if forced
 			// compaction doesn't help either does the run error out.
 			if !budgetCompacted {
 				budgetCompacted = true
-				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, cfg.ContextWindow, true); cerr == nil && did {
+				if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, contextWindow(), true, measure); cerr == nil && did {
 					convMsgs = compacted
-					if cfg.ToolCallback != nil {
-						cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "context exceeded the token budget — force-compacted history and continuing"})
-					}
+					notify("context exceeded the token budget — force-compacted history and continuing")
 					continue
 				}
 			}
@@ -668,17 +859,21 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		}
 		budgetCompacted = false
 		req := provider.Request{
-			System:    system,
-			Messages:  convMsgs,
-			MaxTokens: cfg.MaxTokens,
-			Thinking:  cfg.Thinking,
+			System:        system,
+			Messages:      convMsgs,
+			MaxTokens:     cfg.MaxOutputTokens,
+			Thinking:      thinking,
+			ContextWindow: contextWindow(),
+			// promptTokens measured exactly this request (system, history,
+			// tools), so Send need not count the history again.
+			PromptTokens: promptTokens,
 		}
 		if len(nativeToolSpecs) > 0 {
 			req.Tools = nativeToolSpecs
 		}
 		if cfg.ToolCallback != nil {
 			req.OnRateLimit = func(d time.Duration) {
-				cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds()))})
+				notify(fmt.Sprintf("rate limited, waiting %ds before retrying...", int(d.Round(time.Second).Seconds())))
 			}
 		}
 		var demux *streamDemux
@@ -696,6 +891,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			}
 		}
 		model := runtime.effectiveModel()
+		// req is exactly what promptTokens measured: the system prompt, the
+		// history and the advertised tools.
+		sentEstimate := promptTokens
+		// The tree is quiet while the model generates: snapshot it now for
+		// the step's first mutating call to claim.
+		runtime.prepareStepCheckpoint()
 		resp, err := cfg.ProviderManager.Send(ctx, model.Provider, model.Model, req)
 		if demux != nil {
 			demux.flush()
@@ -705,16 +906,42 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			if ctx.Err() != nil {
 				return fail(fmt.Errorf("agent call failed: %w", err))
 			}
-			// Transient failure (5xx/timeout/network): retry the same request a
-			// bounded number of times before considering a fallback model, so a
-			// single provider hiccup doesn't kill the whole run.
-			if sendRetries < maxSendRetries {
-				sendRetries++
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("provider call failed (%s) — retrying (%d/%d)...", truncate(err.Error(), 180), sendRetries, maxSendRetries)})
+			class := provider.ClassifyRetry(err)
+			// Context overflow: resending the same prompt is pointless. Learn
+			// the real window when the provider states it, force-compact once
+			// and resend; fail clearly if compaction cannot shrink it.
+			if class == provider.RetryContextOverflow {
+				if n := provider.ContextLimitFromError(err); n > 0 && (learnedWindow == 0 || n < learnedWindow) {
+					learnedWindow = n
 				}
+				if !overflowCompacted {
+					overflowCompacted = true
+					if compacted, did, cerr := runtime.compactConv(ctx, system, convMsgs, contextWindow(), true, measure); cerr == nil && did {
+						convMsgs = compacted
+						notify("the request exceeded the model's context window — force-compacted history and retrying")
+						continue
+					}
+				}
+				// Nothing to compact (a short history), but the error named a
+				// smaller window than the request was sized for: resend once,
+				// so the output cap is fitted to the real window. Often the
+				// prompt fit and only max_tokens overflowed.
+				if w := contextWindow(); w > 0 && w != req.ContextWindow && !overflowResent {
+					overflowResent = true
+					notify(fmt.Sprintf("the request exceeded the model's context window (%s tokens) — retrying with the output cap fitted to it", formatTokens(w)))
+					continue
+				}
+				return fail(fmt.Errorf("agent call failed: the conversation exceeds the model's context window and compaction could not shrink it enough: %w", err))
+			}
+			// Transient (rate limit / overload / 5xx / network / stalled
+			// stream) or unclassified: bounded exponential backoff with
+			// jitter, honoring the provider's Retry-After. Deterministic
+			// failures (auth, invalid request) are never resent.
+			sendFailures++
+			if delay, ok := retryPolicy.NextDelay(err, sendFailures); ok {
+				notify(fmt.Sprintf("provider call failed (%s) — retrying in %s (attempt %d)...", truncate(err.Error(), 180), delay.Round(100*time.Millisecond), sendFailures+1))
 				select {
-				case <-time.After(time.Duration(sendRetries) * 2 * time.Second):
+				case <-time.After(delay):
 				case <-ctx.Done():
 					return fail(ctx.Err())
 				}
@@ -725,15 +952,18 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			// user consent on interactive runs and pins the rest of the run.
 			if next, ok := runtime.offerFallback(ctx, model, err); ok {
 				runtime.modelOverride = &next
-				sendRetries = 0
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next)})
-				}
+				sendFailures = 0
+				notify(fmt.Sprintf("model %s unavailable — switched to fallback %s for the rest of this run", model, next))
 				continue
 			}
 			return fail(fmt.Errorf("agent call failed: %w", err))
 		}
-		sendRetries = 0
+		sendFailures = 0
+		overflowCompacted = false
+		overflowResent = false
+		thinking = resp.Thinking
+		runtime.setSubAgentThinking(thinking)
+		calibration.observe(resp.Usage.TotalInput(), sentEstimate)
 		steps++
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
@@ -751,60 +981,118 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			})
 		}
 
+		logReply(runtime.traceID(), steps, resp)
+
 		content := strings.TrimSpace(resp.Content)
 		main, _ := stripThinkTags(content)
 		main = strings.TrimSpace(main)
-		if main == "" && len(resp.ToolCalls) == 0 {
-			if cfg.MaxSteps > 0 && steps >= cfg.MaxSteps {
-				return finish("", false, "")
+		// stepCapReached: the host's per-run step budget (goal-mode
+		// iterations) is spent, so no nudge may ask for another request.
+		stepCapReached := cfg.MaxSteps > 0 && steps >= cfg.MaxSteps
+
+		// The provider says the reply stopped for tool calls, yet none
+		// arrived: the call was lost on the way. Ask once for it again
+		// instead of ending the turn on whatever text came with it. Not
+		// during a continuation of a truncated answer, which has its own
+		// bounded flow.
+		if droppedToolCall(resp) && !droppedCallNudged && len(nativeToolSpecs) > 0 && len(truncatedText) == 0 && !stepCapReached {
+			droppedCallNudged = true
+			logDroppedToolCall(runtime.traceID(), steps)
+			if main != "" {
+				emitNarration(cfg, main)
+				convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
 			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: droppedToolCallNudge})
+			notify("the model stopped for a tool call that never arrived — asking it to send the call again")
 			continue
 		}
 
+		if main == "" && len(resp.ToolCalls) == 0 {
+			if resp.FinishReason == provider.FinishContentFilter {
+				return fail(fmt.Errorf("agent call failed: %w", ErrContentFiltered))
+			}
+			if len(truncatedText) > 0 {
+				// A continuation came back empty: the answer is complete. Drop
+				// the trailing continue request so the carried history ends on
+				// the answer.
+				if last := len(convMsgs) - 1; last >= 0 && convMsgs[last].Role == provider.RoleUser && convMsgs[last].Content == continueTruncatedNudge {
+					convMsgs = convMsgs[:last]
+				}
+				answerRecorded = true
+				return finish(strings.TrimSpace(strings.Join(truncatedText, "")), false, "")
+			}
+			if cfg.MaxSteps > 0 && steps >= cfg.MaxSteps {
+				return finish("", false, "")
+			}
+			// Never resend the identical request: nudge the model, and give
+			// up with a clear error once the empty streak persists.
+			emptyReplies++
+			if emptyReplies >= maxEmptyReplies {
+				convMsgs = dropEmptyNudges(convMsgs, emptyReplies-1)
+				return fail(fmt.Errorf("agent call failed: the model returned %d empty responses in a row", emptyReplies))
+			}
+			nudge := emptyReplyNudge
+			if resp.Truncated() {
+				nudge = emptyTruncatedNudge
+			}
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: nudge})
+			notify(fmt.Sprintf("the model returned an empty response — nudging it to continue (%d/%d)", emptyReplies, maxEmptyReplies))
+			continue
+		}
+		emptyReplies = 0
+
 		// Native tool-calling path: model returned structured tool calls.
 		if len(resp.ToolCalls) > 0 {
+			truncatedText = nil
+			toolCallsThisTurn += len(resp.ToolCalls)
 			emitNarration(cfg, main)
-			internalCalls := make([]toolCall, len(resp.ToolCalls))
-			for i, tc := range resp.ToolCalls {
-				internalCalls[i] = toolCall{Tool: tc.Name, Args: tc.Args}
-			}
-			// Loop check before execution: an abort skips the repeated calls
-			// entirely (the assistant turn is not yet in the history, so the
-			// carried prefix stays valid); a nudge lets the step run and is
-			// injected alongside the tool results below.
-			loopAct := runtime.loopDetect.observe(internalCalls, main)
-			if loopAct == loopAbort {
-				return finish(loopStopMessage, false, "")
-			}
-			results := runtime.parallelExec(ctx, internalCalls, allowed, cfg.ToolCallback)
+			internalCalls := runtime.loopCalls(resp.ToolCalls)
+			results := runtime.execToolCalls(ctx, resp.ToolCalls, allowed, cfg.ToolCallback)
+			// A deferred tool the model called by name is advertised from
+			// the next step on, so its next call has the schema.
+			runtime.noteCalls(resultToolNames(results))
+			runtime.recordActivations(convMsgs)
+			// Loop check after execution: the signature includes each result,
+			// so re-running a command whose output changes (edit → test) is
+			// progress; only the same call with the same result repeats. On
+			// abort the results are still recorded below, keeping the
+			// history a valid prefix.
+			loopAct := runtime.loopDetect.observe(internalCalls, results, main)
 			convMsgs = append(convMsgs, provider.Message{
 				Role:      provider.RoleAssistant,
 				Content:   main,
 				ToolCalls: resp.ToolCalls,
+				Reasoning: resp.Reasoning,
 			})
 			toolResults := make([]provider.ToolResult, len(results))
 			for i, res := range results {
 				traces = append(traces, ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600), Images: res.images})
 				toolResults[i] = provider.ToolResult{
 					ID:      resp.ToolCalls[i].ID,
-					Name:    res.name,
+					Name:    resp.ToolCalls[i].Name,
 					Output:  res.output,
 					IsErr:   res.status == "error",
 					Images:  res.images,
 					SpoolID: ensureSpooled(res.output),
 				}
 			}
+			if !todoNoteGiven && todoOnlyStep(results) {
+				todoNoteGiven = true
+				last := len(toolResults) - 1
+				toolResults[last].Output = appendToolNote(toolResults[last].Output, todoOnlyStepNote)
+			}
 			// Tool results are appended before any exit check: an assistant
 			// tool-call turn without its matching results is an invalid prefix
 			// for the next request (and would poison the carried history).
-			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults}
+			resultsMsg := provider.Message{Role: provider.RoleUser, ToolResults: toolResults, FileStamps: runtime.takeStampDelta()}
 			if loopAct == loopNudge {
 				resultsMsg.Content = loopNudgeMessage
-				if cfg.ToolCallback != nil {
-					cfg.ToolCallback(ToolTrace{AgentID: runtime.traceID(), Name: "comment", Status: "success", Output: "repetition detected — nudged the agent to change approach"})
-				}
+				notify("repetition detected — nudged the agent to change approach")
 			}
 			convMsgs = append(convMsgs, resultsMsg)
+			if loopAct == loopAbort {
+				return finish(loopStopMessage, false, "")
+			}
 			if runtime.shouldStop() {
 				return finish(runtime.stopMessage(), false, "")
 			}
@@ -824,14 +1112,48 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			continue
 		}
 
+		// Text cut at the output token limit: a half answer is not a final
+		// answer. Record the piece and ask the model to continue (bounded).
+		if resp.Truncated() && len(truncatedText) < maxContinuations && !(cfg.MaxSteps > 0 && steps >= cfg.MaxSteps) {
+			piece, _ := stripThinkTags(resp.Content)
+			if len(truncatedText) == 0 {
+				piece = strings.TrimLeft(piece, " \t\r\n")
+			}
+			truncatedText = append(truncatedText, piece)
+			convMsgs = append(convMsgs,
+				provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning},
+				provider.Message{Role: provider.RoleUser, Content: continueTruncatedNudge})
+			notify(fmt.Sprintf("the response hit the output token limit — asking the model to continue (%d/%d)", len(truncatedText), maxContinuations))
+			continue
+		}
+
 		// Final answer: model returned text with no tool calls.
 		if next, ok := runtime.nextRequiredRead(); ok {
 			emitNarration(cfg, main)
-			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main})
+			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
 			convMsgs = append(convMsgs, provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("system: you must read %q with file-read before giving your final answer.", next)})
 			continue
 		}
-		return finish(strings.TrimSpace(main), false, "")
+		// An announcement with nothing done yet ("I'll start by exploring
+		// the repository...") is not a final answer: nudge once to go on.
+		if !announceNudged && toolCallsThisTurn == 0 && len(nativeToolSpecs) > 0 && len(truncatedText) == 0 && !stepCapReached && looksLikeAnnouncement(main) {
+			announceNudged = true
+			emitNarration(cfg, main)
+			convMsgs = append(convMsgs,
+				provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning},
+				provider.Message{Role: provider.RoleUser, Content: announceOnlyNudge})
+			notify("the model announced work without calling a tool — nudging it to continue")
+			continue
+		}
+		// Store the answer with its reasoning (finish only records plain
+		// text), then return it — joined with any earlier continued pieces.
+		convMsgs = append(convMsgs, provider.Message{Role: provider.RoleAssistant, Content: main, Reasoning: resp.Reasoning})
+		answerRecorded = true
+		if len(truncatedText) > 0 {
+			piece, _ := stripThinkTags(resp.Content)
+			return finish(strings.TrimSpace(strings.Join(append(truncatedText, piece), "")), false, "")
+		}
+		return finish(main, false, "")
 	}
 }
 
@@ -851,17 +1173,44 @@ func emitNarration(cfg toolLoopConfig, text string) {
 	if id == "" {
 		id = cfg.AgentID
 	}
-	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text})
+	cfg.ToolCallback(ToolTrace{AgentID: id, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, text), Output: text, Narration: true})
 }
 
-// compactConv summarizes the older portion of convMsgs into a single
-// synthetic message when the estimated request size approaches the context
-// window (or unconditionally when force is set — used to recover from an
-// over-budget context instead of failing the run). The cut/summarize core
-// lives in compactpkg.CompactHistory (shared with the ACP bridge's
-// between-turn compaction); this wrapper supplies the runtime's summarizer
-// routing.
-func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []provider.Message, window int, force bool) ([]provider.Message, bool, error) {
+// dropEmptyNudges removes the last n empty-reply nudges from msgs, matched
+// by content rather than position: compaction may have rewritten the history
+// since the streak began (shifting or summarizing the nudges away), and
+// steering turns the user sent between nudges must survive. Empty replies
+// are never recorded, so the streak's nudges all follow the last assistant
+// message; earlier ones (from a streak the model recovered from) are kept.
+// The result never aliases msgs.
+func dropEmptyNudges(msgs []provider.Message, n int) []provider.Message {
+	drop := make(map[int]bool, n)
+	for i := len(msgs) - 1; i >= 0 && len(drop) < n; i-- {
+		m := msgs[i]
+		if m.Role == provider.RoleAssistant {
+			break
+		}
+		if m.Role == provider.RoleUser && len(m.ToolResults) == 0 && (m.Content == emptyReplyNudge || m.Content == emptyTruncatedNudge) {
+			drop[i] = true
+		}
+	}
+	out := make([]provider.Message, 0, len(msgs)-len(drop))
+	for i, m := range msgs {
+		if !drop[i] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// compactConv compacts convMsgs when the measured request size approaches
+// the context window (or unconditionally when force is set — used to recover
+// from an over-budget or overflowing context instead of failing the run):
+// old tool outputs are pruned first, and only if that is not enough are the
+// older turns summarized (see compactpkg.Compact, shared with the ACP bridge
+// and the TUI's /compact). measure sizes the would-be request (nil → plain
+// history estimate); this wrapper supplies the runtime's summarizer routing.
+func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []provider.Message, window int, force bool, measure compactpkg.MeasureFunc) ([]provider.Message, bool, error) {
 	if r.providerMgr == nil || r.providerName == nil || r.modelName == nil {
 		return msgs, false, fmt.Errorf("compaction: provider not configured")
 	}
@@ -884,7 +1233,27 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 			},
 			primary, chain, req, nil)
 	}
-	out, did, err := compactpkg.CompactHistoryWithPolicy(ctx, send, system, msgs, window, force, r.compactCfg, r.compactFailures)
+	// A forced pass here is recovery from an over-budget or overflowing
+	// context: when the summarizer fails, a summary extracted from the
+	// transcript beats failing the run.
+	res, err := compactpkg.Compact(ctx, send, msgs, compactpkg.Params{
+		System:             system,
+		Window:             window,
+		Force:              force,
+		Policy:             r.compactCfg,
+		Failures:           r.compactFailures,
+		Measure:            measure,
+		ExtractiveFallback: force,
+	})
+	out, did := res.Messages, res.Compacted()
+	if err != nil {
+		out, did = msgs, false
+	}
+	if did && len(out) > 0 {
+		// The summarized messages carried stamp deltas; the summary carries
+		// all of them instead, so a later turn still restores every stamp.
+		out[0].FileStamps = r.stampSnapshot()
+	}
 	// Consecutive-failure bookkeeping: a failing summarizer pauses the auto
 	// trigger after MaxFailures (see compact.Evaluate); any success resets it.
 	if err != nil {
@@ -893,6 +1262,19 @@ func (r *toolRuntime) compactConv(ctx context.Context, system string, msgs []pro
 		r.compactFailures = 0
 	}
 	return out, did, err
+}
+
+// compactFailureNotice is the transcript notice for a failed in-run
+// auto-compaction. failures is the consecutive-failure count including this
+// one. Below limit the trigger fires again at the next step while the
+// context is still over the threshold; at limit it pauses (compact.Evaluate)
+// until a compaction succeeds, which a manual /compact can do.
+func compactFailureNotice(err error, failures, limit int) string {
+	reason := truncate(err.Error(), 200)
+	if failures >= limit {
+		return fmt.Sprintf("auto-compaction failed (%s) — continuing; paused after %d failures in a row (/compact still works)", reason, failures)
+	}
+	return fmt.Sprintf("auto-compaction failed (%s) — continuing; the next step tries again (failure %d of %d before it pauses)", reason, failures, limit)
 }
 
 // formatTokens renders a token count compactly for transcript notices
@@ -904,7 +1286,86 @@ func formatTokens(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// parallelExec fires one goroutine per call and collects results in original order.
+// concurrentTools may run at the same time as each other within one step:
+// tools that only read (files, the index, the web, job/spool output) plus
+// `agent`, whose sub-agent spawns are Spettro's parallelism feature and were
+// always fanned out together (see agentBudget in parallelExec). Everything
+// else — file writes and edits, shell and pty commands, worktree and swarm
+// tools, and any tool not listed here (MCP included) — runs alone, in the
+// model's order. The lsp tool's lookups are concurrent too, but not its
+// restart (see concurrentCall).
+var concurrentTools = map[string]bool{
+	"file-read":          true,
+	"grep":               true,
+	"glob":               true,
+	"web-fetch":          true,
+	"web-search":         true,
+	"view-image":         true,
+	"skill":              true,
+	"tool-search":        true,
+	"job-output":         true,
+	"tool-output":        true,
+	"mcp-list-resources": true,
+	"mcp-read-resource":  true,
+	"comment":            true,
+	"agent":              true,
+}
+
+// planToolBatches splits a step's calls (by index) into the batches parallelExec
+// runs one after another: each maximal run of consecutive concurrent tools is
+// one batch whose calls run together, and every other call is a batch of its
+// own. A mutating call therefore always sees the effects of every call the
+// model placed before it, and never races one placed after it.
+func planToolBatches(calls []toolCall, indices []int) [][]int {
+	var batches [][]int
+	var group []int
+	for _, idx := range indices {
+		if concurrentCall(calls[idx]) {
+			group = append(group, idx)
+			continue
+		}
+		if len(group) > 0 {
+			batches = append(batches, group)
+			group = nil
+		}
+		batches = append(batches, []int{idx})
+	}
+	if len(group) > 0 {
+		batches = append(batches, group)
+	}
+	return batches
+}
+
+// concurrentCall reports whether a call, as the built-in that carries it out
+// sees it (toolRuntime.builtinCall), may run together with its neighbours
+// (see concurrentTools). An lsp restart stops the servers the lookups next
+// to it would be talking to, so it runs alone, as lsp-restart always did.
+func concurrentCall(call toolCall) bool {
+	if call.Tool == "lsp" {
+		return lspCallOp(call.Args) != "restart"
+	}
+	return concurrentTools[call.Tool]
+}
+
+// planBatches is planToolBatches over how each call is carried out
+// (toolRuntime.builtinCall), not what it is named: an unfolded retired
+// built-in batches as the built-in whose code it runs, and a call no built-in
+// carries out (a tool of the operator's own, or arguments that do not
+// convert) is a batch of its own.
+func (r *toolRuntime) planBatches(calls []toolCall, indices []int) [][]int {
+	carried := make([]toolCall, len(calls))
+	for _, idx := range indices {
+		if run, err := r.builtinCall(calls[idx]); err == nil {
+			carried[idx] = run
+		}
+	}
+	return planToolBatches(carried, indices)
+}
+
+// parallelExec executes one step's tool calls and returns their results in
+// call order. Consecutive read-only calls (and sub-agent spawns) run
+// concurrently; mutating calls run serially in the order the model emitted
+// them — see planToolBatches.
 //
 // It enforces two limits:
 //   - r.maxToolCallsPerStep caps the total batch size; calls beyond the limit
@@ -916,14 +1377,45 @@ func formatTokens(n int) string {
 //     within a single batch.
 func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowed map[string]struct{}, callback func(ToolTrace)) []parallelResult {
 	results := make([]parallelResult, len(calls))
+	r.resetStepCheckpoint()
 	agentBudget := r.maxParallelWorkers
 	if r.delegationDepth > 0 {
 		agentBudget = r.maxParallelMicroagnt
 	}
 	toolCap := r.maxToolCallsPerStep
 	agentCalls := 0
-	var wg sync.WaitGroup
+	runnable := make([]int, 0, len(calls))
+	// Retired tool names become their canonical tool before anything else
+	// looks at the call, so the allow-list, policies, hooks, batching, traces
+	// and hosts only ever see canonical names. A misspelt name (web_fetch)
+	// is first routed to the one allowed tool it stands for, if any
+	// (tool_near_miss.go).
+	calls = slices.Clone(calls)
 	for i, call := range calls {
+		if routed, ok := r.routeNearMissCall(call, allowed); ok {
+			call = routed
+		}
+		canon, err := r.canonicalCall(call)
+		if err != nil {
+			results[i] = parallelResult{
+				agentID: r.traceID(),
+				name:    call.Tool,
+				args:    singleLine(string(call.Args)),
+				output:  "error: " + err.Error(),
+				status:  "error",
+			}
+			if callback != nil {
+				callback(ToolTrace{AgentID: r.traceID(), Name: call.Tool, Status: "error", Args: results[i].args, Output: results[i].output})
+			}
+			calls[i] = toolCall{}
+			continue
+		}
+		calls[i] = canon
+	}
+	for i, call := range calls {
+		if call.Tool == "" {
+			continue
+		}
 		if toolCap > 0 && i >= toolCap {
 			results[i] = parallelResult{
 				agentID: r.traceID(),
@@ -947,45 +1439,90 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				continue
 			}
 		}
-		wg.Add(1)
-		go func(idx int, c toolCall) {
-			defer wg.Done()
-			callArgs := singleLine(string(c.Args))
-			if callback != nil && isMajorOperationTool(c.Tool) {
-				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
-				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
-			}
-			if callback != nil {
-				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
-			}
-			cctx, sink := withImageSink(ctx)
-			output, err := r.executeWithTimeout(cctx, c, allowed)
-			status := "success"
-			if err != nil {
-				status = "error"
-				output = "error: " + err.Error()
-			}
+		runnable = append(runnable, i)
+	}
+	run := func(idx int, c toolCall) {
+		callArgs := singleLine(string(c.Args))
+		if err := ctx.Err(); err != nil {
+			// The run was interrupted by an earlier call in this step; the
+			// rest still need a result each, but must not start.
 			results[idx] = parallelResult{
 				agentID: r.traceID(),
 				name:    c.Tool,
 				args:    callArgs,
-				output:  output,
-				status:  status,
-				images:  sink.list(),
+				output:  "error: not executed: " + err.Error(),
+				status:  "error",
 			}
-			if callback != nil {
-				callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list()})
-				if isMajorOperationTool(c.Tool) {
-					msg := fmt.Sprintf("Completed %s.", c.Tool)
-					if err != nil {
-						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
-					}
-					callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+			return
+		}
+		if callback != nil && isMajorOperationTool(c.Tool) {
+			// The note is one line of the transcript: a heredoc's newlines,
+			// or the "\n... (truncated)" truncate appends, would otherwise
+			// render the start of the script as a paragraph of its own.
+			args := strings.Join(strings.Fields(summarizeLoopToolArgs(c.Tool, callArgs)), " ")
+			msg := fmt.Sprintf("Starting %s (%s).", c.Tool, args)
+			callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+		}
+		if callback != nil {
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Args: callArgs, Status: "running"})
+		}
+		cctx, sink := withImageSink(ctx)
+		cctx, changes := withFileChangeSink(cctx)
+		output, err := r.executeWithTimeout(cctx, c, allowed)
+		status := "success"
+		if err != nil {
+			status = "error"
+			output = toolErrorOutput(output, err)
+		}
+		results[idx] = parallelResult{
+			agentID: r.traceID(),
+			name:    c.Tool,
+			args:    callArgs,
+			output:  output,
+			status:  status,
+			images:  sink.list(),
+		}
+		if callback != nil {
+			callback(ToolTrace{AgentID: r.traceID(), Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600), Images: sink.list(), FileChanges: changes.list()})
+			if isMajorOperationTool(c.Tool) {
+				msg := fmt.Sprintf("Completed %s.", c.Tool)
+				if err != nil {
+					msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
+				}
+				callback(ToolTrace{AgentID: r.traceID(), Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+			}
+		}
+	}
+	for _, batch := range r.planBatches(calls, runnable) {
+		if r.shouldStop() {
+			// An earlier batch ended the turn (ask-user's reply-in-chat exit,
+			// task-stop): later calls were planned on the assumption the turn
+			// goes on, so they get a result each but must not start.
+			for _, idx := range batch {
+				results[idx] = parallelResult{
+					agentID: r.traceID(),
+					name:    calls[idx].Tool,
+					args:    singleLine(string(calls[idx].Args)),
+					output:  "error: not executed: the turn was ended by an earlier call in this step",
+					status:  "error",
 				}
 			}
-		}(i, call)
+			continue
+		}
+		if len(batch) == 1 {
+			run(batch[0], calls[batch[0]])
+			continue
+		}
+		var wg sync.WaitGroup
+		for _, idx := range batch {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				run(idx, calls[idx])
+			}(idx)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 	return results
 }
 
@@ -999,7 +1536,7 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 			if lim.FileReadChars > 0 {
 				return lim.FileReadChars
 			}
-		case "repo-search", "grep", "glob", "ls":
+		case "grep", "glob":
 			if lim.SearchChars > 0 {
 				return lim.SearchChars
 			}
@@ -1013,29 +1550,74 @@ func (r *toolRuntime) historyLimit(toolName string) int {
 }
 
 func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
-	if blocksOnUserInput(call.Tool) {
+	// The PostToolUse hooks in finishToolCall need the canonical call too.
+	if canon, err := r.canonicalCall(call); err == nil {
+		call = canon
+	}
+	ctx = withCalledAs(ctx, r.hookAlias(call))
+	// How the call is bounded depends on the built-in that carries it out,
+	// not on its name. A call no built-in carries out fails in execute
+	// before doing anything, so the default deadline is all it needs.
+	run, runErr := r.builtinCall(call)
+	if runErr != nil {
+		run = toolCall{}
+	}
+	if blocksOnUserInput(run.Tool) {
 		// The tool is waiting on a person, who may take as long as they take.
 		// A deadline here would cancel the question out from under them and
 		// hand the model a timeout error as if nobody was there — the run must
 		// block until the user actually answers (or declines). The manifest's
 		// timeout_sec bounds tool execution, not human attention.
 		out, err := r.execute(ctx, call, allowed)
-		_ = r.runPostToolHooks(ctx, call.Tool, call.Args, out)
-		return out, err
+		return r.finishToolCall(ctx, call, out, err), err
 	}
+	if run.Tool == "agent" {
+		// The agent case bounds the sub-agent run itself (agentTimeout), so
+		// that a sub-agent running out of time is reported with its partial
+		// work instead of the whole call being cut off.
+		out, err := r.execute(ctx, call, allowed)
+		return r.finishToolCall(ctx, call, out, err), err
+	}
+	if r.isForegroundShellCall(run) {
+		// runShellTool owns both deadlines of a foreground command: the
+		// approval prompt gets the tool's default window, and the command's
+		// own timeout (honouring a per-call timeout argument) starts only once
+		// it is approved. An outer deadline here would start before approval,
+		// so a slow approval — or a short per-call timeout — would eat into
+		// the other. The command's wait is itself bounded (process-group kill
+		// plus WaitDelay), and hooks carry their own timeouts.
+		out, err := r.execute(ctx, call, allowed)
+		return r.finishToolCall(ctx, call, out, err), err
+	}
+	timeout := time.Duration(r.defaultToolTimeoutSec(call.Tool)) * time.Second
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := r.execute(tctx, call, allowed)
+	return r.finishToolCall(tctx, call, out, err), err
+}
+
+// defaultToolTimeoutSec is a tool's execution limit in seconds when the call
+// does not ask for its own: the manifest's timeout_sec, else 45s, with longer
+// floors for swarms/workflows and for shell tools in goal mode. tool is the
+// call's identity, whose manifest entry sets the limit; the floors follow the
+// built-in that carries the call out (toolRuntime.builtinFor), so an
+// unfolded shell-exec gets the shell's and a tool of the operator's own
+// called bash does not.
+func (r *toolRuntime) defaultToolTimeoutSec(tool string) int {
 	timeoutSec := 45
-	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
+	if spec, ok := r.toolPolicies[tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
 	}
-	if call.Tool == "ultra" || call.Tool == "workflow" {
+	builtin := r.builtinFor(tool)
+	if builtin == "ultra" || builtin == "workflow" {
 		// A swarm — or a workflow script, which may run several rounds of them
 		// — is many full sub-agent turns; the per-tool default (and any
 		// manifest value tuned for single tools) would kill it mid-flight.
 		timeoutSec = 7200
 	}
 	if r.goalMode {
-		switch call.Tool {
-		case "shell-exec", "bash", "bash-output":
+		switch builtin {
+		case "bash":
 			if r.shellTimeoutSec > 0 {
 				timeoutSec = r.shellTimeoutSec
 			} else if timeoutSec < 600 {
@@ -1043,11 +1625,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 			}
 		}
 	}
-	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-	out, err := r.execute(tctx, call, allowed)
-	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
-	return out, err
+	return timeoutSec
 }
 
 // blocksOnUserInput reports whether a tool's execution is a wait on the human,
@@ -1058,8 +1636,15 @@ func blocksOnUserInput(tool string) bool {
 }
 
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	// parallelExec already canonicalized the call; this covers direct callers,
+	// so a retired name never reaches the dispatch below.
+	call, err := r.canonicalCall(call)
+	if err != nil {
+		return "", err
+	}
+	ctx = withCalledAs(ctx, r.hookAlias(call))
 	if _, ok := allowed[call.Tool]; !ok {
-		return "", fmt.Errorf("tool %q not allowed", call.Tool)
+		return "", r.notAllowedError(call.Tool, allowed)
 	}
 	if spec, ok := r.toolPolicies[call.Tool]; ok {
 		if evaluatePermissionRule("tool", spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
@@ -1069,6 +1654,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			if evaluatePermissionRule(fam, spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
 				return "", fmt.Errorf("tool %q denied by policy for permission %q", call.Tool, fam)
 			}
+		}
+		if err := r.lspOpDenied(call, spec); err != nil {
+			return "", err
 		}
 	}
 	updatedArgs, denyReason, err := r.runPreToolHooks(ctx, call.Tool, call.Args)
@@ -1081,65 +1669,32 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	if len(updatedArgs) > 0 {
 		call.Args = updatedArgs
 	}
+	// Everything above judged the call by its identity. From here on it is
+	// carried out: call becomes the built-in's view of it (tool_names.go),
+	// and id keeps the identity, for the per-tool policy a built-in looks up
+	// while it runs (approvals, command and path rules) and for labels.
+	id := call.Tool
+	call, err = r.builtinCall(call)
+	if err != nil {
+		return "", err
+	}
 	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
 	}
-	if r.checkpoint != nil && isMutatingTool(call.Tool) {
-		r.checkpoint(call.Tool)
+	if r.checkpoint != nil && needsCheckpoint(call) {
+		r.checkpointStep(id)
 	}
+	r.noteTreeUse(call)
 	switch call.Tool {
-	case "repo-search":
-		var args struct {
-			Query string `json:"query"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("repo-search args: %w", err)
-		}
-		out, err := r.searcher.Search(ctx, r.cwd, strings.TrimSpace(args.Query))
-		if err != nil {
-			return "", err
-		}
-		r.markReadFromSearch(out)
-		return r.spoolResult("repo-search", out), nil
 	case "file-read":
-		var args struct {
-			Path      string `json:"path"`
-			StartLine int    `json:"start_line"`
-			EndLine   int    `json:"end_line"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("file-read args: %w", err)
-		}
-		abs, rel, err := r.resolvePath(args.Path)
-		if err != nil {
-			return "", err
-		}
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			return "", err
-		}
-		r.mu.Lock()
-		r.readSet[rel] = struct{}{}
-		delete(r.requiredReads, rel)
-		r.mu.Unlock()
-		content := string(data)
-		if args.StartLine > 0 {
-			// Bounded reads are already scoped by the model; plain truncation
-			// keeps the response aligned with the requested line window.
-			content = sliceLines(content, args.StartLine, args.EndLine)
-			return truncate(content, r.historyLimit("file-read")), nil
-		}
-		return r.spoolResult("file-read", content), nil
+		return r.runFileRead(ctx, call.Args)
 	case "file-write":
-		var args struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-			Append  bool   `json:"append"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("file-write args: %w", err)
+		defer r.lockFileForMutation(call.Args)()
+		args, err := decodeFileWriteArgs(call.Args)
+		if err != nil {
+			return "", err
 		}
 		abs, rel, err := r.resolvePath(args.Path)
 		if err != nil {
@@ -1148,25 +1703,47 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if strings.TrimSpace(args.Path) == "" {
 			return "", fmt.Errorf("file-write path is required")
 		}
+		defer r.lockFile(abs)()
 		_, statErr := os.Stat(abs)
 		exists := statErr == nil
-		oldContent := ""
+		var oldRaw []byte
 		if exists {
-			r.mu.Lock()
-			_, alreadyRead := r.readSet[rel]
-			r.mu.Unlock()
-			if !alreadyRead {
+			raw, err := os.ReadFile(abs)
+			if err != nil {
+				return "", err
+			}
+			oldRaw = raw
+		}
+		oldContent := string(oldRaw)
+		// Overwriting needs a full read (a stamp); a grep hit
+		// only showed the model a line or two of the file. Appending replaces
+		// nothing, so it needs no read — and does not count as one.
+		stampedBefore := exists && r.stampMatches(rel, oldRaw)
+		if exists && !args.Append {
+			if !r.hasFileStamp(rel) {
+				r.mu.Lock()
+				_, searched := r.readSet[rel]
+				r.mu.Unlock()
+				if searched {
+					return "", fmt.Errorf("refusing write: file-read %q first (a search hit is not a full read)", rel)
+				}
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
-			if raw, err := os.ReadFile(abs); err == nil {
-				oldContent = string(raw)
+			if err := r.checkFileStamp("file-write", rel, oldRaw); err != nil {
+				return "", err
+			}
+			if err := r.checkOverwriteSeen(rel); err != nil {
+				return "", err
 			}
 		}
 		newContent := args.Content
 		if args.Append {
 			newContent = oldContent + args.Content
 		}
-		if err := r.authorizeWriteAccess(ctx, "file-write", rel, diff.Unified(rel, oldContent, newContent)); err != nil {
+		if err := r.authorizeFileChange(ctx, "file-write", abs, rel, oldContent, newContent, !exists); err != nil {
+			return "", err
+		}
+		if err := r.recheckBeforeWrite("file-write", rel, abs, exists, oldRaw); err != nil {
 			return "", err
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -1189,13 +1766,25 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		r.mu.Unlock()
+		switch {
+		case !args.Append || !exists:
+			// The model supplied every byte of the file.
+			r.recordFullWriteStamp(rel, []byte(newContent))
+		case stampedBefore:
+			// An append keeps what was there, so a file the model has
+			// not seen since its own bash command changed it stays
+			// marked (checkOverwriteSeen).
+			r.recordFileStamp(rel, []byte(newContent))
+		default:
+			// An append to a file the agent had not seen in full leaves it
+			// unstamped: the model still has not read what was there.
+		}
 		r.invalidateSymbolIndex(rel)
+		recordFileChange(ctx, abs, oldContent, newContent, !exists)
 		if exists {
 			return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("updated %s", rel)), nil
 		}
 		return r.withLSPDiagnostics(ctx, abs, fmt.Sprintf("created %s", rel)), nil
-	case "shell-exec":
-		return r.runShellTool(ctx, call.Tool, call.Args, "shell-exec")
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
@@ -1204,60 +1793,33 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("glob args: %w", err)
 		}
-		return r.runGlob(args.Pattern, args.Path)
+		if strings.TrimSpace(args.Pattern) == "" {
+			return r.runListDir(args.Path)
+		}
+		out, err := r.runGlob(ctx, args.Pattern, args.Path)
+		if err != nil {
+			return "", err
+		}
+		return r.spoolResult("glob", out), nil
 	case "grep":
 		var gargs grepArgs
 		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
 			return "", fmt.Errorf("grep args: %w", err)
 		}
+		if gargs.Symbol != nil {
+			return r.runSymbolSearch(ctx, gargs)
+		}
 		out, err := r.runGrep(ctx, gargs)
 		if err != nil {
 			return "", err
 		}
-		if gargs.OutputMode == "" || gargs.OutputMode == "content" {
-			return r.spoolResult("grep", out), nil
-		}
-		return out, nil
-	case "ls":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("ls args: %w", err)
-		}
-		dir := "."
-		if args.Path != "" {
-			abs, _, err := r.resolvePath(args.Path)
-			if err != nil {
-				return "", fmt.Errorf("ls: %w", err)
-			}
-			dir = abs
-		} else {
-			dir = r.cwd
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return "", fmt.Errorf("ls: %w", err)
-		}
-		var lines []string
-		for _, e := range entries {
-			if e.IsDir() {
-				lines = append(lines, e.Name()+"/")
-			} else {
-				lines = append(lines, e.Name())
-			}
-		}
-		return strings.Join(lines, "\n"), nil
+		return r.spoolResult("grep", out), nil
 	case "web-fetch":
 		return r.runWebFetch(ctx, call.Args)
 	case "download":
 		return r.runDownload(ctx, call.Args)
 	case "web-search":
 		return r.runWebSearch(ctx, call.Args)
-	case "grok-image":
-		return r.runGrokImage(ctx, call.Args)
-	case "grok-video":
-		return r.runGrokVideo(ctx, call.Args)
 	case "view-image":
 		return r.runViewImage(ctx, call.Args)
 	case "ask-user":
@@ -1266,38 +1828,20 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runPlanModeToggle(call.Args, true)
 	case "exit-plan-mode":
 		return r.runPlanModeToggle(call.Args, false)
-	case "task-create":
-		return r.runTaskCreate(call.Args)
-	case "task-get":
-		return r.runTaskGet(call.Args)
-	case "task-update":
-		return r.runTaskUpdate(call.Args)
-	case "task-list":
-		return r.runTaskList(call.Args)
-	case "task-delete":
-		return r.runTaskDelete(call.Args)
 	case "task-stop":
 		return r.runTaskStop(call.Args)
 	case "goal-complete":
 		return r.runGoalComplete(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
-	case "skill-read", "activate-skill", "skill-activate":
-		return r.runSkillRead(call.Args)
-	case "skill-list":
-		return r.runSkillList(call.Args)
+	case "skill":
+		return r.runSkill(call.Args)
 	case "config":
 		return r.runConfigTool(call.Args)
-	case "diagnostics":
-		return r.runLSPDiagnostics(ctx, call.Args)
-	case "references":
-		return r.runLSPReferences(ctx, call.Args)
-	case "hover":
-		return r.runLSPHover(ctx, call.Args)
+	case "lsp":
+		return r.runLSP(ctx, call.Args, call.CalledAs)
 	case "rename-symbol":
 		return r.runLSPRename(ctx, call.Args)
-	case "lsp-restart":
-		return r.runLSPRestart(call.Args)
 	case "mcp-list-resources":
 		return r.runMCPListResources(ctx, call.Args)
 	case "mcp-read-resource":
@@ -1307,73 +1851,19 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "save-memory":
 		return r.runSaveMemory(call.Args)
 	case "todo-write":
-		var args struct {
-			Todos []any `json:"todos"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("todo-write args: %w", err)
-		}
-		if strings.TrimSpace(r.sessionDir) == "" {
-			return "", fmt.Errorf("todo-write requires an active session")
-		}
-		out := make([]session.Todo, 0, len(args.Todos))
-		now := time.Now()
-		for i, item := range args.Todos {
-			m, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			id, _ := m["id"].(string)
-			if strings.TrimSpace(id) == "" {
-				id = fmt.Sprintf("todo-%d", i+1)
-			}
-			content, _ := m["content"].(string)
-			status, _ := m["status"].(string)
-			if status == "" {
-				status = "pending"
-			}
-			owner, _ := m["owner"].(string)
-			source, _ := m["source"].(string)
-			priority, _ := m["priority"].(string)
-			var deps []string
-			if rawDeps, ok := m["dependencies"].([]any); ok {
-				for _, d := range rawDeps {
-					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
-						deps = append(deps, strings.TrimSpace(s))
-					}
-				}
-			}
-			out = append(out, session.Todo{
-				ID:           id,
-				Content:      content,
-				Status:       status,
-				Owner:        owner,
-				Source:       source,
-				Priority:     priority,
-				Dependencies: deps,
-				UpdatedAt:    now,
-			})
-		}
-		// Route through the session store so the write is atomic and holds the
-		// same lock as the task tools; direct file writes here raced with them.
-		sid := filepath.Base(r.sessionDir)
-		if err := session.SaveTodos(filepath.Dir(filepath.Dir(r.sessionDir)), sid, out); err != nil {
-			return "", fmt.Errorf("todo-write: %w", err)
-		}
-		return fmt.Sprintf("wrote %d todos", len(out)), nil
+		return r.runTodoWrite(call.Args)
 	case "file-edit":
-		return r.runFileEdit(ctx, call.Args)
-	case "multi-edit":
-		return r.runMultiEdit(ctx, call.Args)
+		defer r.lockFileForMutation(call.Args)()
+		return r.runFileEdit(ctx, id, call.Args)
 	case "enter-worktree":
 		return r.runEnterWorktree(ctx, call.Args)
 	case "exit-worktree":
 		return r.runExitWorktree(ctx, call.Args)
 	case "send-message":
 		return r.runSendMessage(call.Args)
-	case "bash", "bash-output":
-		// Models frequently treat bash-output as the polling tool for background
-		// jobs (job_id + offset) rather than as a bash alias; honor that reading
+	case "bash":
+		// Models frequently treat bash (or its bash-output alias) as the polling
+		// tool for background jobs (job_id + offset); honor that reading
 		// whenever a job_id is supplied so both conventions work.
 		var probe struct {
 			JobID string `json:"job_id"`
@@ -1381,7 +1871,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if json.Unmarshal(call.Args, &probe) == nil && strings.TrimSpace(probe.JobID) != "" {
 			return r.runJobOutput(call.Args)
 		}
-		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
+		return r.runShellTool(ctx, id, call.Args, "bash")
 	case "job-output":
 		return r.runJobOutput(call.Args)
 	case "tool-output":
@@ -1501,9 +1991,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			ModelName:       r.modelName,
 			CWD:             subCWD,
 			MaxTokens:       r.maxTokens,
-			Thinking:        r.thinkingLevel,
+			MaxOutputTokens: r.maxOutputTokens,
+			Thinking:        r.subAgentThinking(),
+			Compact:         r.compactCfg,
+			parentSnapshot:  r.sessionCtx,
+			parentCWD:       r.cwd,
 			ToolCallback:    r.toolCallback,
-			Checkpoint:      r.checkpoint,
+			Checkpoint:      r.subagentCheckpoint(subCWD),
 			ShellApproval:   r.shellApproval,
 			AskUser:         r.askUser,
 			Manifest:        r.manifest,
@@ -1511,20 +2005,50 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			SessionDir:      r.sessionDir,
 			DelegationDepth: r.delegationDepth + 1,
 			ParentAgentID:   parentID,
+			// Carries only the wrap-up notice (subagent_timeout.go).
+			Steering: NewSteeringQueue(),
 		}
-		result, err := subAgent.Run(ctx, subTask)
+		// The sub-agent's deadline is set here rather than by
+		// executeWithTimeout, so that when it passes the parent is still
+		// running and can report the partial work.
+		limit := r.agentTimeout(*spec)
+		runCtx, cancelRun := context.WithTimeout(ctx, limit)
+		stopWrapUp := scheduleWrapUp(subAgent.Steering, limit)
+		result, err := subAgent.Run(runCtx, subTask)
+		stopWrapUp()
+		timedOut := err != nil && subagentTimedOut(ctx, runCtx)
+		cancelRun()
 		if err != nil {
+			// The workspace outlives the (possibly cancelled) run context so
+			// throwaway worktrees still get cleaned up.
+			var kept *workspaceMerge
+			var files []string
 			if workspace != nil {
-				// The workspace outlives the (possibly cancelled) run context so
-				// throwaway worktrees still get cleaned up.
-				if kept := workspace.abandon(context.WithoutCancel(ctx)); kept != nil {
+				files = workspace.changedFiles(context.WithoutCancel(ctx))
+				kept = workspace.abandon(context.WithoutCancel(ctx))
+			} else {
+				files = modifiedFilesFromTraces(result.Tools)
+			}
+			if ctx.Err() != nil {
+				// The parent itself was cancelled: nobody is waiting on a
+				// report.
+				if kept != nil {
 					return "", fmt.Errorf("agent %s: %w (work preserved on branch %s at %s)", target, err, kept.Branch, kept.Path)
 				}
+				return "", fmt.Errorf("agent %s: %w", target, err)
 			}
-			return "", fmt.Errorf("agent %s: %w", target, err)
+			status, reason := "failed", err.Error()
+			if timedOut {
+				status, reason = "timed_out", fmt.Sprintf("time limit of %s reached", limit)
+			}
+			return marshalSubagentPartial(target, status, reason, result, files, kept),
+				&toolOutputError{msg: fmt.Sprintf("agent %s %s: %s", target, strings.ReplaceAll(status, "_", " "), reason)}
 		}
 		var merge *workspaceMerge
 		if workspace != nil {
+			// The merge writes into the main checkout, which the sub-agent's
+			// own snapshots (taken in its worktree) never covered.
+			r.checkpointStep("agent")
 			m := workspace.finalize(context.WithoutCancel(ctx))
 			merge = &m
 		}
@@ -1534,327 +2058,83 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "workflow":
 		return r.runWorkflow(ctx, call.Args)
 	default:
-		return "", fmt.Errorf("unsupported tool %q", call.Tool)
+		return "", fmt.Errorf("unsupported tool %q", id)
 	}
 }
 
 // isMutatingTool reports whether a tool can modify the working tree and thus
-// warrants a pre-execution checkpoint. Shell tools are always treated as
-// mutating: classifying arbitrary commands reliably is not possible, and a
-// spurious checkpoint is cheap while a missed one is unrecoverable.
+// warrants a pre-execution checkpoint. Shell tools count as mutating;
+// needsCheckpoint (checkpoint_policy.go) exempts the narrow set of shell
+// command lines that provably only read.
 func isMutatingTool(tool string) bool {
 	switch tool {
-	case "file-write", "file-edit", "multi-edit", "rename-symbol", "shell-exec", "bash", "pty-start", "pty-write":
+	case "file-write", "file-edit", "rename-symbol", "bash", "pty-start", "pty-write":
 		return true
 	}
 	return false
 }
 
-// skipDirs are directories to skip when walking the workspace.
-var skipDirs = map[string]bool{
-	".git":         true,
-	".spettro":     true,
-	"vendor":       true,
-	"node_modules": true,
-	"dist":         true,
-	"build":        true,
-}
+// fileMutationLocks holds one mutex per file (keyed by resolved absolute path)
+// serializing the in-process read-modify-write tools on it. It is process-wide
+// rather than per runtime so sibling sub-agents editing the same checkout are
+// covered too. parallelExec already runs mutating calls of one step serially;
+// this is the backstop for everything that step ordering cannot see.
+var fileMutationLocks sync.Map // string -> *sync.Mutex
 
-// runGlob implements the glob tool using filepath.WalkDir with ** support.
-func (r *toolRuntime) runGlob(pattern, subPath string) (string, error) {
-	if strings.TrimSpace(pattern) == "" {
-		return "", fmt.Errorf("glob: pattern is required")
+// lockFileForMutation locks the file named by a tool call's path argument (or
+// its file_path alias) and returns the unlock function. Arguments without a
+// resolvable path lock nothing: the tool reports that error itself.
+func (r *toolRuntime) lockFileForMutation(rawArgs []byte) (unlock func()) {
+	var probe struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
 	}
-	root := r.cwd
-	if strings.TrimSpace(subPath) != "" {
-		abs, _, err := r.resolvePath(subPath)
-		if err != nil {
-			return "", fmt.Errorf("glob path: %w", err)
-		}
-		root = abs
+	_ = json.Unmarshal(rawArgs, &probe)
+	p := firstNonEmpty(probe.Path, probe.FilePath)
+	if p == "" {
+		return func() {}
 	}
-
-	var matches []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip inaccessible entries
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(r.cwd, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if matchGlobPattern(pattern, rel) {
-			matches = append(matches, rel)
-		}
-		return nil
-	})
+	abs, _, err := r.resolvePath(p)
 	if err != nil {
-		return "", fmt.Errorf("glob walk: %w", err)
+		return func() {}
 	}
-	sort.Strings(matches)
-	if len(matches) == 0 {
-		return fmt.Sprintf("no files match %q", pattern), nil
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
 	}
-	return fmt.Sprintf("%d files:\n%s", len(matches), strings.Join(matches, "\n")), nil
+	v, _ := fileMutationLocks.LoadOrStore(abs, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
-// matchGlobPattern matches a slash-separated path against a glob pattern with ** support.
-func matchGlobPattern(pattern, rel string) bool {
-	patParts := strings.Split(pattern, "/")
-	pathParts := strings.Split(rel, "/")
-	return globMatch(patParts, pathParts)
-}
-
-func globMatch(patParts, pathParts []string) bool {
-	if len(patParts) == 0 && len(pathParts) == 0 {
-		return true
-	}
-	if len(patParts) == 0 {
-		return false
-	}
-	if patParts[0] == "**" {
-		// ** can match zero or more path components
-		// Try matching rest of pattern against every suffix of path
-		restPat := patParts[1:]
-		// Zero-component match: skip ** entirely
-		if globMatch(restPat, pathParts) {
-			return true
+// readableRequiredReads turns the caller's required reads into the
+// workspace-relative, slash-separated paths runFileRead records, dropping
+// any the model could never satisfy: a path outside the workspace, or one
+// that is not an existing regular file. Every non-read tool call is refused
+// and every final answer is sent back while a required read is pending, so
+// an unsatisfiable entry would otherwise loop the turn until its budget ran
+// out. The TUI already sends relative, existing paths; ACP sends the
+// absolute paths of the files the client attached.
+func (r *toolRuntime) readableRequiredReads(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
 		}
-		// One or more components match
-		for i := 1; i <= len(pathParts); i++ {
-			if globMatch(restPat, pathParts[i:]) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(pathParts) == 0 {
-		return false
-	}
-	matched, err := filepath.Match(patParts[0], pathParts[0])
-	if err != nil || !matched {
-		return false
-	}
-	return globMatch(patParts[1:], pathParts[1:])
-}
-
-// typeExtensions maps type names to file extensions.
-func typeExtensions(t string) []string {
-	switch strings.ToLower(t) {
-	case "go":
-		return []string{".go"}
-	case "ts":
-		return []string{".ts", ".tsx"}
-	case "js":
-		return []string{".js", ".jsx", ".mjs"}
-	case "py":
-		return []string{".py"}
-	case "rs":
-		return []string{".rs"}
-	case "md":
-		return []string{".md"}
-	case "toml":
-		return []string{".toml"}
-	case "json":
-		return []string{".json"}
-	case "yaml", "yml":
-		return []string{".yaml", ".yml"}
-	case "sh":
-		return []string{".sh", ".bash"}
-	default:
-		return nil
-	}
-}
-
-type grepArgs struct {
-	Pattern         string `json:"pattern"`
-	Glob            string `json:"glob"`
-	Type            string `json:"type"`
-	CaseInsensitive bool   `json:"case_insensitive"`
-	Context         int    `json:"context"`
-	OutputMode      string `json:"output_mode"`
-	MaxResults      int    `json:"max_results"`
-}
-
-// runGrep implements the grep tool.
-func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) {
-	if strings.TrimSpace(args.Pattern) == "" {
-		return "", fmt.Errorf("grep: pattern is required")
-	}
-	regexPattern := args.Pattern
-	if args.CaseInsensitive {
-		regexPattern = "(?i)" + regexPattern
-	}
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return "", fmt.Errorf("grep: invalid pattern: %w", err)
-	}
-	if args.MaxResults <= 0 {
-		args.MaxResults = 200
-	}
-	outputMode := args.OutputMode
-	if outputMode == "" {
-		outputMode = "content"
-	}
-
-	exts := typeExtensions(args.Type)
-
-	type fileResult struct {
-		path   string
-		count  int
-		blocks []string // for content mode
-	}
-
-	var results []fileResult
-	totalMatches := 0
-	truncated := false
-
-	walkErr := filepath.WalkDir(r.cwd, func(path string, d fs.DirEntry, err error) error {
+		abs, rel, err := r.resolvePath(p)
 		if err != nil {
-			return nil
+			continue
 		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
+		if info, err := os.Stat(abs); err != nil || !info.Mode().IsRegular() {
+			continue
 		}
-		if truncated {
-			return nil
+		if !seen[rel] {
+			seen[rel] = true
+			out = append(out, rel)
 		}
-
-		// Filter by type
-		if len(exts) > 0 {
-			ext := strings.ToLower(filepath.Ext(d.Name()))
-			found := slices.Contains(exts, ext)
-			if !found {
-				return nil
-			}
-		}
-		// Filter by glob
-		if args.Glob != "" {
-			matched, mErr := filepath.Match(args.Glob, d.Name())
-			if mErr != nil || !matched {
-				return nil
-			}
-		}
-
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		rel, relErr := filepath.Rel(r.cwd, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-
-		lines := strings.Split(string(data), "\n")
-		matchLines := make([]int, 0)
-		for i, line := range lines {
-			if re.MatchString(line) {
-				matchLines = append(matchLines, i)
-			}
-		}
-		if len(matchLines) == 0 {
-			return nil
-		}
-
-		// Mark as read from search
-		r.mu.Lock()
-		r.readSet[rel] = struct{}{}
-		r.mu.Unlock()
-
-		fr := fileResult{path: rel, count: len(matchLines)}
-
-		if outputMode == "content" {
-			// Build context blocks
-			included := make([]bool, len(lines))
-			for _, mi := range matchLines {
-				start := max(mi-args.Context, 0)
-				end := mi + args.Context
-				if end >= len(lines) {
-					end = len(lines) - 1
-				}
-				for j := start; j <= end; j++ {
-					included[j] = true
-				}
-			}
-
-			var blockBuf bytes.Buffer
-			prevIncluded := false
-			for i, line := range lines {
-				if included[i] {
-					if !prevIncluded && blockBuf.Len() > 0 {
-						blockBuf.WriteString("--\n")
-					}
-					fmt.Fprintf(&blockBuf, "%s:%d: %s\n", rel, i+1, line)
-					prevIncluded = true
-				} else {
-					prevIncluded = false
-				}
-			}
-			fr.blocks = []string{blockBuf.String()}
-		}
-
-		results = append(results, fr)
-		totalMatches += len(matchLines)
-		if totalMatches >= args.MaxResults {
-			truncated = true
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return "", fmt.Errorf("grep walk: %w", walkErr)
 	}
-
-	if len(results) == 0 {
-		return fmt.Sprintf("no matches for %q", args.Pattern), nil
-	}
-
-	var sb strings.Builder
-	switch outputMode {
-	case "files_with_matches":
-		for _, fr := range results {
-			sb.WriteString(fr.path)
-			sb.WriteString("\n")
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	case "count":
-		for _, fr := range results {
-			fmt.Fprintf(&sb, "%s: %d\n", fr.path, fr.count)
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	default: // "content"
-		for _, fr := range results {
-			for _, block := range fr.blocks {
-				sb.WriteString(block)
-			}
-		}
-		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
-		out := header + sb.String()
-		if truncated {
-			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
-		}
-		return strings.TrimRight(out, "\n"), nil
-	}
+	return out
 }
 
 func (r *toolRuntime) nextRequiredRead() (string, bool) {
@@ -1886,7 +2166,12 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 		return "", "", err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("path outside workspace is not allowed")
+		// Every file tool is confined to the workspace, in every permission
+		// mode, yolo included: this is the file tools' scope, not an
+		// approval that a mode could grant. Shell commands are governed by
+		// the shell's own approval and sandbox rules, not by this check;
+		// only a bash cwd goes through it (shellDir).
+		return "", "", &outsideWorkspaceError{root: r.cwd}
 	}
 	// Under an active sandbox, also reject paths whose *real* target escapes the
 	// workspace through a symlink. Without this, an agent could `ln -s` a secret
@@ -1900,43 +2185,67 @@ func (r *toolRuntime) resolvePath(p string) (abs, rel string, err error) {
 	return abs, rel, nil
 }
 
+// outsideWorkspaceError is resolvePath's refusal of a path that leaves the
+// workspace. Its message is written for the file tools: models still aim
+// file-write at /tmp for scratch scripts (ten such calls in the round-7
+// bench), so it says where they can go instead, as the coding prompt does.
+// A caller that is not a file tool (shellDir) words its own refusal, since
+// "use bash" is wrong advice inside a bash call.
+type outsideWorkspaceError struct {
+	root string
+}
+
+func (e *outsideWorkspaceError) Error() string {
+	return fmt.Sprintf("path outside workspace is not allowed: the file tools only reach files under %s; for a scratch file elsewhere, use bash (e.g. pipe a heredoc to the interpreter)", e.root)
+}
+
 // realPathEscapes reports whether abs — after resolving symlinks on its
 // longest existing prefix — points outside dir. The target itself need not
 // exist (file-write creates new files), so only the existing ancestry is
 // resolved and the missing tail is re-appended.
 func realPathEscapes(dir, abs string) bool {
-	realDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		realDir = filepath.Clean(dir)
-	}
-	real, rem := abs, ""
-	for {
-		if resolved, rerr := filepath.EvalSymlinks(real); rerr == nil {
-			real = resolved
-			break
-		}
-		parent := filepath.Dir(real)
-		if parent == real {
-			real = filepath.Clean(abs)
-			break
-		}
-		rem = filepath.Join(filepath.Base(real), rem)
-		real = parent
-	}
-	full := filepath.Clean(filepath.Join(real, rem))
-	rel, err := filepath.Rel(realDir, full)
+	rel, err := filepath.Rel(realDirPath(dir), realTargetPath(abs))
 	if err != nil {
 		return true
 	}
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// searchLineNumberRE matches ":<digits>" segments in repo-search output, used
+// realDirPath is dir with its symlinks resolved, or dir cleaned when it
+// cannot be resolved.
+func realDirPath(dir string) string {
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return real
+	}
+	return filepath.Clean(dir)
+}
+
+// realTargetPath is the file a write to abs lands in: abs with every symlink
+// on its longest existing prefix resolved and the missing tail re-appended
+// (the file itself need not exist).
+func realTargetPath(abs string) string {
+	real, rem := abs, ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(real); err == nil {
+			real = resolved
+			break
+		}
+		parent := filepath.Dir(real)
+		if parent == real {
+			return filepath.Clean(abs)
+		}
+		rem = filepath.Join(filepath.Base(real), rem)
+		real = parent
+	}
+	return filepath.Clean(filepath.Join(real, rem))
+}
+
+// searchLineNumberRE matches ":<digits>" segments in symbol-search output, used
 // by markReadFromSearch to detect ripgrep-style "path:lineno:..." rows.
 var searchLineNumberRE = regexp.MustCompile(`^\d+$`)
 
 // invalidateSymbolIndex drops rel from the repo symbol index after one of the
-// agent's own write tools touched it, so the next repo-search re-parses it
+// agent's own write tools touched it, so the next symbol search re-parses it
 // even if the filesystem mtime didn't visibly change.
 func (r *toolRuntime) invalidateSymbolIndex(rel string) {
 	if r.searcher.Index != nil {

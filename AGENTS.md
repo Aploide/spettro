@@ -21,17 +21,109 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `10`. Older manifests
-  are migrated on load (with a `.bak` backup): v3 rewrites the previously
+- `version` (int, required): schema version, currently `14`. Older manifests
+  are migrated on load and written back next to a
+  `spettro.agents.toml.migrated-<time>.bak` backup of the original. Both
+  keep the original file's permissions, and a manifest that is a symlink
+  stays one (its target is migrated). When the manifest cannot be written
+  (a read-only checkout or mount), the migrated manifest is still used and
+  the migration simply runs again on the next load. v3 rewrites the previously
   inert `sandbox_mode = "workspace-write"` default to `full-access` (the
   field is now enforced — re-set it explicitly if you want the OS sandbox);
   later versions retrofit new built-in tools (v5 `view-image`, v6
-  `hover`/`rename-symbol`, v7 `repo-search`, v8 the
+  `hover`/`rename-symbol` for agents holding `references` (or, since v13,
+  `lsp`), v7 `repo-search`, v8 the
   `pty-start`/`pty-write`/`pty-kill` interactive terminal tools, granted to
-  agents that already hold `shell-exec`, v9 `tool-output` for agents that
-  already hold `file-read`, v10 `ask-user`). Each retrofit widens only
-  allow-lists that already show the same level of trust, so a deliberately
-  restricted agent is never opened up.
+  agents that already hold a shell tool, v9 `tool-output` for agents that
+  already hold `file-read`, v10 `ask-user`, v11 the `general-purpose`
+  subagent). Each retrofit widens only allow-lists that already show the
+  same level of trust, so a deliberately restricted agent is never opened
+  up: the tool that shows the trust must be one the agent can actually call
+  (a shell listed but disabled or denied by a rule does not earn the pty
+  tools), and the `general-purpose` handoff goes only to a delegating
+  primary that can already exercise every kind of access that subagent has
+  (a read-only agent does not gain writes and commands through it).
+- v12 folds duplicate built-ins into one canonical tool each and removes the
+  `grok-image`/`grok-video` generators:
+
+  | Canonical | Retired (hidden aliases) |
+  |---|---|
+  | `bash` | `shell-exec`, `bash-output` |
+  | `file-edit` | `multi-edit` |
+  | `grep` | `repo-search` (now `grep`'s `symbol` argument) |
+  | `glob` | `ls` (`glob` without a pattern lists one directory) |
+  | `todo-write` | `task-create`, `task-update`, `task-delete`, `task-get`, `task-list` |
+
+  No agent gains access. For each agent, the migration first works out
+  which retired tools it could actually call under the v11 manifest
+  (enabled, an action the agent may take, no permission rule denying it);
+  only those become the canonical ID in its `allowed_tools`, and one it
+  could not call is dropped. A retired definition's settings merge into the
+  canonical tool toward the stricter side (approval if either required it,
+  the longer timeout, the higher risk, its command/path rules that deny or
+  ask), or it becomes the canonical tool in place when that is missing. The
+  canonical tool keeps its own `enabled` flag and `permitted_actions`, so a
+  canonical tool you switched off stays off. The canonical tool's own allow
+  rules move to the agents that already held it, so an agent that reaches it
+  only through a retired name does not inherit them (a tool's rules come
+  last and would override the agent's own). The retired tool's allow rules,
+  and the rules that switched it off, are not merged. Permission rules that
+  name a retired ID are left as written: they only ever decided whether that
+  tool could be called, which the allow-lists now carry. An agent that could
+  only read tasks (`task-get`/`task-list`) loses them instead of gaining
+  `todo-write`; an agent left with no tools keeps `comment` and is disabled. Tools of another
+  kind that share a retired name are left alone, and a tool of your own that
+  holds a canonical name (a `bash` script) folds nothing of its group: those
+  built-ins keep their own names (see [Built-in tools](docs/tools.md#tools-of-your-own-with-a-built-ins-name)). Folded retired names stay
+  callable, but are never advertised to the model and cannot be listed in
+  `allowed_tools`. A built-in left under its own name because a tool of your
+  own holds its canonical name is the exception: it stays in `allowed_tools`
+  and is advertised under that name (it stands unfolded; see the same
+  section of docs/tools.md).
+- v13 folds the read-only language-server tools into one `lsp` tool whose
+  `op` argument picks the operation:
+
+  | `lsp` op | Retired tool (hidden alias) |
+  |---|---|
+  | `diagnostics` | `diagnostics` |
+  | `references`, `definition` | `references` (`kind: "definition"` is op `definition`) |
+  | `hover` | `hover` |
+  | `restart` | `lsp-restart` |
+
+  `rename-symbol` writes files and needs approval, so it stays a tool of its
+  own. The migration works like v12's: an agent gets `lsp` only if it could
+  actually call at least one of the four tools, the first enabled of
+  `diagnostics`/`references`/`hover`/`lsp-restart` becomes `lsp` in place
+  when there is no `lsp` definition, the others merge into it toward the
+  stricter side, and the old names become its aliases. Because the old tools
+  are now operations of one tool, an agent that could call only some of them
+  gets an agent-level rule `{ permission = "lsp-op", pattern = "<op>",
+  action = "deny" }` for each op of the others (`references` is ops
+  `references` and `definition`): an agent that held `hover` but not
+  `lsp-restart` still cannot restart a server. A tool of your own that shares
+  an old name (a `hover` script) is not the built-in, so holding it grants
+  no op. An agent whose own rules would deny `lsp` (a `"*"` deny with an
+  allow per tool) gets a rule allowing `lsp`, so it keeps the ops it had.
+  Rules naming the old tools are left as written and no longer decide
+  anything. If you have a tool of your own called `lsp`, nothing is folded:
+  the four built-ins stay tools of their own, under their own names. The
+  stock agents held all four, so they get no rules. `lsp` is low-risk and
+  needs no approval, as the four tools were.
+- v14 folds the two skill tools into one `skill` tool, which loads a skill
+  when given a `name` and lists the skills when not (see
+  [docs/skills.md](docs/skills.md)):
+
+  | Canonical | Retired (hidden aliases) |
+  |---|---|
+  | `skill` | `skill-read` (and its old aliases `activate-skill`, `skill-activate`), `skill-list` |
+
+  The migration works like v12's. An agent that held only `skill-list`
+  gets `skill`, which can also load a skill: both halves only read the
+  SKILL.md files the catalog already shows, so no new kind of access is
+  granted. A tool of your own called `skill` stops the fold, and the two
+  built-ins keep their names: an agent holding `skill-read` loads skills
+  through it (the skill list in its system prompt names `skill-read`), and
+  calls under the old names are never turned into calls of your `skill`.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
@@ -58,11 +150,21 @@ This file lets you define, in one place:
   CLI: `--sandbox-allow-read-dir` (repeatable).
 - `log_tool_calls`: boolean.
 - `permission_rules`: optional layered policy rules (`permission`, `pattern`, `action`).
+  The permission `lsp-op` takes an `lsp` op as its pattern and decides which
+  ops an agent may call: `{ permission = "lsp-op", pattern = "restart",
+  action = "deny" }` keeps the lookups but not restarts. Only rules naming
+  `lsp-op` itself apply to ops, so a `"*"` permission or pattern that the
+  `lsp` tool is allowed around does not take its ops away.
 - `[runtime.delegation]`: defaults for `max_parallel_workers` and `max_depth`.
 
 ### `[[tools]]`
 
-- `id` (required, unique)
+- `id` (required, unique). A tool of kind `mcp`, `script` or `http` may take
+  a built-in's name (`bash`, `ls`, `hover`, ...); it then owns every call made
+  by that name, and the built-ins it shadows stay reachable under their own
+  names (see [Built-in tools](docs/tools.md#tools-of-your-own-with-a-built-ins-name)).
+  Spettro does not run tools of those kinds yet: a call of one fails without
+  running anything.
 - `name` (required)
 - `description`
 - `kind`: `builtin`, `mcp`, `script`, `http`
@@ -71,7 +173,7 @@ This file lets you define, in one place:
 - `timeout_sec`: positive integer
 - `requires_approval`: boolean
 - `permitted_actions`: non-empty string list, e.g. `read`, `write`, `search`, `execute`, `git`, `chat`, `network`
-- `aliases`: optional alternate tool IDs
+- `aliases`: optional alternate tool IDs (unique across the manifest: an alias may not repeat a tool `id` or another tool's alias)
 - `input_schema`: optional JSON-like schema metadata
 - `risk_level`: optional `low|medium|high`
 - `primary_only`: optional boolean (only primary/orchestrator agents can use)

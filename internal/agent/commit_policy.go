@@ -17,7 +17,7 @@ const (
 
 // spettroCoAuthorTrailer is the mandatory Co-Authored-By trailer that Spettro
 // guarantees on every commit it makes — directly via LLMCommitter, or
-// indirectly when an LLM agent issues `git commit` through shell-exec/bash.
+// indirectly when an LLM agent issues `git commit` through the bash tool.
 //
 // Keep this string in sync with internal/agent/committer.go and
 // internal/tui/model.go.

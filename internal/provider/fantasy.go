@@ -1,12 +1,19 @@
 package provider
 
 import (
+	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"charm.land/fantasy"
 	fantasyanthropic "charm.land/fantasy/providers/anthropic"
@@ -18,7 +25,7 @@ import (
 )
 
 func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL, nil)
 	if err != nil {
 		return Response{}, err
 	}
@@ -28,7 +35,8 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		return Response{}, err
 	}
 
-	resp, err := model.Generate(ctx, buildFantasyCall(providerName, apiKind, modelName, req))
+	call := buildFantasyCall(providerName, apiKind, modelName, req)
+	resp, err := model.Generate(ctx, call)
 	if err != nil {
 		return Response{}, err
 	}
@@ -38,28 +46,198 @@ func sendWithFantasy(ctx context.Context, providerName, apiKind, modelName, apiK
 		totalTokens = int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
 	}
 
-	var toolCalls []NativeTool
+	maxOut := sentMaxOutput(call)
+	var raw []rawToolCall
 	for _, tc := range resp.Content.ToolCalls() {
-		args := json.RawMessage(tc.Input)
-		if !json.Valid(args) {
-			args = json.RawMessage(`{}`)
-		}
-		toolCalls = append(toolCalls, NativeTool{ID: tc.ToolCallID, Name: tc.ToolName, Args: args})
+		// A non-streamed reply has no "arguments finished" event; arguments
+		// that are not valid JSON count as unfinished so a call cut off at
+		// the output limit is recognized (see finalizeToolCalls).
+		complete := strings.TrimSpace(tc.Input) == "" || json.Valid([]byte(tc.Input))
+		raw = append(raw, rawToolCall{id: tc.ToolCallID, name: tc.ToolName, input: tc.Input, complete: complete})
 	}
+	var reasoning []ReasoningBlock
+	for _, rc := range resp.Content.Reasoning() {
+		sig, redacted := reasoningMetadata(rc.ProviderMetadata)
+		reasoning = appendReasoning(reasoning, rc.Text, sig, redacted, providerName, modelName)
+	}
+	finish := detectTruncation(mapFinishReason(resp.FinishReason), resp.Usage, maxOut)
+	toolCalls, finish := finalizeToolCalls(raw, finish, maxOut, int(resp.Usage.OutputTokens))
 	return Response{
 		Content:         fantasyText(resp),
 		ToolCalls:       toolCalls,
 		EstimatedTokens: totalTokens,
 		Usage:           usageFromFantasy(resp.Usage),
+		FinishReason:    finish,
+		Reasoning:       reasoning,
+		MaxOutputTokens: maxOut,
+		Diagnostics:     rawDiagnostics(string(resp.FinishReason), raw, 0),
 	}, nil
+}
+
+// ErrStreamIdle is returned when a streaming response goes silent for longer
+// than the idle timeout. It is a transient failure (see ClassifyRetry): the
+// connection most likely stalled in a proxy or a local server, and the
+// request is safe to resend.
+var ErrStreamIdle = errors.New("stream idle timeout: the provider sent no data")
+
+// ErrStreamIncomplete is returned when a streaming response ends without the
+// provider saying why the reply ended (no finish reason): the stream was cut
+// mid-generation, typically by a proxy. It is transient: the request is safe
+// to resend.
+var ErrStreamIncomplete = errors.New("stream ended before the model finished its reply (no finish reason)")
+
+// Stream silence limits. Activity is measured on the raw response body, so
+// SSE keep-alives (Anthropic "ping" events, ": comment" lines) count as
+// life even when the SDK yields no part: a healthy stream that is buffering
+// a large tool input or thinking with its display omitted is not cut off.
+// The limits are still generous, because some backends send nothing at all
+// while working: OpenAI Responses reasoning models without a summary, and
+// local servers processing a long prompt before the first token.
+//
+//   - DefaultStreamIdleTimeout: the longest silence between two chunks.
+//   - streamReasoningIdleTimeout: the same, when the model may reason
+//     silently (a thinking level is set, or OpenAI's Responses API).
+//   - streamFirstChunkTimeout: before the first body byte.
+//   - streamLocalFirstChunkTimeout: before the first body byte from a local
+//     endpoint (prompt processing on slow hardware; no proxy can stall it).
+//
+// SPETTRO_STREAM_IDLE_TIMEOUT (a Go duration or a number of seconds; 0
+// disables the watchdog) overrides all of them, as does
+// Request.StreamIdleTimeout.
+const (
+	DefaultStreamIdleTimeout     = 300 * time.Second
+	streamReasoningIdleTimeout   = 600 * time.Second
+	streamFirstChunkTimeout      = 600 * time.Second
+	streamLocalFirstChunkTimeout = 30 * time.Minute
+)
+
+// streamIdleEnv names the environment override for the stream watchdog.
+const streamIdleEnv = "SPETTRO_STREAM_IDLE_TIMEOUT"
+
+// streamIdleOverride parses SPETTRO_STREAM_IDLE_TIMEOUT. ok is false when it
+// is unset or unparsable; a zero duration disables the watchdog.
+func streamIdleOverride() (time.Duration, bool) {
+	v := strings.TrimSpace(os.Getenv(streamIdleEnv))
+	if v == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return time.Duration(n) * time.Second, true
+	}
+	if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+		return d, true
+	}
+	return 0, false
+}
+
+// streamTimeouts returns the (first-chunk, between-chunk) silence limits for
+// req on providerName. An explicit Request.StreamIdleTimeout, then the
+// environment override, applies to both; 0 means no watchdog.
+func streamTimeouts(providerName string, req Request) (first, idle time.Duration) {
+	if req.StreamIdleTimeout > 0 {
+		return req.StreamIdleTimeout, req.StreamIdleTimeout
+	}
+	if d, ok := streamIdleOverride(); ok {
+		return d, d
+	}
+	idle = DefaultStreamIdleTimeout
+	if (req.Thinking != "" && req.Thinking != ThinkingOff) || providerName == "openai" {
+		idle = streamReasoningIdleTimeout
+	}
+	first = streamFirstChunkTimeout
+	if req.localEndpoint {
+		first = streamLocalFirstChunkTimeout
+	}
+	return first, idle
+}
+
+// streamWatchdog cancels a stream with ErrStreamIdle once no response bytes
+// arrived for too long: first before any byte, idle after. touch is safe
+// from any goroutine (the SDK reads the body on its own).
+type streamWatchdog struct {
+	last    atomic.Int64 // unix nanos of the last activity
+	started atomic.Bool  // a body byte arrived
+	done    chan struct{}
+	once    sync.Once
+}
+
+func startStreamWatchdog(first, idle time.Duration, cancel context.CancelCauseFunc) *streamWatchdog {
+	w := &streamWatchdog{done: make(chan struct{})}
+	w.last.Store(time.Now().UnixNano())
+	if first <= 0 || idle <= 0 {
+		return w
+	}
+	tick := min(first, idle) / 8
+	tick = max(min(tick, time.Second), time.Millisecond)
+	go func() {
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-w.done:
+				return
+			case <-t.C:
+				limit := first
+				if w.started.Load() {
+					limit = idle
+				}
+				if time.Since(time.Unix(0, w.last.Load())) > limit {
+					cancel(ErrStreamIdle)
+					return
+				}
+			}
+		}
+	}()
+	return w
+}
+
+// touch records activity: a response body read that returned data.
+func (w *streamWatchdog) touch() {
+	w.last.Store(time.Now().UnixNano())
+	w.started.Store(true)
+}
+
+func (w *streamWatchdog) stop() { w.once.Do(func() { close(w.done) }) }
+
+// activityHTTPClient is the SDK HTTP client for a watched stream: it reports
+// every chunk of response body to onRead, keep-alives included.
+type activityHTTPClient struct{ onRead func() }
+
+func (c activityHTTPClient) Do(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultClient.Do(r)
+	if resp != nil && resp.Body != nil {
+		resp.Body = activityBody{ReadCloser: resp.Body, onRead: c.onRead}
+	}
+	return resp, err
+}
+
+type activityBody struct {
+	io.ReadCloser
+	onRead func()
+}
+
+func (b activityBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.onRead()
+	}
+	return n, err
 }
 
 // sendWithFantasyStream is the streaming counterpart of sendWithFantasy. It
 // forwards text and reasoning deltas to req.OnStream as they arrive while still
 // accumulating the full answer text (reasoning is delivered live but not folded
-// into Response.Content, matching the non-streaming path).
+// into Response.Content, matching the non-streaming path). A watchdog cancels
+// the stream with ErrStreamIdle when the provider goes silent (see
+// streamTimeouts).
 func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName, apiKey, baseURL string, req Request) (Response, error) {
-	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL)
+	firstTimeout, idleTimeout := streamTimeouts(providerName, req)
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	watchdog := startStreamWatchdog(firstTimeout, idleTimeout, cancel)
+	defer watchdog.stop()
+
+	prov, err := newFantasyProvider(providerName, apiKind, apiKey, baseURL, &activityHTTPClient{onRead: watchdog.touch})
 	if err != nil {
 		return Response{}, err
 	}
@@ -68,58 +246,316 @@ func sendWithFantasyStream(ctx context.Context, providerName, apiKind, modelName
 	if err != nil {
 		return Response{}, err
 	}
+	idleErr := func(err error) error {
+		if ctx.Err() == nil && errors.Is(context.Cause(streamCtx), ErrStreamIdle) {
+			return ErrStreamIdle
+		}
+		return err
+	}
 
-	stream, err := model.Stream(ctx, buildFantasyCall(providerName, apiKind, modelName, req))
+	call := buildFantasyCall(providerName, apiKind, modelName, req)
+	stream, err := model.Stream(streamCtx, call)
 	if err != nil {
+		return Response{}, idleErr(err)
+	}
+
+	collector := newStreamCollector(req.OnStream)
+	var streamErr error
+	for part := range stream {
+		watchdog.touch()
+		if part.Type == fantasy.StreamPartTypeError && part.Error != nil {
+			streamErr = part.Error
+			continue
+		}
+		collectFantasyPart(collector, part)
+	}
+	watchdog.stop()
+	if err := streamOutcome(ctx, streamCtx, streamErr, collector, req.localEndpoint); err != nil {
 		return Response{}, err
 	}
+	return collector.response(providerName, modelName, sentMaxOutput(call)), nil
+}
 
-	var (
-		textSB    strings.Builder
-		usage     fantasy.Usage
-		streamErr error
-		toolCalls []NativeTool
-	)
-	for part := range stream {
-		switch part.Type {
-		case fantasy.StreamPartTypeTextDelta:
-			textSB.WriteString(part.Delta)
-			if req.OnStream != nil && part.Delta != "" {
-				req.OnStream(StreamEvent{Kind: StreamText, Delta: part.Delta})
-			}
-		case fantasy.StreamPartTypeReasoningDelta:
-			if req.OnStream != nil && part.Delta != "" {
-				req.OnStream(StreamEvent{Kind: StreamReasoning, Delta: part.Delta})
-			}
-		case fantasy.StreamPartTypeToolCall:
-			args := json.RawMessage(part.ToolCallInput)
-			if !json.Valid(args) {
-				args = json.RawMessage(`{}`)
-			}
-			toolCalls = append(toolCalls, NativeTool{ID: part.ID, Name: part.ToolCallName, Args: args})
-		case fantasy.StreamPartTypeFinish:
-			usage = part.Usage
-		case fantasy.StreamPartTypeError:
-			if part.Error != nil {
-				streamErr = part.Error
-			}
+// collectFantasyPart feeds one fantasy stream part to the collector.
+func collectFantasyPart(c *streamCollector, part fantasy.StreamPart) {
+	switch part.Type {
+	case fantasy.StreamPartTypeTextDelta:
+		c.textDelta(part.Delta)
+	case fantasy.StreamPartTypeReasoningStart, fantasy.StreamPartTypeReasoningDelta, fantasy.StreamPartTypeReasoningEnd:
+		sig, redacted := reasoningMetadata(part.ProviderMetadata)
+		c.reasoning(part.ID, part.Delta, sig, redacted, part.Type == fantasy.StreamPartTypeReasoningDelta)
+	case fantasy.StreamPartTypeToolInputStart:
+		if !part.ProviderExecuted {
+			c.toolCall(part.ID, part.ToolCallName)
+		}
+	case fantasy.StreamPartTypeToolInputDelta:
+		// The OpenAI-style adapters carry the fragment in Delta, the
+		// Anthropic one in ToolCallInput.
+		c.toolInputDelta(part.ID, cmp.Or(part.Delta, part.ToolCallInput))
+	case fantasy.StreamPartTypeToolCall:
+		if !part.ProviderExecuted {
+			c.toolCallComplete(part.ID, part.ToolCallName, part.ToolCallInput)
+		}
+	case fantasy.StreamPartTypeFinish:
+		c.finishPart(part.Usage, part.FinishReason)
+	}
+}
+
+// streamOutcome decides whether a finished stream produced a usable reply:
+// it returns the stream's error (ErrStreamIdle when the watchdog cut it),
+// ErrStreamIdle when the watchdog fired without an error surfacing, and
+// ErrStreamIncomplete when the reply ended without the provider saying why
+// (see below); nil when the collected reply stands.
+func streamOutcome(ctx, streamCtx context.Context, streamErr error, c *streamCollector, localEndpoint bool) error {
+	idle := ctx.Err() == nil && errors.Is(context.Cause(streamCtx), ErrStreamIdle)
+	if streamErr != nil {
+		if idle {
+			return ErrStreamIdle
+		}
+		return streamErr
+	}
+	if idle {
+		// The watchdog fired but the stream ended without an error.
+		return ErrStreamIdle
+	}
+	if !c.finishReported && !localEndpoint {
+		// The response ended cleanly but the model never said it was done
+		// (no finish_reason / message_delta): a proxy or load balancer cut
+		// the stream mid-generation. Accepting it would pass half an answer
+		// (or a half-streamed tool call) off as complete. Local servers are
+		// exempt: some omit the finish reason, and nothing sits between.
+		return ErrStreamIncomplete
+	}
+	return nil
+}
+
+// rawDiagnostics summarizes a reply's raw tool calls for
+// Response.Diagnostics. It must be given the calls before finalizeToolCalls
+// drops the unnamed ones.
+func rawDiagnostics(rawFinish string, raw []rawToolCall, orphanDeltas int) ResponseDiagnostics {
+	d := ResponseDiagnostics{RawFinishReason: rawFinish, ToolCallsSeen: len(raw), OrphanToolDeltas: orphanDeltas}
+	for _, tc := range raw {
+		if tc.name == "" {
+			d.UnnamedToolCalls++
 		}
 	}
-	if streamErr != nil {
-		return Response{}, streamErr
-	}
+	return d
+}
 
-	totalTokens := int(usage.TotalTokens)
-	if totalTokens == 0 {
-		totalTokens = int(usage.InputTokens + usage.OutputTokens)
-	}
+// rawToolCall is one tool call as the model produced it, before argument
+// normalization. complete is false when the stream ended before the provider
+// considered the arguments finished.
+type rawToolCall struct {
+	id, name, input string
+	complete        bool
+}
 
-	return Response{
-		Content:         textSB.String(),
-		ToolCalls:       toolCalls,
-		EstimatedTokens: totalTokens,
-		Usage:           usageFromFantasy(usage),
-	}, nil
+// finalizeToolCalls normalizes every call's arguments (see
+// normalizeToolArgs) and returns the finish reason, upgraded to FinishLength
+// when the reply evidently ended mid-call at the output limit: the last call
+// never finished streaming, its arguments stop in the middle of a JSON value,
+// and the reply used (nearly) all the output it was allowed — or no cap or
+// usage is known to compare against. (The OpenAI-style adapters report
+// "tool-calls" in that case, hiding the length stop.) Well below the cap the
+// same shape is a malformed call — a forgotten closing brace — and gets the
+// parse error, not advice to split a large write.
+//
+// A call that never finished and carries no argument text at all is never
+// run with "{}": its arguments were lost, so it gets an error instead.
+// Unnamed fragments — an argument delta for a call the stream never
+// introduced — are dropped: there is nothing to route them to.
+func finalizeToolCalls(raw []rawToolCall, finish FinishReason, maxOut, outputTokens int) ([]NativeTool, FinishReason) {
+	if n := len(raw); n > 0 && finish != FinishLength {
+		nearCap := maxOut <= 0 || outputTokens <= 0 || outputTokens*10 >= maxOut*9
+		if last := raw[n-1]; !last.complete && endsMidJSON(last.input) && nearCap {
+			finish = FinishLength
+		}
+	}
+	var out []NativeTool
+	for _, tc := range raw {
+		if tc.name == "" {
+			continue
+		}
+		if !tc.complete && strings.TrimSpace(tc.input) == "" {
+			msg := "error: your tool call's arguments never arrived (the reply ended before they were sent) and the call was NOT executed; send the call again"
+			if finish == FinishLength {
+				msg = TruncatedArgsError(maxOut)
+			}
+			out = append(out, NativeTool{ID: tc.id, Name: tc.name, Args: json.RawMessage(`{}`), ArgsError: msg})
+			continue
+		}
+		args, argsErr := normalizeToolArgs(tc.input, finish == FinishLength, maxOut)
+		nt := NativeTool{ID: tc.id, Name: tc.name, Args: args, ArgsError: argsErr}
+		if argsErr != "" {
+			nt.RawArgs = tc.input
+		}
+		out = append(out, nt)
+	}
+	return out, finish
+}
+
+// detectTruncation reports FinishLength when the provider said so, and also
+// when it did not but the reply demonstrably hit the cap: the OpenAI-style
+// adapters rewrite the finish reason to "tool-calls" whenever the reply
+// contains any tool call, hiding a length stop. A reply that used every
+// output token it was allowed is therefore treated as truncated. (A tool
+// call that never finished streaming below the cap is malformed, not
+// truncated: it goes through the repair pass instead.)
+func detectTruncation(finish FinishReason, usage fantasy.Usage, maxOut int) FinishReason {
+	if finish == FinishLength {
+		return finish
+	}
+	if maxOut > 0 && usage.OutputTokens >= int64(maxOut) {
+		return FinishLength
+	}
+	return finish
+}
+
+func mapFinishReason(r fantasy.FinishReason) FinishReason {
+	switch r {
+	case fantasy.FinishReasonStop:
+		return FinishStop
+	case fantasy.FinishReasonLength:
+		return FinishLength
+	case fantasy.FinishReasonToolCalls:
+		return FinishToolCalls
+	case fantasy.FinishReasonContentFilter:
+		return FinishContentFilter
+	case fantasy.FinishReasonError:
+		return FinishError
+	case fantasy.FinishReasonOther:
+		return FinishOther
+	}
+	return ""
+}
+
+// sentMaxOutput is the output cap the call carries (0 when none is sent).
+func sentMaxOutput(call fantasy.Call) int {
+	if call.MaxOutputTokens == nil {
+		return 0
+	}
+	return int(*call.MaxOutputTokens)
+}
+
+// reasoningMetadata extracts Anthropic's thinking signature / redacted
+// payload from a reasoning part's provider metadata.
+func reasoningMetadata(md fantasy.ProviderMetadata) (signature, redacted string) {
+	if md == nil {
+		return "", ""
+	}
+	if meta := fantasyanthropic.GetReasoningMetadata(fantasy.ProviderOptions(md)); meta != nil {
+		return meta.Signature, meta.RedactedData
+	}
+	return "", ""
+}
+
+func appendReasoning(out []ReasoningBlock, text, signature, redacted, providerName, modelName string) []ReasoningBlock {
+	if text == "" && signature == "" && redacted == "" {
+		return out
+	}
+	return append(out, ReasoningBlock{
+		Text:         text,
+		Signature:    signature,
+		RedactedData: redacted,
+		Provider:     providerName,
+		Model:        modelName,
+	})
+}
+
+// Thinking budget bounds: Anthropic requires budget_tokens >= 1024 and
+// below max_tokens; the rest of max_tokens is left for the answer.
+const (
+	minThinkingBudget     = 1024
+	thinkingAnswerReserve = 4096
+)
+
+// fitThinkingBudget fits a thinking budget under the output cap the manager
+// resolved — the model's output limit and the room left in the context
+// window. Raising max_tokens to make room for the budget would undo that
+// clamp and turn into a hard 400 (max_tokens above the model's limit, or
+// prompt plus max_tokens past the window) that no retry or thinking
+// downgrade recovers from, so the budget shrinks instead: to leave the
+// answer reserve, or half the cap when that is too little, or to nothing
+// (0) below the minimum budget. With no cap known, max_tokens is raised to
+// budget plus the reserve.
+func fitThinkingBudget(budget int64, maxOutput *int64) (fitted, maxTokens int64) {
+	if maxOutput == nil || *maxOutput <= 0 {
+		return budget, budget + thinkingAnswerReserve
+	}
+	limit := *maxOutput
+	if budget+thinkingAnswerReserve <= limit {
+		return budget, limit
+	}
+	fitted = limit - thinkingAnswerReserve
+	if fitted < minThinkingBudget {
+		fitted = limit / 2
+	}
+	if fitted < minThinkingBudget {
+		return 0, limit
+	}
+	return fitted, limit
+}
+
+// toolTurnLacksThinking reports whether msgs end inside a tool loop — an
+// assistant turn with tool calls followed only by its tool results — whose
+// assistant turn carries no thinking block replayable to modelName.
+func toolTurnLacksThinking(providerName, modelName string, msgs []Message) bool {
+	i := len(msgs) - 1
+	for i >= 0 && msgs[i].Role == RoleUser && len(msgs[i].ToolResults) > 0 && strings.TrimSpace(msgs[i].Content) == "" {
+		i--
+	}
+	if i < 0 || i == len(msgs)-1 || msgs[i].Role != RoleAssistant || len(msgs[i].ToolCalls) == 0 {
+		return false
+	}
+	for _, b := range msgs[i].Reasoning {
+		if b.Provider == providerName && b.Model == modelName && (b.Signature != "" || b.RedactedData != "") {
+			return false
+		}
+	}
+	return true
+}
+
+// replayReasoning builds the reasoning parts to send back on an assistant
+// turn. Blocks are replayed only to the model that produced them (a thinking
+// signature is not valid for any other model), and only where the wire
+// format carries them:
+//   - Anthropic: signed thinking / redacted_thinking blocks, while extended
+//     thinking is enabled — required on the in-progress tool-use turn.
+//   - OpenAI-compatible chat: reasoning_content, which reasoning models such
+//     as DeepSeek and Kimi expect back during a tool loop.
+//   - OpenAI Responses: not replayable inline (fantasy drops reasoning items
+//     on replay; the IDs are ephemeral without server-side storage), so
+//     nothing is sent.
+func replayReasoning(providerName, apiKind, modelName string, req Request, blocks []ReasoningBlock) []fantasy.MessagePart {
+	if len(blocks) == 0 || providerName == "openai" {
+		return nil
+	}
+	anthropicAPI := isAnthropicAPI(providerName, apiKind)
+	if anthropicAPI && ThinkingBudgetTokens(req.Thinking) <= 0 {
+		return nil
+	}
+	var parts []fantasy.MessagePart
+	for _, b := range blocks {
+		if b.Provider != providerName || b.Model != modelName {
+			continue
+		}
+		if anthropicAPI {
+			if b.Signature == "" && b.RedactedData == "" {
+				continue
+			}
+			parts = append(parts, fantasy.ReasoningPart{
+				Text: b.Text,
+				ProviderOptions: fantasy.ProviderOptions{
+					fantasyanthropic.Name: &fantasyanthropic.ReasoningOptionMetadata{Signature: b.Signature, RedactedData: b.RedactedData},
+				},
+			})
+			continue
+		}
+		if b.Text != "" {
+			parts = append(parts, fantasy.ReasoningPart{Text: b.Text})
+		}
+	}
+	return parts
 }
 
 // usageFromFantasy maps fantasy's usage block onto Spettro's Usage type.
@@ -195,7 +631,10 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 					prompt = append(prompt, fantasy.NewUserMessage(m.Content, fantasyImageParts(imgs)...))
 				}
 			case RoleAssistant:
-				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls))
+				parts := make([]fantasy.MessagePart, 0, 1+len(m.ToolCalls)+len(m.Reasoning))
+				// Reasoning goes first: Anthropic requires the thinking block
+				// to open the assistant turn it belongs to.
+				parts = append(parts, replayReasoning(providerName, apiKind, modelName, req, m.Reasoning)...)
 				if m.Content != "" {
 					parts = append(parts, fantasy.TextPart{Text: m.Content})
 				}
@@ -240,8 +679,8 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 	if len(req.Tools) > 0 {
 		call.Tools = make([]fantasy.Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			var schema map[string]any
-			if err := json.Unmarshal(t.Schema, &schema); err != nil || schema == nil {
+			schema := toolSchemas.parse(t.Schema)
+			if schema == nil {
 				schema = map[string]any{"type": "object", "additionalProperties": true}
 			}
 			call.Tools = append(call.Tools, fantasy.FunctionTool{
@@ -267,16 +706,26 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 	// provider default; a server that rejects "none" is retried without the
 	// field by the manager's downgrade ladder.
 	if isAnthropicAPI(providerName, apiKind) {
-		if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
-			budgetInt := int64(budget)
+		budget := int64(ThinkingBudgetTokens(ThinkingLevel(req.Thinking)))
+		if budget > 0 && toolTurnLacksThinking(providerName, modelName, req.Messages) {
+			// The in-progress tool-use turn came from another model (a
+			// fallback or a model switch mid-loop) or from a request without
+			// thinking, so it has no thinking block this model can replay.
+			// Anthropic rejects a thinking-enabled request whose final
+			// assistant turn does not start with one; think again from the
+			// next user turn on.
+			budget = 0
+		}
+		if budget > 0 {
+			var maxTokens int64
+			budget, maxTokens = fitThinkingBudget(budget, call.MaxOutputTokens)
+			call.MaxOutputTokens = &maxTokens
+		}
+		if budget > 0 {
 			call.ProviderOptions = fantasy.ProviderOptions{
 				"anthropic": &fantasyanthropic.ProviderOptions{
-					Thinking: &fantasyanthropic.ThinkingProviderOption{BudgetTokens: budgetInt},
+					Thinking: &fantasyanthropic.ThinkingProviderOption{BudgetTokens: budget},
 				},
-			}
-			needed := budgetInt + 4096
-			if call.MaxOutputTokens == nil || *call.MaxOutputTokens < needed {
-				call.MaxOutputTokens = &needed
 			}
 		}
 	} else if effort := ReasoningEffort(ThinkingLevel(req.Thinking)); effort != "" {
@@ -312,13 +761,14 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 // loadToolResultMedia reads an image file into a media tool-result output
 // (base64 + mime), keeping the tool's text output alongside it. Returns false
 // when the file cannot be read so the caller falls back to a text-only result.
+// The encoding comes from the media cache.
 func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedia, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := requestMedia.base64(path)
+	if !ok {
 		return fantasy.ToolResultOutputContentMedia{}, false
 	}
 	return fantasy.ToolResultOutputContentMedia{
-		Data:      base64.StdEncoding.EncodeToString(data),
+		Data:      data,
 		MediaType: mediaTypeFromPath(path),
 		Text:      text,
 	}, true
@@ -326,12 +776,13 @@ func loadToolResultMedia(path, text string) (fantasy.ToolResultOutputContentMedi
 
 // fantasyImageParts loads image files into fantasy FileParts. Unreadable
 // paths are skipped (matching the legacy adapters) so a vanished temp file
-// degrades to a text-only turn instead of failing the whole request.
+// degrades to a text-only turn instead of failing the whole request. The
+// bytes come from the media cache and are shared: fantasy only reads them.
 func fantasyImageParts(paths []string) []fantasy.FilePart {
 	var parts []fantasy.FilePart
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
+		data, ok := requestMedia.bytes(p)
+		if !ok {
 			continue
 		}
 		parts = append(parts, fantasy.FilePart{
@@ -343,11 +794,17 @@ func fantasyImageParts(paths []string) []fantasy.FilePart {
 	return parts
 }
 
-func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.Provider, error) {
+// newFantasyProvider builds the fantasy provider for one request. A non-nil
+// client replaces the SDK's default HTTP client (the stream watchdog uses it
+// to observe body activity).
+func newFantasyProvider(providerName, apiKind, apiKey, baseURL string, client *activityHTTPClient) (fantasy.Provider, error) {
 	switch {
 	case providerName == "anthropic" || apiKind == models.APIAnthropic:
 		opts := []fantasyanthropic.Option{
 			fantasyanthropic.WithUserAgent(fantasyUserAgent()),
+		}
+		if client != nil {
+			opts = append(opts, fantasyanthropic.WithHTTPClient(*client))
 		}
 		if apiKey != "" {
 			opts = append(opts, fantasyanthropic.WithAPIKey(apiKey))
@@ -367,6 +824,9 @@ func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.
 			fantasyopenai.WithUserAgent(fantasyUserAgent()),
 			fantasyopenai.WithUseResponsesAPI(),
 		}
+		if client != nil {
+			opts = append(opts, fantasyopenai.WithHTTPClient(*client))
+		}
 		if apiKey != "" {
 			opts = append(opts, fantasyopenai.WithAPIKey(apiKey))
 		}
@@ -384,6 +844,9 @@ func newFantasyProvider(providerName, apiKind, apiKey, baseURL string) (fantasy.
 			fantasyopenaicompat.WithName(providerName),
 			fantasyopenaicompat.WithAPIKey(apiKey),
 			fantasyopenaicompat.WithUserAgent(fantasyUserAgent()),
+		}
+		if client != nil {
+			opts = append(opts, fantasyopenaicompat.WithHTTPClient(*client))
 		}
 		if resolvedBaseURL != "" {
 			opts = append(opts, fantasyopenaicompat.WithBaseURL(resolvedBaseURL))

@@ -3,8 +3,11 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
@@ -17,18 +20,20 @@ func (m *Model) stopAgent() {
 		m.cancelAgent = nil
 	}
 	if m.pendingAuth != nil {
-		select {
-		case m.pendingAuth.response <- shellApprovalResponse{decision: agent.ShellApprovalDeny}:
-		default:
-		}
+		denyApproval(*m.pendingAuth)
 	}
+	m.discardApprovalQueue()
 	if m.pendingQuestion != nil {
 		m.pendingQuestion.reply(askUserResponse{err: fmt.Errorf("cancelled")})
 	}
 	m.discardQuestionQueue(fmt.Errorf("cancelled"))
 	m.thinking = false
-	m.toolCh = nil
-	m.streamCh = nil
+	if m.runEvents != nil {
+		// Release the stopped run's reader and its done message now (see
+		// runEventQueue); that message is then ignored by isActiveRun.
+		m.runEvents.abandon()
+	}
+	m.runEvents = nil
 	m.usageCh = nil
 	m.approvalCh = nil
 	m.askUserCh = nil
@@ -36,7 +41,11 @@ func (m *Model) stopAgent() {
 	m.currentTool = nil
 	m.pendingAuth = nil
 	m.pendingQuestion = nil
-	m.approvalCursor = 0
+	// The stopped run's done message is ignored (isActiveRun), so
+	// resetRunState never runs for it: its sub-agents are cleared here, or
+	// the "agents" footer kept listing them as running after the stop.
+	m.parallelAgents = nil
+	*m = m.resetApprovalUI()
 	m.progressNote = ""
 	m.activePrompt = nil
 	m.activeAgentID = ""
@@ -68,12 +77,61 @@ func (m *Model) showBanner(text, kind string) {
 	m.publishRemote("banner", map[string]any{"text": text, "level": kind})
 }
 
+// persistUIState records the mode and the side panel toggle in the user
+// config. The write itself happens in a background command (see
+// uiStateSaveCmd): config.Update reads, decrypts and rewrites the whole
+// config, which on the Update goroutine made every shift+tab and ctrl+b wait
+// for the disk (and for the key file's key derivation).
 func (m *Model) persistUIState() {
-	_ = m.updateConfig(func(cfg *config.UserConfig) error {
-		cfg.LastAgentID = m.mode
-		cfg.ShowSidePanel = m.showSidePanel
+	m.cfg.LastAgentID = m.mode
+	m.cfg.ShowSidePanel = m.showSidePanel
+	m.uiStateDirty = true
+}
+
+// uiStateSaver serializes the background writes of persistUIState. Each
+// write saves the latest requested state, not the one current when it was
+// scheduled, so two quick toggles whose commands run out of order still end
+// with the last one on disk.
+//
+// Ordering guarantee: writes are serialized by writeMu, and each one reads
+// the state of the most recent request under stateMu when it starts, so the
+// last request is always the last state written. The Update goroutine only
+// ever takes stateMu, which is never held across I/O, so a slow write never
+// blocks the UI.
+type uiStateSaver struct {
+	writeMu   sync.Mutex
+	stateMu   sync.Mutex
+	mode      string
+	sidePanel bool
+}
+
+// uiStateSaves is the process's one saver: the config file is per user.
+var uiStateSaves uiStateSaver
+
+// uiStateSaveCmd returns the background config write a persistUIState call
+// asked for, once, or nil.
+func (m *Model) uiStateSaveCmd() tea.Cmd {
+	if !m.uiStateDirty {
 		return nil
-	})
+	}
+	m.uiStateDirty = false
+	s := &uiStateSaves
+	s.stateMu.Lock()
+	s.mode, s.sidePanel = m.mode, m.showSidePanel
+	s.stateMu.Unlock()
+	return func() tea.Msg {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		s.stateMu.Lock()
+		mode, side := s.mode, s.sidePanel
+		s.stateMu.Unlock()
+		_, _ = config.Update(func(cfg *config.UserConfig) error {
+			cfg.LastAgentID = mode
+			cfg.ShowSidePanel = side
+			return nil
+		})
+		return nil
+	}
 }
 
 func (m *Model) updateConfig(mut func(*config.UserConfig) error) error {
@@ -156,7 +214,10 @@ func (m *Model) appendOrUpdateStream(kind, delta string) {
 	if n := len(m.messages); n > 0 {
 		last := &m.messages[n-1]
 		if last.Role == RoleAssistant && last.Kind == kind {
-			last.Content += delta
+			if last.draft == nil {
+				last.draft = &draftText{}
+			}
+			last.Content = last.draft.appendTo(last.Content, delta)
 			last.At = time.Now()
 			return
 		}
@@ -297,10 +358,12 @@ func (m *Model) nextQueuedPrompt() (queuedPrompt, bool) {
 	return next, true
 }
 
-func compactRunSummary(tools []ToolItem, current *ToolItem) string {
+// compactRunSummary lists what an interrupted run did, for the "Progress
+// kept" note: the label of each finished call, then the call in progress.
+func (m Model) compactRunSummary(tools []ToolItem, current *ToolItem) string {
 	var parts []string
 	for _, t := range tools {
-		label := formatToolLabel(t.Name, t.Args)
+		label := m.toolLabel(t.Name, t.Args, false)
 		if strings.TrimSpace(label) == "" {
 			label = t.Name
 		}
@@ -312,7 +375,7 @@ func compactRunSummary(tools []ToolItem, current *ToolItem) string {
 		}
 	}
 	if current != nil {
-		label := formatRunningLabel(current.Name, current.Args)
+		label := m.toolLabel(current.Name, current.Args, true)
 		if strings.TrimSpace(label) == "" {
 			label = current.Name
 		}
@@ -339,7 +402,7 @@ func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
 	// Drop transient live-stream drafts; the kept-progress note below is the
 	// canonical record of an interrupted run.
 	m.clearStreamMessages()
-	runSummary := compactRunSummary(m.liveTools, m.currentTool)
+	runSummary := m.compactRunSummary(m.liveTools, m.currentTool)
 	content := strings.TrimSpace(summaryPrefix)
 	if runSummary != "" {
 		if content != "" {

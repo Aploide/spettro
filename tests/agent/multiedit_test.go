@@ -1,7 +1,9 @@
 package agent_test
 
-// Tests for the multi-edit builtin: several find/replace edits applied to one
-// file in a single atomic tool call.
+// Tests for the retired multi-edit tool name: several find/replace edits
+// applied to one file in a single atomic call. multi-edit is now an alias of
+// file-edit's edits[] form, so the model below still calls "multi-edit" while
+// the manifest only knows file-edit.
 
 import (
 	"context"
@@ -15,7 +17,7 @@ import (
 )
 
 // multiEditManifest returns a minimal manifest whose single agent may call
-// multi-edit (and comment), mirroring the default manifest's tool policy.
+// file-edit (and comment), mirroring the default manifest's tool policy.
 func multiEditManifest(t *testing.T, permission config.PermissionLevel) config.AgentManifest {
 	t.Helper()
 	manifest := config.AgentManifest{
@@ -27,7 +29,7 @@ func multiEditManifest(t *testing.T, permission config.PermissionLevel) config.A
 			LogToolCalls:      true,
 		},
 		Tools: []config.ToolSpec{
-			{ID: "multi-edit", Name: "Multi Edit", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}},
+			{ID: "file-edit", Name: "File Edit", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, Aliases: []string{"multi-edit"}},
 			{ID: "comment", Name: "Comment", Kind: "builtin", Enabled: true, TimeoutSec: 10, PermittedActions: []string{"read"}},
 		},
 		Agents: []config.AgentSpec{
@@ -35,7 +37,7 @@ func multiEditManifest(t *testing.T, permission config.PermissionLevel) config.A
 				ID:               "code",
 				Name:             "Code",
 				Mode:             "worker",
-				AllowedTools:     []string{"multi-edit", "comment"},
+				AllowedTools:     []string{"file-edit", "comment"},
 				PermittedActions: []string{"read", "write"},
 				Permission:       permission,
 				MaxSteps:         4,
@@ -88,8 +90,11 @@ func TestMultiEdit_SequentialEdits(t *testing.T) {
 	if string(data) != want {
 		t.Errorf("unexpected file content:\n%q\nwant:\n%q", string(data), want)
 	}
-	if !strings.Contains(result.Tools[0].Output, "2 edits") {
-		t.Errorf("expected edit count in output, got: %q", result.Tools[0].Output)
+	if !strings.Contains(result.Tools[0].Output, "2 replacements") {
+		t.Errorf("expected replacement count in output, got: %q", result.Tools[0].Output)
+	}
+	if result.Tools[0].Name != "file-edit" {
+		t.Errorf("multi-edit should run and trace as file-edit, got %q", result.Tools[0].Name)
 	}
 }
 
@@ -141,7 +146,7 @@ func TestMultiEdit_AmbiguousMatchFailsWithoutReplaceAll(t *testing.T) {
 	if len(result.Tools) == 0 || result.Tools[0].Status != "error" {
 		t.Fatalf("expected ambiguous-match error trace, got: %+v", result.Tools)
 	}
-	if !strings.Contains(result.Tools[0].Output, "matches 2 times") {
+	if !strings.Contains(result.Tools[0].Output, "matches 2 locations (lines 1, 2)") {
 		t.Errorf("expected ambiguity error, got: %q", result.Tools[0].Output)
 	}
 	data, _ := os.ReadFile(path)

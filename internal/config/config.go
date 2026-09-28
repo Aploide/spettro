@@ -26,7 +26,7 @@ type UserConfig struct {
 	ActiveProvider          string            `json:"active_provider"`
 	ActiveModel             string            `json:"active_model"`
 	Permission              PermissionLevel   `json:"permission"`
-	TokenBudget             int               `json:"token_budget,omitempty"` // max tokens per request; 0 = unlimited
+	TokenBudget             int               `json:"token_budget,omitempty"` // max INPUT (prompt) tokens per request; 0 = unlimited
 	AutoCompactEnabled      bool              `json:"auto_compact_enabled"`
 	AutoCompactThresholdPct int               `json:"auto_compact_threshold_pct,omitempty"`
 	AutoCompactMaxFailures  int               `json:"auto_compact_max_failures,omitempty"`
@@ -41,17 +41,50 @@ type UserConfig struct {
 	// degrades to dark when it cannot be determined. The SPETTRO_THEME
 	// environment variable overrides this for a single process.
 	Theme string `json:"theme,omitempty"`
-	// ThinkingLevel selects extended-thinking compute when the active model
-	// supports it. Allowed values are "off", "low", "medium", "high", "x-high"
-	// (or empty, which is treated as "off"). Toggleable at runtime via the
-	// /thinking command and honoured by the Anthropic adapter; other
-	// providers ignore it.
+	// CursorBlink makes the input cursor blink. Off by default: a blinking
+	// cursor repaints the frame twice a second for as long as the TUI is
+	// open, which was most of an idle TUI's CPU once nothing else woke it.
+	CursorBlink bool `json:"cursor_blink,omitempty"`
+	// ThinkingLevel selects reasoning compute when the active model supports
+	// it. Allowed values are "off", "low", "medium", "high", "x-high", "max",
+	// or empty (never set: no thinking parameter is sent and the provider's
+	// default applies). Toggleable at runtime via the /thinking command and
+	// honoured by the TUI, headless and ACP runs alike: Anthropic gets a
+	// thinking token budget; OpenAI and OpenAI-compatible backends (the Spettro
+	// Subscription included) get reasoning_effort (low/medium/high, x-high and
+	// max as "xhigh", an explicit "off" as "none").
 	ThinkingLevel string `json:"thinking_level,omitempty"`
+	// MaxOutputTokens caps each model reply (max_tokens on the wire). 0 =
+	// auto: the model's known output limit, or 32000 for Anthropic-protocol
+	// models whose limit is unknown (their implicit default is only 4096).
+	// Distinct from TokenBudget, which limits the prompt.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// ProviderWire selects the client that carries streamed requests to
+	// OpenAI-compatible chat-completions endpoints (OpenAI-compatible
+	// catalog providers, the Spettro Subscription, local servers): "native"
+	// (empty means native) is Spettro's own client, "fantasy" the fantasy
+	// SDK it replaced, kept as a fallback. The SPETTRO_PROVIDER_WIRE
+	// environment variable overrides it for one process. Anthropic and the
+	// official OpenAI provider always use fantasy.
+	ProviderWire string `json:"provider_wire,omitempty"`
 	// Ultra, when true, injects the ultra fan-out tool and swarm guidance into
 	// the top-level agent so it decomposes hard tasks across many parallel
 	// sub-agents. Works with any model (sub-agents inherit the active model).
 	// Toggleable at runtime via /ultra (TUI) or the "ultra" ACP config option.
 	Ultra bool `json:"ultra,omitempty"`
+
+	// SkillsCompatDisabled switches off skill discovery in other agents'
+	// directories (.agents/skills, .claude/skills, .codex/skills,
+	// .openai/skills, in the project and the home directory), leaving only
+	// Spettro's own .spettro/skills. The zero value keeps it on, so skills
+	// installed for Claude Code or Codex work out of the box. See
+	// docs/skills.md.
+	SkillsCompatDisabled bool `json:"skills_compat_disabled,omitempty"`
+	// DisabledSkills names skills hidden from both the model and the slash
+	// menu (case-insensitive). /skill disable and /skill enable edit it; it
+	// is kept here rather than as a file in the skill's folder so the
+	// Claude Code and Codex directories are never written to.
+	DisabledSkills []string `json:"disabled_skills,omitempty"`
 
 	// Spettro Subscription state. The ep_ API key itself lives in the encrypted
 	// keys store under the "spettro" provider; these fields cache the last-known
@@ -78,6 +111,11 @@ type UserConfig struct {
 	// values fall back to the storage package defaults (30 days / keep 5).
 	CleanSessionAgeDays int `json:"clean_session_age_days,omitempty"` // sessions older than this are clean candidates
 	CleanKeepSessions   int `json:"clean_keep_sessions,omitempty"`    // most recent K sessions per project always survive
+
+	// RipgrepDownloadDisabled stops grep from downloading ripgrep into
+	// ~/.spettro/bin when rg is not on PATH (see internal/ripgrep); grep
+	// then keeps using its built-in Go search.
+	RipgrepDownloadDisabled bool `json:"ripgrep_download_disabled,omitempty"`
 
 	// Goal mode (/goal): autonomous run-until-done.
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)

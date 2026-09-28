@@ -18,6 +18,15 @@ type Config struct {
 	MaxFailures      int
 }
 
+// FailureLimit is the number of consecutive summarizer failures that pause
+// the automatic trigger: MaxFailures, or the default (3) when it is unset.
+func (c Config) FailureLimit() int {
+	if c.MaxFailures <= 0 {
+		return defaultMaxFailures
+	}
+	return c.MaxFailures
+}
+
 type State struct {
 	TokensUsed          int
 	ConsecutiveFailures int
@@ -46,10 +55,7 @@ func Evaluate(contextWindow int, cfg Config, state State) Evaluation {
 	autoCompactThreshold := autoThreshold(effective, cfg.AutoThresholdPct)
 	blocking := clampThreshold(effective-blockingBufferTokens, effective)
 
-	maxFailures := cfg.MaxFailures
-	if maxFailures <= 0 {
-		maxFailures = defaultMaxFailures
-	}
+	maxFailures := cfg.FailureLimit()
 
 	autoEnabled := cfg.AutoEnabled
 	autoDisabledReason := ""

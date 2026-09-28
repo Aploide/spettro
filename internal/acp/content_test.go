@@ -9,32 +9,55 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"spettro/internal/agent"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 )
 
-func TestPromptFromBlocks_TextAndResourceLink(t *testing.T) {
-	task, images, mentioned, err := promptFromBlocks([]acpsdk.ContentBlock{
+func TestReadPromptContent_TextAndResourceLink(t *testing.T) {
+	p, err := readPromptContent([]acpsdk.ContentBlock{
 		acpsdk.TextBlock("Read "),
 		acpsdk.ResourceLinkBlock("main.go", "file:///tmp/proj/main.go"),
 		acpsdk.TextBlock(" and summarize it."),
 	}, t.TempDir())
+	task, images, mentioned := p.task(), p.images, p.mentioned
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task != "Read @/tmp/proj/main.go and summarize it." {
+	if task != "Read @"+filepath.FromSlash("/tmp/proj/main.go")+" and summarize it." {
 		t.Fatalf("unexpected task: %q", task)
 	}
 	if len(images) != 0 {
 		t.Fatalf("expected no images, got %v", images)
 	}
-	if len(mentioned) != 1 || mentioned[0] != "/tmp/proj/main.go" {
+	if len(mentioned) != 1 || mentioned[0] != filepath.FromSlash("/tmp/proj/main.go") {
 		t.Fatalf("unexpected mentioned files: %v", mentioned)
 	}
 }
 
-func TestPromptFromBlocks_EmbeddedResource(t *testing.T) {
-	task, _, _, err := promptFromBlocks([]acpsdk.ContentBlock{
+// Resource links are URIs: a percent-encoded space or a "localhost"
+// authority must still name the file on disk, and a link that is not a
+// file:// URI names no file to read first.
+func TestReadPromptContent_ResourceLinkURIForms(t *testing.T) {
+	p, err := readPromptContent([]acpsdk.ContentBlock{
+		acpsdk.ResourceLinkBlock("a.txt", "file:///tmp/My%20Proj/a.txt"),
+		acpsdk.ResourceLinkBlock("b.txt", "file://localhost/tmp/b.txt"),
+		acpsdk.ResourceLinkBlock("docs", "https://example.com/docs"),
+	}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.FromSlash("/tmp/My Proj/a.txt"), filepath.FromSlash("/tmp/b.txt")}
+	if strings.Join(p.mentioned, "|") != strings.Join(want, "|") {
+		t.Fatalf("mentioned = %q, want %q", p.mentioned, want)
+	}
+	if !strings.Contains(p.typed, "@https://example.com/docs") {
+		t.Fatalf("a non-file link should stay in the text: %q", p.typed)
+	}
+}
+
+func TestReadPromptContent_EmbeddedResource(t *testing.T) {
+	p, err := readPromptContent([]acpsdk.ContentBlock{
 		acpsdk.TextBlock("Explain this."),
 		acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
 			TextResourceContents: &acpsdk.TextResourceContents{
@@ -46,18 +69,27 @@ func TestPromptFromBlocks_EmbeddedResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(task, "Context from /tmp/proj/util.go:") || !strings.Contains(task, "package util") {
+	task := p.task()
+	// The label is the URI's local path in the host's own form (backslashes
+	// on Windows).
+	if !strings.Contains(task, "Context from "+filepath.FromSlash("/tmp/proj/util.go")+":") || !strings.Contains(task, "package util") {
 		t.Fatalf("embedded context missing from task: %q", task)
+	}
+	// The typed text is kept apart from the attached file, so a skill
+	// command can be parsed from it alone.
+	if p.typed != "Explain this." {
+		t.Fatalf("typed text = %q", p.typed)
 	}
 }
 
-func TestPromptFromBlocks_ImageDecodedToFile(t *testing.T) {
+func TestReadPromptContent_ImageDecodedToFile(t *testing.T) {
 	dir := t.TempDir()
 	payload := []byte{0x89, 0x50, 0x4e, 0x47}
-	_, images, _, err := promptFromBlocks([]acpsdk.ContentBlock{
+	p, err := readPromptContent([]acpsdk.ContentBlock{
 		acpsdk.TextBlock("look"),
 		acpsdk.ImageBlock(base64.StdEncoding.EncodeToString(payload), "image/png"),
 	}, filepath.Join(dir, "media"))
+	images := p.images
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -70,68 +102,6 @@ func TestPromptFromBlocks_ImageDecodedToFile(t *testing.T) {
 	}
 	if string(raw) != string(payload) {
 		t.Fatalf("decoded image content mismatch")
-	}
-}
-
-func TestToolKindClassification(t *testing.T) {
-	cases := map[string]acpsdk.ToolKind{
-		"file-read":   acpsdk.ToolKindRead,
-		"file-edit":   acpsdk.ToolKindEdit,
-		"file-write":  acpsdk.ToolKindEdit,
-		"shell-exec":  acpsdk.ToolKindExecute,
-		"repo-search": acpsdk.ToolKindSearch,
-		"grep":        acpsdk.ToolKindSearch,
-		"http-fetch":  acpsdk.ToolKindFetch,
-		"view-image":  acpsdk.ToolKindRead,
-		"mystery":     acpsdk.ToolKindOther,
-	}
-	for name, want := range cases {
-		if got := toolKind(name); got != want {
-			t.Errorf("toolKind(%q) = %q, want %q", name, got, want)
-		}
-	}
-}
-
-// Tool-attached images (screenshot, view-image) must reach ACP clients as
-// image content blocks alongside the tool's text output; unreadable paths are
-// skipped rather than failing the update.
-func TestToolOutputContentWithImages(t *testing.T) {
-	payload := []byte{0x89, 0x50, 0x4e, 0x47}
-	img := filepath.Join(t.TempDir(), "shot.png")
-	if err := os.WriteFile(img, payload, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	blocks := toolOutputContent(`{"file":"shot.png"}`, []string{img, "/no/such/file.png"})
-	if len(blocks) != 2 {
-		t.Fatalf("expected text+image blocks, got %d", len(blocks))
-	}
-	if blocks[0].Content == nil || blocks[0].Content.Content.Text == nil {
-		t.Fatal("first block should be the text output")
-	}
-	if blocks[1].Content == nil || blocks[1].Content.Content.Image == nil {
-		t.Fatal("second block should be an image")
-	}
-	imgBlock := blocks[1].Content.Content.Image
-	if imgBlock.MimeType != "image/png" {
-		t.Fatalf("mime = %q", imgBlock.MimeType)
-	}
-	if imgBlock.Data != base64.StdEncoding.EncodeToString(payload) {
-		t.Fatal("image data does not round-trip the file")
-	}
-
-	if blocks := toolOutputContent("", nil); blocks != nil {
-		t.Fatalf("empty output should produce no blocks, got %v", blocks)
-	}
-}
-
-func TestToolLocations(t *testing.T) {
-	locs := toolLocations(`{"path":"/tmp/a.go","content":"x"}`)
-	if len(locs) != 1 || locs[0].Path != "/tmp/a.go" {
-		t.Fatalf("unexpected locations: %v", locs)
-	}
-	if locs := toolLocations("not json"); locs != nil {
-		t.Fatalf("expected nil locations for non-JSON args, got %v", locs)
 	}
 }
 
@@ -173,5 +143,32 @@ func TestPlanEntriesFromTodos(t *testing.T) {
 	}
 	if entries[2].Content != "ship (blocked)" || entries[2].Status != acpsdk.PlanEntryStatusPending || entries[2].Priority != acpsdk.PlanEntryPriorityMedium {
 		t.Fatalf("unexpected third entry: %#v", entries[2])
+	}
+}
+
+// Only the session agent's own words reach the chat: a sub-agent's
+// narration, comment-tool messages and steering notices stay on its cards.
+func TestCommentChatText(t *testing.T) {
+	turn := newSilentTurn()
+	turn.agentID = "coding"
+	cases := []struct {
+		what string
+		tr   agent.ToolTrace
+		want string
+	}{
+		{"own narration", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "success", Output: "Looking.", Narration: true}, "Looking."},
+		{"sub-agent narration", agent.ToolTrace{AgentID: "explore", Name: "comment", Status: "success", Output: "Looking.", Narration: true}, ""},
+		{"own comment tool", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "running", Args: `{"message":"halfway"}`}, "halfway"},
+		{"sub-agent comment tool", agent.ToolTrace{AgentID: "code#2", Name: "comment", Status: "running", Args: `{"message":"halfway"}`}, ""},
+		{"own steering", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "success", Output: "steering delivered: use sqlite"}, "✔ steering delivered: use sqlite"},
+		// A sub-agent's private steering queue carries only the runtime's
+		// time-limit wrap-up notice; the user sent nothing.
+		{"sub-agent steering", agent.ToolTrace{AgentID: "code#2", Name: "comment", Status: "success", Output: "steering delivered: wrap up now"}, ""},
+		{"runtime note", agent.ToolTrace{AgentID: "coding", Name: "comment", Status: "success", Output: "Starting bash (ls)"}, ""},
+	}
+	for _, tc := range cases {
+		if got := turn.commentChatText(tc.tr); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.what, got, tc.want)
+		}
 	}
 }

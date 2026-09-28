@@ -301,7 +301,9 @@ Every run writes to `<session>/workflows/<run_id>/`:
 
 Re-run with `script_path` and `resume_from_run_id` and every agent call
 whose prompt and options are unchanged replays from the journal instead
-of executing. Edit one stage of a twelve-agent script and only that
+of executing. A relative `script_path` is relative to the agent's
+workspace; the script must be in the workspace, in a run directory of this
+or another session, or in a saved-workflow folder. Edit one stage of a twelve-agent script and only that
 stage — and whatever depends on it — costs anything.
 
 Entries are keyed by a hash of `(prompt, agentType, model, effort,

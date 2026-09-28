@@ -61,8 +61,7 @@ command persistence, background jobs for a dev server (`run_in_background`),
 and so on. Nothing about the browser invocation is special-cased.
 
 The same two steps cover every other "look at this" need: render a matplotlib
-chart and check the axes, generate an asset with `grok-image` and inspect it,
-open a design PNG the user dropped into the repo.
+chart and check the axes, or open a design PNG the user dropped into the repo.
 
 ## How images reach the model
 

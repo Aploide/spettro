@@ -12,240 +12,173 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"spettro/internal/config"
 	"spettro/internal/diff"
+	"spettro/internal/lsp"
 	"spettro/internal/mcp"
+	"spettro/internal/provider"
 	"spettro/internal/safeio"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
 )
 
-func (r *toolRuntime) runTaskCreate(rawArgs []byte) (string, error) {
+// todoWriteItem is one task in a todo-write call. dependencies is a pointer
+// so a merge can tell "keep the stored list" (absent) from "clear it" ([]).
+type todoWriteItem struct {
+	ID           string    `json:"id"`
+	Content      string    `json:"content"`
+	Status       string    `json:"status"`
+	Owner        string    `json:"owner"`
+	Source       string    `json:"source"`
+	Priority     string    `json:"priority"`
+	Dependencies *[]string `json:"dependencies"`
+	// UpdateOnly is not in the schema: the task-update alias sets it so an
+	// unknown ID is an error, as it always was, rather than a new task.
+	UpdateOnly bool `json:"update_only"`
+}
+
+// todoRow is one task as todo-write reports it: the stored fields without
+// timestamps, plus the scheduling state derived from the graph.
+type todoRow struct {
+	ID           string   `json:"id"`
+	Content      string   `json:"content"`
+	Status       string   `json:"status"`
+	Owner        string   `json:"owner,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Priority     string   `json:"priority,omitempty"`
+	Dependencies []string `json:"dependencies,omitempty"`
+	BlockedBy    []string `json:"blocked_by,omitempty"`
+	Ready        bool     `json:"ready,omitempty"`
+}
+
+// runTodoWrite reads and edits the session task list: the one tool behind
+// what used to be todo-write plus task-create/get/update/list/delete. todos
+// replaces the whole list, or with merge inserts/updates tasks by ID (empty
+// fields keep their stored value); delete and clear_completed remove tasks. A
+// call with none of those only reads. Every call returns the full list in
+// dependency order, so the model never needs a separate read.
+//
+// Sub-agents share the parent's session folder, so a worker's full replace
+// would wipe the orchestrator's list: below the top level, todos always
+// merge.
+func (r *toolRuntime) runTodoWrite(rawArgs []byte) (string, error) {
 	var args struct {
-		ID           string   `json:"id"`
-		Content      string   `json:"content"`
-		Status       string   `json:"status"`
-		Owner        string   `json:"owner"`
-		Source       string   `json:"source"`
-		Priority     string   `json:"priority"`
-		Dependencies []string `json:"dependencies"`
+		Todos          *[]todoWriteItem `json:"todos"`
+		Merge          flexBool         `json:"merge"`
+		Delete         []string         `json:"delete"`
+		ClearCompleted flexBool         `json:"clear_completed"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-create args: %w", err)
+		return "", fmt.Errorf("todo-write args: %w", err)
 	}
 	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-create requires an active session")
-	}
-	// An empty ID is minted by UpsertTodo under its lock; deriving one here
-	// from the wall clock collided when creates landed in the same millisecond.
-	id := strings.TrimSpace(args.ID)
-	status, err := session.NormalizeTaskStatus(args.Status)
-	if err != nil {
-		return "", fmt.Errorf("task-create: %w", err)
-	}
-	item := session.Todo{
-		ID:           id,
-		Content:      strings.TrimSpace(args.Content),
-		Status:       status,
-		Owner:        strings.TrimSpace(args.Owner),
-		Source:       strings.TrimSpace(args.Source),
-		Priority:     strings.TrimSpace(args.Priority),
-		Dependencies: append([]string(nil), args.Dependencies...),
+		return "", fmt.Errorf("todo-write requires an active session")
 	}
 	sid := filepath.Base(r.sessionDir)
 	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
-	// Graph validation (unknown deps, cycles, unmet-dependency status rules)
-	// happens inside UpsertTodo, atomically with the load-merge-save.
-	out, err := session.UpsertTodo(globalDir, sid, item)
-	if err != nil {
-		return "", fmt.Errorf("task-create: %w", err)
-	}
-	raw, _ := json.Marshal(out)
-	return string(raw), nil
-}
-
-func (r *toolRuntime) runTaskGet(rawArgs []byte) (string, error) {
-	var args struct {
-		ID string `json:"id"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-get args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-get requires an active session")
-	}
-	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		return "", fmt.Errorf("task-get: id is required")
-	}
-	sid := filepath.Base(r.sessionDir)
-	item, ok, err := session.GetTodo(filepath.Dir(filepath.Dir(r.sessionDir)), sid, id)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", fmt.Errorf("task-get: task %q not found", id)
-	}
-	raw, _ := json.Marshal(item)
-	return string(raw), nil
-}
-
-func (r *toolRuntime) runTaskUpdate(rawArgs []byte) (string, error) {
-	var args struct {
-		ID           string   `json:"id"`
-		Content      string   `json:"content"`
-		Status       string   `json:"status"`
-		Owner        string   `json:"owner"`
-		Source       string   `json:"source"`
-		Priority     string   `json:"priority"`
-		Dependencies []string `json:"dependencies"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-update args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-update requires an active session")
-	}
-	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		return "", fmt.Errorf("task-update: id is required")
-	}
-	sid := filepath.Base(r.sessionDir)
-	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
-	prev, ok, err := session.GetTodo(globalDir, sid, id)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", fmt.Errorf("task-update: task %q not found", id)
-	}
-	if strings.TrimSpace(args.Content) != "" {
-		prev.Content = strings.TrimSpace(args.Content)
-	}
-	if strings.TrimSpace(args.Status) != "" {
-		status, err := session.NormalizeTaskStatus(args.Status)
+	var todos []session.Todo
+	var notes []string
+	if args.Todos == nil && len(args.Delete) == 0 && !args.ClearCompleted {
+		loaded, err := session.LoadTodos(globalDir, sid)
 		if err != nil {
-			return "", fmt.Errorf("task-update: %w", err)
+			return "", fmt.Errorf("todo-write: %w", err)
 		}
-		prev.Status = status
-	}
-	if strings.TrimSpace(args.Owner) != "" {
-		prev.Owner = strings.TrimSpace(args.Owner)
-	}
-	if strings.TrimSpace(args.Source) != "" {
-		prev.Source = strings.TrimSpace(args.Source)
-	}
-	if strings.TrimSpace(args.Priority) != "" {
-		prev.Priority = strings.TrimSpace(args.Priority)
-	}
-	if len(args.Dependencies) > 0 {
-		prev.Dependencies = append([]string(nil), args.Dependencies...)
-	}
-	out, err := session.UpsertTodo(globalDir, sid, prev)
-	if err != nil {
-		return "", fmt.Errorf("task-update: %w", err)
-	}
-	raw, _ := json.Marshal(out)
-	return string(raw), nil
-}
-
-func (r *toolRuntime) runTaskDelete(rawArgs []byte) (string, error) {
-	var args struct {
-		ID             string `json:"id"`
-		ClearCompleted bool   `json:"clear_completed"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-delete args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-delete requires an active session")
-	}
-	sid := filepath.Base(r.sessionDir)
-	globalDir := filepath.Dir(filepath.Dir(r.sessionDir))
-	if args.ClearCompleted {
-		n, err := session.ClearCompletedTodos(globalDir, sid)
-		if err != nil {
-			return "", fmt.Errorf("task-delete: %w", err)
-		}
-		return fmt.Sprintf("removed %d completed/cancelled tasks", n), nil
-	}
-	id := strings.TrimSpace(args.ID)
-	if id == "" {
-		return "", fmt.Errorf("task-delete: id is required (or set clear_completed)")
-	}
-	found, err := session.DeleteTodo(globalDir, sid, id)
-	if err != nil {
-		return "", fmt.Errorf("task-delete: %w", err)
-	}
-	if !found {
-		return "", fmt.Errorf("task-delete: task %q not found", id)
-	}
-	return fmt.Sprintf("deleted task %s", id), nil
-}
-
-func (r *toolRuntime) runTaskList(rawArgs []byte) (string, error) {
-	var args struct {
-		Status string `json:"status"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("task-list args: %w", err)
-	}
-	if strings.TrimSpace(r.sessionDir) == "" {
-		return "", fmt.Errorf("task-list requires an active session")
-	}
-	sid := filepath.Base(r.sessionDir)
-	items, err := session.LoadTodos(filepath.Dir(filepath.Dir(r.sessionDir)), sid)
-	if err != nil {
-		return "", err
-	}
-	all := append([]session.Todo(nil), items...)
-	filter := strings.ToLower(strings.TrimSpace(args.Status))
-	blocked := session.BlockedIDs(items)
-	switch filter {
-	case "":
-	case "ready":
-		items = session.ReadyTasks(items)
-	case "blocked":
-		out := make([]session.Todo, 0, len(items))
-		for _, t := range items {
-			if _, ok := blocked[t.ID]; ok {
-				out = append(out, t)
+		todos = loaded
+	} else {
+		change := session.TodoChange{Delete: args.Delete, ClearCompleted: bool(args.ClearCompleted)}
+		if args.Todos != nil {
+			change.Replace = !bool(args.Merge)
+			if change.Replace && r.delegationDepth > 0 {
+				// Tasks written without IDs match stored tasks by content, so
+				// a worker that rewrites its whole list updates it instead of
+				// adding copies next to the stale originals.
+				change.Replace = false
+				change.MatchContent = true
+				notes = append(notes, "merged instead of replacing: sub-agents share the parent's task list (tasks without an id were matched to existing tasks by content)")
+			}
+			for _, it := range *args.Todos {
+				change.Todos = append(change.Todos, session.TodoPatch{
+					ID:           it.ID,
+					Content:      it.Content,
+					Status:       it.Status,
+					Owner:        it.Owner,
+					Source:       it.Source,
+					Priority:     it.Priority,
+					Dependencies: it.Dependencies,
+					MustExist:    it.UpdateOnly,
+				})
 			}
 		}
-		items = out
-	default:
-		out := make([]session.Todo, 0, len(items))
-		for _, t := range items {
-			if t.Status == filter {
-				out = append(out, t)
-			}
+		saved, applyNotes, err := session.ApplyTodos(globalDir, sid, change)
+		if err != nil {
+			return "", fmt.Errorf("todo-write: %w", err)
 		}
-		items = out
+		todos = saved
+		notes = append(notes, applyNotes...)
 	}
-	// Return tasks in dependency order, annotated with the incomplete
-	// dependencies currently gating each one, so the agent can pick the next
-	// ready task without re-deriving the graph.
-	type taskRow struct {
-		session.Todo
-		BlockedBy []string `json:"blocked_by,omitempty"`
-	}
+	return formatTodoList(todos, notes), nil
+}
+
+// formatTodoList renders the task list todo-write returns: tasks in
+// dependency order, each with the incomplete dependencies gating it and
+// whether it can start now.
+func formatTodoList(todos []session.Todo, notes []string) string {
 	pos := map[string]int{}
-	for i, id := range session.TopoOrder(items) {
+	for i, id := range session.TopoOrder(todos) {
 		pos[id] = i
 	}
-	sort.SliceStable(items, func(i, j int) bool { return pos[items[i].ID] < pos[items[j].ID] })
-	rows := make([]taskRow, 0, len(items))
-	for _, t := range items {
-		rows = append(rows, taskRow{Todo: t, BlockedBy: session.IncompleteDeps(t, all)})
+	ordered := append([]session.Todo(nil), todos...)
+	sort.SliceStable(ordered, func(i, j int) bool { return pos[ordered[i].ID] < pos[ordered[j].ID] })
+	ready := map[string]struct{}{}
+	for _, t := range session.ReadyTasks(todos) {
+		ready[t.ID] = struct{}{}
 	}
-	raw, _ := json.Marshal(rows)
-	return string(raw), nil
+	out := struct {
+		Tasks []todoRow `json:"tasks"`
+		Notes []string  `json:"notes,omitempty"`
+	}{Tasks: make([]todoRow, 0, len(ordered)), Notes: notes}
+	for _, t := range ordered {
+		_, isReady := ready[t.ID]
+		out.Tasks = append(out.Tasks, todoRow{
+			ID:           t.ID,
+			Content:      t.Content,
+			Status:       t.Status,
+			Owner:        t.Owner,
+			Source:       t.Source,
+			Priority:     t.Priority,
+			Dependencies: t.Dependencies,
+			BlockedBy:    session.IncompleteDeps(t, todos),
+			Ready:        isReady,
+		})
+	}
+	raw, _ := json.Marshal(out)
+	return string(raw)
 }
 
+// toolSearchMaxLoads caps how many deferred tools one tool-search loads, so
+// a vague query cannot put every schema back on the request.
+const toolSearchMaxLoads = 8
+
+// toolSearchHit is one tool a tool-search query matched.
+type toolSearchHit struct {
+	id      string
+	score   int
+	summary string
+	meta    string
+}
+
+// runToolSearch finds tools this agent holds by name or keyword and loads the
+// deferred ones among them (see tool_surface.go): the result carries each
+// one's description and schema, and they are advertised from the next step
+// on. The query is a keyword, or one or more tool names (comma or space
+// separated, optionally after "select:"); an empty query lists every tool
+// and loads none. Only tools on the agent's allow-list are ever listed or
+// loaded.
 func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte) (string, error) {
 	var args struct {
 		Query string `json:"query"`
@@ -254,20 +187,29 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		return "", fmt.Errorf("tool-search args: %w", err)
 	}
 	q := strings.ToLower(strings.TrimSpace(args.Query))
-	seen := map[string]struct{}{}
-	var rows []string
+	q = strings.TrimSpace(strings.TrimPrefix(q, "select:"))
+	tokens := strings.FieldsFunc(q, func(c rune) bool { return c == ',' || c == ' ' || c == '\t' || c == '\n' })
+	var hits []toolSearchHit
 	for id := range allowed {
-		if _, ok := seen[id]; ok {
+		spec, hasSpec := r.toolPolicies[id]
+		// Aliases (a retired name, or a manifest alias) are callable but not
+		// advertised: listing them would offer the model the same tool twice.
+		if hasSpec && spec.ID != "" && spec.ID != id {
 			continue
 		}
-		seen[id] = struct{}{}
-		spec, hasSpec := r.toolPolicies[id]
+		// A retired built-in name is listed only while it stands unfolded
+		// (tool_names.go): otherwise it is an alias of a listed tool.
+		if _, retired := legacyTools[id]; retired && (!hasSpec || spec.IsBuiltin()) && !r.unfoldedTool(id) {
+			continue
+		}
+		if r.surface.isHidden(id) {
+			continue
+		}
 		label := id
 		risk := "unknown"
 		acts := ""
 		desc := ""
 		requiresApproval := false
-		timeoutSec := 0
 		if hasSpec {
 			if strings.TrimSpace(spec.Name) != "" {
 				label = spec.Name
@@ -277,27 +219,110 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 				risk = spec.RiskLevel
 			}
 			requiresApproval = spec.RequiresApproval
-			timeoutSec = spec.TimeoutSec
 			acts = strings.Join(spec.PermittedActions, ",")
 		}
-		hay := strings.ToLower(id + " " + label + " " + acts + " " + risk + " " + desc)
-		if q != "" && !strings.Contains(hay, q) {
+		switch {
+		case hasSpec && !spec.IsBuiltin():
+			// A tool of the operator's own keeps its own description, even
+			// under a built-in's name.
+		case r.unfoldedTool(id):
+			desc, _ = unfoldedSurface(id)
+		default:
+			if full, ok := toolDescription(id); ok {
+				desc = full
+			}
+		}
+		lowID, lowLabel := strings.ToLower(id), strings.ToLower(label)
+		hay := strings.ToLower(id + " " + label + " " + acts + " " + desc)
+		score := 0
+		switch {
+		case q == "":
+			score = 1
+		case slices.Contains(tokens, lowID):
+			score = 100
+		case strings.Contains(lowID, q) || strings.Contains(lowLabel, q):
+			score = 10
+		case strings.Contains(hay, q):
+			score = 2
+		case len(tokens) > 1 && allContained(hay, tokens):
+			score = 1
+		}
+		if score == 0 {
 			continue
 		}
-		score := 1
-		if strings.Contains(strings.ToLower(id), q) || strings.Contains(strings.ToLower(label), q) {
-			score += 3
+		meta := "risk=" + risk
+		if requiresApproval {
+			meta += ", needs approval"
 		}
-		if strings.Contains(acts, "search") {
-			score++
-		}
-		rows = append(rows, fmt.Sprintf("%03d | %s | risk=%s | approval=%t | timeout=%ds | actions=%s | %s", score, id, risk, requiresApproval, timeoutSec, emptyIfBlank(acts), emptyIfBlank(desc)))
+		hits = append(hits, toolSearchHit{id: id, score: score, summary: firstSentence(desc), meta: meta})
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i] > rows[j] })
-	if len(rows) == 0 {
+	if len(hits) == 0 {
 		return "no tools matched", nil
 	}
-	return strings.Join(rows, "\n"), nil
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].id < hits[j].id
+	})
+	var load []string
+	if q != "" {
+		for _, h := range hits {
+			if len(load) < toolSearchMaxLoads && r.surface.isDeferred(h.id) {
+				load = append(load, h.id)
+			}
+		}
+	}
+	r.surface.activate(load...)
+	var b strings.Builder
+	if len(load) > 0 {
+		fmt.Fprintf(&b, "%s%s (loaded: call them from your next step)\n", toolSearchActivatedPrefix, strings.Join(load, ", "))
+		for _, id := range load {
+			spec, _ := r.surface.deferredSpec(id)
+			fmt.Fprintf(&b, "\n## %s\n%s\nParameters (JSON Schema): %s\n", id, spec.Description, spec.Schema)
+		}
+	}
+	var rest []string
+	for _, h := range hits {
+		if slices.Contains(load, h.id) {
+			continue
+		}
+		state := "available"
+		if r.surface.isDeferred(h.id) {
+			state = "not loaded: search its name to load it"
+		}
+		rest = append(rest, fmt.Sprintf("- %s (%s; %s): %s", h.id, state, h.meta, emptyIfBlank(h.summary)))
+	}
+	if len(rest) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\nOther matches:\n")
+		}
+		b.WriteString(strings.Join(rest, "\n"))
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// allContained reports whether every token occurs in hay.
+func allContained(hay string, tokens []string) bool {
+	for _, t := range tokens {
+		if !strings.Contains(hay, t) {
+			return false
+		}
+	}
+	return true
+}
+
+// firstSentence returns the first sentence of a tool description, for a
+// one-line listing.
+func firstSentence(desc string) string {
+	desc = strings.TrimSpace(desc)
+	if i := strings.IndexAny(desc, "\n"); i >= 0 {
+		desc = desc[:i]
+	}
+	if i := strings.Index(desc, ". "); i >= 0 {
+		desc = desc[:i+1]
+	}
+	return truncate(desc, 200)
 }
 
 func (r *toolRuntime) runWebSearch(ctx context.Context, rawArgs []byte) (string, error) {
@@ -487,42 +512,47 @@ func (r *toolRuntime) runMCPAuth(ctx context.Context, rawArgs []byte) (string, e
 	return fmt.Sprintf("mcp auth updated for %s", state.ServerID), nil
 }
 
-func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path       string `json:"path"`
-		OldString  string `json:"old_string"`
-		NewString  string `json:"new_string"`
-		ReplaceAll bool   `json:"replace_all"`
-		StartLine  int    `json:"start_line"`
-		EndLine    int    `json:"end_line"`
-		Expected   int    `json:"expected_replacements"`
-		Edits      []struct {
-			OldString  string `json:"old_string"`
-			NewString  string `json:"new_string"`
-			ReplaceAll bool   `json:"replace_all"`
-		} `json:"edits"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("file-edit args: %w", err)
+// runFileEdit is the file-edit built-in. toolID is the tool the call runs as
+// (file-edit, or multi-edit standing unfolded; see tool_names.go): its
+// manifest entry decides whether the write needs approval.
+func (r *toolRuntime) runFileEdit(ctx context.Context, toolID string, rawArgs []byte) (string, error) {
+	args, err := decodeFileEditArgs(rawArgs)
+	if err != nil {
+		return "", err
 	}
 	abs, rel, err := r.resolvePath(args.Path)
 	if err != nil {
 		return "", err
 	}
-	hasSingle := strings.TrimSpace(args.OldString) != ""
+	// A whitespace-only old_string ("\n\n\n" to collapse blank lines) is a
+	// real edit; only an absent or empty one is missing.
+	hasSingle := args.Single.OldString != ""
 	if !hasSingle && len(args.Edits) == 0 {
 		return "", fmt.Errorf("file-edit: old_string or edits is required")
 	}
+	defer r.lockFile(abs)()
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return "", err
 	}
+	if err := r.checkFileStamp("file-edit", rel, raw); err != nil {
+		return "", err
+	}
+	trustLines := r.unchangedSinceRead(rel, raw)
 	content := string(raw)
 	scope := content
 	prefix := ""
 	suffix := ""
+	lineOffset := 0
+	// The line-ending style is the whole file's: a one-line scope of a CRLF
+	// file has no "\r\n" of its own, and applyEdit would write bare LFs.
+	crlf := false
 	if args.StartLine > 0 || args.EndLine > 0 {
-		lines := strings.Split(content, "\n")
+		work := content
+		if crlf = isCRLF(work); crlf {
+			work = strings.ReplaceAll(work, "\r\n", "\n")
+		}
+		lines := strings.Split(work, "\n")
 		start := args.StartLine
 		if start <= 0 {
 			start = 1
@@ -534,6 +564,7 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		if start > end || start > len(lines) {
 			return "", fmt.Errorf("file-edit: invalid line range")
 		}
+		lineOffset = start - 1
 		prefix = strings.Join(lines[:start-1], "\n")
 		scope = strings.Join(lines[start-1:end], "\n")
 		suffix = strings.Join(lines[end:], "\n")
@@ -548,38 +579,70 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 		old        string
 		new        string
 		replaceAll bool
+		// expected is the op's own expected_replacements (0: not given).
+		expected int
 	}
 	ops := make([]fileEditOp, 0, len(args.Edits)+1)
 	if hasSingle {
-		ops = append(ops, fileEditOp{old: args.OldString, new: args.NewString, replaceAll: args.ReplaceAll})
-	}
-	for _, e := range args.Edits {
-		if strings.TrimSpace(e.OldString) == "" {
-			continue
+		op := fileEditOp{old: args.Single.OldString, new: args.Single.NewString, replaceAll: args.Single.ReplaceAll}
+		if len(args.Edits) == 0 {
+			// The call's expected_replacements is this one edit's.
+			op.expected = args.Expected
 		}
-		ops = append(ops, fileEditOp{old: e.OldString, new: e.NewString, replaceAll: e.ReplaceAll})
+		ops = append(ops, op)
+	}
+	for i, e := range args.Edits {
+		if e.OldString == "" {
+			// edits[] is all or nothing: a blank item is an error, never
+			// silently skipped while the rest are written.
+			return "", fmt.Errorf("file-edit: edit %d: old_string is required (file untouched)", i+1)
+		}
+		ops = append(ops, fileEditOp{old: e.OldString, new: e.NewString, replaceAll: e.ReplaceAll, expected: e.Expected})
 	}
 	updated := scope
 	totalReplacements := 0
-	var tierNotes []string
-	for _, op := range ops {
-		next, n, tier, err := replaceWithFallback(updated, op.old, op.new, op.replaceAll, false)
-		if err != nil {
-			return "", fmt.Errorf("file-edit: %w", err)
+	var notes []string
+	for i, op := range ops {
+		label := ""
+		if len(ops) > 1 {
+			label = fmt.Sprintf("edit %d: ", i+1)
 		}
-		updated = next
-		totalReplacements += n
-		if note := editTierNote(tier); note != "" {
-			tierNotes = append(tierNotes, note)
+		if op.old == op.new {
+			return "", fmt.Errorf("file-edit: %sold_string and new_string are identical", label)
+		}
+		// Expecting several replacements asks for every occurrence (as
+		// other harnesses' expected_replacements does); the count below
+		// then checks there were exactly that many.
+		replaceAll := op.replaceAll || op.expected > 1
+		// Line numbers the model copied only describe the file as it was
+		// read; after the first op they may have moved.
+		res, err := applyEdit(updated, editRequest{Old: op.old, New: op.new, ReplaceAll: replaceAll, LineOffset: lineOffset,
+			TrustLineNumbers: i == 0 && trustLines})
+		if err != nil {
+			return "", fmt.Errorf("file-edit: %s%w", label, err)
+		}
+		if op.expected > 0 && res.Count != op.expected {
+			return "", fmt.Errorf("file-edit: %sexpected %d replacements, got %d (file untouched)", label, op.expected, res.Count)
+		}
+		updated = res.Content
+		totalReplacements += res.Count
+		for _, n := range res.Notes {
+			notes = append(notes, label+n)
 		}
 	}
 	if args.Expected > 0 && totalReplacements != args.Expected {
 		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
 	}
 	updated = prefix + updated + suffix
+	if crlf {
+		updated = strings.ReplaceAll(updated, "\n", "\r\n")
+	}
 	// Approval comes after the edit is fully computed so the user can be shown
 	// the exact diff that would be applied.
-	if err := r.authorizeWriteAccess(ctx, "file-edit", rel, diff.Unified(rel, content, updated)); err != nil {
+	if err := r.authorizeFileChange(ctx, toolID, abs, rel, content, updated, false); err != nil {
+		return "", err
+	}
+	if err := r.recheckBeforeWrite("file-edit", rel, abs, true, raw); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
@@ -588,79 +651,20 @@ func (r *toolRuntime) runFileEdit(ctx context.Context, rawArgs []byte) (string, 
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
+	r.recordFileStamp(rel, []byte(updated))
 	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements)
-	if len(tierNotes) > 0 {
-		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
-	}
+	recordFileChange(ctx, abs, content, updated, false)
+	msg := fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements) + editNotesSuffix(notes) + "\n" + editDiffSummary(rel, content, updated)
 	return r.withLSPDiagnostics(ctx, abs, msg), nil
 }
 
-// runMultiEdit applies an ordered list of find/replace edits to one file
-// atomically: every edit runs against the in-memory result of the previous
-// one, and if any edit fails to match (or matches ambiguously without
-// replace_all) the whole call errors and the file is left untouched.
-func (r *toolRuntime) runMultiEdit(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		Path  string `json:"path"`
-		Edits []struct {
-			OldString  string `json:"old_string"`
-			NewString  string `json:"new_string"`
-			ReplaceAll bool   `json:"replace_all"`
-		} `json:"edits"`
+// editNotesSuffix renders the match notes of an edit, nudging the model to
+// quote verbatim when a fuzzy tier was needed.
+func editNotesSuffix(notes []string) string {
+	if len(notes) == 0 {
+		return ""
 	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("multi-edit args: %w", err)
-	}
-	abs, rel, err := r.resolvePath(args.Path)
-	if err != nil {
-		return "", err
-	}
-	if len(args.Edits) == 0 {
-		return "", fmt.Errorf("multi-edit: edits is required")
-	}
-	raw, err := os.ReadFile(abs)
-	if err != nil {
-		return "", err
-	}
-	content := string(raw)
-	updated := content
-	totalReplacements := 0
-	var tierNotes []string
-	for i, e := range args.Edits {
-		if e.OldString == "" {
-			return "", fmt.Errorf("multi-edit: edit %d: old_string is required (file untouched)", i+1)
-		}
-		if e.OldString == e.NewString {
-			return "", fmt.Errorf("multi-edit: edit %d: old_string and new_string are identical (file untouched)", i+1)
-		}
-		next, n, tier, err := replaceWithFallback(updated, e.OldString, e.NewString, e.ReplaceAll, true)
-		if err != nil {
-			return "", fmt.Errorf("multi-edit: edit %d: %w (file untouched)", i+1, err)
-		}
-		updated = next
-		totalReplacements += n
-		if note := editTierNote(tier); note != "" {
-			tierNotes = append(tierNotes, fmt.Sprintf("edit %d %s", i+1, note))
-		}
-	}
-	// Approval comes after all edits are computed so the user is shown the
-	// combined diff exactly as it would be applied.
-	if err := r.authorizeWriteAccess(ctx, "multi-edit", rel, diff.Unified(rel, content, updated)); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
-		return "", err
-	}
-	r.mu.Lock()
-	r.readSet[rel] = struct{}{}
-	r.mu.Unlock()
-	r.invalidateSymbolIndex(rel)
-	msg := fmt.Sprintf("edited %s (%d edits, %d replacements)", rel, len(args.Edits), totalReplacements)
-	if len(tierNotes) > 0 {
-		msg += " — " + strings.Join(tierNotes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
-	}
-	return r.withLSPDiagnostics(ctx, abs, msg), nil
+	return " — " + strings.Join(notes, "; ") + "; old_string was not byte-exact, quote the file verbatim next time"
 }
 
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {
@@ -757,6 +761,9 @@ func (r *toolRuntime) runExitWorktree(ctx context.Context, rawArgs []byte) (stri
 			return "", fmt.Errorf("exit-worktree: worktree has uncommitted changes (use force=true)")
 		}
 	}
+	// Language servers started in the worktree hold it open (and would run
+	// until the process exits); stop them before removing it.
+	lsp.ShutdownUnder(abs)
 	cmdArgs := []string{"worktree", "remove", abs}
 	if args.Force {
 		cmdArgs = append(cmdArgs, "--force")
@@ -811,6 +818,22 @@ func (r *toolRuntime) runTaskStop(rawArgs []byte) (string, error) {
 	}
 	r.requestStop(reason)
 	return reason, nil
+}
+
+// setSubAgentThinking records the thinking level the model last accepted:
+// when the manager had to step a rejected level down, sub-agents start from
+// the accepted one instead of re-sending (and re-failing) the original.
+func (r *toolRuntime) setSubAgentThinking(level provider.ThinkingLevel) {
+	r.mu.Lock()
+	r.thinkingLevel = level
+	r.mu.Unlock()
+}
+
+// subAgentThinking is the thinking level a sub-agent starts from.
+func (r *toolRuntime) subAgentThinking() provider.ThinkingLevel {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.thinkingLevel
 }
 
 // requestStop ends the turn after the current batch of tool results is
@@ -1086,8 +1109,26 @@ func saveAllowedNetworkSet(cwd string, set map[string]struct{}) error {
 // policy. Writes were previously ungated regardless of policy; this makes a
 // manifest's `requires_approval = true` on the write tools actually take
 // effect. When the policy does not require approval (the default) or we are in
-// YOLO mode, writes proceed unchanged.
+// YOLO mode, writes proceed unchanged. diff is what the approval prompt shows.
 func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath, diff string) error {
+	return r.authorizeWrite(ctx, toolID, relPath, diff, nil)
+}
+
+// authorizeFileChange is authorizeWriteAccess for a write that changes one
+// file (absPath, relPath) from oldText to newText (file-write, file-edit).
+// The approval request carries the change itself next to the unified diff,
+// so a host that renders real diffs (an ACP editor) can show it natively.
+// The diff is always computed from the full texts; only the structured
+// change drops them for very large files (newFileChange).
+func (r *toolRuntime) authorizeFileChange(ctx context.Context, toolID, absPath, relPath, oldText, newText string, created bool) error {
+	change := newFileChange(absPath, oldText, newText, created)
+	return r.authorizeWrite(ctx, toolID, relPath, diff.Unified(relPath, oldText, newText), &change)
+}
+
+// authorizeWrite is the check behind authorizeWriteAccess and
+// authorizeFileChange; change is nil when the write is not one known file
+// change (a download, a multi-file rename).
+func (r *toolRuntime) authorizeWrite(ctx context.Context, toolID, relPath, diff string, change *FileChange) error {
 	// The OS sandbox policy is non-negotiable and independent of the approval
 	// flow (it is an operator setting, not a per-command permission). The
 	// in-process file tools must honor the same FS scope the kernel enforces on
@@ -1107,21 +1148,69 @@ func (r *toolRuntime) authorizeWriteAccess(ctx context.Context, toolID, relPath,
 	if r.shellApproval == nil {
 		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{
+	command := toolID + " " + relPath
+	target, realAbs := r.symlinkedWriteTarget(relPath)
+	if target != "" {
+		// The path is, or runs through, a symlink: name the file that is
+		// written, which may be anywhere, even outside the workspace. The
+		// structured change names it too, so an editor shows that file.
+		command += " (through a symlink: writes " + target + ")"
+		if change != nil {
+			redirected := *change
+			redirected.Path = realAbs
+			change = &redirected
+		}
+	}
+	decision, err := r.askApproval(ctx, ShellApprovalRequest{
 		ToolID:  toolID,
-		Command: toolID + " " + relPath,
+		Command: command,
 		Reason:  "file modification requires approval",
 		Diff:    diff,
+		Change:  change,
 	})
 	if err != nil {
 		return fmt.Errorf("write approval failed: %w", err)
 	}
 	switch decision {
 	case ShellApprovalAllowOnce, ShellApprovalAllowAlways:
-		return nil
 	default:
 		return fmt.Errorf("%s denied by user", toolID)
 	}
+	if now, _ := r.symlinkedWriteTarget(relPath); now != target {
+		// A symlink changed while the prompt was up: the write would land
+		// somewhere other than the file the user approved.
+		return fmt.Errorf("%s: %s now leads to a different file than the one approved; nothing was written", toolID, relPath)
+	}
+	return nil
+}
+
+// symlinkedWriteTarget reports where a write to relPath (relative to the
+// workspace) lands when a symlink makes that a different file: shown is
+// the file workspace-relative when it is inside the workspace, absolute
+// otherwise, and realAbs is its absolute path. Both are empty when the write
+// lands at relPath itself.
+func (r *toolRuntime) symlinkedWriteTarget(relPath string) (shown, realAbs string) {
+	realCwd := realDirPath(r.cwd)
+	realAbs = realTargetPath(filepath.Join(r.cwd, filepath.FromSlash(relPath)))
+	if realAbs == filepath.Join(realCwd, filepath.FromSlash(relPath)) {
+		return "", ""
+	}
+	rel, err := filepath.Rel(realCwd, realAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return realAbs, realAbs
+	}
+	return filepath.ToSlash(rel), realAbs
+}
+
+// askApproval hands req to the host's approval callback, stamped with who is
+// asking (AgentID) and where that agent works (CWD), so a host running
+// several agents at once can show the request next to the right agent's
+// tool call. Every approval request goes through here; callers check that
+// r.shellApproval is set first.
+func (r *toolRuntime) askApproval(ctx context.Context, req ShellApprovalRequest) (ShellApprovalDecision, error) {
+	req.AgentID = r.traceID()
+	req.CWD = r.cwd
+	return r.shellApproval(ctx, req)
 }
 
 func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target string) error {
@@ -1143,7 +1232,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 	case config.RuleAllow:
 		return nil
 	}
-	allowed, err := loadAllowedNetworkSet(r.cwd)
+	allowed, err := loadAllowedNetworkSet(projectStateDir(r.cwd))
 	if err != nil {
 		return fmt.Errorf("read network approvals: %w", err)
 	}
@@ -1153,7 +1242,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 	if r.shellApproval == nil {
 		return fmt.Errorf("%s requires approval outside yolo mode", toolID)
 	}
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{Command: "network " + toolID + " " + target})
+	decision, err := r.askApproval(ctx, ShellApprovalRequest{Command: "network " + toolID + " " + target})
 	if err != nil {
 		return fmt.Errorf("network approval failed: %w", err)
 	}
@@ -1162,7 +1251,7 @@ func (r *toolRuntime) authorizeNetworkAccess(ctx context.Context, toolID, target
 		return nil
 	case ShellApprovalAllowAlways:
 		allowed[target] = struct{}{}
-		if err := saveAllowedNetworkSet(r.cwd, allowed); err != nil {
+		if err := saveAllowedNetworkSet(projectStateDir(r.cwd), allowed); err != nil {
 			return fmt.Errorf("persist network approval: %w", err)
 		}
 		return nil

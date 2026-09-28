@@ -490,7 +490,7 @@ func (m Model) handleTelegramSubmission(req telegram.SubmitRequest) (tea.Model, 
 	// Plain prompt path.
 	if m.thinking {
 		mentionedFiles := m.extractMentionedFiles(text)
-		prompt := injectMentionGuidance(text, mentionedFiles)
+		prompt := injectMentionGuidance(m.expandSkillMentions(text), mentionedFiles)
 		m.queuePrompt(text, prompt, mentionedFiles, nil)
 		m.pushSystemMsg(fmt.Sprintf("queued telegram request from %s: %s", req.From, truncateLabel(text, 140)))
 		m.showBanner("telegram request queued", "info")

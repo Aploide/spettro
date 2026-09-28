@@ -78,6 +78,7 @@ func buildModels(cat models.Catalog) []Model {
 				ToolCall:      mod.ToolCall,
 				PromptCaching: prov.API == models.APIAnthropic,
 				Context:       mod.Context,
+				MaxOutput:     mod.Output,
 				Status:        mod.Status,
 				EnvKey:        prov.Env,
 			})

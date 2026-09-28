@@ -13,6 +13,15 @@ import (
 type localModelsResp struct {
 	Data []struct {
 		ID string `json:"id"`
+		// Context window, when the server reports it. Field names vary:
+		// vLLM sends max_model_len; OpenRouter-style gateways and some
+		// local servers send context_length / max_context_length /
+		// context_window. Training-time values (llama.cpp n_ctx_train) are
+		// deliberately ignored: the runtime window can be much smaller.
+		MaxModelLen      int `json:"max_model_len"`
+		ContextLength    int `json:"context_length"`
+		MaxContextLength int `json:"max_context_length"`
+		ContextWindow    int `json:"context_window"`
 	} `json:"data"`
 }
 
@@ -22,10 +31,7 @@ type localModelsResp struct {
 // open servers. Returns an error if the server is unreachable or the response
 // is invalid.
 func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if !strings.HasPrefix(baseURL, "http") {
-		baseURL = "http://" + baseURL
-	}
+	baseURL = LocalProviderID(baseURL)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
@@ -68,11 +74,18 @@ func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, err
 		if m.ID == "" {
 			continue
 		}
+		ctxWindow := m.MaxModelLen
+		for _, v := range []int{m.ContextLength, m.MaxContextLength, m.ContextWindow} {
+			if ctxWindow <= 0 {
+				ctxWindow = v
+			}
+		}
 		out = append(out, Model{
 			Provider:     baseURL,
 			ProviderName: provName,
 			Name:         m.ID,
 			DisplayName:  m.ID,
+			Context:      max(ctxWindow, 0),
 			Local:        true,
 		})
 	}
@@ -80,6 +93,17 @@ func ProbeLocalServer(ctx context.Context, baseURL, apiKey string) ([]Model, err
 		return nil, fmt.Errorf("server is running but returned no models")
 	}
 	return out, nil
+}
+
+// LocalProviderID returns the provider id the models of a local endpoint
+// get: the endpoint URL without a trailing slash, with http:// added when it
+// has no scheme.
+func LocalProviderID(endpoint string) string {
+	id := strings.TrimRight(endpoint, "/")
+	if !strings.HasPrefix(id, "http") {
+		id = "http://" + id
+	}
+	return id
 }
 
 // LocalProviderName derives a human-readable name from a local server URL.

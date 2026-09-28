@@ -92,6 +92,8 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 	theme.Set(theme.Seed(theme.Preferred(cfg.Theme)))
 
 	pm := provider.NewManager()
+	pm.SetStreamAll(true)
+	pm.SetWireMode(cfg.ProviderWire)
 	pm.SetAPIKeys(cfg.APIKeys)
 	for _, endpoint := range cfg.LocalEndpoints {
 		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint])

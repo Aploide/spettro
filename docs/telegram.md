@@ -94,12 +94,10 @@ the chat stays useful rather than noisy:
 | Banners with level `warn` / `error` | `⚠️` |
 | Agent errors | `⚠️ error` |
 | Ask-user dialog | `❓` + options + “reply with your answer” hint; a multi-question form is announced as `question N of M` |
-| Shell-approval request | `🔐` + the command (handle inside the TUI) |
+| Approval request (command, file change, network access) | `approval required: <tool>` + the whole command or diff (handle inside the TUI; see below) |
 | Successful commits | `🟢 commit` |
-| Generated image (`grok-image`) | `sendPhoto` with the prompt as caption (`🖼 …`); falls back to `sendDocument` when the file is over Telegram's 10 MB photo cap. |
-| Generated video (`grok-video`) | `sendVideo` with the prompt as caption (`🎬 …`); falls back to `sendDocument` over 50 MB. |
 
-Tool traces (e.g. every `file-write` and `shell-exec`) are **not**
+Tool traces (e.g. every `file-write` and `bash`) are **not**
 forwarded by default to keep the chat readable. State changes
 (run start, run done) are silent unless the `verbose` flag is set in
 `telegram.json`.
@@ -107,6 +105,26 @@ forwarded by default to keep the chat readable. State changes
 Outbound messages longer than ~3800 characters are split at line/word
 boundaries and sent as a sequence of chunks with `(...cont)` / `…
 (continued)` markers.
+
+An approval notice never shows part of a command or diff as if it were the
+whole. One that fits in about three messages (roughly 11 KB) is sent whole,
+split without losing a character: unlike other long messages, no blank is
+dropped at a break, so `./build/ ~/` and `./build/~/` never split into the
+same messages. A break falls at a line break where it can, and the message
+ends with `... (continued in the next message)`; otherwise inside a line,
+between two characters that are not blanks and never inside a `\u202e`-style
+escape, and the message ends with `... (this line continues in the next
+message)`. Each following message starts with `(...cont)`. A longer one is sent as its beginning (up to 40 lines or
+2 KB) followed by `[not the whole command: only its first N of M bytes are
+shown here. The full command is attached as approval-bash-command.txt]`,
+and the whole text follows as a file in the same chat (`sendDocument`, up
+to 20 MB). If the attachment cannot be sent, the chat is told so and asked
+to review the change in the TUI before approving. In the message and the
+attachment alike, every character that would not show as itself is written
+out as in the TUI (`^M` for a carriage return, `^[` for an escape, `⇥` for a
+tab, `\u202e`-style escapes for bidi overrides, zero-width characters,
+variation selectors, no-break spaces and the like), since a chat app hides
+them just as a terminal would.
 
 ## Authentication and allowlist semantics
 

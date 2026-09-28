@@ -66,6 +66,12 @@ func newFailingServer(t *testing.T, firstResponse string) *httptest.Server {
 func TestPrompt_FailedTurnPreservesContext(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// The 500s are retried with exponential backoff before the turn fails;
+	// shrink the delays so the test exercises the policy without the wait.
+	saved := provider.DefaultRetryPolicy
+	provider.DefaultRetryPolicy.BaseDelay = time.Millisecond
+	provider.DefaultRetryPolicy.MaxDelay = 5 * time.Millisecond
+	t.Cleanup(func() { provider.DefaultRetryPolicy = saved })
 
 	srv := newFailingServer(t, "first answer")
 

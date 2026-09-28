@@ -33,6 +33,11 @@ type Options struct {
 	// SandboxState is the process-wide OS sandbox policy shared by every
 	// session, mirroring headless mode. nil disables the sandbox feature.
 	SandboxState *agent.SandboxState
+	// ModelsReady is closed once the background model discovery (local
+	// endpoints, the subscription model list) has put its results in
+	// Providers. Session responses wait for it, bounded (see awaitModels);
+	// nil means the model list is already complete.
+	ModelsReady <-chan struct{}
 }
 
 // Serve runs the ACP agent on stdin/stdout until the client disconnects or

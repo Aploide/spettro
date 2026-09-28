@@ -20,8 +20,9 @@ import (
 // locally ("not a recognized command") before it ever reaches Prompt.
 //
 // Only commands that resolve from plain text are included: anything that
-// needs a TUI dialog (skills, mcp, resume, ...) stays TUI-only for now,
-// since ACP has no equivalent surface.
+// needs a TUI dialog (skill install, mcp, resume, ...) stays TUI-only for
+// now, since ACP has no equivalent surface. The workspace's skills are
+// appended per session (see sessionCommands in skills.go).
 var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "help", Description: "show available commands"},
 	{Name: "mode", Description: "switch agent mode", Input: hintInput("plan|coding|ask|...")},
@@ -43,6 +44,7 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "workflows", Description: "list, show, or run saved workflow scripts", Input: hintInput("[list|show <name>|run <name> [json]|where]")},
 	{Name: "plan", Description: "switch to plan mode", Input: hintInput("[task]")},
 	{Name: "permissions", Description: "show/set permission level and debug", Input: hintInput("[yolo|restricted|ask-first] | debug <on|off>")},
+	{Name: "skills", Description: "list Agent Skills and where each comes from"},
 }
 
 func hintInput(hint string) *acpsdk.AvailableCommandInput {
@@ -51,13 +53,14 @@ func hintInput(hint string) *acpsdk.AvailableCommandInput {
 
 // announceCommands pushes the available command list to the client right
 // after a session is created, so ACP clients recognize Spettro's slash
-// commands instead of rejecting them before they're ever sent.
+// commands (and the workspace's skills) instead of rejecting them before
+// they're ever sent.
 func (b *bridge) announceCommands(ctx context.Context, sid acpsdk.SessionId) {
 	_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
 		SessionId: sid,
 		Update: acpsdk.SessionUpdate{
 			AvailableCommandsUpdate: &acpsdk.SessionAvailableCommandsUpdate{
-				AvailableCommands: acpAvailableCommands,
+				AvailableCommands: b.sessionCommands(sid),
 			},
 		},
 	})
@@ -198,13 +201,29 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		return handleMemoryCommand(s.cwd, fields[1:]), false, true
 
 	case "/clear":
-		s.history = nil
 		// Spooled tool outputs are only reachable through the cleared
-		// history's references; drop them with the conversation.
-		jobs.Spool().Cleanup()
+		// history's references; drop them with the conversation. Only
+		// this session's: the spool is process-wide, and the other
+		// sessions this process serves still reference theirs.
+		jobs.Spool().Remove(historySpoolIDs(s.history)...)
+		s.history = nil
 		return "conversation history cleared", false, true
 	}
 	return "", false, false
+}
+
+// historySpoolIDs lists the spool entries a conversation's tool results
+// point at.
+func historySpoolIDs(history []provider.Message) []string {
+	var ids []string
+	for _, m := range history {
+		for _, tr := range m.ToolResults {
+			if tr.SpoolID != "" {
+				ids = append(ids, tr.SpoolID)
+			}
+		}
+	}
+	return ids
 }
 
 // handleMemoryCommand is the ACP text stand-in for the TUI's /memory command
@@ -331,4 +350,6 @@ const acpHelpText = `commands:
                         (write "ultracode" in a message to give the agent
                         the workflow tool for that turn)
   /plan [task]          switch to plan mode
-  /permissions          show/set permission level, debug details`
+  /permissions          show/set permission level, debug details
+  /skills               list Agent Skills and where each comes from
+  /<skill> [args]       run a skill (or mention it as $skill in a prompt)`

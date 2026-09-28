@@ -23,7 +23,7 @@
 
 - Run `/hooks` to inspect merged global+project rules and warnings.
 - Verify event names are exactly: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `SessionStart`.
-- Confirm matcher patterns target the tool IDs you expect (`bash`, `shell-exec`, etc.).
+- Confirm matcher patterns target the tool IDs you expect (`bash`, `file-edit`, etc.). A matcher written for `shell-exec` still fires on `bash`; one for a narrower retired name (`multi-edit`, `ls`, `task-*`, ...) fires only when the model calls that name. The `tool_id` your script receives is always the canonical name.
 - Hook commands must exit with code `0` to be treated as successful.
 
 ## `/approve` does nothing useful
@@ -63,6 +63,74 @@
   `COLORFGBG`, output redirected to a file, or `TERM=dumb`.
 - To force a palette without saving it, set `SPETTRO_THEME=light` (or `dark`).
 - See [Themes](theme.md) for the full precedence and detection rules.
+
+## Some emoji look different in the transcript
+
+Terminals disagree on how many cells some emoji take: a sequence joined
+with U+200D (ZERO WIDTH JOINER), such as "woman technologist", is two cells
+in a terminal that clusters graphemes and four in one that does not
+(xterm.js, Terminal.app), and a symbol followed by the emoji variation
+selector U+FE0F is one cell or two. Spettro rewrites those in model text,
+tool output and prompts to a form every terminal measures alike, so table
+borders and the side panel stay in line: a joined sequence shows as its
+parts side by side, the variation selector and skin-tone modifiers are
+dropped, a flag shows as its two letters (Italy's flag becomes `IT`) and a
+keycap as its digit. The stored session and the text sent to the model are
+unchanged.
+
+Only emoji sequences are rewritten. Text in scripts that combine letters
+with marks (Devanagari, Bengali, Tamil, Thai, Tibetan and others) is shown
+exactly as written, even though a terminal that does not cluster graphemes
+may give such a row a few more cells than the layout expects, which can
+push a table's right border out of line on that row.
+
+## The agent stops early or ends without doing anything
+
+The run loop does not accept every reply without tool calls as the final
+answer. Each case below gets a bounded nudge (a short user message asking
+the model to go on), reported in the transcript as a note:
+
+- An empty reply is nudged up to twice; a third ends the turn with an error.
+- A short reply that only announces work ("I'll start by exploring the
+  repository...") before the turn has made any tool call is nudged once.
+  A reply that asks the user something (it contains `?` or the word "you")
+  or introduces an answer with a colon ("Let me explain: ...") is never
+  treated as an announcement, so a clarifying question still ends the turn
+  and waits for the user.
+- A reply whose finish reason says it stopped for tool calls, but which
+  carries none, is nudged once to send the call again.
+
+A second announce-only reply in the same turn ends it, and so does a second
+dropped-call reply that carries text. A second dropped-call reply with no
+text is an empty reply, so it gets the empty-reply nudges above. None of
+these can loop. To see what the provider actually returned, set
+`SPETTRO_DEBUG_LOG` to a file path before starting spettro (TUI, `--acp` or
+`--goal`):
+
+```bash
+SPETTRO_DEBUG_LOG=/tmp/spettro-debug.log spettro --goal "fix the failing test"
+```
+
+Every reply is then logged at debug level with its normalized and raw
+finish reason, the number of tool calls parsed and seen in the stream
+(unnamed calls and orphan argument fragments included), text and reasoning
+sizes, output tokens and the first characters of the text. Without the
+variable nothing is logged.
+
+## A local server or OpenAI-compatible provider misbehaves
+
+Streamed requests to OpenAI-compatible endpoints (catalog providers with an
+OpenAI-style API, the Spettro Subscription, local servers) go through
+Spettro's own chat-completions client. To rule it out, send them through the
+fantasy SDK it replaced, for one run or for good:
+
+```bash
+SPETTRO_PROVIDER_WIRE=fantasy spettro    # one run
+```
+
+or set `"provider_wire": "fantasy"` in `~/.spettro/config.json` (see
+[Configuration](configuration.md#provider-wire)). If the problem goes away,
+please report it with the debug log described above.
 
 ## Reset local state
 

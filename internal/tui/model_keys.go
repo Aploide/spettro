@@ -33,6 +33,15 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(5*time.Second, func(time.Time) tea.Msg { return quitWarningMsg{} })
 	case "ctrl+q":
 		return m, tea.Quit
+	case "pgup":
+		// Keyboard scrolling of the transcript, for terminals (and users)
+		// without a mouse wheel. Scrolling up stops the view following new
+		// output; scrolling back to the bottom resumes it (refreshViewport).
+		m.vp.PageUp()
+		return m, nil
+	case "pgdown":
+		m.vp.PageDown()
+		return m, nil
 	case "up":
 		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
 			if m.cmdCursor > 0 {
@@ -164,7 +173,7 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		m.refreshViewport()
 		if m.showSidePanel {
-			m.showBanner("activity panel enabled", "info")
+			m.showBanner(sidePanelEnabledBanner(m.sidePanelWidth() > 0), "info")
 		} else {
 			m.showBanner("activity panel hidden", "info")
 		}
@@ -289,7 +298,7 @@ func (m Model) updateMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ta.Reset()
 		m.cmdItems = nil
 		m.mentionItems = nil
-		if m.pendingPlan != "" && !isCmd {
+		if m.planEditing && !isCmd {
 			return m.handlePlanEdit(input)
 		}
 		if isCmd {

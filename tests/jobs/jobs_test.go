@@ -13,6 +13,7 @@ import (
 
 	"spettro/internal/jobs"
 	"spettro/internal/shell/shelltest"
+	"spettro/internal/testhome"
 )
 
 // helperAddrEnv makes the test binary serve HTTP on the named address instead
@@ -20,7 +21,8 @@ import (
 // to drive.
 const helperAddrEnv = "SPETTRO_TEST_HTTP_ADDR"
 
-// TestMain routes the helper mode before the test framework starts.
+// TestMain routes the helper mode before the test framework starts, then runs
+// the tests with HOME in a throwaway directory (see internal/testhome).
 //
 // The obvious server, "python -m http.server", is not usable here.
 // http.server.HTTPServer.server_bind does a reverse-DNS lookup
@@ -35,8 +37,10 @@ func TestMain(m *testing.M) {
 	if addr := os.Getenv(helperAddrEnv); addr != "" {
 		serveForever(addr)
 	}
-	os.Exit(m.Run())
+	os.Exit(testhome.Main(m))
 }
+
+func TestHomeIsIsolated(t *testing.T) { testhome.Check(t) }
 
 // serveForever runs the helper HTTP server until the process is killed. It
 // reports to stderr, which is unbuffered, so a job that failed to bind is

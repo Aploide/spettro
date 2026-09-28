@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+
+	"spettro/internal/lsp"
 )
 
 // Subagent workspace isolation. When a delegation (agent tool) or swarm
@@ -153,6 +156,42 @@ func ensureLocalGitExclude(ctx context.Context, repoRoot string) {
 	_, _ = f.WriteString("\n# spettro subagent workspaces\n.spettro/\n")
 }
 
+// mainCheckoutPath maps a directory inside an agent worktree
+// (<repo>/.spettro/worktrees/<slug>/...) to the same directory in the main
+// checkout. Files git never checks out — .spettro/ itself (prompt overrides)
+// and uncommitted instruction files — are only there. ok is false outside a
+// worktree.
+func mainCheckoutPath(dir string) (string, bool) {
+	dir = filepath.Clean(dir)
+	var rest []string
+	for d := dir; ; d = filepath.Dir(d) {
+		wt := filepath.Dir(d)
+		if filepath.Base(wt) == workspaceDirName && filepath.Base(filepath.Dir(wt)) == ".spettro" {
+			root := filepath.Dir(filepath.Dir(wt))
+			slices.Reverse(rest)
+			return filepath.Join(append([]string{root}, rest...)...), true
+		}
+		if filepath.Dir(d) == d {
+			return "", false
+		}
+		rest = append(rest, filepath.Base(d))
+	}
+}
+
+// projectStateDir returns the directory whose .spettro/ holds the
+// operator's project state for a run in cwd: hooks.json, the allow-always
+// command and network lists, and project skills. For a sub-agent in an
+// agent worktree that is the same directory in the main checkout, because
+// .spettro/ is never checked out into a worktree, and anything saved in the
+// worktree's own .spettro/ is deleted with it after the merge. Everywhere
+// else it is cwd itself.
+func projectStateDir(cwd string) string {
+	if main, ok := mainCheckoutPath(cwd); ok {
+		return main
+	}
+	return cwd
+}
+
 // newAgentWorkspace creates the worktree+branch pair for one subagent. The
 // worktree forks from the current HEAD of the repository containing cwd.
 func newAgentWorkspace(ctx context.Context, cwd, name string) (*agentWorkspace, error) {
@@ -269,9 +308,18 @@ func (w *agentWorkspace) hasCommits(ctx context.Context) bool {
 	return err == nil && strings.TrimSpace(count) != "0"
 }
 
+// releaseServers stops the language servers the subagent started in its
+// worktree. Each worktree is a workspace of its own, so they would otherwise
+// run until the process exits, one copy per subagent, and keep the directory
+// busy (on Windows the worktree cannot be removed while they hold it).
+func (w *agentWorkspace) releaseServers() {
+	lsp.ShutdownUnder(w.path)
+}
+
 // cleanup removes the worktree and deletes the branch. Safe to call on a
 // partially torn-down workspace.
 func (w *agentWorkspace) cleanup(ctx context.Context) {
+	w.releaseServers()
 	workspaceMu.Lock()
 	defer workspaceMu.Unlock()
 	_, _ = workspaceGit(ctx, w.repoRoot, "worktree", "remove", "--force", "--", w.path)
@@ -283,6 +331,7 @@ func (w *agentWorkspace) cleanup(ctx context.Context) {
 // branch and worktree. On conflict the merge is aborted and the branch and
 // worktree are preserved for manual resolution.
 func (w *agentWorkspace) finalize(ctx context.Context) workspaceMerge {
+	w.releaseServers() // the subagent is done, whatever becomes of its tree
 	res := workspaceMerge{Branch: w.branch, Path: w.path}
 	if detail, err := w.commitPending(ctx); err != nil {
 		res.Status = "error"
@@ -319,6 +368,7 @@ func (w *agentWorkspace) finalize(ctx context.Context) workspaceMerge {
 // clean tree) are deleted; anything with work in it is preserved and reported
 // so nothing a subagent produced is silently lost.
 func (w *agentWorkspace) abandon(ctx context.Context) *workspaceMerge {
+	w.releaseServers()
 	dirty, err := isGitDirty(ctx, w.path)
 	if err == nil && !dirty && !w.hasCommits(ctx) {
 		w.cleanup(ctx)

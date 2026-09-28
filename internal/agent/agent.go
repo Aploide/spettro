@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -13,7 +11,6 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/memory"
 	"spettro/internal/provider"
-	"spettro/internal/skills"
 )
 
 // Legacy interfaces — kept for backward compatibility with existing tests and callers.
@@ -48,6 +45,16 @@ type ToolTrace struct {
 	// model (screenshot, view-image). Hosts that can render images (ACP
 	// editors) show them; text-only hosts ignore the field.
 	Images []string
+	// FileChanges lists the files the call changed, with their text before
+	// and after, on the completion trace of a call that wrote files
+	// (file-write, file-edit, rename-symbol). Hosts that render diffs (ACP
+	// editors) show them; others ignore the field. See file_changes.go.
+	FileChanges []FileChange
+	// Narration marks a "comment" trace that carries the model's own prose:
+	// text it wrote alongside (or instead of) tool calls in a step (see
+	// emitNarration). Other comment traces are the runtime's progress notes.
+	// Hosts that keep a transcript show narration as the model's words.
+	Narration bool
 }
 
 type RunResult struct {
@@ -151,7 +158,12 @@ type LLMAgent struct {
 	ProviderName    func() string
 	ModelName       func() string
 	CWD             string
-	MaxTokens       int
+	// MaxTokens is the per-request input token budget (config token_budget);
+	// 0 = unlimited.
+	MaxTokens int
+	// MaxOutputTokens caps each reply (config max_output_tokens); 0 = the
+	// provider manager's per-model default.
+	MaxOutputTokens int
 	Thinking        provider.ThinkingLevel
 	// Ultra, when true on a top-level run, injects the ultra fan-out tool and
 	// swarm guidance so the agent decomposes hard tasks across many parallel
@@ -188,11 +200,20 @@ type LLMAgent struct {
 	PermissionFn  func() config.PermissionLevel
 	ShellApproval ShellApprovalCallback
 	AskUser       AskUserCallback
-	// Checkpoint, when set, is called synchronously before every
-	// file-modifying tool executes (including in sub-agents) so the host can
-	// snapshot files + conversation for /rewind.
+	// Checkpoint, when set, is called synchronously before the first
+	// file-modifying tool call of each step (including in sub-agents sharing
+	// this checkout) so the host can snapshot files + conversation for
+	// /rewind. See checkpoint_policy.go for what counts as file-modifying.
 	Checkpoint func(tool string)
-	Manifest   *config.AgentManifest // for sub-agent spawning via agent tool
+	// CheckpointPrepare, optional next to Checkpoint, lets the runtime take
+	// a step's snapshot while the model is still generating: it is called
+	// on a background goroutine when the step's request is sent, and
+	// returns the prepared snapshot (nil when preparing failed). The step's
+	// first mutating call then claims it instead of waiting for Checkpoint.
+	// Only this run uses it; sub-agents snapshot through Checkpoint. See
+	// checkpoint_policy.go.
+	CheckpointPrepare func() PreparedCheckpoint
+	Manifest          *config.AgentManifest // for sub-agent spawning via agent tool
 	// SandboxState is the session-scoped OS sandbox policy shared across the
 	// whole agent tree. nil means the sandbox feature is disabled.
 	SandboxState    *SandboxState
@@ -218,6 +239,11 @@ type LLMAgent struct {
 	// Compact carries the user's auto-compaction settings into the run loop
 	// (typically cfg.CompactConfig()). Zero value → defaults (enabled, 85%).
 	Compact compactpkg.Config
+
+	// parentSnapshot and parentCWD carry a parent run's environment
+	// snapshot to a sub-agent (set by the delegating runtime, never by hosts).
+	parentSnapshot string
+	parentCWD      string
 
 	// Steering, when set, lets the host inject user guidance while the run is
 	// executing: the tool loop drains it at every step boundary and appends
@@ -285,8 +311,6 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 			maxToolCallsPerStep = a.Manifest.Runtime.Delegation.MaxToolCallsPerStep
 		}
 	}
-	catalog, _ := skills.Discover(a.CWD, skills.DefaultLookupOptions())
-	catalog = filterDisabledSkills(catalog)
 	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt: systemPrompt,
 		UserTask:     task,
@@ -305,6 +329,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ProviderName:        a.ProviderName,
 		ModelName:           a.ModelName,
 		MaxTokens:           a.MaxTokens,
+		MaxOutputTokens:     a.MaxOutputTokens,
+		parentSnapshot:      a.parentSnapshot,
+		parentCWD:           a.parentCWD,
 		Thinking:            a.Thinking,
 		RequiredReads:       a.RequiredReads,
 		Images:              a.Images,
@@ -316,6 +343,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ShellApproval:       a.ShellApproval,
 		AskUser:             a.AskUser,
 		Checkpoint:          a.Checkpoint,
+		CheckpointPrepare:   a.CheckpointPrepare,
 		Manifest:            a.Manifest,
 		SandboxState:        a.SandboxState,
 		SessionDir:          a.SessionDir,
@@ -329,14 +357,16 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		MaxWorkers:          maxWorkers,
 		MaxDepth:            maxDelegationDepth,
 		MaxToolCalls:        maxToolCallsPerStep,
-		SkillsCatalog:       catalog,
+		SkillsCatalog:       SkillCatalog(projectStateDir(a.CWD)),
 		Steering:            a.Steering,
 	})
 	if err != nil {
 		// Preserve the partial conversation so hosts can carry it into the
 		// next turn: a failed or cancelled run must not wipe the context the
 		// user already built up (tool results, steering, prior steps).
-		return RunResult{Messages: res.messages}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
+		// Traces and token use come back too, so a delegating parent can
+		// report what a failed or timed-out sub-agent already did.
+		return RunResult{Messages: res.messages, Tools: res.traces, TokensUsed: res.tokens}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)
 	}
 	out := strings.TrimSpace(res.content)
 	out = stripLeakedToolCalls(out)
@@ -360,20 +390,4 @@ func compact(s string) string {
 		return s
 	}
 	return s[:max] + "..."
-}
-
-// filterDisabledSkills removes skills that have a sentinel `.spettro-disabled`
-// file in their directory. The TUI command `/skill disable <name>` writes this
-// marker so the user can opt out of a discovered skill without uninstalling.
-func filterDisabledSkills(c skills.Catalog) skills.Catalog {
-	keep := make([]skills.Skill, 0, len(c.Skills))
-	for _, s := range c.Skills {
-		flag := filepath.Join(s.Directory, ".spettro-disabled")
-		if _, err := os.Stat(flag); err == nil {
-			continue
-		}
-		keep = append(keep, s)
-	}
-	c.Skills = keep
-	return c
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -155,9 +157,10 @@ type FallbackPolicy struct {
 // ContextLimits caps how many characters of tool output are retained in model
 // context. Zero for any field means use the built-in default.
 type ContextLimits struct {
-	// FileReadChars is the max chars returned by file-read and kept in history.
+	// FileReadChars is the max chars of file content one file-read returns
+	// and keeps in history (the line-number prefixes come on top).
 	FileReadChars int `toml:"file_read_chars"`
-	// SearchChars is the max chars returned by repo-search/grep/glob/ls and kept in history.
+	// SearchChars is the max chars returned by grep/glob and kept in history.
 	SearchChars int `toml:"search_chars"`
 	// ToolOutputChars is the max chars for other tools (shell, agent, etc.).
 	ToolOutputChars int `toml:"tool_output_chars"`
@@ -178,6 +181,32 @@ type ToolSpec struct {
 	RiskLevel        string           `toml:"risk_level"`
 	PrimaryOnly      bool             `toml:"primary_only"`
 	PermissionRules  []PermissionRule `toml:"permission_rules"`
+}
+
+// IsBuiltin reports whether the tool is one of spettro's own built-ins
+// rather than a tool of the operator's own (kind mcp, script or http). An
+// empty kind counts as built-in, which is how the agent runtime reads tool
+// lists built in code; Validate rejects an empty kind in a manifest file.
+//
+// A tool of the operator's own always owns its ID and aliases, even when one
+// of them is a built-in's name: see docs/tools.md, "Tools of your own with a
+// built-in's name".
+func (t ToolSpec) IsBuiltin() bool {
+	return t.Kind == "" || t.Kind == "builtin"
+}
+
+// UserTool returns the tool of the operator's own (not a built-in) that
+// answers to name, as its ID or one of its aliases. Such a tool owns that
+// name even when it is a built-in's (see IsBuiltin): the agent runtime never
+// hands a call under it to the built-in, and the TUI labels it as the
+// operator's tool rather than as the built-in of that name.
+func (m AgentManifest) UserTool(name string) (ToolSpec, bool) {
+	for _, t := range m.Tools {
+		if !t.IsBuiltin() && (t.ID == name || slices.Contains(t.Aliases, name)) {
+			return t, true
+		}
+	}
+	return ToolSpec{}, false
 }
 
 type AgentSpec struct {
@@ -252,7 +281,9 @@ var askUserToolSpec = ToolSpec{ID: "ask-user", Name: "Ask User", Description: "P
 // spans several of them had nowhere to go and had to be split by hand. Its
 // tool list is spelled out in full rather than relying on the v5-v10
 // retrofits, which run before this one and would skip an agent that does not
-// exist yet.
+// exist yet. It names the canonical tools (v12's, v13's lsp and v14's skill); a manifest
+// older than those gets the retired name it holds instead
+// (ensureGeneralPurposeAgent), and v12, v13 or v14 then folds it.
 //
 // Role is subagent so both orchestrators and workers can hand off to it, and
 // the agent tool (primary_only) stays out of reach: it does the work itself
@@ -266,12 +297,12 @@ var generalPurposeAgentSpec = AgentSpec{
 	Role:        AgentRoleSubagent,
 	Color:       "magenta",
 	AllowedTools: []string{
-		"glob", "grep", "repo-search", "file-read", "file-write", "file-edit", "ls",
-		"diagnostics", "references", "hover", "rename-symbol", "lsp-restart",
-		"shell-exec", "bash", "job-output", "job-kill",
+		"glob", "grep", "file-read", "file-write", "file-edit",
+		"lsp", "rename-symbol",
+		"bash", "job-output", "job-kill",
 		"pty-start", "pty-write", "pty-kill",
 		"web-search", "web-fetch", "download",
-		"todo-write", "comment", "skill-read", "skill-list", "view-image", "tool-output",
+		"todo-write", "comment", "skill", "view-image", "tool-output",
 	},
 	PermittedActions: []string{"read", "search", "write", "execute", "git", "network"},
 	Permission:       PermissionRestricted,
@@ -282,6 +313,51 @@ var generalPurposeAgentSpec = AgentSpec{
 	// delegate anyway — it finishes the task itself and reports back.
 	Handoffs:   nil,
 	PromptFile: "agents/general-purpose.md",
+}
+
+// commentToolSpec is shared between the default manifest and the v12
+// migration, which gives an agent left with no tools just this one.
+var commentToolSpec = ToolSpec{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"}
+
+// defaultToolSpecs is the default manifest's tool registry before the
+// version upgrades DefaultAgentManifest runs (which append the v6 and v8
+// tools). Each tool that absorbed others in v12, v13 or v14 lists the retired
+// names as aliases, exactly as the migration leaves them.
+func defaultToolSpecs() []ToolSpec {
+	return []ToolSpec{
+		{ID: "glob", Name: "Glob", Description: "Find files by name pattern, or list one directory.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, Aliases: retiredToolNames("glob"), RiskLevel: "low"},
+		{ID: "grep", Name: "Grep", Description: "Search file contents with regex, or look up a symbol's definitions and usages.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, Aliases: retiredToolNames("grep"), RiskLevel: "low"},
+		{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
+		{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
+		{ID: "file-edit", Name: "File Edit", Description: "Apply targeted edits to existing files.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, Aliases: retiredToolNames("file-edit"), RiskLevel: "high"},
+		{ID: "lsp", Name: "LSP", Description: "Query the language server: diagnostics, references, definition, hover, or restart a server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, Aliases: retiredToolNames("lsp"), RiskLevel: "low"},
+		{ID: "tool-search", Name: "Tool Search", Description: "Search available tools for current agent.", Kind: "builtin", Enabled: true, TimeoutSec: 20, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+		{ID: "save-memory", Name: "Save Memory", Description: "Save one short durable fact or preference to persistent cross-session memory.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write", "ask"}, RiskLevel: "low"},
+		{ID: "todo-write", Name: "Todo Write", Description: "Read and update the session task list.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}, Aliases: retiredToolNames("todo-write"), RiskLevel: "medium"},
+		{ID: "task-stop", Name: "Task Stop", Description: "Request stopping the current agent run.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan", "ask"}, RiskLevel: "low"},
+		{ID: "goal-complete", Name: "Goal Complete", Description: "Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan", "ask"}, RiskLevel: "low"},
+		{ID: "config", Name: "Config", Description: "Read or update selected runtime settings.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "write", "plan"}, RiskLevel: "medium"},
+		{ID: "bash", Name: "Bash", Description: "Execute a command with the host shell and return its output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, Aliases: retiredToolNames("bash"), RiskLevel: "high"},
+		{ID: "job-output", Name: "Job Output", Description: "Fetch accumulated output of a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
+		{ID: "job-kill", Name: "Job Kill", Description: "Terminate a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
+		toolOutputSpec,
+		commentToolSpec,
+		askUserToolSpec,
+		{ID: "enter-plan-mode", Name: "Enter Plan Mode", Description: "Switch execution into planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
+		{ID: "exit-plan-mode", Name: "Exit Plan Mode", Description: "Exit planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
+		{ID: "web-search", Name: "Web Search", Description: "Search the web and return result links.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"search", "network"}, RiskLevel: "medium"},
+		{ID: "web-fetch", Name: "Web Fetch", Description: "Fetch a URL and return readable text/markdown content.", Kind: "builtin", Enabled: true, TimeoutSec: 45, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
+		{ID: "download", Name: "Download", Description: "Download a URL to a file inside the workspace (size-limited).", Kind: "builtin", Enabled: true, TimeoutSec: 180, RequiresApproval: true, PermittedActions: []string{"write", "network"}, RiskLevel: "high"},
+		visionToolViewImage,
+		{ID: "mcp-list-resources", Name: "MCP List Resources", Description: "List resources exposed by MCP servers.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
+		{ID: "mcp-read-resource", Name: "MCP Read Resource", Description: "Read one MCP resource.", Kind: "builtin", Enabled: true, TimeoutSec: 45, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
+		{ID: "mcp-auth", Name: "MCP Auth", Description: "Store MCP server auth credentials.", Kind: "builtin", Enabled: true, TimeoutSec: 20, RequiresApproval: true, PermittedActions: []string{"write", "network"}, RiskLevel: "high"},
+		{ID: "enter-worktree", Name: "Enter Worktree", Description: "Create and enter a git worktree.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"git", "write"}, RiskLevel: "high"},
+		{ID: "exit-worktree", Name: "Exit Worktree", Description: "Remove a git worktree.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"git", "write"}, RiskLevel: "high"},
+		{ID: "send-message", Name: "Send Message", Description: "Send a structured coordination message.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask", "plan"}, RiskLevel: "low"},
+		{ID: "agent", Name: "Agent", Description: "Spawn a sub-agent to handle a subtask.", Kind: "builtin", Enabled: true, TimeoutSec: 300, RequiresApproval: false, PermittedActions: []string{"read", "write", "execute", "git", "search", "plan", "ask"}, RiskLevel: "medium", PrimaryOnly: true},
+		{ID: "skill", Name: "Skill", Description: "Load an Agent Skill's instructions by name, or list the available skills.", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, Aliases: retiredToolNames("skill"), RiskLevel: "low"},
+	}
 }
 
 func DefaultAgentManifest() AgentManifest {
@@ -306,63 +382,17 @@ func DefaultAgentManifest() AgentManifest {
 			SandboxMode: SandboxFullAccess,
 			Delegation:  DelegationPolicy{MaxParallelWorkers: 2, MaxDepth: 2},
 		},
-		Tools: []ToolSpec{
-			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "grep", Name: "Grep", Description: "Search file contents with regex.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
-			{ID: "file-edit", Name: "File Edit", Description: "Apply targeted edits to existing files.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
-			{ID: "multi-edit", Name: "Multi Edit", Description: "Apply several find/replace edits to one file in a single atomic call.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
-			{ID: "diagnostics", Name: "LSP Diagnostics", Description: "Fetch language-server diagnostics for a file or the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "references", Name: "LSP References", Description: "Find references or the definition of a symbol via the language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "lsp-restart", Name: "LSP Restart", Description: "Restart a wedged language server.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "shell-exec", Name: "Shell Executor", Description: "Runs shell commands in the project directory.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
-			{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "tool-search", Name: "Tool Search", Description: "Search available tools for current agent.", Kind: "builtin", Enabled: true, TimeoutSec: 20, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "ls", Name: "List Directory", Description: "List directory contents.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
-			{ID: "save-memory", Name: "Save Memory", Description: "Save one short durable fact or preference to persistent cross-session memory.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write", "ask"}, RiskLevel: "low"},
-			{ID: "todo-write", Name: "Todo Write", Description: "Write a list of todos to track task progress.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}, RiskLevel: "medium"},
-			{ID: "task-create", Name: "Task Create", Description: "Create a structured task in session state.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}, RiskLevel: "low"},
-			{ID: "task-get", Name: "Task Get", Description: "Fetch one task by id.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "task-update", Name: "Task Update", Description: "Update a task by id.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}, RiskLevel: "low"},
-			{ID: "task-list", Name: "Task List", Description: "List tasks in current session.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "task-stop", Name: "Task Stop", Description: "Request stopping the current agent run.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan", "ask"}, RiskLevel: "low"},
-			{ID: "goal-complete", Name: "Goal Complete", Description: "Declare the goal fully achieved and verified; ends the run. Only call after you have confirmed the objective is met (tests pass / build green / change applied).", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan", "ask"}, RiskLevel: "low"},
-			{ID: "config", Name: "Config", Description: "Read or update selected runtime settings.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "write", "plan"}, RiskLevel: "medium"},
-			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
-			{ID: "job-output", Name: "Job Output", Description: "Fetch accumulated output of a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			{ID: "job-kill", Name: "Job Kill", Description: "Terminate a background shell job.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"execute"}, RiskLevel: "low"},
-			toolOutputSpec,
-			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-			askUserToolSpec,
-			{ID: "enter-plan-mode", Name: "Enter Plan Mode", Description: "Switch execution into planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
-			{ID: "exit-plan-mode", Name: "Exit Plan Mode", Description: "Exit planning mode.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"plan"}, RiskLevel: "low"},
-			{ID: "web-search", Name: "Web Search", Description: "Search the web and return result links.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"search", "network"}, RiskLevel: "medium"},
-			{ID: "web-fetch", Name: "Web Fetch", Description: "Fetch a URL and return readable text/markdown content.", Kind: "builtin", Enabled: true, TimeoutSec: 45, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
-			{ID: "download", Name: "Download", Description: "Download a URL to a file inside the workspace (size-limited).", Kind: "builtin", Enabled: true, TimeoutSec: 180, RequiresApproval: true, PermittedActions: []string{"write", "network"}, RiskLevel: "high"},
-			{ID: "grok-image", Name: "Grok Image", Description: "Generate images via xAI Grok Imagine and save them to the workspace (defaults to assets/ or Next.js public/).", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: false, PermittedActions: []string{"write", "network"}, RiskLevel: "medium"},
-			visionToolViewImage,
-			{ID: "grok-video", Name: "Grok Video", Description: "Generate videos via xAI Grok Imagine (polled until ready) and save them to the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 900, RequiresApproval: false, PermittedActions: []string{"write", "network"}, RiskLevel: "medium"},
-			{ID: "mcp-list-resources", Name: "MCP List Resources", Description: "List resources exposed by MCP servers.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
-			{ID: "mcp-read-resource", Name: "MCP Read Resource", Description: "Read one MCP resource.", Kind: "builtin", Enabled: true, TimeoutSec: 45, RequiresApproval: true, PermittedActions: []string{"read", "network"}, RiskLevel: "medium"},
-			{ID: "mcp-auth", Name: "MCP Auth", Description: "Store MCP server auth credentials.", Kind: "builtin", Enabled: true, TimeoutSec: 20, RequiresApproval: true, PermittedActions: []string{"write", "network"}, RiskLevel: "high"},
-			{ID: "enter-worktree", Name: "Enter Worktree", Description: "Create and enter a git worktree.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"git", "write"}, RiskLevel: "high"},
-			{ID: "exit-worktree", Name: "Exit Worktree", Description: "Remove a git worktree.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"git", "write"}, RiskLevel: "high"},
-			{ID: "send-message", Name: "Send Message", Description: "Send a structured coordination message.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask", "plan"}, RiskLevel: "low"},
-			{ID: "agent", Name: "Agent", Description: "Spawn a sub-agent to handle a subtask.", Kind: "builtin", Enabled: true, TimeoutSec: 300, RequiresApproval: false, PermittedActions: []string{"read", "write", "execute", "git", "search", "plan", "ask"}, RiskLevel: "medium", PrimaryOnly: true},
-			{ID: "skill-read", Name: "Skill Read", Description: "Activate an installed Agent Skill and load its SKILL.md instructions.", Kind: "builtin", Enabled: true, TimeoutSec: 15, RequiresApproval: false, PermittedActions: []string{"read"}, Aliases: []string{"activate-skill", "skill-activate"}, RiskLevel: "low"},
-			{ID: "skill-list", Name: "Skill List", Description: "List installed Agent Skills with name + description.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
-		},
+		Tools: defaultToolSpecs(),
 		Agents: []AgentSpec{
-			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs", "general-purpose"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore", "general-purpose"}, PromptFile: "agents/coding.md"},
-			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs", "general-purpose"}, PromptFile: "agents/chat.md"},
-			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
-			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "todo-write", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
-			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
-			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
-			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
-			{ID: "docs", Name: "Docs", Description: "Read-only documentation worker", Skill: "documentation", Mode: "worker", Role: AgentRoleSubagent, Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore"}, PromptFile: "agents/docs-writer.md"},
+			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "todo-write", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "comment", "skill"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs", "general-purpose"}, PromptFile: "agents/planning.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "lsp", "bash", "job-output", "job-kill", "tool-search", "todo-write", "task-stop", "config", "ask-user", "send-message", "comment", "skill", "save-memory", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore", "general-purpose"}, PromptFile: "agents/coding.md"},
+			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs", "general-purpose"}, PromptFile: "agents/chat.md"},
+			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "comment", "skill"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
+			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "lsp", "bash", "job-output", "job-kill", "todo-write", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "skill", "save-memory", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
+			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "bash", "job-output", "job-kill", "comment", "skill"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
+			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "bash", "job-output", "job-kill", "comment", "skill"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
+			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "bash", "job-output", "job-kill", "comment", "skill"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
+			{ID: "docs", Name: "Docs", Description: "Read-only documentation worker", Skill: "documentation", Mode: "worker", Role: AgentRoleSubagent, Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "comment", "skill"}, PermittedActions: []string{"read", "search", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore"}, PromptFile: "agents/docs-writer.md"},
 			generalPurposeAgentSpec,
 		},
 	}
@@ -374,21 +404,35 @@ func AgentManifestPath(cwd string) string {
 	return filepath.Join(cwd, AgentManifestFilename)
 }
 
+// LoadAgentManifestForProject loads the project's spettro.agents.toml, or
+// the default manifest when the project has none. An older manifest is
+// migrated in memory and, when that changed anything, written back with a
+// backup of the original (see backupAndWriteManifest).
+//
+// Only a manifest that cannot be read, decoded or validated is an error.
+// Writing the migration back is a convenience: in a read-only checkout,
+// mount or container, or a directory the process sandbox does not let
+// spettro write, the write fails, and the migrated manifest is returned
+// anyway (the migration then simply runs again on the next load). Failing
+// the load instead would stop spettro from starting, and callers that
+// ignore the error would run with an empty manifest or another project's.
 func LoadAgentManifestForProject(cwd string) (AgentManifest, error) {
 	p := AgentManifestPath(cwd)
 	m, originalVersion, changed, err := loadAgentManifestWithMigrationInfo(p)
-	if err == nil {
-		if changed || originalVersion == 1 {
-			if werr := backupAndWriteManifest(p, m); werr != nil {
-				return AgentManifest{}, werr
-			}
-		}
-		return m, nil
-	}
 	if errors.Is(err, os.ErrNotExist) {
 		return DefaultAgentManifest(), nil
 	}
-	return AgentManifest{}, err
+	if err != nil {
+		return AgentManifest{}, err
+	}
+	if changed || originalVersion == 1 {
+		if werr := backupAndWriteManifest(p, m); werr != nil {
+			// Debug level: an info or warning record would go to stderr,
+			// which is the TUI's screen.
+			slog.Debug("migrated agent manifest not written back", "path", p, "err", werr)
+		}
+	}
+	return m, nil
 }
 
 func LoadAgentManifest(path string) (AgentManifest, error) {
@@ -445,14 +489,35 @@ func DecodeAgentManifestWithMigrationInfo(r io.Reader) (AgentManifest, int, bool
 	return manifest, originalVersion, changed, nil
 }
 
+// backupAndWriteManifest saves a copy of the manifest at path as
+// <manifest>.migrated-<UTC time>.bak and replaces it with m.
+//
+//   - A manifest that is a symlink (one manifest shared across worktrees,
+//     or kept in a dotfiles repository) stays one: the link's target is
+//     backed up and rewritten, so every link sees the migration.
+//   - The backup and the rewritten file keep the original's permissions:
+//     a manifest can carry tokens in http or mcp entry points, and a 0600
+//     file must not come back 0644.
+//   - Concurrent migrations (several ACP sessions opening at once, or the
+//     TUI and an editor started together after an upgrade) never share a
+//     file: the new content goes to a unique temp file that is renamed over
+//     the manifest, so the last rename wins and each one installs the same
+//     content. The backup is created exclusively; when another migration
+//     already wrote it within the same second it held the same original, so
+//     it is kept as is.
 func backupAndWriteManifest(path string, m AgentManifest) error {
-	if _, err := os.Stat(path); err == nil {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return fmt.Errorf("read manifest before migration backup: %w", rerr)
 		}
 		backup := fmt.Sprintf("%s.migrated-%s.bak", path, time.Now().UTC().Format("20060102-150405"))
-		if werr := os.WriteFile(backup, data, 0o644); werr != nil {
+		if werr := writeFileExclusive(backup, data, mode); werr != nil && !errors.Is(werr, fs.ErrExist) {
 			return fmt.Errorf("write migration backup: %w", werr)
 		}
 	}
@@ -460,14 +525,44 @@ func backupAndWriteManifest(path string, m AgentManifest) error {
 	if err != nil {
 		return fmt.Errorf("encode migrated manifest: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("write migrated manifest: %w", err)
 	}
-	if err := safeio.Replace(tmp, path); err != nil {
+	tmpPath := tmp.Name()
+	_, werr := tmp.Write(raw)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmpPath, mode)
+	}
+	if werr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write migrated manifest: %w", werr)
+	}
+	if err := safeio.Replace(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("replace migrated manifest: %w", err)
 	}
 	return nil
+}
+
+// writeFileExclusive creates path with data, failing with fs.ErrExist when
+// the file already exists.
+func writeFileExclusive(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(path)
+	}
+	return werr
 }
 
 func (m *AgentManifest) normalizeFromVersion() bool {
@@ -500,12 +595,12 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 			m.Tools[i].RiskLevel = "medium"
 			changed = true
 		}
-		if len(m.Tools[i].Aliases) == 0 {
-			switch m.Tools[i].ID {
-			case "bash":
-				m.Tools[i].Aliases = []string{"bash-output"}
-				changed = true
-			}
+		// The built-in bash has always answered to bash-output. A tool of
+		// the operator's own called bash is not the shell, and a bash-output
+		// of their own keeps its name, so neither case gets the alias.
+		if len(m.Tools[i].Aliases) == 0 && m.Tools[i].ID == "bash" && m.Tools[i].IsBuiltin() && !m.nameTaken("bash-output", i) {
+			m.Tools[i].Aliases = []string{"bash-output"}
+			changed = true
 		}
 	}
 	for i := range m.Agents {
@@ -549,7 +644,9 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		// v6 introduces the deeper LSP tools (hover, rename-symbol). Existing
 		// manifests get the definitions; agents already trusted with the
 		// references tool get hover, and those also holding file-edit get
-		// rename-symbol.
+		// rename-symbol. (v13 folds references and hover into lsp; an agent
+		// holding lsp already has hover and counts as trusted with
+		// references.)
 		m.ensureLSPDeepTools()
 		m.Version = 6
 		changed = true
@@ -597,45 +694,137 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 11
 		changed = true
 	}
+	if m.Version < 12 {
+		// v12 folds duplicate built-ins into one canonical tool each (bash,
+		// file-edit, grep, glob, todo-write; the old names stay callable as
+		// hidden aliases) and removes the grok image/video generators.
+		m.consolidateBuiltinTools(consolidatedTools, removedTools)
+		m.Version = 12
+		changed = true
+	}
+	if m.Version < 13 {
+		// v13 folds the read-only language-server tools (diagnostics,
+		// references, hover, lsp-restart) into one lsp tool with an op
+		// argument; the old names stay callable as hidden aliases.
+		// rename-symbol, which writes, stays separate.
+		m.consolidateBuiltinTools(lspConsolidatedTools, nil)
+		m.Version = 13
+		changed = true
+	}
+	if m.Version < 14 {
+		// v14 folds skill-read and skill-list into one skill tool that
+		// loads a skill by name or lists them; the old names (and
+		// skill-read's aliases activate-skill and skill-activate) stay
+		// callable as hidden aliases.
+		m.consolidateBuiltinTools(skillConsolidatedTools, nil)
+		m.Version = 14
+		changed = true
+	}
 	return changed
 }
 
 // ensureGeneralPurposeAgent retrofits the general-purpose subagent into a
 // manifest that predates v11. The agent is added when absent, and the handoff
 // goes to primary/orchestrator agents that already delegate at all (a
-// non-empty handoffs list): an operator who stripped an agent's handoffs
-// disabled its delegation deliberately, and a manifest whose agent was
-// removed by hand does not get it back.
+// non-empty handoffs list) and that can already do everything the new
+// agent can (every permission family it can exercise, see usableFamilies):
+// an operator who stripped an agent's handoffs disabled its delegation
+// deliberately, a read-only agent must not gain writes and commands through
+// a delegation, and a manifest whose agent was removed by hand does not get
+// it back.
 //
 // Tools the manifest is missing entirely are dropped from the allow-list,
-// since Validate rejects an agent referencing an unknown tool.
+// since Validate rejects an agent referencing an unknown tool. So are tools
+// of the operator's own that share a built-in's name (a "bash" script): the
+// agent is granted built-ins only, and when the name is taken it gets the
+// built-in under a retired name instead, if the manifest still defines one.
 func (m *AgentManifest) ensureGeneralPurposeAgent() {
 	for _, a := range m.Agents {
 		if a.ID == generalPurposeAgentSpec.ID {
 			return
 		}
 	}
-	known := map[string]bool{}
+	builtin := map[string]bool{}
 	for _, t := range m.Tools {
-		known[t.ID] = true
+		builtin[t.ID] = t.IsBuiltin()
 	}
 	spec := generalPurposeAgentSpec
 	tools := make([]string, 0, len(spec.AllowedTools))
 	for _, id := range spec.AllowedTools {
-		if known[id] {
+		if builtin[id] {
 			tools = append(tools, id)
+			continue
+		}
+		// A pre-v12 manifest may hold the tool under a name v12, v13 or v14
+		// retires; grant that and let the migration fold it. A duplicate
+		// needs one of its old names; a tool whose old names became its ops
+		// (lsp) needs all of them, or the migration would hold the agent to
+		// the ops of the one it got.
+		for _, old := range retiredToolNames(id) {
+			if builtin[old] && !readOnlyRetiredTools[old] && !slices.Contains(tools, old) {
+				tools = append(tools, old)
+				if !opFolds[id] {
+					break
+				}
+			}
 		}
 	}
 	spec.AllowedTools = tools
 	m.Agents = append(m.Agents, spec)
+	needs := m.usableFamilies(spec)
 	for i := range m.Agents {
 		if !m.Agents[i].IsPrimaryRole() || len(m.Agents[i].Handoffs) == 0 {
+			continue
+		}
+		// The agent tool checks only that the target is a handoff, so a
+		// handoff to general-purpose lends the primary everything
+		// general-purpose can do. A primary that could not already do all
+		// of it (a read-only "ask" agent next to a subagent that writes
+		// files and runs commands) does not get it.
+		if !coversFamilies(m.usableFamilies(m.Agents[i]), needs) {
 			continue
 		}
 		if !slices.Contains(m.Agents[i].Handoffs, spec.ID) {
 			m.Agents[i].Handoffs = append(m.Agents[i].Handoffs, spec.ID)
 		}
 	}
+}
+
+// usableFamilies returns the permission families (read, search, edit,
+// execute, network, ...) agent a can exercise: for each tool on its
+// allow-list that it can call (ToolUsableBy), the tool's families that the
+// agent's permitted_actions allow, or all of them when the agent does not
+// filter actions.
+func (m *AgentManifest) usableFamilies(a AgentSpec) map[string]bool {
+	allowed := map[string]bool{}
+	for _, action := range a.PermittedActions {
+		if f := NormalizePermissionFamily(action); f != "" {
+			allowed[f] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, id := range a.AllowedTools {
+		t, ok := m.toolNamed(id)
+		if !ok || !m.ToolUsableBy(a, t) {
+			continue
+		}
+		for _, f := range ToolPermissionFamilies(t) {
+			if len(allowed) == 0 || allowed[f] {
+				out[f] = true
+			}
+		}
+	}
+	return out
+}
+
+// coversFamilies reports whether have holds every family in need.
+func coversFamilies(have, need map[string]bool) bool {
+	for f := range need {
+		if !have[f] {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureAskUserTool retrofits the ask-user grant into a manifest that predates
@@ -676,8 +865,8 @@ func (m *AgentManifest) ensureAskUserTool() {
 
 // ensureToolOutputTool retrofits the tool-output spool reader into a manifest
 // that predates v9: the definition is added when absent, and any agent
-// already holding file-read gets it allowed (identical read trust level, so
-// deliberate restrictions are preserved).
+// that can use the built-in file-read gets it allowed (identical read trust
+// level, so deliberate restrictions are preserved; see holdsBuiltin).
 func (m *AgentManifest) ensureToolOutputTool() {
 	haveTool := false
 	for _, t := range m.Tools {
@@ -694,16 +883,18 @@ func (m *AgentManifest) ensureToolOutputTool() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["file-read"] && !allowed["tool-output"] {
+		if m.holdsBuiltin(m.Agents[i], "file-read") && !allowed["tool-output"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "tool-output")
 		}
 	}
 }
 
 // ensurePTYTools retrofits the pty session tools into a manifest that
-// predates v8: definitions are added when absent, and any agent already
-// holding shell-exec gets all three (identical execute trust level, so
-// deliberate restrictions are preserved).
+// predates v8: definitions are added when absent, and any agent that can
+// use a shell (shell-exec, or bash, its v12 name) gets all three (identical
+// execute trust level, so deliberate restrictions are preserved). Only the
+// built-in shell counts, only when the agent can actually call it, and only
+// a built-in pty tool is granted (see holdsBuiltin).
 func (m *AgentManifest) ensurePTYTools() {
 	have := map[string]bool{}
 	for _, t := range m.Tools {
@@ -719,21 +910,43 @@ func (m *AgentManifest) ensurePTYTools() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if !allowed["shell-exec"] {
+		if !m.holdsBuiltin(m.Agents[i], "shell-exec") && !m.holdsBuiltin(m.Agents[i], "bash") {
 			continue
 		}
 		for _, t := range ptyTools {
-			if !allowed[t.ID] {
+			if !allowed[t.ID] && m.builtinToolNamed(t.ID) {
 				m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, t.ID)
 			}
 		}
 	}
 }
 
+// holdsBuiltin reports whether agent a can actually use the built-in tool
+// called name: it lists name, name reaches a built-in (builtinToolNamed),
+// and the agent can call that tool (ToolUsableBy: enabled, an action the
+// agent may take, no permission rule denying it).
+//
+// The retrofits (v5 to v9) grant a new tool only to agents whose tools
+// already show the same trust, and each asks this. Listing a tool is not
+// that trust: a shell the operator switched off or denied, or a tool of the
+// operator's own that shares a built-in's name (a "grep" script), shows
+// none, and must not turn into a new tool that does the same job (pty-start
+// in place of a disabled shell-exec, rename-symbol next to a disabled
+// file-edit).
+func (m *AgentManifest) holdsBuiltin(a AgentSpec, name string) bool {
+	if !slices.Contains(a.AllowedTools, name) || !m.builtinToolNamed(name) {
+		return false
+	}
+	t, _ := m.toolNamed(name)
+	return m.ToolUsableBy(a, t)
+}
+
 // ensureRepoSearchTool retrofits the symbol-index-backed repo-search tool
 // into a manifest that predates v7: the definition is added when absent, and
 // any agent already holding grep gets repo-search allowed (identical
-// read/search trust level, so deliberate restrictions are preserved).
+// read/search trust level, so deliberate restrictions are preserved). A tool
+// of the operator's own called grep is no sign of that trust, and one called
+// repo-search is never granted in the built-in's place (see holdsBuiltin).
 func (m *AgentManifest) ensureRepoSearchTool() {
 	haveTool := false
 	for _, t := range m.Tools {
@@ -750,7 +963,7 @@ func (m *AgentManifest) ensureRepoSearchTool() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["grep"] && !allowed["repo-search"] {
+		if m.holdsBuiltin(m.Agents[i], "grep") && !allowed["repo-search"] && m.builtinToolNamed("repo-search") {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "repo-search")
 		}
 	}
@@ -761,13 +974,18 @@ func (m *AgentManifest) ensureRepoSearchTool() {
 // absent, and allow-lists grow only for agents whose existing tools show the
 // same level of trust (references for hover; references + file-edit for
 // rename-symbol) so deliberate restrictions are preserved.
+//
+// The default manifest runs this too, and it already has v13's lsp tool,
+// which answers to hover (an alias) and does what references did: no hover
+// definition is added next to it, and an agent holding lsp counts as holding
+// references for rename-symbol.
 func (m *AgentManifest) ensureLSPDeepTools() {
-	have := map[string]bool{}
-	for _, t := range m.Tools {
-		have[t.ID] = true
-	}
+	// Only built-ins count as trust and only built-ins are granted: a tool
+	// of the operator's own called lsp, references or file-edit shows
+	// nothing, and one called hover or rename-symbol is never granted in the
+	// built-in's place (see holdsBuiltin).
 	for _, t := range lspDeepTools {
-		if !have[t.ID] {
+		if _, ok := m.toolNamed(t.ID); !ok {
 			m.Tools = append(m.Tools, t)
 		}
 	}
@@ -776,10 +994,12 @@ func (m *AgentManifest) ensureLSPDeepTools() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["references"] && !allowed["hover"] {
+		a := m.Agents[i]
+		references := m.holdsBuiltin(a, "references")
+		if references && !allowed["hover"] && m.builtinToolNamed("hover") {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "hover")
 		}
-		if allowed["references"] && allowed["file-edit"] && !allowed["rename-symbol"] {
+		if (references || m.holdsBuiltin(a, "lsp")) && m.holdsBuiltin(a, "file-edit") && !allowed["rename-symbol"] && m.builtinToolNamed("rename-symbol") {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "rename-symbol")
 		}
 	}
@@ -787,8 +1007,8 @@ func (m *AgentManifest) ensureLSPDeepTools() {
 
 // ensureVisionTools retrofits the view-image tool into a manifest that
 // predates it. The definition is added when absent; each agent's allow-list
-// grows the tool only when it already holds file-read, so an operator's
-// deliberate restrictions are preserved.
+// grows the tool only when it can already use the built-in file-read (see
+// holdsBuiltin), so an operator's deliberate restrictions are preserved.
 func (m *AgentManifest) ensureVisionTools() {
 	haveTool := false
 	for _, t := range m.Tools {
@@ -805,7 +1025,7 @@ func (m *AgentManifest) ensureVisionTools() {
 		for _, id := range m.Agents[i].AllowedTools {
 			allowed[id] = true
 		}
-		if allowed["file-read"] && !allowed["view-image"] {
+		if m.holdsBuiltin(m.Agents[i], "file-read") && !allowed["view-image"] {
 			m.Agents[i].AllowedTools = append(m.Agents[i].AllowedTools, "view-image")
 		}
 	}
@@ -856,6 +1076,26 @@ func (m AgentManifest) Validate() error {
 	}
 
 	toolIDs := map[string]struct{}{}
+	for _, tool := range m.Tools {
+		toolIDs[strings.TrimSpace(tool.ID)] = struct{}{}
+	}
+	aliasOwner := map[string]string{}
+	for _, tool := range m.Tools {
+		for _, alias := range tool.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue // reported below with the tool's other checks
+			}
+			if _, clash := toolIDs[alias]; clash {
+				return fmt.Errorf("agent manifest: tool %q alias %q is another tool's id", tool.ID, alias)
+			}
+			if owner, dup := aliasOwner[alias]; dup && owner != tool.ID {
+				return fmt.Errorf("agent manifest: alias %q is claimed by both %q and %q", alias, owner, tool.ID)
+			}
+			aliasOwner[alias] = tool.ID
+		}
+	}
+	toolIDs = map[string]struct{}{}
 	for _, tool := range m.Tools {
 		id := strings.TrimSpace(tool.ID)
 		if id == "" {

@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/config"
 	"spettro/internal/theme"
@@ -604,5 +605,30 @@ func TestLightCursorIsNotInvisible(t *testing.T) {
 	m = m.applyTheme(theme.DarkKind)
 	if !strings.Contains(m.viewInput(120), "\x1b[7;37m") {
 		t.Error("the dark input box no longer emits bubbles' reverse-video ANSI-7 caret")
+	}
+}
+
+// Found in a VHS screenshot of the theme picker: "light" is a cell longer
+// than "auto" and "dark", so its description started one column right of
+// the others. Every option's description now starts in the same column.
+func TestThemePickerDescriptionsLineUp(t *testing.T) {
+	m := newThemeTestModel(t)
+	m.SetDimensionsForTesting(80, 24)
+	m.MarkReadyAndTrustedForTesting()
+	m = m.RecalcLayoutForTesting()
+	for cursor := range themePickerOrder {
+		m = m.openThemePicker()
+		m.themeCursor = cursor
+		cols := map[int]bool{}
+		for _, row := range strings.Split(ansi.Strip(m.viewThemePicker()), "\n") {
+			for _, desc := range []string{"follow the terminal", "palette tuned for a dark", "palette tuned for a light"} {
+				if i := strings.Index(row, desc); i >= 0 {
+					cols[ansi.StringWidth(row[:i])] = true
+				}
+			}
+		}
+		if len(cols) != 1 {
+			t.Errorf("cursor on %v: the descriptions start in columns %v, want one column", themePickerOrder[cursor], cols)
+		}
 	}
 }

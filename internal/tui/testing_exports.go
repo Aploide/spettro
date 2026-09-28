@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
@@ -101,9 +102,12 @@ func IsInstantCommandForTesting(input string) bool {
 	return isInstantCommand(input)
 }
 
+// SetPendingShellApprovalForTesting opens an approval of an empty command
+// (all of it on screen, so the picker is the four base options) with the
+// cursor on option index cursor.
 func (m *Model) SetPendingShellApprovalForTesting(cursor int) {
 	m.pendingAuth = &shellApprovalRequestMsg{response: make(chan shellApprovalResponse, 1)}
-	m.approvalCursor = cursor
+	m.approvalChoice = approvalBaseActions[cursor]
 }
 
 func (m Model) TextareaValueForTesting() string {
@@ -118,8 +122,10 @@ func (m Model) HistoryBrowsingForTesting() bool {
 	return m.historyBrowsing
 }
 
+// ApprovalCursorForTesting is the picker row index of the selected action.
 func (m Model) ApprovalCursorForTesting() int {
-	return m.approvalCursor
+	w := m.approvalContentWidth()
+	return slices.Index(m.approvalActions(w), m.approvalSelected(w))
 }
 
 func (m Model) HasPendingShellApprovalForTesting() bool {
@@ -162,6 +168,13 @@ func (m Model) AwaitingInsteadForTesting() bool {
 
 func (m Model) BannerForTesting() string {
 	return m.banner
+}
+
+// BannerKindForTesting returns the current banner's kind ("success",
+// "error", "info", ...), so tests can tell a success from a warning that
+// happens to share its wording.
+func (m Model) BannerKindForTesting() string {
+	return m.bannerKind
 }
 
 // ThinkingLevelForTesting returns the persisted extended-thinking level so
@@ -219,7 +232,7 @@ func (m Model) RenderCacheSizeForTesting() int {
 	if m.renderCache == nil {
 		return -1
 	}
-	return len(m.renderCache.blocks)
+	return len(m.renderCache.entries)
 }
 
 // RenderCacheWidthForTesting returns the layout width the cache was built for.
@@ -263,10 +276,9 @@ func StreamChunkMsgForTesting(kind, delta string, reset bool) tea.Msg {
 	return streamChunkMsg{chunk: agent.StreamChunk{Kind: kind, Delta: delta, Reset: reset}}
 }
 
-// SetStreamChForTesting installs a non-nil stream channel so the streamChunkMsg
-// handler re-arms its wait command (matching a live run).
+// SetStreamChForTesting installs a run event queue, as a live run has.
 func (m *Model) SetStreamChForTesting() {
-	m.streamCh = make(chan agent.StreamChunk, 8)
+	m.runEvents = newRunEventQueue()
 }
 
 func AgentDoneMsgForTesting(content string) tea.Msg {
@@ -607,25 +619,6 @@ func (m Model) RemoteTokenForTesting() string {
 func (m *Model) MarkReadyAndTrustedForTesting() {
 	m.ready = true
 	m.showTrust = false
-}
-
-// ParseMediaTraceOutputForTesting exposes the JSON envelope parser the
-// Telegram media dispatcher uses to extract file paths from grok-image /
-// grok-video tool traces.
-func ParseMediaTraceOutputForTesting(output string) ([]string, string) {
-	return parseMediaTraceOutput(output)
-}
-
-// MediaCaptionForTesting renders the tool-specific Telegram caption the
-// dispatcher would attach to an upload.
-func MediaCaptionForTesting(toolName, prompt string) string {
-	return mediaCaption(toolName, prompt)
-}
-
-// MediaAbsolutePathForTesting resolves a workspace-relative path against a
-// cwd, mirroring the logic used by the Telegram dispatcher.
-func MediaAbsolutePathForTesting(cwd, p string) string {
-	return mediaAbsolutePath(cwd, p)
 }
 
 // RecalcLayoutForTesting forces the layout pass that the public Update would

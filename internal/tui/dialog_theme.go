@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -104,8 +106,14 @@ func (m Model) viewThemePicker() string {
 	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select theme")
 	rows := []string{diagFillTitle(titleLabel, innerW), ""}
 
+	// The descriptions start in one column: labels are padded to the
+	// longest ("light" is a cell longer than "auto" and "dark").
+	labelW := 0
+	for _, k := range themePickerOrder {
+		labelW = max(labelW, len(k.String()))
+	}
 	for i, k := range themePickerOrder {
-		label := k.String()
+		label := fmt.Sprintf("%-*s", labelW, k.String())
 		desc := themePickerDesc[k]
 		// Auto is the only option whose name does not say what you will get,
 		// so it carries what choosing it would resolve to right now.
@@ -113,6 +121,8 @@ func (m Model) viewThemePicker() string {
 			desc += " (now: " + theme.Seed(theme.AutoKind).String() + ")"
 		}
 
+		// Rows are cut, not wrapped, on a narrow terminal: a wrapped option
+		// reads as two options.
 		num := string(rune('1' + i))
 		if i == m.themeCursor {
 			rows = append(rows, lipgloss.NewStyle().
@@ -120,20 +130,32 @@ func (m Model) viewThemePicker() string {
 				Foreground(pal.Text).
 				Bold(true).
 				Width(innerW).
-				Render("› "+num+"  "+label+"   "+desc))
+				Render(termtext.Fit("› "+num+"  "+label+"   "+desc, innerW)))
 		} else {
-			rows = append(rows, "  "+num+"  "+
+			rows = append(rows, termtext.Fit("  "+num+"  "+
 				lipgloss.NewStyle().Foreground(pal.Text).Render(label)+
-				"   "+lipgloss.NewStyle().Foreground(pal.TextMuted).Render(desc))
+				"   "+lipgloss.NewStyle().Foreground(pal.TextMuted).Render(desc), innerW))
 		}
 	}
 
+	// The painted preview is the first thing to go on a short terminal: the
+	// options and the keys are what the dialog cannot do without, and the
+	// chosen theme is visible behind the dialog once applied anyway.
 	preview := m.previewKind()
-	rows = append(rows, "",
-		lipgloss.NewStyle().Foreground(pal.TextMuted).Render("  preview — "+preview.String()))
-	rows = append(rows, themePreview(theme.For(preview), innerW)...)
-	rows = append(rows, "",
-		lipgloss.NewStyle().Foreground(pal.TextMuted).Render("↑↓ preview  enter apply  esc cancel"))
+	previewRows := themePreview(theme.For(preview), innerW)
+	// The keys wrap onto a second row on a narrow dialog rather than being
+	// cut, so "esc cancel" is always on screen.
+	hints := packKeyHints([]string{"↑↓ preview", "enter apply", "esc cancel"}, innerW)
+	chrome := 2 + 2 + 1 + len(hints) // border, vertical padding, the blank row above the hints, the hints
+	if len(rows)+2+len(previewRows)+chrome <= m.height || m.height <= 0 {
+		rows = append(rows, "",
+			lipgloss.NewStyle().Foreground(pal.TextMuted).Render("  preview — "+preview.String()))
+		rows = append(rows, previewRows...)
+	}
+	rows = append(rows, "")
+	for _, h := range hints {
+		rows = append(rows, lipgloss.NewStyle().Foreground(pal.TextMuted).Render(h))
+	}
 
 	dialog := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).

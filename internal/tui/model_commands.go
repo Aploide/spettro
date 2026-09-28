@@ -14,7 +14,24 @@ import (
 	"spettro/internal/session"
 )
 
+// handleCommand runs a slash command. Whatever the command added to the
+// transcript is on screen when it returns: many handlers (/skills, /tasks,
+// /hooks, /jobs, /memory, ...) return early without refreshing the viewport,
+// and their output stayed invisible until some later event repainted it (a
+// VHS run showed /skills doing nothing). The refresh is done here once
+// rather than trusted to every handler.
 func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
+	before := len(m.messages)
+	next, cmd := m.dispatchCommand(input)
+	if nm, ok := next.(Model); ok && len(nm.messages) != before {
+		nm.refreshViewport()
+		return nm, cmd
+	}
+	return next, cmd
+}
+
+// dispatchCommand routes a slash command to its handler; see handleCommand.
+func (m Model) dispatchCommand(input string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(input)
 	cmd := fields[0]
 	m.recordCommandEvent(input)
@@ -183,6 +200,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			} else {
 				plan := m.pendingPlan
 				m.pendingPlan = ""
+				m.planEditing = false
 				return m.runAgentApproved(spec, plan, nil, nil, true)
 			}
 		}
@@ -193,17 +211,14 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
-		m.convHistory = nil
+		m.resetConversationState()
 		// Spooled tool outputs are only reachable through the cleared
 		// history's references; drop them with the conversation.
 		jobs.Spool().Cleanup()
 		m.sessionID = ""
 		m.todos = nil
-		// Occupancy resets with the conversation; keep the gauge honest.
-		m.contextTokens = 0
 		// Usage counters are per-conversation; a cleared session starts at zero.
 		m.providers.ResetUsage()
-		m.compactWarningLevel = 0
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
 	case "/stats":
@@ -265,6 +280,13 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			}
 			return m.handlePrompt(expanded)
 		}
+		// Skills come last: a built-in (the cases above) or a custom
+		// command with the same name wins, so installing a skill can never
+		// take over a command the user relies on.
+		if skill, ok := m.findUserSkill(cmd); ok {
+			args := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
+			return m.runUserSkill(input, skill, args)
+		}
 		m.showBanner("unknown command: "+cmd, "error")
 	}
 
@@ -272,14 +294,28 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handlePrompt sends a prompt the user typed. $skill-name mentions in it
+// pull in those skills' instructions (see expandSkillMentions).
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
+	// Expand first, as its own statement: it sets a banner on m, which must
+	// be the receiver handlePromptWith then runs on.
+	body := m.expandSkillMentions(input)
+	return m.handlePromptWith(input, body)
+}
+
+// handlePromptWith runs (or queues) a turn whose transcript entry is input,
+// what the user typed, and whose model prompt is body. The two differ for a
+// skill invocation, where the user typed "/name args" and the model gets the
+// skill's instructions. @file mentions are taken from input, so a skill body
+// that happens to contain "@something" attaches nothing.
+func (m Model) handlePromptWith(input, body string) (tea.Model, tea.Cmd) {
 	eval := m.evaluateCompact()
 	if eval.IsBlocking {
 		m.showBanner("context limit reached; run /compact before sending new prompts", "error")
 		return m, nil
 	}
 	mentionedFiles := m.extractMentionedFiles(input)
-	prompt := injectMentionGuidance(input, mentionedFiles)
+	prompt := injectMentionGuidance(body, mentionedFiles)
 	prompt = m.injectAttachments(prompt)
 	// Collect image paths (Kind="image") to send via the vision channel.
 	var imagePaths []string
@@ -331,7 +367,7 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 	m.publishRemoteState("user_message")
 	// Persist the user turn immediately so a crash mid-run never loses it.
 	m.autoSave()
-	m.refreshViewport()
+	m.scrollToBottom()
 
 	spec, ok := m.manifest.AgentByID(m.mode)
 	if !ok {

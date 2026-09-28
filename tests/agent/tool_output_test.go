@@ -63,6 +63,16 @@ func newCaptureServer(t *testing.T, responses []string) *captureServer {
 
 // promptAt returns all message content from request i concatenated, so tests
 // can search for content regardless of which turn it appears in.
+// afterTask drops everything up to and including the task text, leaving only
+// the tool turns: the system prompt's environment section lists the working
+// directory's files, which would otherwise satisfy (or break) file-name checks.
+func afterTask(prompt, task string) string {
+	if i := strings.Index(prompt, task); i >= 0 {
+		return prompt[i+len(task):]
+	}
+	return prompt
+}
+
 func (cs *captureServer) promptAt(i int) string {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -143,7 +153,7 @@ func TestToolOutput_RepoSearch_ListsFiles(t *testing.T) {
 	}
 
 	// The second prompt (step 2) must contain the tool output listing both files.
-	prompt2 := cs.promptAt(1)
+	prompt2 := afterTask(cs.promptAt(1), "List files.")
 	if !strings.Contains(prompt2, "main.go") {
 		t.Errorf("repo-search output missing main.go in prompt:\n%s", prompt2)
 	}
@@ -166,7 +176,7 @@ func TestToolOutput_RepoSearch_ContentSearch(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	prompt2 := cs.promptAt(1)
+	prompt2 := afterTask(cs.promptAt(1), "Find HelloWorld.")
 	if !strings.Contains(prompt2, "hello.go") {
 		t.Errorf("repo-search should have matched hello.go:\n%s", prompt2)
 	}

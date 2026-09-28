@@ -2,9 +2,11 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/skills"
 	"spettro/internal/version"
 )
 
@@ -42,6 +45,11 @@ type bridge struct {
 	// any. It is connection-scoped rather than session-scoped: signing in is
 	// an account-level act that every session on this bridge observes.
 	logins loginRegistry
+
+	// lateModels starts, at most once, the goroutine that re-sends config
+	// options when model discovery finishes after a session response gave
+	// up waiting for it (see awaitModels).
+	lateModels sync.Once
 }
 
 // acpSession is the per-conversation state. Mutable fields are guarded by the
@@ -68,6 +76,13 @@ type acpSession struct {
 	// exists yet.
 	transcript []session.Message
 	startedAt  time.Time
+	// storedGoal and storedStats are metadata a session loaded from the
+	// store carried that ACP does not manage itself: the TUI's /goal record
+	// (its /resume offers to continue an unfinished goal) and the /stats
+	// usage counters. persistState writes them back unchanged, so
+	// continuing a TUI session from an editor does not erase them.
+	storedGoal  *session.GoalRecord
+	storedStats *provider.SessionUsage
 	// commandsAnnounced records that a prompt turn has re-sent the available
 	// commands list, the fallback for clients that dropped the initial
 	// announcement (see NewSession).
@@ -139,6 +154,7 @@ func (b *bridge) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 			SessionCapabilities: acpsdk.SessionCapabilities{
 				List:   &acpsdk.SessionListCapabilities{},
 				Resume: &acpsdk.SessionResumeCapabilities{},
+				Close:  &acpsdk.SessionCloseCapabilities{},
 			},
 			PromptCapabilities: acpsdk.PromptCapabilities{
 				Image:           true,
@@ -170,6 +186,20 @@ func (b *bridge) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (
 	return acpsdk.AuthenticateResponse{}, nil
 }
 
+// projectManifest loads the agent manifest of the project a session runs
+// in, which may not be the process's own. A manifest that cannot be loaded
+// is the client's error to see: falling back to the process manifest
+// would run the session under another project's agents, rules and sandbox,
+// possibly wider ones. (A migration that merely cannot be written back is
+// not an error; see config.LoadAgentManifestForProject.)
+func (b *bridge) projectManifest(cwd string) (config.AgentManifest, error) {
+	manifest, err := config.LoadAgentManifestForProject(cwd)
+	if err != nil {
+		return config.AgentManifest{}, acpsdk.NewInternalError(map[string]any{"error": fmt.Sprintf("agent manifest of %s: %v", cwd, err)})
+	}
+	return manifest, nil
+}
+
 func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
 	cwd := params.Cwd
 	if cwd == "" {
@@ -179,11 +209,9 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 		return acpsdk.NewSessionResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "cwd must be an absolute path"})
 	}
 
-	// Sessions may target a different project than the process cwd, so load
-	// that project's manifest; fall back to the process manifest on error.
-	manifest, err := config.LoadAgentManifestForProject(cwd)
+	manifest, err := b.projectManifest(cwd)
 	if err != nil {
-		manifest = b.opts.Manifest
+		return acpsdk.NewSessionResponse{}, err
 	}
 	agentID := manifest.DefaultAgent
 	if agentID == "" {
@@ -205,7 +233,9 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 
 	// Config options describe the mode, model, permission, and thinking
 	// selectors the editor draws in its toolbar. Load fresh config so those
-	// selectors reflect the current model/permission (mirrors Prompt).
+	// selectors reflect the current model/permission (mirrors Prompt), and
+	// give the background model discovery a bounded chance to finish.
+	b.awaitModels(ctx)
 	cfg := b.opts.Cfg
 	if fresh, err := config.LoadFull(); err == nil {
 		cfg = fresh
@@ -237,7 +267,7 @@ func (b *bridge) SetSessionMode(_ context.Context, params acpsdk.SetSessionModeR
 	defer b.mu.Unlock()
 	s, ok := b.sessions[string(params.SessionId)]
 	if !ok {
-		return acpsdk.SetSessionModeResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+		return acpsdk.SetSessionModeResponse{}, errSessionNotFound(params.SessionId)
 	}
 	if _, ok := s.manifest.AgentByID(string(params.ModeId)); !ok {
 		return acpsdk.SetSessionModeResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "unknown mode: " + string(params.ModeId)})
@@ -296,12 +326,19 @@ func (b *bridge) beginRun(ctx context.Context, s *acpSession) (runCtx context.Co
 // next step boundary and this (second) prompt turn ends immediately. Clients
 // that want replace-semantics instead send session/cancel first, which stops
 // the run before the new prompt arrives.
-func (b *bridge) steerRunningTurn(ctx context.Context, s *acpSession, sessionID acpsdk.SessionId, task string) (acpsdk.PromptResponse, error) {
+//
+// shown, when not empty, is what the transcript records instead of task: the
+// "/<skill> args" or $mention the user sent, where task carries the skill's
+// instructions (see shownTask in Prompt).
+func (b *bridge) steerRunningTurn(ctx context.Context, s *acpSession, sessionID acpsdk.SessionId, task, shown string) (acpsdk.PromptResponse, error) {
+	if shown == "" {
+		shown = task
+	}
 	b.mu.Lock()
 	q := s.steering
 	// Record the steering text in the flat transcript now; the structured
 	// history picks it up from the running turn's RunResult.Messages.
-	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: time.Now()})
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: shown, At: time.Now()})
 	b.mu.Unlock()
 	q.Push(task)
 	_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
@@ -321,7 +358,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	}
 	b.mu.Unlock()
 	if !ok {
-		return acpsdk.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+		return acpsdk.PromptResponse{}, errSessionNotFound(params.SessionId)
 	}
 	// Re-announce the commands once per session from inside a prompt turn:
 	// by now the client provably knows the session, so this delivery cannot
@@ -339,11 +376,17 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		b.opts.Providers.SetAPIKeys(cfg.APIKeys)
 	}
 
-	task, images, mentioned, err := promptFromBlocks(params.Prompt, s.mediaDir)
+	content, err := readPromptContent(params.Prompt, s.mediaDir)
 	if err != nil {
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": err.Error()})
 	}
+	task, images, mentioned := content.task(), content.images, content.mentioned
 	trimmedTask := strings.TrimSpace(task)
+	// typed is the text the user typed, without the files the editor
+	// attached. Skill commands and $mentions are parsed from it alone: an
+	// attached file is context for the turn, not the skill's arguments,
+	// and a $word inside it is not a mention.
+	typed := strings.TrimSpace(content.typed)
 	if trimmedTask == "" {
 		return acpsdk.PromptResponse{}, acpsdk.NewInvalidParams(map[string]any{"error": "prompt has no text content"})
 	}
@@ -352,8 +395,14 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		bridge:    b,
 		ctx:       ctx,
 		sessionID: params.SessionId,
-		open:      make(map[string][]acpsdk.ToolCallId),
+		cwd:       s.cwd,
 	}
+	// shownTask, when set, is what the transcript records as the user's
+	// message instead of task: a skill invocation or $mention sends the
+	// skill's instructions to the model, but the transcript (replayed on
+	// session/load) keeps what the user sent. This holds for a prompt that
+	// becomes steering of a running turn too (see steerRunningTurn).
+	shownTask := ""
 
 	if strings.HasPrefix(trimmedTask, "/") {
 		// /plan <task> runs the plan agent on the task as a one-shot turn
@@ -367,6 +416,13 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			b.mu.Unlock()
 			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
 			task = trimmedTask
+			typed = strings.TrimSpace(strings.TrimPrefix(typed, "/plan"))
+			// $skill mentions in the task load those skills, as in any
+			// other prompt.
+			if section, names := skills.MentionInstructions(typed, agent.SkillCatalogFor(s.cwd, cfg)); len(names) > 0 {
+				shownTask = task
+				task += section
+			}
 		} else if rewritten, ok := acpWorkflowRunPrompt(s.cwd, trimmedTask); ok {
 			// /workflows run <name> becomes an ordinary turn instructing the
 			// agent to invoke the saved script, so the model reviews and acts
@@ -393,7 +449,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 				// A goal/run is already in flight: treat "/goal <text>" sent
 				// mid-turn as steering for it (minus the command prefix).
 				return b.steerRunningTurn(ctx, s, params.SessionId,
-					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")))
+					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")), "")
 			}
 			defer finish()
 			turn.ctx = runCtx
@@ -419,7 +475,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 				// A loop/run is already in flight: treat "/loop <text>" sent
 				// mid-turn as steering for it (minus the command prefix).
 				return b.steerRunningTurn(ctx, s, params.SessionId,
-					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/loop")))
+					strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/loop")), "")
 			}
 			defer finish()
 			turn.ctx = runCtx
@@ -430,6 +486,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			return b.handleCompactCommand(ctx, s, &cfg, turn, trimmedTask)
 		}
 		b.mu.Lock()
+		before := sharedSettings(&cfg)
 		reply, modeChanged, handled := handleSlashCommand(s, &cfg, b.opts.Providers, trimmedTask)
 		if !handled {
 			reply, modeChanged, handled = handleExtendedSlashCommand(b, s, &cfg, b.opts.Providers, trimmedTask)
@@ -439,7 +496,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		if handled {
 			options = buildConfigOptions(s, &cfg, b.opts.Providers)
 		}
+		sharedChanged := handled && sharedSettings(&cfg) != before
 		b.mu.Unlock()
+		if sharedChanged {
+			b.syncOtherSessions(params.SessionId, cfg)
+		}
 		if handled {
 			if reply != "" {
 				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
@@ -458,6 +519,24 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			})
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 		}
+		// Not one of Spettro's commands: "/<skill-name> [args]" runs that
+		// skill; anything else goes to the model as typed.
+		if prompt, errText, ok := resolveSkillCommand(s.cwd, cfg, typed); ok {
+			if errText != "" {
+				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+					SessionId: params.SessionId,
+					Update:    acpsdk.UpdateAgentMessageText(errText),
+				})
+				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+			}
+			shownTask = trimmedTask
+			task = content.withContexts(prompt)
+		}
+	} else if section, names := skills.MentionInstructions(typed, agent.SkillCatalogFor(s.cwd, cfg)); len(names) > 0 {
+		// $skill-name mentions pull those skills' instructions into the
+		// prompt (Codex style).
+		shownTask = task
+		task += section
 	}
 
 	// Claim the session's run slot. If a turn is already executing, this
@@ -466,7 +545,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	// agent runs under runCtx, so it is unaffected).
 	runCtx, finish, ok := b.beginRun(ctx, s)
 	if !ok {
-		return b.steerRunningTurn(ctx, s, params.SessionId, task)
+		return b.steerRunningTurn(ctx, s, params.SessionId, task, shownTask)
 	}
 	defer finish()
 	turn.ctx = runCtx
@@ -479,6 +558,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	b.mu.Lock()
 	agentID := s.agentID
 	manifest := s.manifest
+	turn.manifest = manifest
 	steering := s.steering
 	// Seed the session's live permission from the freshly loaded config; a
 	// mid-run /permission or config-option change overwrites it and the
@@ -498,16 +578,14 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return acpsdk.PromptResponse{}, fmt.Errorf("agent not found: %s", agentID)
 	}
 	spec.Permission = cfg.Permission
+	turn.agentID = spec.ID
 	livePermission := func() config.PermissionLevel {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		return s.permission
 	}
 
-	thinking := provider.ThinkingLevel("")
-	if b.opts.Providers.SupportsReasoning(cfg.ActiveProvider, cfg.ActiveModel) {
-		thinking = provider.ThinkingLevel(cfg.ThinkingLevel)
-	}
+	thinking := b.opts.Providers.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 
 	contextWindow := b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel)
 	// Turn-level usage accumulation for the final PromptResponse. The
@@ -522,6 +600,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		ModelName:       func() string { return cfg.ActiveModel },
 		CWD:             s.cwd,
 		MaxTokens:       cfg.TokenBudget,
+		MaxOutputTokens: cfg.MaxOutputTokens,
 		Thinking:        thinking,
 		Ultra:           cfg.UltraActive(),
 		RequiredReads:   mentioned,
@@ -548,7 +627,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			if livePermission() == config.PermissionYOLO {
 				return agent.ShellApprovalAllowOnce, nil
 			}
-			return turn.requestShellApproval(sctx, ar)
+			return turn.requestApproval(sctx, ar)
 		},
 		// The whole form when the client can take one, question by question when
 		// it cannot. See question_form.go for the ladder.
@@ -565,7 +644,10 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		s.history = result.Messages
 	}
 	now := time.Now()
-	s.transcript = append(s.transcript, session.Message{Role: "user", Content: task, At: now})
+	if shownTask == "" {
+		shownTask = task
+	}
+	s.transcript = append(s.transcript, session.Message{Role: "user", Content: shownTask, At: now})
 	if content := strings.TrimSpace(result.Content); content != "" {
 		s.transcript = append(s.transcript, session.Message{Role: "assistant", Content: result.Content, At: now})
 	} else if runErr != nil {
@@ -582,10 +664,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	_ = session.Save(b.opts.GlobalDir, state)
 
 	if runErr != nil {
-		if runCtx.Err() != nil {
-			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
-		}
-		return acpsdk.PromptResponse{}, runErr
+		return promptFailure(runCtx, runErr, turnUsageResponse(turnUsage, result.TokensUsed))
 	}
 
 	// The answer is sent once from the authoritative final content; see
@@ -599,6 +678,21 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		Usage:      turnUsageResponse(turnUsage, result.TokensUsed),
 		Meta:       map[string]any{"spettro.app/tokensUsed": result.TokensUsed},
 	}, nil
+}
+
+// promptFailure turns a failed run into the prompt turn's outcome. Per the
+// ACP spec a cancelled turn is not an error: it ends with the "cancelled"
+// stop reason, whatever error the aborted provider call or tool produced. A
+// reply the provider's content filter stopped ends with "refusal". Any other
+// failure is returned as a JSON-RPC error carrying the runtime's message.
+func promptFailure(runCtx context.Context, runErr error, usage *acpsdk.Usage) (acpsdk.PromptResponse, error) {
+	switch {
+	case runCtx.Err() != nil:
+		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled, Usage: usage}, nil
+	case errors.Is(runErr, agent.ErrContentFiltered):
+		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonRefusal, Usage: usage}, nil
+	}
+	return acpsdk.PromptResponse{}, runErr
 }
 
 // turnUsageResponse converts the turn's accumulated provider usage into the
@@ -626,42 +720,6 @@ func turnUsageResponse(u provider.Usage, estimatedTotal int) *acpsdk.Usage {
 	return out
 }
 
-// requestShellApproval bridges Spettro's shell approval flow to ACP's
-// session/request_permission, letting the editor render its native prompt.
-func (t *turnState) requestShellApproval(ctx context.Context, ar agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
-	title := "Run shell command: " + ar.Command
-	update := acpsdk.ToolCallUpdate{
-		ToolCallId: t.openToolCallID(ar.ToolID),
-		Title:      new(title),
-		Kind:       acpsdk.Ptr(acpsdk.ToolKindExecute),
-		Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
-		RawInput:   map[string]any{"command": ar.Command, "reason": ar.Reason},
-	}
-	resp, err := t.bridge.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
-		SessionId: t.sessionID,
-		ToolCall:  update,
-		Options: []acpsdk.PermissionOption{
-			{OptionId: "allow-once", Name: "Allow once", Kind: acpsdk.PermissionOptionKindAllowOnce},
-			{OptionId: "allow-always", Name: "Always allow", Kind: acpsdk.PermissionOptionKindAllowAlways},
-			{OptionId: "deny", Name: "Deny", Kind: acpsdk.PermissionOptionKindRejectOnce},
-		},
-	})
-	if err != nil {
-		return agent.ShellApprovalDeny, err
-	}
-	if resp.Outcome.Cancelled != nil || resp.Outcome.Selected == nil {
-		return agent.ShellApprovalDeny, nil
-	}
-	switch string(resp.Outcome.Selected.OptionId) {
-	case "allow-once":
-		return agent.ShellApprovalAllowOnce, nil
-	case "allow-always":
-		return agent.ShellApprovalAllowAlways, nil
-	default:
-		return agent.ShellApprovalDeny, nil
-	}
-}
-
 // Agent questions (the ask-user tool) live in question.go: turnState.askUser
 // negotiates the extension / `_meta` / elicitation transports there.
 
@@ -671,8 +729,34 @@ func (b *bridge) Logout(_ context.Context, _ acpsdk.LogoutRequest) (acpsdk.Logou
 	return acpsdk.LogoutResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodLogout)
 }
 
+// CloseSession ends a session: its running turn, if any, is cancelled as by
+// session/cancel (that turn still answers its session/prompt, with the
+// "cancelled" stop reason, and still saves its transcript), and the session
+// is dropped from this connection, freeing its in-memory history. The stored
+// conversation stays on disk, so session/load or session/resume can bring it
+// back later. Closing an unknown session is an error.
 func (b *bridge) CloseSession(_ context.Context, params acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
-	return acpsdk.CloseSessionResponse{}, acpsdk.NewMethodNotFound(acpsdk.AgentMethodSessionClose)
+	b.mu.Lock()
+	s, ok := b.sessions[string(params.SessionId)]
+	var cancel context.CancelFunc
+	if ok {
+		cancel = s.runCancel
+		delete(b.sessions, string(params.SessionId))
+	}
+	b.mu.Unlock()
+	if !ok {
+		return acpsdk.CloseSessionResponse{}, errSessionNotFound(params.SessionId)
+	}
+	if cancel != nil {
+		cancel()
+	}
+	return acpsdk.CloseSessionResponse{}, nil
+}
+
+// errSessionNotFound is the error for a request naming a session this
+// connection does not hold (never created, or closed).
+func errSessionNotFound(sid acpsdk.SessionId) error {
+	return acpsdk.NewInvalidParams(map[string]any{"error": "session not found: " + string(sid)})
 }
 
 // SetSessionConfigOption applies a change made in the editor's toolbar
@@ -706,17 +790,67 @@ func (b *bridge) SetSessionConfigOption(_ context.Context, params acpsdk.SetSess
 	}
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	s, ok := b.sessions[string(sid)]
 	if !ok {
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", sid)
+		b.mu.Unlock()
+		return acpsdk.SetSessionConfigOptionResponse{}, errSessionNotFound(sid)
 	}
+	before := sharedSettings(&cfg)
 	if err := b.applyConfigOption(s, &cfg, configID, value); err != nil {
+		b.mu.Unlock()
 		return acpsdk.SetSessionConfigOptionResponse{}, err
 	}
-	return acpsdk.SetSessionConfigOptionResponse{
-		ConfigOptions: buildConfigOptions(s, &cfg, b.opts.Providers),
-	}, nil
+	options := buildConfigOptions(s, &cfg, b.opts.Providers)
+	sharedChanged := sharedSettings(&cfg) != before
+	b.mu.Unlock()
+	if sharedChanged {
+		b.syncOtherSessions(sid, cfg)
+	}
+	return acpsdk.SetSessionConfigOptionResponse{ConfigOptions: options}, nil
+}
+
+// sharedSettings fingerprints the settings every session on the connection
+// shares. Only the mode is per session; the model, permission level,
+// thinking level and Ultra live in the user config, so a change made from
+// one session applies to all of them (and to a TUI running alongside).
+func sharedSettings(cfg *config.UserConfig) string {
+	return strings.Join([]string{
+		cfg.ActiveProvider, cfg.ActiveModel, string(cfg.Permission),
+		cfg.ThinkingLevel, strconv.FormatBool(cfg.Ultra),
+	}, "\x00")
+}
+
+// syncOtherSessions tells every session on this connection except the one
+// that made the change about a change to the shared settings: each gets a
+// config_option_update so the editor's selectors in every open session show
+// the new model, permission and thinking level, and each session's live
+// permission level moves to the new one, so a run in progress there applies
+// it at its next approval decision exactly as its next turn would.
+func (b *bridge) syncOtherSessions(except acpsdk.SessionId, cfg config.UserConfig) {
+	type update struct {
+		sid     acpsdk.SessionId
+		options []acpsdk.SessionConfigOption
+	}
+	b.mu.Lock()
+	var updates []update
+	for id, s := range b.sessions {
+		if id == string(except) {
+			continue
+		}
+		if cfg.Permission != "" {
+			s.permission = cfg.Permission
+		}
+		updates = append(updates, update{acpsdk.SessionId(id), buildConfigOptions(s, &cfg, b.opts.Providers)})
+	}
+	b.mu.Unlock()
+	for _, u := range updates {
+		_ = b.conn.SessionUpdate(context.Background(), acpsdk.SessionNotification{
+			SessionId: u.sid,
+			Update: acpsdk.SessionUpdate{ConfigOptionUpdate: &acpsdk.SessionConfigOptionUpdate{
+				ConfigOptions: u.options,
+			}},
+		})
+	}
 }
 
 // ensureMediaDir creates the session's media directory for decoded image

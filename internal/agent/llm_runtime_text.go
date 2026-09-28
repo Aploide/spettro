@@ -1,10 +1,13 @@
 package agent
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
+
+	agentprompts "spettro/agents"
+	"spettro/internal/config"
 )
 
 func stripThinkTags(content string) (main, thinking string) {
@@ -45,21 +48,70 @@ func stripFrontmatter(content string) string {
 	return strings.TrimSpace(after)
 }
 
+// promptOverrideDir is where a project overrides a built-in prompt without
+// shipping its own manifest: <cwd>/.spettro/agents/<name>.md.
+const promptOverrideDir = ".spettro"
+
+// loadPromptOrFallback resolves an agent's system prompt from its manifest
+// prompt_file, in order of precedence:
+//
+//  1. an absolute path, read directly;
+//  2. a project override at <cwd>/.spettro/<relative>;
+//  3. the project file at <cwd>/<relative>, but for a built-in prompt only when
+//     the project ships its own spettro.agents.toml (which is what points at
+//     it) — otherwise an unrelated agents/*.md in the user's repo (common in
+//     projects that build AI products) would silently replace Spettro's
+//     prompt;
+//  4. the built-in prompt embedded in the binary (agents/*.md);
+//  5. fallback (typically the agent's one-line description).
 func loadPromptOrFallback(cwd, relative, fallback string) string {
-	if strings.TrimSpace(cwd) != "" && strings.TrimSpace(relative) != "" {
-		p := filepath.Join(cwd, relative)
+	relative = strings.TrimSpace(relative)
+	if relative == "" {
+		return fallback
+	}
+	embedded, builtin := agentprompts.Prompt(relative)
+	var candidates []string
+	switch {
+	case filepath.IsAbs(relative):
+		candidates = append(candidates, relative)
+	case strings.TrimSpace(cwd) != "":
+		dirs := []string{cwd}
+		// An agent worktree has no .spettro/ of its own (it is never
+		// checked out): the project's overrides are in the main checkout.
+		if main, ok := mainCheckoutPath(cwd); ok {
+			dirs = append(dirs, main)
+		}
+		for _, d := range dirs {
+			candidates = append(candidates, filepath.Join(d, promptOverrideDir, relative))
+		}
+		for _, d := range dirs {
+			if !builtin || fileExists(filepath.Join(d, config.AgentManifestFilename)) {
+				candidates = append(candidates, filepath.Join(d, relative))
+			}
+		}
+	}
+	for _, p := range candidates {
 		if data, err := os.ReadFile(p); err == nil {
-			text := strings.TrimSpace(string(data))
-			if text != "" {
+			if text := strings.TrimSpace(string(data)); text != "" {
 				return stripFrontmatter(text)
 			}
 		}
 	}
+	if text := strings.TrimSpace(embedded); builtin && text != "" {
+		return stripFrontmatter(text)
+	}
 	return fallback
 }
 
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
+// sliceLines returns lines start..end (1-based, inclusive; end < 1 means to the
+// end) of content in file-read's numbered format.
 func sliceLines(content string, start, end int) string {
-	lines := strings.Split(content, "\n")
+	lines := splitFileLines(content)
 	if start < 1 {
 		start = 1
 	}
@@ -71,16 +123,23 @@ func sliceLines(content string, start, end int) string {
 	}
 	var b strings.Builder
 	for i := start - 1; i < end; i++ {
-		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, lines[i]))
+		b.WriteString(formatNumberedLine(i+1, lines[i]))
 	}
 	return b.String()
 }
 
+// truncate keeps at most max bytes of s and marks the cut. The cut backs up
+// to a rune boundary, so the result stays valid UTF-8: it ends up in tool
+// traces that ACP forwards as JSON, and in hook input.
 func truncate(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
-	return s[:max] + "\n... (truncated)"
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n... (truncated)"
 }
 
 func emptyIfBlank(s string) string {
@@ -113,7 +172,7 @@ func tailTrimHistory(history string, maxBytes int) string {
 
 func isMajorOperationTool(name string) bool {
 	switch name {
-	case "file-write", "file-edit", "multi-edit", "shell-exec", "bash", "bash-output", "agent", "ultra", "enter-worktree", "exit-worktree", "grok-image", "grok-video":
+	case "file-write", "file-edit", "bash", "agent", "ultra", "enter-worktree", "exit-worktree":
 		return true
 	default:
 		return false

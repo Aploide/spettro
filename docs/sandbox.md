@@ -19,9 +19,9 @@ A coding agent executes shell commands, writes files, and sometimes makes networ
 
 | Layer | Confined by | Coverage |
 |-------|-------------|----------|
-| Shell commands | OS kernel | Every command spawned through `shell-exec`/`bash` is wrapped. |
+| Shell commands | OS kernel | Every command spawned through `bash` (or `pty-start`) is wrapped. |
 | File tools | In-process check | `file-write`/`file-edit` honor the same write scope, so `read-only` cannot be bypassed by writing through a file tool instead of a shell redirect. |
-| Spettro itself | OS kernel (write-only backstop) | The parent process cannot write outside the workspace, config/project directories, and temp dirs. Reads and network stay open so the app can talk to the LLM API and read skills. |
+| Spettro itself | OS kernel (write-only backstop) | The parent process cannot write outside the workspace, config/project directories, and temp dirs. Under `sudo` the directory that holds the API keys (the invoking user's `~/.spettro`) is writable too, since keys load after the confinement. Reads and network stay open so the app can talk to the LLM API and read skills. |
 
 The model **cannot** inspect or change the policy. There is no sandbox tool exposed, no prompt hint, and blocked operations surface as ordinary command failures.
 

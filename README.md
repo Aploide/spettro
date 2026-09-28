@@ -42,6 +42,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Parallel native tool-call spawning of sub-agents
 - Permission policies: `ask-first`, `restricted`, `yolo`
 - Live tool traces in planning/coding runs
+- [Built-in tools](docs/tools.md) — one tool per job (`bash`, `file-edit`, `grep`, `glob`, `todo-write`, ...); retired duplicate names keep working as hidden aliases
 - [Dark, light and auto themes](docs/theme.md) — `/theme`, terminal-background detection, `SPETTRO_THEME`
 - Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
@@ -101,7 +102,7 @@ Spettro commands are entered with a leading `/`.
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
 - `/mcp <list|read|auth>` manage MCP resources and auth tokens
-- `/skill <list|install|info|uninstall|enable|disable|where>` manage Agent Skills (Claude Code / OpenAI / Anthropic format)
+- `/skills` list Agent Skills; `/<skill-name> [args]` or `$skill-name` runs one; `/skill <install|info|uninstall|enable|disable|where|reload>` manages them (Claude Code / Codex `SKILL.md` format, their folders are read too)
 - `/hooks` show effective runtime hooks
 - `/compact [focus]` summarize conversation history
 - `/compact auto <status|on|off>` configure auto-compact

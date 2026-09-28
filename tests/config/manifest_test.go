@@ -37,9 +37,15 @@ func TestDefaultAgentManifestIsValid(t *testing.T) {
 	if !ok {
 		t.Fatal("expected default manifest to include coding agent")
 	}
-	for _, toolID := range []string{"file-write", "file-edit", "shell-exec", "bash", "ls"} {
+	for _, toolID := range []string{"file-write", "file-edit", "bash", "glob", "grep", "todo-write"} {
 		if !slices.Contains(coding.AllowedTools, toolID) {
 			t.Fatalf("coding agent should allow %q", toolID)
+		}
+	}
+	// v12 folded the duplicates: their names are aliases, never grants.
+	for _, toolID := range []string{"shell-exec", "ls", "multi-edit", "repo-search", "task-create", "grok-image"} {
+		if slices.Contains(coding.AllowedTools, toolID) {
+			t.Fatalf("coding agent should not list retired tool %q", toolID)
 		}
 	}
 	for _, action := range []string{"write", "execute", "git"} {
@@ -364,7 +370,7 @@ enabled = true
 	if !changed {
 		t.Fatal("expected migration change flag for v1 manifest")
 	}
-	if m.Version != 11 {
-		t.Fatalf("expected normalized version 11, got %d", m.Version)
+	if m.Version != 14 {
+		t.Fatalf("expected normalized version 14, got %d", m.Version)
 	}
 }

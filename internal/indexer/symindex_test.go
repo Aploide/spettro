@@ -131,6 +131,11 @@ func TestMtimeInvalidationWithoutExplicitCall(t *testing.T) {
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)
 	}
+	// An edit made outside Spettro is seen once the last sync is older
+	// than syncTTL.
+	x.mu.Lock()
+	x.lastSync = time.Now().Add(-syncTTL)
+	x.mu.Unlock()
 	if syms := x.Lookup(context.Background(), "NewServer"); len(syms) != 0 {
 		t.Fatalf("stale symbol survived mtime change: %+v", syms)
 	}
@@ -138,13 +143,19 @@ func TestMtimeInvalidationWithoutExplicitCall(t *testing.T) {
 
 func TestCachePersistsAcrossInstances(t *testing.T) {
 	root := fixtureRepo(t)
-	cache := filepath.Join(root, ".spettro", "cache", "symbols.json")
+	cache := filepath.Join(root, ".spettro", "cache", "symbols.idx")
 	x := NewSymbolIndex(root, cache)
 	x.Lookup(context.Background(), "Server")
+	x.Flush()
 	if _, err := os.Stat(cache); err != nil {
 		t.Fatalf("cache not written: %v", err)
 	}
 	y := NewSymbolIndex(root, cache)
+	// The second index may still be syncing or rewriting the cache in the
+	// background when Lookup returns; without waiting for it, t.TempDir's
+	// cleanup raced that write and failed with "directory not empty" in
+	// about a third of the runs.
+	t.Cleanup(y.Flush)
 	if syms := y.Lookup(context.Background(), "NewServer"); len(syms) == 0 {
 		t.Fatal("cached index returned nothing")
 	}

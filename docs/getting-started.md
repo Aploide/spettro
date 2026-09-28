@@ -8,6 +8,9 @@ This guide focuses on the daily usage flow. For command details, see [`commands.
 ./bin/spettro
 ```
 
+`spettro --version` (also `-v` or `spettro version`) prints the version and
+exits.
+
 On first launch in a folder, Spettro shows a trust dialog:
 
 - `Yes, trust this session`

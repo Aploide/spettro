@@ -539,3 +539,35 @@ func TestWorkflowRunDirIsSeparateFromSavedScripts(t *testing.T) {
 		t.Fatalf("run transcripts land inside the saved-workflow folder: %q", got)
 	}
 }
+
+// script_path is resolved like every other tool path: a relative path is
+// relative to the agent's workspace (not spettro's process directory, which
+// differs under ACP), and a path outside the workspace, the session's run
+// directories and the saved-workflow folders is refused.
+func TestResolveWorkflowScriptPath(t *testing.T) {
+	ws := t.TempDir()
+	sessions := t.TempDir()
+	runDir := filepath.Join(sessions, "sess-1", "workflows", "wf_1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "export const meta = {name: 'x'}\nreturn 1\n"
+	for _, p := range []string{filepath.Join(ws, "wf.js"), filepath.Join(runDir, "script.js")} {
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(t.TempDir(), "secret.js")
+	if err := os.WriteFile(outside, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &toolRuntime{cwd: ws, sessionDir: filepath.Join(sessions, "sess-2")}
+	for _, ok := range []string{"wf.js", filepath.Join(runDir, "script.js")} {
+		if script, _, err := rt.resolveWorkflowScript(workflowArgs{ScriptPath: ok}); err != nil || script != src {
+			t.Errorf("script_path %q: script=%q err=%v", ok, script, err)
+		}
+	}
+	if _, _, err := rt.resolveWorkflowScript(workflowArgs{ScriptPath: outside}); err == nil {
+		t.Errorf("script_path outside every allowed root was read")
+	}
+}

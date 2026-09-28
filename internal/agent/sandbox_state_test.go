@@ -130,7 +130,7 @@ func TestRunShellToolEnforcesSandboxEndToEnd(t *testing.T) {
 		allowedShell: map[string]struct{}{},
 	}
 	args, _ := json.Marshal(map[string]string{"command": "echo blocked > inside.txt"})
-	out, err := r.runShellTool(context.Background(), "shell-exec", args, "shell-exec")
+	out, err := r.runShellTool(context.Background(), "bash", args, "bash")
 	if err == nil {
 		t.Fatal("write inside workspace must fail under read-only sandbox")
 	}
@@ -142,7 +142,7 @@ func TestRunShellToolEnforcesSandboxEndToEnd(t *testing.T) {
 	}
 
 	args, _ = json.Marshal(map[string]string{"command": "cat /etc/hosts > /dev/null && echo ok"})
-	out, err = r.runShellTool(context.Background(), "shell-exec", args, "shell-exec")
+	out, err = r.runShellTool(context.Background(), "bash", args, "bash")
 	if err != nil || !strings.Contains(out, "ok") {
 		t.Fatalf("read-only command should still succeed: %v / %q", err, out)
 	}

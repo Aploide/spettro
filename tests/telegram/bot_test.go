@@ -34,12 +34,7 @@ type fakeBot struct {
 	// inspect what the relay tried to deliver.
 	sendMu sync.Mutex
 	sent   []sentMessage
-
-	// mediaMu / media records every multipart upload (sendPhoto,
-	// sendVideo, sendDocument) so assertions can inspect routing and
-	// payload bytes.
-	mediaMu sync.Mutex
-	media   []sentMedia
+	docs   []sentDocument
 
 	// stateMu guards everything below: tests mutate canned errors at
 	// runtime while the HTTP handler is reading them concurrently.
@@ -49,25 +44,20 @@ type fakeBot struct {
 	sendErr          string
 	getUpdatesErr    string
 	getMeErr         string
-	mediaErr         string
 	getUpdatesCalled atomic.Int64
+}
+
+// sentDocument is one sendDocument upload.
+type sentDocument struct {
+	ChatID   string
+	Filename string
+	Caption  string
+	Data     []byte
 }
 
 type sentMessage struct {
 	ChatID int64  `json:"chat_id"`
 	Text   string `json:"text"`
-}
-
-// sentMedia captures one multipart upload — what endpoint it hit, which
-// form field carried the file, and a copy of the bytes so assertions can
-// confirm the right file was uploaded.
-type sentMedia struct {
-	Method   string
-	Field    string
-	ChatID   int64
-	Caption  string
-	Filename string
-	Body     []byte
 }
 
 func newFakeBot(t *testing.T) *fakeBot {
@@ -96,15 +86,13 @@ func (f *fakeBot) setError(kind, msg string) {
 		f.getUpdatesErr = msg
 	case "sendMessage":
 		f.sendErr = msg
-	case "sendMedia":
-		f.mediaErr = msg
 	}
 }
 
-func (f *fakeBot) snapState() (getMeErr, getUpdatesErr, sendErr, mediaErr string, getMeResp telegram.User, deleteOK bool) {
+func (f *fakeBot) snapState() (getMeErr, getUpdatesErr, sendErr string, getMeResp telegram.User, deleteOK bool) {
 	f.stateMu.RLock()
 	defer f.stateMu.RUnlock()
-	return f.getMeErr, f.getUpdatesErr, f.sendErr, f.mediaErr, f.getMeResp, f.deleteWebhookOK
+	return f.getMeErr, f.getUpdatesErr, f.sendErr, f.getMeResp, f.deleteWebhookOK
 }
 
 func (f *fakeBot) handle(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +104,7 @@ func (f *fakeBot) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	method := parts[1]
-	getMeErr, getUpdatesErr, sendErr, mediaErr, getMeResp, deleteOK := f.snapState()
+	getMeErr, getUpdatesErr, sendErr, getMeResp, deleteOK := f.snapState()
 	switch method {
 	case "getMe":
 		if getMeErr != "" {
@@ -163,64 +151,25 @@ func (f *fakeBot) handle(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, msg)
 		f.sendMu.Unlock()
 		writeAPI(w, true, "", telegram.Message{MessageID: 1, Date: time.Now().Unix(), Text: msg.Text})
-	case "sendPhoto", "sendVideo", "sendDocument":
-		if mediaErr != "" {
-			writeAPI(w, false, mediaErr, nil)
+	case "sendDocument":
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			writeAPI(w, false, "bad multipart: "+err.Error(), nil)
 			return
 		}
-		entry, err := readMultipartMedia(r, method)
+		file, header, err := r.FormFile("document")
 		if err != nil {
-			writeAPI(w, false, err.Error(), nil)
+			writeAPI(w, false, "no document: "+err.Error(), nil)
 			return
 		}
-		f.mediaMu.Lock()
-		f.media = append(f.media, entry)
-		f.mediaMu.Unlock()
-		writeAPI(w, true, "", telegram.Message{MessageID: 1, Date: time.Now().Unix()})
+		data, _ := io.ReadAll(file)
+		_ = file.Close()
+		f.sendMu.Lock()
+		f.docs = append(f.docs, sentDocument{ChatID: r.FormValue("chat_id"), Filename: header.Filename, Caption: r.FormValue("caption"), Data: data})
+		f.sendMu.Unlock()
+		writeAPI(w, true, "", telegram.Message{MessageID: 2, Date: time.Now().Unix()})
 	default:
 		writeAPI(w, false, "method "+method+" not implemented", nil)
 	}
-}
-
-// readMultipartMedia parses a Telegram multipart upload (sendPhoto /
-// sendVideo / sendDocument) into a sentMedia entry. The expected file
-// field name matches the endpoint (photo/video/document).
-func readMultipartMedia(r *http.Request, method string) (sentMedia, error) {
-	var entry sentMedia
-	entry.Method = method
-	expectedField := ""
-	switch method {
-	case "sendPhoto":
-		expectedField = "photo"
-	case "sendVideo":
-		expectedField = "video"
-	case "sendDocument":
-		expectedField = "document"
-	}
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		return entry, fmt.Errorf("parse multipart: %w", err)
-	}
-	if v := r.FormValue("chat_id"); v != "" {
-		_, _ = fmt.Sscanf(v, "%d", &entry.ChatID)
-	}
-	entry.Caption = r.FormValue("caption")
-	headers := r.MultipartForm.File[expectedField]
-	if len(headers) == 0 {
-		return entry, fmt.Errorf("missing form file field %q", expectedField)
-	}
-	entry.Field = expectedField
-	entry.Filename = headers[0].Filename
-	f, err := headers[0].Open()
-	if err != nil {
-		return entry, fmt.Errorf("open form file: %w", err)
-	}
-	defer f.Close()
-	body, err := io.ReadAll(f)
-	if err != nil {
-		return entry, fmt.Errorf("read form file: %w", err)
-	}
-	entry.Body = body
-	return entry, nil
 }
 
 func (f *fakeBot) pushUpdate(u telegram.Update) {
@@ -229,31 +178,16 @@ func (f *fakeBot) pushUpdate(u telegram.Update) {
 	f.updatesMu.Unlock()
 }
 
+func (f *fakeBot) sentDocuments() []sentDocument {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	return append([]sentDocument(nil), f.docs...)
+}
+
 func (f *fakeBot) sentMessages() []sentMessage {
 	f.sendMu.Lock()
 	defer f.sendMu.Unlock()
 	return append([]sentMessage(nil), f.sent...)
-}
-
-// sentMediaCalls returns a copy of every multipart upload recorded so far.
-// Tests use it to assert routing and payload bytes for SendMediaFile.
-func (f *fakeBot) sentMediaCalls() []sentMedia {
-	f.mediaMu.Lock()
-	defer f.mediaMu.Unlock()
-	out := make([]sentMedia, len(f.media))
-	for i, m := range f.media {
-		body := make([]byte, len(m.Body))
-		copy(body, m.Body)
-		out[i] = sentMedia{
-			Method:   m.Method,
-			Field:    m.Field,
-			ChatID:   m.ChatID,
-			Caption:  m.Caption,
-			Filename: m.Filename,
-			Body:     body,
-		}
-	}
-	return out
 }
 
 func writeAPI(w http.ResponseWriter, ok bool, desc string, result any) {

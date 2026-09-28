@@ -10,8 +10,28 @@ import (
 
 	"spettro/internal/config"
 	"spettro/internal/session"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
+
+// resetConversationState drops what belongs to the conversation on screen
+// and not to the one that replaces it, on /clear and /resume:
+//
+//   - the structured carried history: a resumed session's first turn
+//     rebuilds context from the loaded transcript instead;
+//   - the context gauge (contextTokens, compactWarningLevel): kept, a long
+//     conversation's occupancy would block the first prompt of a short
+//     resumed one with "context limit reached";
+//   - a pending plan and plan-edit mode: the next prompt must not run or
+//     edit the previous conversation's plan.
+func (m *Model) resetConversationState() {
+	m.convHistory = nil
+	m.autoCompactNoopLen = 0
+	m.contextTokens = 0
+	m.compactWarningLevel = 0
+	m.pendingPlan = ""
+	m.planEditing = false
+}
 
 func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 	return session.Load(m.store.GlobalDir, sel.ID)
@@ -19,6 +39,7 @@ func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 
 func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	m.activityFeed = nil
+	m.activityDropped = 0
 	m.parallelAgents = nil
 	m.workflow = nil
 	m.recentApprovals = nil
@@ -43,7 +64,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 			}
 			toolID := strings.TrimSpace(ev.ToolID)
 			if toolID == "" {
-				toolID = "shell-exec"
+				toolID = "bash"
 			}
 			segment := strings.TrimSpace(ev.CommandSegment)
 			if segment == "" {
@@ -73,10 +94,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 			if name == "" {
 				name = "tool"
 			}
-			title := formatToolLabel(name, ev.ToolArgs)
-			if ev.Status == "running" {
-				title = formatRunningLabel(name, ev.ToolArgs)
-			}
+			title := m.toolLabel(name, ev.ToolArgs, ev.Status == "running")
 			bodyParts := []string{}
 			if summary := summarizeToolArgs(name, ev.ToolArgs); summary != "" {
 				bodyParts = append(bodyParts, summary)
@@ -175,10 +193,10 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.parallelAgents = nil
 			m.workflow = nil
 			m.activityFeed = nil
-			// The structured carried history belongs to the previous in-memory
-			// conversation; drop it so the resumed session's first turn rebuilds
-			// context from the loaded transcript instead.
-			m.convHistory = nil
+			m.activityDropped = 0
+			// The carried history, context gauge and pending plan belong to
+			// the previous conversation (see resetConversationState).
+			m.resetConversationState()
 			m.messages = make([]ChatMessage, 0, len(state.Messages))
 			for _, cm := range state.Messages {
 				m.messages = append(m.messages, ChatMessage{
@@ -243,22 +261,27 @@ func (m *Model) ensureResumeWindow() {
 	}
 }
 
+// resumeMaxRows is how many sessions the resume dialog shows at once, the
+// page size of pgup/pgdn. It comes from the same layout viewResume draws
+// with, so paging moves by exactly what is on screen.
 func (m Model) resumeMaxRows() int {
-	maxRows := max(m.height-12, 4)
-	return maxRows
+	width := resumeDialogWidth(m.width)
+	d := m.resumeDialog(width)
+	_, visible := d.layout(dialogInnerWidth(width), m.height)
+	return visible
 }
 
-func (m Model) viewResume() string {
-	mc := m.currentColor()
-	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation")
-	dialogWidth := 72
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
+// resumeDialogWidth is the resume dialog's width on a terminal width cells
+// wide: 72, or what the terminal leaves with a two-cell margin a side.
+func resumeDialogWidth(width int) int {
+	return max(min(72, width-4), 30)
+}
 
+// resumeDialog builds the resume dialog, dialogWidth cells wide: one row per
+// saved session (its start time and first prompt).
+func (m Model) resumeDialog(dialogWidth int) listDialog {
+	mc := m.currentColor()
+	innerW := dialogInnerWidth(dialogWidth)
 	var rows []string
 	for i, s := range m.resumeItems {
 		isSelected := i == m.resumeCursor
@@ -267,7 +290,9 @@ func (m Model) viewResume() string {
 		if preview == "" {
 			preview = "(empty)"
 		}
-		preview = strings.ReplaceAll(preview, "\n", " ")
+		// One row per session: folded onto one line and cut by display cells
+		// (a rune count lets CJK text wrap the row and grow the dialog).
+		preview = termtext.SingleLine(preview)
 		var prefix string
 		var timeStyle, previewStyle lipgloss.Style
 		if isSelected {
@@ -279,43 +304,30 @@ func (m Model) viewResume() string {
 			timeStyle = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 			previewStyle = lipgloss.NewStyle().Foreground(theme.Current().TextDim)
 		}
-		prefixWidth := lipgloss.Width(prefix)
-		timeWidth := lipgloss.Width(timeStr) + 2
-		previewBudget := max(8, dialogWidth-prefixWidth-timeWidth-6)
-		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(truncateLabel(preview, previewBudget)))
+		previewBudget := max(innerW-lipgloss.Width(prefix)-lipgloss.Width(timeStr)-2, 1)
+		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(termtext.Fit(preview, previewBudget)))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, styleMuted.Render("  no saved conversations"))
 	}
-
-	hint := styleMuted.Render("↑↓ navigate  pgup/pgdn jump  enter load  esc close")
-	maxRows := m.resumeMaxRows()
-	if len(rows) > maxRows {
-		start := max(m.resumeScroll, 0)
-		if start+maxRows > len(rows) {
-			start = len(rows) - maxRows
-		}
-		if start < 0 {
-			start = 0
-		}
-		rows = rows[start:min(len(rows), start+maxRows)]
+	return listDialog{
+		title:  lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation"),
+		rows:   rows,
+		hints:  []string{"↑↓ navigate", "pgup/pgdn jump", "enter load", "esc close"},
+		border: mc,
 	}
+}
 
-	dialog := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
-			title, "",
-			strings.Join(rows, "\n"),
-			"",
-			hint,
-		))
-
+func (m Model) viewResume() string {
+	width := resumeDialogWidth(m.width)
+	d := m.resumeDialog(width)
+	_, visible := d.layout(dialogInnerWidth(width), m.height)
+	// The stored scroll is kept by the key handler; after a resize it may
+	// no longer show the cursor, so the window is pulled back over it.
+	start := min(max(m.resumeScroll, m.resumeCursor-visible+1), m.resumeCursor)
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
-		dialog,
+		d.view(width, m.height, max(start, 0)),
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
 	)
@@ -360,18 +372,43 @@ func (m Model) updateTrust(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// viewTrust is the first-run dialog asking whether to trust the folder.
+//
+// It is the first screen a new user sees, so it has to fit whatever size the
+// terminal starts at. Every text is wrapped to the dialog's inner width here
+// (the path in full: it is what the user is deciding about), so the height
+// is known; when the spaced layout is taller than the terminal, the blank
+// rows and the vertical padding are dropped, and MaxHeight guarantees the
+// frame never grows past the bottom even then.
 func (m Model) viewTrust() string {
 	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ confirm folder trust")
 	pathStyle := lipgloss.NewStyle().Foreground(theme.Current().Text).Bold(true)
 	warnStyle := lipgloss.NewStyle().Foreground(theme.Current().WarningSoft)
 
+	dialogWidth := 64
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+	// The box is dialogWidth+2 wide including its border (2) and horizontal
+	// padding (4); texts are indented two more cells inside it.
+	textW := dialogWidth - 4 - 2
+	indented := func(text string, style lipgloss.Style) []string {
+		var out []string
+		for _, line := range termtext.Wrap(text, textW) {
+			out = append(out, style.Render("  "+line))
+		}
+		return out
+	}
+
 	options := []string{
 		"Yes, trust this session",
 		"Yes, and remember this folder",
 		"No, exit",
 	}
-
 	var optLines []string
 	for i, opt := range options {
 		var prefix string
@@ -383,40 +420,51 @@ func (m Model) viewTrust() string {
 			prefix = "  "
 			style = lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
 		}
-		optLines = append(optLines, prefix+style.Render(fmt.Sprintf("%d  %s", i+1, opt)))
+		optLines = append(optLines, prefix+style.Render(termtext.Fit(fmt.Sprintf("%d  %s", i+1, opt), textW)))
 	}
 
-	inner := lipgloss.JoinVertical(lipgloss.Left,
-		title, "",
-		pathStyle.Render("  "+m.cwd),
-		"",
-		warnStyle.Render("  Spettro may read files and run commands in this folder."),
-		styleMuted.Render("  Only trust folders you own and control."),
-		"",
-		strings.Join(optLines, "\n"),
-		"",
-		styleMuted.Render("  ↑↓ navigate  enter confirm  1/2/3 direct select"),
-	)
-
-	dialogWidth := 64
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
+	sections := [][]string{
+		{title},
+		indented(termtext.EscapeControls(m.cwd), pathStyle),
+		append(indented("Spettro may read files and run commands in this folder.", warnStyle),
+			indented("Only trust folders you own and control.", styleMuted)...),
+		optLines,
+		indented("↑↓ navigate  enter confirm  1/2/3 direct select", styleMuted),
 	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
+	spacedHeight := 2 + 2 + len(sections) - 1 // border, padding, the blank rows between sections
+	for _, section := range sections {
+		spacedHeight += len(section)
+	}
+	spaced := spacedHeight <= m.height
+	if compactHeight := spacedHeight - 2 - (len(sections) - 1); compactHeight > m.height {
+		// Not even the compact form fits: the path, the only text of
+		// unbounded length, gives way to one row showing its end, so the
+		// options stay on screen.
+		sections[1] = []string{pathStyle.Render("  " + termtext.FitLeft(termtext.EscapeControls(m.cwd), textW))}
 	}
 
-	dialog := lipgloss.NewStyle().
+	var lines []string
+	for i, section := range sections {
+		if spaced && i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, section...)
+	}
+	style := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(inner)
+		Width(dialogWidth + 2)
+	if spaced {
+		style = style.Padding(1, 2)
+	} else {
+		style = style.Padding(0, 2)
+	}
+	dialog := style.Render(strings.Join(lines, "\n"))
 
-	return lipgloss.Place(m.width, m.height,
+	return lipgloss.NewStyle().MaxHeight(max(m.height, 1)).Render(lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Foreground(theme.Current().Rule)),
-	)
+	))
 }

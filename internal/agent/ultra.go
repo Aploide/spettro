@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -281,6 +282,11 @@ func (r *toolRuntime) runUltra(ctx context.Context, rawArgs json.RawMessage) (st
 	// every worktree instead of leaking them.
 	if workspaces != nil {
 		mergeCtx := context.WithoutCancel(ctx)
+		if ctx.Err() == nil {
+			// Merges write into the main checkout, which the members' own
+			// snapshots (taken in their worktrees) never covered.
+			r.checkpointStep(ultraToolID)
+		}
 		for i := range results {
 			// A cancelled swarm must not merge anything behind the user's
 			// back: preserve whatever work exists and drop empty worktrees.
@@ -310,9 +316,13 @@ func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpe
 		ModelName:       r.modelName,
 		CWD:             cwd,
 		MaxTokens:       r.maxTokens,
-		Thinking:        r.thinkingLevel,
+		MaxOutputTokens: r.maxOutputTokens,
+		Thinking:        r.subAgentThinking(),
+		Compact:         r.compactCfg,
+		parentSnapshot:  r.sessionCtx,
+		parentCWD:       r.cwd,
 		ToolCallback:    r.toolCallback,
-		Checkpoint:      r.checkpoint,
+		Checkpoint:      r.subagentCheckpoint(cwd),
 		ShellApproval:   r.shellApproval,
 		AskUser:         r.askUser,
 		Manifest:        r.manifest,
@@ -333,11 +343,19 @@ func (r *toolRuntime) runUltraSubagent(ctx context.Context, spec config.AgentSpe
 			return strings.TrimSpace(result.Content), nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || !provider.Classify(err).Transient() {
+		if ctx.Err() != nil || !rerunSubagentAfter(err) {
 			break
 		}
 	}
 	return "", lastErr
+}
+
+// rerunSubagentAfter reports whether a sub-agent run that failed with err is
+// worth starting over: a transient provider failure, except a rate limit the
+// provider manager already waited out for minutes (a re-run would restart
+// the work from scratch only to queue on the same bucket).
+func rerunSubagentAfter(err error) bool {
+	return provider.Classify(err).Transient() && !errors.Is(err, provider.ErrRateLimitRetriesExhausted)
 }
 
 // ultraSleep waits for d or until ctx is cancelled; false means cancelled.

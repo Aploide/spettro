@@ -1,18 +1,17 @@
 package tui
 
 import (
-	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"image/color"
-	"io"
 	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/diff"
 	"spettro/internal/session"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
@@ -101,12 +100,42 @@ func (m *Model) autoSave() {
 // longer persists the session: saving is decoupled (see autoSaveDebounced /
 // autoSave) so that scroll, tick, and banner-only refreshes do not trigger a
 // full session rewrite.
+//
+// The viewport only follows new output while it is already pinned to the
+// bottom: a user who scrolled up to read earlier output keeps their position
+// while tokens and tool traces stream in, and following resumes once they
+// scroll back down (or send a new prompt, see scrollToBottom).
 func (m *Model) refreshViewport() {
-	m.vp.SetContent(m.renderMessages())
+	follow := m.vp.AtBottom()
+	// A view scrolled up keeps showing the same content, not the same row
+	// number: re-rendered blocks above it (a resize or the side panel
+	// rewrapping the transcript, ctrl+o, a budgeted render filling in) change
+	// how many rows lie above it.
+	var anchor viewAnchor
+	if !follow {
+		anchor = m.vp.topAnchor()
+	}
+	m.vp.SetBlocks(m.renderTranscript(renderFrameBudget))
+	m.vp.restoreAnchor(anchor, m.paneWidth())
 	if len(m.messages) == 0 {
 		// A fresh session is nothing but the logo and the hint; scrolling to
 		// the bottom of that would crop the art from the top on a short
 		// terminal, which is exactly the screen that should look welcoming.
+		m.vp.GotoTop()
+		return
+	}
+	if follow {
+		m.vp.GotoBottom()
+	}
+}
+
+// scrollToBottom re-renders and unconditionally jumps to the latest output.
+// Used when the user submits input, which should always bring the
+// conversation back into view.
+func (m *Model) scrollToBottom() {
+	m.vp.SetBlocks(m.renderTranscript(renderFrameBudget))
+	m.vp.restoreAnchor(viewAnchor{}, m.paneWidth())
+	if len(m.messages) == 0 {
 		m.vp.GotoTop()
 		return
 	}
@@ -122,7 +151,7 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc color.Color) string {
 
 	var bodyParts []string
 	if len(msg.Tools) > 0 {
-		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, m.showTools, m.showFullOutput, mc))
+		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, innerW, m.showTools, m.showFullOutput, mc, m.isUserTool))
 	}
 	bodyParts = append(bodyParts, renderMarkdown(strings.TrimSpace(msg.Content), innerW))
 
@@ -184,31 +213,15 @@ func renderUserTextBlock(body string, width int, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderCacheState memoizes per-message rendered blocks so renderMessages does
-// not re-run the markdown regex over the whole transcript on every frame. The
-// cache is keyed by a content hash of each message's render-relevant fields and
-// scoped to the layout params (width / showTools / color); any change to those
-// params invalidates the whole cache. Entries for messages no longer present
-// are evicted by rebuilding the map on each call, bounding its size to the
-// current transcript.
-//
-// Access is single-threaded: renderMessages is only ever called from the Bubble
-// Tea Update goroutine, never from a background tea.Cmd.
-type renderCacheState struct {
-	width      int
-	showTools  bool
-	fullOutput bool
-	color      string
-	blocks     map[uint64]string
-}
-
 // renderMessageBlock renders a single chat message to its display string. It is
 // the pure, cacheable unit of renderMessages.
 func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 	switch msg.Role {
 	case RoleUser:
 		prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
-		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(msg.Content)
+		// StableWidth: a prompt pasted with an emoji ZWJ sequence would
+		// otherwise measure differently here and in the terminal.
+		text := lipgloss.NewStyle().Foreground(theme.Current().Text).Render(termtext.StableWidth(msg.Content))
 		var entry strings.Builder
 		entry.WriteString(renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		for i := range msg.Images {
@@ -227,13 +240,13 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		body := renderMarkdown(msg.Content, m.paneWidth()-8)
 		var entryLines []string
 		if len(msg.Tools) > 0 {
-			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, m.showFullOutput, mc))
+			entryLines = append(entryLines, renderToolGroups(msg.Tools, m.transcriptWidth(), m.showTools, m.showFullOutput, mc, m.isUserTool))
 		}
 		if strings.TrimSpace(msg.Content) != "" {
 			entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
 		}
 		if msg.Meta != "" {
-			entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
+			entryLines = append(entryLines, styleMuted.Render(termtext.Fit("  "+termtext.SingleLine(msg.Meta), m.transcriptWidth())))
 		}
 		return strings.Join(entryLines, "\n")
 	case RoleSystem:
@@ -245,101 +258,99 @@ func (m Model) renderMessageBlock(msg ChatMessage, mc color.Color) string {
 		}
 		return lipgloss.NewStyle().
 			Foreground(theme.Current().TextMuted).
-			PaddingLeft(4).
-			Width(m.paneWidth() - 4).
-			Render(msg.Content)
+			Render(indent(strings.Join(wrapSystemText(msg.Content, m.paneWidth()-8), "\n"), "    "))
 	}
 	return ""
 }
 
-// messageRenderKey hashes every field that influences how a message renders.
-// Length prefixes guard against boundary collisions (e.g. "ab"+"c" vs
-// "a"+"bc"). The layout params (width/showTools/color) are NOT folded in here —
-// they scope the whole cache and invalidate it wholesale on change.
-func messageRenderKey(msg ChatMessage) uint64 {
-	h := fnv.New64a()
-	writeHashField := func(s string) {
-		var buf [8]byte
-		binary.LittleEndian.PutUint64(buf[:], uint64(len(s)))
-		_, _ = h.Write(buf[:])
-		_, _ = io.WriteString(h, s)
-	}
-	writeHashField(string(msg.Role))
-	writeHashField(msg.Kind)
-	writeHashField(msg.Content)
-	writeHashField(msg.Thinking)
-	writeHashField(msg.Meta)
-	for _, t := range msg.Tools {
-		writeHashField(t.Name)
-		writeHashField(t.Status)
-		writeHashField(t.Args)
-		writeHashField(t.Output)
-		writeHashField(t.Diff)
-		if t.Open {
-			writeHashField("open")
+// wrapSystemText wraps a system message (command output such as /help,
+// /skills, /stats) to width cells. Those messages are mostly two-column
+// listings, "  /models p:m    set model directly", so a row too long for the
+// pane is wrapped with a hanging indent at its second column: the wrapped
+// part lines up under the description instead of starting at column 0,
+// where it read as a new entry. When the second column starts past half the
+// width (a narrow terminal), the description moves under its key instead,
+// indented four cells past it. A row with no second column hangs at its own
+// indent. Rows carrying escape sequences (already styled) are wrapped as
+// before, by lipgloss.
+func wrapSystemText(content string, width int) []string {
+	width = max(width, 10)
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "\x1b") {
+			out = append(out, strings.Split(lipgloss.NewStyle().Width(width).Render(line), "\n")...)
+			continue
+		}
+		line = strings.ReplaceAll(line, "\t", "    ")
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		lead := len(line) - len(strings.TrimLeft(line, " "))
+		cut := systemTextHangColumn(line)
+		if cut > 0 && ansi.StringWidth(line[:cut]) > width/2 {
+			// The second column is too far right to hang under: the key
+			// keeps its row and the description goes on the rows below,
+			// indented past the key, so no wrapped part of it starts in the
+			// key column where it would read as another entry.
+			key := strings.TrimRight(line[lead:cut], " ")
+			keyIndent := min(lead, width/2)
+			for _, part := range termtext.Wrap(key, width-keyIndent) {
+				out = append(out, line[:keyIndent]+part)
+			}
+			hang := min(lead+4, width/2)
+			pad := strings.Repeat(" ", hang)
+			for _, part := range termtext.Wrap(line[cut:], width-hang) {
+				out = append(out, pad+part)
+			}
+			continue
+		}
+		if cut == 0 {
+			// Leading spaces are one byte a cell, so this is also a width.
+			cut = min(lead, width/2)
+		}
+		prefixW := ansi.StringWidth(line[:cut])
+		parts := termtext.Wrap(line[cut:], width-prefixW)
+		out = append(out, line[:cut]+parts[0])
+		pad := strings.Repeat(" ", prefixW)
+		for _, part := range parts[1:] {
+			out = append(out, pad+part)
 		}
 	}
-	for _, img := range msg.Images {
-		writeHashField(img)
-	}
-	return h.Sum64()
+	return out
 }
 
-func (m *Model) renderMessages() string {
-	// The logo opens the scrollback rather than sitting above it, so it
-	// scrolls out of the way as the conversation grows. It is recomputed on
-	// every call — it is not a ChatMessage and never enters the block cache —
-	// which is what lets a mode or theme switch repaint it.
-	banner := m.eyesBanner()
-
-	if len(m.messages) == 0 {
-		return banner + "\n\n" + styleMuted.Render("  no messages yet — type a prompt or /help")
+// systemTextHangColumn returns the byte offset of a listing row's second
+// column: the text after the first run of two or more spaces that follows
+// the row's first word. It returns 0 when the row has no second column.
+func systemTextHangColumn(line string) int {
+	lead := len(line) - len(strings.TrimLeft(line, " "))
+	gap := strings.Index(line[lead:], "  ")
+	if lead == len(line) || gap <= 0 {
+		return 0
 	}
-
-	mc := m.currentColor()
-	width := m.paneWidth()
-	color := colorCacheKey(mc)
-
-	// Reuse the prior cache only when the layout params match; otherwise start
-	// fresh so width/showTools/color changes fully re-render.
-	var prev map[uint64]string
-	if m.renderCache != nil && m.renderCache.width == width &&
-		m.renderCache.showTools == m.showTools && m.renderCache.fullOutput == m.showFullOutput &&
-		m.renderCache.color == color {
-		prev = m.renderCache.blocks
+	col := lead + gap
+	for col < len(line) && line[col] == ' ' {
+		col++
 	}
-	next := make(map[uint64]string, len(m.messages))
-
-	parts := make([]string, 0, len(m.messages)+1)
-	parts = append(parts, banner)
-	for _, msg := range m.messages {
-		key := messageRenderKey(msg)
-		block, ok := next[key]
-		if !ok {
-			if block, ok = prev[key]; !ok {
-				block = m.renderMessageBlock(msg, mc)
-			}
-			next[key] = block
-		}
-		parts = append(parts, block)
+	if col == len(line) {
+		return 0
 	}
+	return col
+}
 
-	m.renderCache = &renderCacheState{
-		width:      width,
-		showTools:  m.showTools,
-		fullOutput: m.showFullOutput,
-		color:      color,
-		blocks:     next,
-	}
-
-	return strings.Join(parts, "\n\n")
+// transcriptWidth is the width of the conversation viewport: the pane minus
+// a column of margin on each side. Anything placed in the transcript must fit
+// in it; the viewport cuts wider rows without a trace.
+func (m Model) transcriptWidth() int {
+	return max(m.paneWidth()-2, 10)
 }
 
 // eyesBanner is the static logo block that opens the scrollback. It is sized
-// to the viewport rather than the pane (recalcLayout's vpW), because that is
-// the width it is centred inside.
+// to the viewport rather than the pane, because that is the width it is
+// centred inside.
 func (m Model) eyesBanner() string {
-	return renderEyesStatic(m.mode, max(m.paneWidth()-2, 10))
+	return renderEyesStatic(m.mode, m.transcriptWidth())
 }
 
 func (m Model) recalcLayout() Model {
@@ -347,42 +358,36 @@ func (m Model) recalcLayout() Model {
 	sepH := 2
 	statusH := 1
 
-	inputH := 6
-	if len(m.attachments) > 0 {
-		inputH++
-	}
-	if m.showPlanApproval {
-		inputH += 2 + len(planApprovalOptions)
-	} else if m.pendingQuestion != nil {
-		// The form replaces the textarea and grows with the answer list, so
-		// reserve what it actually renders instead of the fixed textarea
-		// height. renderQuestionForm keeps itself inside questionBlockBudget,
-		// so this can never squeeze the conversation pane away.
-		inputH = 3 + lipgloss.Height(m.renderQuestionForm())
-	} else if m.pendingAuth != nil {
-		inputH += 2 + len(shellApprovalOptions)
-		if block := m.approvalDiffView(m.paneWidth()); block != "" {
-			inputH += lipgloss.Height(block)
-		}
-	}
-	if len(m.mentionItems) > 0 {
-		inputH += 5 + len(m.mentionItems)
-	}
-
-	parallelH := 0
-	if m.sidePanelWidth() <= 0 {
-		if pa := m.renderParallelAgents(); pa != "" {
-			parallelH = lipgloss.Height(pa)
-		}
-	}
-
-	fixed := headerH + sepH + inputH + statusH + parallelH + m.workingIndicatorHeight()
-	contentH := max(m.height-fixed, 3)
-	vpW := max(m.paneWidth()-2, 10)
-
-	m.vp.SetWidth(vpW)
-	m.vp.SetHeight(contentH)
+	// The input area is measured, not estimated. It holds the textarea or,
+	// in its place, the plan/steer/approval picker or the question form,
+	// plus attachment chips and the @mention palette; each of those used to
+	// have a hand-kept row estimate here, and every one of them drifted from
+	// what viewInput draws at some point (a wrapped command, a palette one
+	// row taller), pushing the frame past the bottom of the terminal. The
+	// dialogs keep themselves inside the terminal (questionBlockBudget,
+	// approvalLayout), so measuring can never squeeze the conversation away.
 	m.ta.SetWidth(m.paneWidth() - 6)
+	_, input := m.cachedInput(m.paneWidth())
+	inputH := len(input.rows)
+
+	fixed := headerH + sepH + inputH + statusH + m.parallelFooterHeight() + m.workingIndicatorHeight()
+	// At least one transcript row, even when the chrome alone fills the
+	// terminal: a larger floor would only push the frame further past the
+	// bottom edge on a tiny window.
+	contentH := max(m.height-fixed, 1)
+	// A transcript that was following the latest output keeps following it
+	// through a resize of the pane. Without this, anything that shrinks the
+	// pane (an approval dialog opening, the todo list or the working
+	// indicator appearing) left the old offset behind: the view stopped at
+	// the bottom of the old height, the newest rows sat below it, and since
+	// refreshViewport only follows a view already at the bottom, nothing
+	// new was shown again until the user scrolled.
+	follow := m.vp.AtBottom() && len(m.messages) > 0
+	m.vp.SetWidth(m.transcriptWidth())
+	m.vp.SetHeight(contentH)
+	if follow {
+		m.vp.GotoBottom()
+	}
 
 	return m
 }

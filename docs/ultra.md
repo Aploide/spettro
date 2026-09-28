@@ -89,7 +89,13 @@ instead:
    forked from the current `HEAD`.
 2. Each sub-agent runs with its cwd inside its own worktree, so
    concurrent edits never collide and the main checkout stays clean
-   (`.spettro/` is auto-added to `.git/info/exclude`).
+   (`.spettro/` is auto-added to `.git/info/exclude`). Because `.spettro/`
+   is never checked out into a worktree, a sub-agent there reads the
+   project's operator state from the main checkout: hooks
+   (`.spettro/hooks.json`), the allow-always command and network lists,
+   prompt overrides, instruction files and project skills. An allow-always
+   choice made while a sub-agent runs is saved to the main checkout too, so
+   it outlives the worktree.
 3. When the swarm finishes, the branches are **merged back one at a
    time, in item order**, into the main checkout; leftover uncommitted
    work is committed first, with a Conventional Commits message written
@@ -132,7 +138,9 @@ name, so its activity is attributable end to end:
   the swarm block lists only the members that are **running right now**,
   each showing what it is doing at this moment — its latest tool call,
   falling back to the item it was assigned — and owns up to the rest with
-  a `… N more running · ctrl+b for the whole swarm` line. When the swarm
+  a `… N more running · ctrl+b for the whole swarm` line (without the
+  `ctrl+b` part on a terminal below 110x15, where the panel cannot be
+  drawn). When the swarm
   finishes it collapses to a single `N running · N done · N failed` line,
   so a completed fan-out stops costing the transcript anything.
 

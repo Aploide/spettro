@@ -3,58 +3,23 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"spettro/internal/compact"
-	"spettro/internal/diff"
 	"spettro/internal/jobs"
 	"spettro/internal/pty"
 	"spettro/internal/session"
+	"spettro/internal/skills"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 	"spettro/internal/version"
 )
-
-// approvalDiffCollapsedLines is how many diff lines a file-write/file-edit
-// approval prompt shows before collapsing (ctrl+o expands).
-const approvalDiffCollapsedLines = 16
-
-// approvalDiffChromeLines is everything in the frame besides the diff when an
-// approval dialog is open: header(1) + separators(2) + status(1) + the
-// working indicator(1) + input box incl. borders(6) + approval
-// label/reason/picker(6) + the 3-line minimum viewport, plus one row of
-// slack. The eye art no longer costs anything here — it moved into the
-// scrollback.
-const approvalDiffChromeLines = 21
-
-// approvalDiffView renders the diff block of a pending file-write/file-edit
-// approval, sized so the whole input box always fits the terminal. Both
-// viewInput and recalcLayout call this, so the layout budget and the actual
-// render can never disagree.
-func (m Model) approvalDiffView(width int) string {
-	if m.pendingAuth == nil || m.pendingAuth.request.Diff == "" {
-		return ""
-	}
-	maxLines := approvalDiffCollapsedLines
-	if m.approvalDiffExpanded {
-		maxLines = 1 << 20 // no cap beyond what fits on screen
-	}
-	if fit := m.height - approvalDiffChromeLines; fit < maxLines {
-		maxLines = fit
-	}
-	if maxLines < 3 {
-		maxLines = 3
-	}
-	return diff.Render(m.pendingAuth.request.Diff, diff.Options{
-		Width:      width - 6,
-		MaxLines:   maxLines,
-		ExpandHint: "(ctrl+o to expand)",
-		Indent:     "  ",
-	})
-}
 
 // View assembles the frame and declares terminal features (alt screen, mouse
 // mode, focus reporting) on the returned tea.View, per the bubbletea v2
@@ -87,13 +52,13 @@ func (m Model) viewContent() string {
 	// never disagree with update()'s key routing. A nil view (modalSetup,
 	// legacy) falls through to the main pane.
 	if h, ok := modalHandlers[m.activeModal()]; ok && h.view != nil {
-		return h.view(m)
+		return clampFrame(h.view(m), m.width, m.height)
 	}
 
-	header := m.viewHeader()
+	header := m.cachedHeader()
 	paneW := m.paneWidth()
-	inputArea := m.viewInput(paneW)
-	statusBar := m.viewStatusBar(paneW)
+	inputArea, inputPart := m.cachedInput(paneW)
+	statusBar := m.cachedStatusBar(paneW)
 	sideW := m.sidePanelWidth()
 
 	// The working indicator sits directly above the input box on every path
@@ -101,37 +66,60 @@ func (m Model) viewContent() string {
 	// is open. It is "" when idle and costs no row then.
 	indicator := m.viewWorkingIndicator(paneW)
 
-	var parts []string
+	var parts []framePart
 	if len(m.cmdItems) > 0 {
-		// Overlay spans the full inner area. Fixed costs: header(1)+input(6)+status(1)=8,
-		// plus the indicator row while a run is in flight.
-		innerH := max(m.height-8-m.workingIndicatorHeight(), 4)
+		// The overlay takes the place of the separators, the transcript and
+		// the footer: every row the header, the status bar, the working
+		// indicator and the input area leave. The input area is measured,
+		// as recalcLayout does, because its height varies (attachment
+		// chips, a taller textarea).
+		innerH := max(m.height-1-1-m.workingIndicatorHeight()-lipgloss.Height(inputArea), 1)
 		overlay := m.viewCmdOverlay(m.vp.Width(), innerH)
-		parts = []string{overlay}
+		parts = []framePart{newFramePart(overlay)}
 	} else {
-		sep := m.viewSep(paneW)
-		content := m.vp.View()
-		parts = []string{sep, content, sep}
-		if sideW <= 0 {
-			if pa := m.renderParallelAgents(); pa != "" {
-				parts = append(parts, pa)
+		sep := fixedWidthPart(m.viewSep(paneW), paneW)
+		parts = []framePart{sep, fixedWidthPart(m.vp.View(), m.vp.Width()), sep}
+		if m.showsParallelFooter() {
+			if pa, part := m.cachedParallelAgents(); pa != "" {
+				parts = append(parts, part)
 			}
 		}
 	}
 	if indicator != "" {
-		parts = append(parts, indicator)
+		parts = append(parts, newFramePart(indicator))
 	}
-	parts = append(parts, inputArea, statusBar)
-
-	mainPane := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	parts = append(parts, inputPart, statusBar)
 
 	if sideW <= 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
+		return composeFrame(header, parts, nil)
 	}
-	sidePane := m.viewSidePanel(sideW)
-	divider := lipgloss.NewStyle().Foreground(theme.Current().Border).Render("│")
-	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	// A blank gutter column between the panes: the panel draws its own
+	// border. The gutter was once a one-row "│", which JoinHorizontal left
+	// as a stray tick at the end of the transcript's top rule.
+	side := m.cachedSidePanel(sideW)
+	return composeFrame(header, parts, &side)
+}
+
+// clampFrame cuts a full-screen frame to the terminal: at most height rows,
+// each at most width cells (cut with "…"). The full-screen modals (resume,
+// model selector, connect, theme, rewind, memory review, ...) centre a
+// dialog of their own design; each keeps itself inside the terminal at the
+// sizes it was designed for, and this is the backstop that makes a dialog
+// taller or wider than a very small window crop at the edge instead of
+// scrolling the whole screen. A zero size (no WindowSizeMsg yet) leaves the
+// frame alone.
+func clampFrame(frame string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return frame
+	}
+	lines := strings.Split(frame, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i, line := range lines {
+		lines[i] = termtext.Fit(line, width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // diagFillTitle builds a section header like "Title ╱╱╱╱╱╱╱╱╱╱╱" filling innerWidth.
@@ -180,15 +168,12 @@ func (m Model) viewHeader() string {
 
 	modelLabel := m.cfg.ActiveModel
 	provLabel := m.cfg.ActiveProvider
-	for _, mod := range m.providers.Models() {
-		if mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel {
-			if mod.DisplayName != "" {
-				modelLabel = mod.DisplayName
-			}
-			if mod.ProviderName != "" {
-				provLabel = mod.ProviderName
-			}
-			break
+	if mod, ok := m.providers.Lookup(m.cfg.ActiveProvider, m.cfg.ActiveModel); ok {
+		if mod.DisplayName != "" {
+			modelLabel = mod.DisplayName
+		}
+		if mod.ProviderName != "" {
+			provLabel = mod.ProviderName
 		}
 	}
 	if len(modelLabel) > 12 {
@@ -241,6 +226,11 @@ func (m Model) viewHeader() string {
 	if right != "" {
 		row += " " + right
 	}
+	// The header is exactly one row. On a narrow terminal the logo, tabs and
+	// model/permission tags do not all fit, and the Width style below would
+	// wrap the overflow onto a second row that the layout never budgeted,
+	// pushing the status bar off the bottom of the screen. Cut it instead.
+	row = termtext.Fit(row, m.width)
 
 	return lipgloss.NewStyle().
 		Width(m.width).
@@ -294,8 +284,22 @@ func dialogInnerWidth(dialogWidth int) int {
 	return w
 }
 
+// Command overlay chrome. The full dialog spends 8 rows around its list:
+// border (2), vertical padding (2), the title, a blank row on each side of
+// the list and the key hint. On a short terminal that leaves no room for
+// the list, so the compact dialog keeps only the border and the title.
+const (
+	cmdOverlayFullChrome    = 8
+	cmdOverlayCompactChrome = 3
+)
+
 // viewCmdOverlay renders the /command suggestions as a centered overlay in the
 // content area so the layout (eyes, viewport, input, status) never shifts.
+//
+// The dialog fits inside height rows: the list is windowed around the cursor
+// and, when even four rows of list do not fit with the full chrome, the
+// compact form is used. Only a terminal too short for the compact form's
+// border, title and one row gets a dialog cut by MaxHeight.
 func (m Model) viewCmdOverlay(width, height int) string {
 	mc := m.currentColor()
 
@@ -308,25 +312,22 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	titleLabel := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ commands")
 	title := diagFillTitle(titleLabel, innerW)
 
-	// Descriptions must fit on one line to prevent the dialog from growing taller
-	// than the height passed to lipgloss.Place (which doesn't clip overflow).
-	maxDescW := max(innerW-18, 8)
-
+	// Every row must fit on one line: a wrapped row makes the dialog taller
+	// than the height passed to lipgloss.Place, which does not clip.
 	var rows []string
 	for i, cmd := range m.cmdItems {
-		desc := truncateLabel(cmd.desc, maxDescW)
+		name, desc := cmdMenuColumns(cmd.name, termtext.SingleLine(cmd.desc), innerW)
 		if i == m.cmdCursor {
-			label := fmt.Sprintf("%-16s  %s", cmd.name, desc)
 			rows = append(rows, lipgloss.NewStyle().
 				Background(theme.Current().BgSelection).
 				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
-				Render(label))
+				Render(name+"  "+desc))
 		} else {
 			nameStyle := lipgloss.NewStyle().Foreground(theme.Current().Text)
 			descStyle := lipgloss.NewStyle().Foreground(theme.Current().TextMuted)
-			rows = append(rows, nameStyle.Render(fmt.Sprintf("%-16s", cmd.name))+"  "+descStyle.Render(desc))
+			rows = append(rows, nameStyle.Render(name)+"  "+descStyle.Render(desc))
 		}
 	}
 	if len(m.cmdItems) == 0 {
@@ -335,39 +336,45 @@ func (m Model) viewCmdOverlay(width, height int) string {
 
 	hint := styleMuted.Render("enter inserts  enter again runs")
 
+	compact := height > 0 && height-cmdOverlayFullChrome < min(len(rows), 4)
+	chrome := cmdOverlayFullChrome
+	if compact {
+		chrome = cmdOverlayCompactChrome
+	}
 	maxRows := len(rows)
-	if height > 0 && maxRows > height-8 {
-		maxRows = height - 8
+	if height > 0 {
+		maxRows = min(maxRows, max(height-chrome, 1))
 	}
-	if maxRows < 4 {
-		maxRows = 4
-	}
-	start := 0
 	if len(rows) > maxRows {
-		start = max(m.cmdCursor-maxRows/2, 0)
+		start := max(m.cmdCursor-maxRows/2, 0)
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}
 		rows = rows[start : start+maxRows]
 	}
 
-	dialog := lipgloss.NewStyle().
+	style := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(dialogWidth+2).
-		Padding(1, 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
+		Width(dialogWidth + 2)
+	var dialog string
+	if compact {
+		dialog = style.Padding(0, 2).Render(lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			strings.Join(rows, "\n"),
+		))
+	} else {
+		dialog = style.Padding(1, 2).Render(lipgloss.JoinVertical(lipgloss.Left,
 			title,
 			"",
 			strings.Join(rows, "\n"),
 			"",
 			hint,
 		))
+	}
 
-	// The dialog has floors of its own (four rows of list plus title, hint,
-	// padding and border), so on a very short terminal Place is handed less
-	// height than the dialog needs and does not clip. MaxHeight makes the
-	// overlay honour the budget viewContent reserved for it instead of
+	// MaxHeight makes the overlay honour the budget viewContent reserved for
+	// it even on a terminal too short for the compact dialog, instead of
 	// pushing the input box off the bottom of the screen.
 	return lipgloss.NewStyle().MaxHeight(height).Render(lipgloss.Place(width, height,
 		lipgloss.Center, lipgloss.Center,
@@ -377,34 +384,116 @@ func (m Model) viewCmdOverlay(width, height int) string {
 	))
 }
 
+// cmdNameWidth is the width of the command-name column in the slash menu.
+const cmdNameWidth = 16
+
+// cmdMenuColumns fits one slash-menu row into innerW terminal cells: the
+// name padded to cmdNameWidth (a longer name, such as a skill's, keeps up to
+// half the row) and the description cut to the rest, two cells of gap
+// between them. Widths are measured in cells, so wide characters cannot
+// push a row past the dialog edge.
+func cmdMenuColumns(name, desc string, innerW int) (string, string) {
+	nameW := max(cmdNameWidth, min(ansi.StringWidth(name), innerW/2))
+	name = ansi.Truncate(name, nameW, "…")
+	name += strings.Repeat(" ", max(nameW-ansi.StringWidth(name), 0))
+	desc = ansi.Truncate(desc, max(innerW-nameW-2, 0), "…")
+	return name, desc
+}
+
+// Mention palette chrome: the full form has a border (2 rows), a title, a
+// blank row on each side of the list and a key hint; the compact form, used
+// when the terminal is too short for that, is the border around the list.
+const (
+	mentionPaletteFullChrome    = 6
+	mentionPaletteCompactChrome = 2
+)
+
+// mentionPaletteMaxRows is how many rows the @file/$skill completion palette
+// may take: what the terminal has left after the header, the separators, the
+// status bar, the working indicator, the input box itself and one row of
+// transcript. The todo/agent footer is not drawn while the palette is open
+// (see showsParallelFooter), so it does not compete for these rows.
+func (m Model) mentionPaletteMaxRows(width int) int {
+	if m.height <= 0 {
+		return math.MaxInt32 // no WindowSizeMsg yet: nothing to overflow
+	}
+	fixed := lipgloss.Height(m.viewHeader()) + 2 + 1 + m.workingIndicatorHeight() + 1 +
+		lipgloss.Height(m.viewInputBox(width))
+	return m.height - fixed
+}
+
+// viewMentionPalette renders the completions for an @file or $skill mention
+// being typed, inside the rows mentionPaletteMaxRows allows. Each row is cut
+// to one line of the box. When not every completion fits, the list is
+// windowed around the cursor and the title says which one is selected; on a
+// very short terminal the title and hint are dropped, and with no room at
+// all the palette is not drawn (typing still completes).
 func (m Model) viewMentionPalette(width int) string {
 	if len(m.mentionItems) == 0 {
 		return ""
 	}
+	maxRows := m.mentionPaletteMaxRows(width)
+	compact := maxRows < mentionPaletteFullChrome+1
+	chrome := mentionPaletteFullChrome
+	if compact {
+		chrome = mentionPaletteCompactChrome
+	}
+	shown := min(len(m.mentionItems), maxRows-chrome)
+	if shown < 1 {
+		return ""
+	}
+	cursor := clampOffset(m.mentionCursor, 0, len(m.mentionItems)-1)
+	start := clampOffset(cursor-shown/2, 0, len(m.mentionItems)-shown)
+
 	boxW := width - 4
 	innerW := dialogInnerWidth(boxW)
-	titleLabel := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render("available files")
+	label := "available files"
+	if m.mentionKind == mentionSkill {
+		label = "skills"
+	}
+	if shown < len(m.mentionItems) {
+		label += fmt.Sprintf(" %d/%d", cursor+1, len(m.mentionItems))
+	}
+	titleLabel := lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Bold(true).Render(label)
 	title := diagFillTitle(titleLabel, innerW)
+	var cat skills.Catalog
+	if m.mentionKind == mentionSkill {
+		cat = m.skillCatalog()
+	}
 	var rows []string
-	for i, item := range m.mentionItems {
-		if i == m.mentionCursor {
+	for i := start; i < start+shown; i++ {
+		item := m.mentionItems[i]
+		text := termtext.SingleLine(item)
+		if m.mentionKind == mentionSkill {
+			text = "$" + text
+			if s, ok := cat.Find(item); ok {
+				text += "  " + termtext.SingleLine(s.ListingDescription())
+			}
+		}
+		// Two cells go to the cursor marker in front of the text.
+		text = ansi.Truncate(text, max(innerW-2, 1), "…")
+		if i == cursor {
 			rows = append(rows, lipgloss.NewStyle().
 				Background(theme.Current().BgSelection).
 				Foreground(theme.Current().Text).
 				Bold(true).
 				Width(innerW).
-				Render("› "+item))
+				Render("› "+text))
 		} else {
-			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+item))
+			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Current().TextMuted).Render("  "+text))
 		}
 	}
-	hint := styleMuted.Render("↑↓ navigate  enter inserts mention")
+	body := strings.Join(rows, "\n")
+	if !compact {
+		hint := styleMuted.Render(ansi.Truncate("↑↓ navigate  enter inserts mention", innerW, "…"))
+		body = title + "\n\n" + body + "\n\n" + hint
+	}
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(theme.Current().Border).
 		Width(boxW + 2).
 		PaddingLeft(2).PaddingRight(2).
-		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
+		Render(body)
 }
 
 // wrapPlainLines word-wraps unstyled text to width and returns one entry per
@@ -423,6 +512,19 @@ func wrapPlainLines(s string, width int) []string {
 	return lines
 }
 
+// wrapIndentedLines is wrapPlainLines for a block drawn indent cells in: the
+// text is wrapped to the width left beside the indent and every row gets
+// the indent, so wrapped rows line up under the first one. Wrapping the
+// indented text as a whole (as the ask-user dialog once did) indents only
+// the first row and sends the rest back to column 0.
+func wrapIndentedLines(s, indent string, width int) []string {
+	lines := wrapPlainLines(s, max(width-ansi.StringWidth(indent), 1))
+	for i, line := range lines {
+		lines[i] = indent + line
+	}
+	return lines
+}
+
 // clampTextLines keeps at most maxLines of text, marking the cut with an ellipsis
 // so a long question reads as truncated rather than silently missing its tail.
 func clampTextLines(lines []string, maxLines, width int) []string {
@@ -431,7 +533,9 @@ func clampTextLines(lines []string, maxLines, width int) []string {
 	}
 	lines = lines[:maxLines]
 	last := len(lines) - 1
-	lines[last] = truncateLabel(lines[last], max(width-2, 4)) + " …"
+	// One marker either way: " …" after a line that has room for it, or the
+	// cut's own "…" when the line has to shrink to make room.
+	lines[last] = termtext.Fit(lines[last]+" …", max(width, 4))
 	return lines
 }
 
@@ -442,7 +546,27 @@ func (m Model) inputTextareaView() string {
 	return highlightUltracode(m.ta.View(), m.eyeFrame)
 }
 
+// boxContentWidth is the room inside the input box for a box width cells
+// wide: the rounded border and one cell of padding on each side.
+func boxContentWidth(width int) int {
+	return max(width-4, 1)
+}
+
+// viewInput is the whole input area: the @mention palette, when one is open,
+// stacked on the input box.
 func (m Model) viewInput(width int) string {
+	inputBox := m.viewInputBox(width)
+	// cmd overlay is shown in content area; only @mention inline popup stays here
+	mentionPalette := m.viewMentionPalette(width)
+	if mentionPalette == "" {
+		return inputBox
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, mentionPalette, inputBox)
+}
+
+// viewInputBox is the bordered box at the bottom of the pane: the textarea,
+// or in its place the plan/steer/approval picker or the question form.
+func (m Model) viewInputBox(width int) string {
 	mc := m.currentColor()
 	agentLabel := m.mode
 	if spec, ok := m.manifest.AgentByID(m.mode); ok {
@@ -463,7 +587,7 @@ func (m Model) viewInput(width int) string {
 			lines = append(lines, m.inputTextareaView())
 		}
 	} else if m.showSteerChoice {
-		lines = append(lines, styleMuted.Render("  "+truncateLabel(m.steerPending, 100)))
+		lines = append(lines, styleMuted.Render("  "+truncateLabel(termtext.SingleLine(m.steerPending), 100)))
 		lines = append(lines, m.renderApprovalPicker(
 			"agent is running — deliver this message how?",
 			steerChoiceOptions,
@@ -474,28 +598,8 @@ func (m Model) viewInput(width int) string {
 	} else if m.pendingQuestion != nil {
 		lines = append(lines, m.renderQuestionForm())
 	} else if m.pendingAuth != nil {
-		cmd := formatApprovalCommandLabel(m.pendingAuth.request.Command)
-		lines = append(lines, styleWarn.Render("  "+cmd))
-		if strings.TrimSpace(m.pendingAuth.request.Reason) != "" {
-			lines = append(lines, styleMuted.Render("  why: "+m.pendingAuth.request.Reason))
-		}
-		if len(m.pendingAuth.request.Segments) > 0 && m.cfg.ShowPermissionDebug {
-			lines = append(lines, styleMuted.Render("  segments: "+strings.Join(m.pendingAuth.request.Segments, " | ")))
-		}
-		if block := m.approvalDiffView(width); block != "" {
-			lines = append(lines, block)
-		}
-		if m.approvalCursor == 3 {
-			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
-			lines = append(lines, m.inputTextareaView())
-		} else {
-			lines = append(lines, m.renderApprovalPicker(
-				"allow this command?",
-				shellApprovalOptions,
-				m.approvalCursor,
-				theme.Current().Warning,
-			))
-		}
+		// The dialog decides for itself whether the label row fits.
+		lines = m.approvalDialogLines(label, boxContentWidth(width))
 	} else {
 		if chips := m.renderAttachmentChips(mc); chips != "" {
 			lines = append(lines, chips)
@@ -511,15 +615,17 @@ func (m Model) viewInput(width int) string {
 		Width(width).
 		PaddingLeft(1).PaddingRight(1)
 
-	inner := strings.Join(lines, "\n")
-	inputBox := boxStyle.Render(inner)
-
-	// cmd overlay is shown in content area; only @mention inline popup stays here
-	mentionPalette := m.viewMentionPalette(width)
-	if mentionPalette == "" {
-		return inputBox
+	// Every row is cut to the box's content width. The box would otherwise
+	// wrap a long row (a steering message, a picker option on a narrow
+	// terminal) onto rows that recalcLayout never reserved.
+	contentW := boxContentWidth(width)
+	var fitted []string
+	for _, line := range lines {
+		for row := range strings.SplitSeq(line, "\n") {
+			fitted = append(fitted, termtext.Fit(row, contentW))
+		}
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, mentionPalette, inputBox)
+	return boxStyle.Render(strings.Join(fitted, "\n"))
 }
 
 // renderGlare produces a shimmer that sweeps left-to-right across text.
@@ -572,6 +678,93 @@ func footerBudget(height int) int {
 	return min(max(height/4, 4), 12)
 }
 
+// showsParallelFooter reports whether the block drawn by renderParallelAgents
+// (workflow, swarm, delegations, todos) sits between the transcript and the
+// input. The side panel carries the same information while it is open, and
+// the @/$ completion palette takes the block's place while the user is
+// picking a completion: it is short-lived, and on a small terminal it needs
+// those rows more. Every place that draws or budgets for the block asks this.
+func (m Model) showsParallelFooter() bool {
+	return m.sidePanelWidth() <= 0 && len(m.mentionItems) == 0
+}
+
+// parallelFooterHeight is the number of rows the footer block occupies in
+// the frame right now (0 when it is not drawn). Every layout budget that has
+// to leave room for it asks this rather than rendering the block itself.
+func (m Model) parallelFooterHeight() int {
+	if !m.showsParallelFooter() {
+		return 0
+	}
+	if pa, part := m.cachedParallelAgents(); pa != "" {
+		return len(part.rows)
+	}
+	return 0
+}
+
+// dialogMinTranscriptRows is how much of the conversation stays visible
+// above the input area when the terminal is short: three rows on a normal
+// terminal, down to one on a very short one, where the input area (a dialog,
+// a picker) needs every row it can get.
+func dialogMinTranscriptRows(height int) int {
+	return min(max(height/8, 1), 3)
+}
+
+// dialogMinInputRows is the smallest input area the open dialog can be drawn
+// in with its essentials, or 0 when no size-adaptive dialog is open. For an
+// approval: the box border, the summary row, the preview footer and the
+// picker (or the "instead" field). For a question: the box border and agent
+// label plus the rows renderQuestionForm cannot do without.
+//
+// The plan approval and steer pickers take precedence over both in
+// viewInputBox, so while one of them is open this is 0 as well: the input
+// box then holds that picker, which has a fixed height and is measured.
+func (m Model) dialogMinInputRows() int {
+	if m.showPlanApproval || m.showSteerChoice {
+		return 0
+	}
+	switch {
+	case m.pendingAuth != nil:
+		return 2 + 1 + 1 + m.approvalLatchedControlRows()
+	case m.pendingQuestion != nil:
+		return 3 + questionMinBlockRows
+	}
+	return 0
+}
+
+// inputRowsForFooter is the height of the input area the footer has to
+// leave room for. A size-adaptive dialog (approval, question) shrinks to
+// fit whatever the footer leaves it, so only its minimum counts; everything
+// else drawn in the input box (the textarea with its attachment chips, the
+// plan approval or steer picker) has one height, which is measured.
+//
+// Measuring cannot recurse: viewInputBox only consults the footer's height
+// for the size-adaptive dialogs, and those take the first branch.
+func (m Model) inputRowsForFooter() int {
+	if need := m.dialogMinInputRows(); need > 0 {
+		return need
+	}
+	return lipgloss.Height(m.viewInputBox(m.paneWidth()))
+}
+
+// parallelFooterBudget is the row budget renderParallelAgents spends. It is
+// footerBudget, capped so the footer never takes the rows the rest of the
+// frame needs: the header, the separators, the status bar, the working
+// indicator, the input area (inputRowsForFooter) and a minimum of transcript
+// (dialogMinTranscriptRows). On a normal terminal the cap is above
+// footerBudget and changes nothing; on a short one the footer shrinks, down
+// to nothing, instead of pushing the frame past the bottom edge. That holds
+// whatever the input area holds: the textarea during a run, a picker, or a
+// dialog.
+func (m Model) parallelFooterBudget() int {
+	budget := footerBudget(m.height)
+	if m.height <= 0 {
+		return budget // no WindowSizeMsg yet: nothing to overflow
+	}
+	chrome := 1 + 2 + 1 + m.workingIndicatorHeight() // header, separators, status bar, indicator
+	room := m.height - chrome - m.inputRowsForFooter() - dialogMinTranscriptRows(m.height)
+	return min(budget, max(room, 0))
+}
+
 // renderParallelAgents draws everything that sits between the transcript and
 // the input: the workflow summary, the Ultra swarm, ordinary delegations, and
 // the todo list. Swarms and workflows get their own bordered blocks — a
@@ -584,7 +777,7 @@ func footerBudget(height int) int {
 // ones before it left.
 func (m Model) renderParallelAgents() string {
 	paneW := m.paneWidth()
-	remaining := footerBudget(m.height)
+	remaining := m.parallelFooterBudget()
 	var blocks []string
 
 	// A bordered block costs its lines plus the border.
@@ -641,6 +834,12 @@ func (m Model) renderParallelAgents() string {
 		lines = append(lines, m.todoLines(remaining)...)
 	}
 	if len(lines) > 0 {
+		// Delegation and todo rows use fixed label budgets sized for a
+		// normal terminal; on a narrow one they are cut to the pane here so
+		// a long task name cannot widen the frame past the terminal edge.
+		for i, line := range lines {
+			lines[i] = termtext.Fit(line, paneW)
+		}
 		blocks = append(blocks, strings.Join(lines, "\n"))
 	}
 	return strings.Join(blocks, "\n")
@@ -656,7 +855,7 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 	}
 	header := lipgloss.NewStyle().Bold(true).Foreground(theme.Current().TextMuted).Render("  agents")
 	// The tightest form still says the work exists and where to look.
-	compact := []string{header + styleMuted.Render(fmt.Sprintf("  %d running · ctrl+b", len(active)))}
+	compact := []string{header + styleMuted.Render(fmt.Sprintf("  %d running%s", len(active), m.panelKeyHint(" · ", "")))}
 	if rows == 1 {
 		return compact
 	}
@@ -673,7 +872,7 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 		lines = append(lines, m.delegationRow(a))
 	}
 	if hidden := len(active) - shown; hidden > 0 {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more · ctrl+b for all of them", hidden)))
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more%s", hidden, m.panelKeyHint(" · ", "all of them"))))
 	}
 	// When the listed form does not fit, the count does — better one honest
 	// line than a truncated list that reads as the whole story.
@@ -693,10 +892,9 @@ func (m Model) delegationRow(a parallelAgentEntry) string {
 	if a.Instance > 1 {
 		label = fmt.Sprintf("%s [%d]", a.ID, a.Instance)
 	}
-	task := a.Task
-	if len(task) > 50 {
-		task = task[:47] + "..."
-	}
+	// Rune-based and folded: a byte slice of the task could split a
+	// multi-byte character, and a multi-line task would break the row.
+	task := truncateLabel(termtext.SingleLine(a.Task), 50)
 	pal := theme.Current()
 	taskStyle := lipgloss.NewStyle().Foreground(pal.TextMuted)
 	switch a.Status {
@@ -749,7 +947,7 @@ func (m Model) todoLines(rows int) []string {
 	if completed > 0 {
 		header += styleMuted.Render(fmt.Sprintf("  %d/%d done", completed, completed+len(ordered)))
 	}
-	compact := []string{header + " " + styleMuted.Render(truncateLabel(ordered[0].Content, 56))}
+	compact := []string{header + " " + styleMuted.Render(truncateLabel(termtext.SingleLine(ordered[0].Content), 56))}
 	if rows < 2 {
 		return compact
 	}
@@ -772,10 +970,9 @@ func (m Model) todoLines(rows int) []string {
 }
 
 func todoRow(td session.Todo, status string, frame int) string {
-	label := td.Content
-	if len(label) > 56 {
-		label = label[:53] + "..."
-	}
+	// Rune-based and folded: a byte slice of the content could split a
+	// multi-byte character, and a multi-line task would break the row.
+	label := truncateLabel(termtext.SingleLine(td.Content), 56)
 	switch status {
 	case "in_progress", "running":
 		return "  " + renderGlare(label, frame, theme.Current().Warning)
@@ -786,13 +983,14 @@ func todoRow(td session.Todo, status string, frame int) string {
 	}
 }
 
+// contextWindow is the active model's context window from the model
+// metadata, 0 when the model is unknown. It runs on every status bar render
+// (the context gauge), so it uses the manager's index (Lookup, no
+// allocation) rather than copying the model list: 20 us and 80 KB per call
+// with the embedded catalog before (BenchmarkContextWindow).
 func (m Model) contextWindow() int {
-	for _, mod := range m.providers.Models() {
-		if mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel {
-			return mod.Context
-		}
-	}
-	return 0
+	mod, _ := m.providers.Lookup(m.cfg.ActiveProvider, m.cfg.ActiveModel)
+	return mod.Context
 }
 
 // evaluateCompact is the single source of truth for context-pressure
@@ -836,6 +1034,9 @@ func (m Model) autoCompactIfNeeded() tea.Cmd {
 		return nil
 	}
 	if len(m.messages) < 3 {
+		return nil
+	}
+	if n := len(m.convHistory); n > 0 && n == m.autoCompactNoopLen {
 		return nil
 	}
 	_, cmd := m.runCompactWithMode("preserve all key decisions, code changes, and action items", true)
@@ -895,8 +1096,18 @@ func (m Model) viewStatusBar(width int) string {
 		right = lipgloss.NewStyle().Foreground(pal.SuccessBright).Render(label) + "  " + right
 	}
 
+	// The bar is one row: one cell of left padding, the left text, the
+	// right cluster and one trailing space. The right cluster is built from
+	// independent indicators with no bound of its own, so on a narrow
+	// terminal it alone can be wider than the bar; it is then cut from the
+	// left, keeping the context gauge at its end, which matters most.
+	right = termtext.FitLeft(right, max(width-2, 0))
 	leftWidth := max(width-lipgloss.Width(right)-2, 0)
-	leftPadded := lipgloss.NewStyle().Width(leftWidth).Render(left)
+	// A banner can be anything, a provider's error message included; the
+	// Width style would wrap it onto a second row the layout never reserved,
+	// so it is cut to the one row the bar has, one cell short of the right
+	// cluster so the two never run together.
+	leftPadded := lipgloss.NewStyle().Width(leftWidth).Render(termtext.Fit(left, leftWidth-1))
 
 	bar := leftPadded + right + " "
 	return lipgloss.NewStyle().
@@ -952,5 +1163,6 @@ func renderStatusBanner(text, kind string) string {
 		prefix = "✓ "
 		style = styleSuccess
 	}
-	return style.Render(prefix + text)
+	// Banners are one row; a multi-line error message is folded onto it.
+	return style.Render(prefix + termtext.SingleLine(text))
 }

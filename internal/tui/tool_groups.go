@@ -12,23 +12,70 @@ import (
 	"spettro/internal/config"
 	"spettro/internal/diff"
 	"spettro/internal/pty"
+	"spettro/internal/termtext"
 	"spettro/internal/theme"
 )
 
-func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Color) string {
-	// Line caps for tool outputs; lifted when the user toggled full output
-	// with ctrl+g (0 = unlimited, scrollback handles the length).
-	singleCap, groupCap := 20, 8
-	if fullOutput {
-		singleCap, groupCap = 0, 0
-	}
+// Tool output line caps: a lone tool call shows more of its output than each
+// member of a group of same-named calls. ctrl+g (fullOutput) lifts both.
+const (
+	toolOutputCapSingle = 20
+	toolOutputCapGroup  = 8
+)
+
+// toolOutputIndent is the gutter in front of every tool output row, so the
+// output reads as belonging to the "●" header above it.
+const toolOutputIndent = "       "
+
+// toolDetailIndent prefixes the per-call rows of an expanded tool group and
+// the path row of a single file tool.
+const toolDetailIndent = "    ⎿  "
+
+// renderToolGroups renders an assistant turn's tool calls as the transcript
+// shows them: one "●" header row per call, or per run of consecutive calls of
+// the same tool, followed (when showTools is on) by paths, diffs and output.
+//
+// width is the number of cells the block may occupy. Every row is fitted to
+// it here, because the viewport that displays the transcript silently cuts
+// anything wider: a 50k-character heredoc or a 10k-character minified line
+// would otherwise lose its tail with no sign anything was hidden. Labels are
+// folded onto one line and cut with "…"; output rows are sanitized (escape
+// sequences, tabs, carriage returns) and either cut with "…" or, in the
+// ctrl+g full-output view, wrapped so nothing is lost.
+//
+// userTool reports whether a name belongs to a tool of the operator's own
+// (Model.isUserTool; nil means none does). Such a call gets the generic
+// label, and none of the extras a built-in of the same name would get (a
+// path row, a live terminal tail): see tool_labels.go.
+func renderToolGroups(tools []ToolItem, width int, showTools, fullOutput bool, mc color.Color, userTool func(name string) bool) string {
 	if len(tools) == 0 {
 		return ""
 	}
+	width = max(width, 20)
+	singleCap, groupCap := toolOutputCapSingle, toolOutputCapGroup
+	if fullOutput {
+		singleCap, groupCap = 0, 0 // 0 = unlimited, the scrollback handles the length
+	}
 	bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
+	bulletW := lipgloss.Width(bullet) + 1 // the bullet and the space after it
 	errStyle := lipgloss.NewStyle().Foreground(theme.Current().Error)
 	outputStyle := lipgloss.NewStyle().Foreground(theme.Current().TextFaint).Italic(true)
 	var lines []string
+
+	// header fits a label into the row after the bullet.
+	header := func(label string, style lipgloss.Style) string {
+		return bullet + " " + style.Render(termtext.Fit(termtext.SingleLine(label), width-bulletW))
+	}
+	// detail fits an indented sub-row (a path or a group member's label).
+	detail := func(text string) string {
+		return styleMuted.Render(termtext.Fit(toolDetailIndent+termtext.SingleLine(text), width))
+	}
+	// output appends styled output rows.
+	output := func(rows []string) {
+		for _, row := range rows {
+			lines = append(lines, outputStyle.Render(row))
+		}
+	}
 
 	i := 0
 	for i < len(tools) {
@@ -37,90 +84,79 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 			j++
 		}
 		group := tools[i:j]
-		count := len(group)
 		name := group[0].Name
-
-		if count == 1 {
-			item := group[0]
-			label := formatToolLabel(name, item.Args)
-			if item.Status == "running" {
-				label = formatRunningLabel(name, item.Args)
-				label = styleMuted.Render(label)
-			} else if item.Status == "error" {
-				label = errStyle.Render(label)
-			} else {
-				label = styleMuted.Render(label)
+		ownTool := userTool != nil && userTool(name)
+		// label is the one-row label of one call in this run.
+		label := func(item ToolItem) string {
+			running := item.Status == "running"
+			switch {
+			case ownTool:
+				return userToolLabel(name, running)
+			case running:
+				return formatRunningLabel(name, item.Args)
+			default:
+				return formatToolLabel(name, item.Args)
 			}
-			lines = append(lines, bullet+" "+label)
-			if item.Status == "running" {
-				for _, tl := range renderPtyLiveTail(name, item.Args, fullOutput) {
-					lines = append(lines, outputStyle.Render("       "+tl))
-				}
+		}
+		// path is the file path a built-in file tool shows under its label.
+		path := func(item ToolItem) string {
+			if ownTool {
+				return ""
+			}
+			return extractToolPath(name, item.Args)
+		}
+		// liveTail is the live terminal tail of a running pty tool.
+		liveTail := func(item ToolItem) []string {
+			if ownTool {
+				return nil
+			}
+			return liveTailRows(renderPtyLiveTail(name, item.Args, fullOutput), width)
+		}
+
+		if len(group) == 1 {
+			item := group[0]
+			switch item.Status {
+			case "running":
+				lines = append(lines, header(label(item), styleMuted))
+				output(liveTail(item))
+			case "error":
+				lines = append(lines, header(label(item), errStyle))
+			default:
+				lines = append(lines, header(label(item), styleMuted))
 			}
 			if showTools {
-				if p := extractToolPath(name, item.Args); p != "" {
-					icon := "✓"
-					if item.Status == "running" {
-						icon = ""
-					} else if item.Status == "error" {
-						icon = "✗"
-					}
-					line := fmt.Sprintf("    ⎿  %s", p)
-					if icon != "" {
-						line += " " + icon
-					}
-					lines = append(lines, styleMuted.Render(line))
+				if p := path(item); p != "" {
+					lines = append(lines, detail(p+toolStatusIcon(item.Status)))
 				}
 			}
 			if item.Diff != "" && item.Status != "running" {
-				if block := renderDiffBlock(item.Diff, showTools); block != "" {
+				if block := renderDiffBlock(item.Diff, width, showTools); block != "" {
 					lines = append(lines, block)
 				}
 			} else if showTools && item.Status != "running" {
-				if out := trimToolOutput(item.Output, singleCap); out != "" {
-					for ol := range strings.SplitSeq(out, "\n") {
-						lines = append(lines, outputStyle.Render("       "+ol))
-					}
-				}
+				output(toolOutputRows(item.Output, singleCap, width, fullOutput))
 			}
 		} else {
-			label := formatToolGroupLabel(name, group)
-			if !showTools {
-				label += "  " + styleMuted.Render("(ctrl+o to expand)")
+			groupLabel := formatToolGroupLabel(name, group)
+			if ownTool {
+				groupLabel = userToolGroupLabel(name, len(group), hasRunningTool(group))
 			}
-			lines = append(lines, bullet+" "+styleMuted.Render(label))
+			if !showTools {
+				groupLabel += "  (ctrl+o to expand)"
+			}
+			lines = append(lines, header(groupLabel, styleMuted))
 			if showTools {
 				for _, gt := range group {
-					var detail string
-					if p := extractToolPath(gt.Name, gt.Args); p != "" {
-						icon := "✓"
-						if gt.Status == "running" {
-							icon = ""
-						} else if gt.Status == "error" {
-							icon = "✗"
-						}
-						detail = "    ⎿  " + p
-						if icon != "" {
-							detail += " " + icon
-						}
+					// Arguments can be a whole file; parse them once per row.
+					if p := path(gt); p != "" {
+						lines = append(lines, detail(p+toolStatusIcon(gt.Status)))
 					} else {
-						if gt.Status == "running" {
-							detail = "    ⎿  " + formatRunningLabel(gt.Name, gt.Args)
-						} else {
-							detail = "    ⎿  " + formatToolLabel(gt.Name, gt.Args)
-						}
+						lines = append(lines, detail(label(gt)))
 					}
-					lines = append(lines, styleMuted.Render(detail))
 					if gt.Status == "running" {
-						for _, tl := range renderPtyLiveTail(gt.Name, gt.Args, fullOutput) {
-							lines = append(lines, outputStyle.Render("       "+tl))
-						}
+						output(liveTail(gt))
 					} else {
-						if out := trimToolOutput(gt.Output, groupCap); out != "" {
-							for ol := range strings.SplitSeq(out, "\n") {
-								lines = append(lines, outputStyle.Render("       "+ol))
-							}
-						}
+						output(toolOutputRows(gt.Output, groupCap, width, fullOutput))
 					}
 				}
 			}
@@ -129,6 +165,84 @@ func renderToolGroups(tools []ToolItem, showTools, fullOutput bool, mc color.Col
 		i = j
 	}
 	return strings.Join(lines, "\n")
+}
+
+// toolStatusIcon is the suffix of a file tool's path row: a check once it
+// succeeded, a cross when it failed, nothing while it runs.
+func toolStatusIcon(status string) string {
+	switch status {
+	case "running":
+		return ""
+	case "error":
+		return " ✗"
+	default:
+		return " ✓"
+	}
+}
+
+// toolOutputRows turns a tool's raw output into indented display rows no
+// wider than width cells, keeping at most maxLines source lines (0 = all).
+//
+// Tool output is untrusted text: every line is sanitized first (see
+// termtext.SanitizeLine). A line still wider than the row is wrapped when
+// wrap is set (the ctrl+g full-output view, which promises everything) and
+// cut with "…" otherwise. Whatever was left out is owned up to in one footer
+// row, together with the key that brings it back, so a capped view never
+// reads as the whole output.
+func toolOutputRows(outputText string, maxLines, width int, wrap bool) []string {
+	outputText = strings.TrimSpace(outputText)
+	if outputText == "" {
+		return nil
+	}
+	textW := max(width-len(toolOutputIndent), 8)
+	source := strings.Split(outputText, "\n")
+	hidden := 0
+	if maxLines > 0 && len(source) > maxLines {
+		hidden = len(source) - maxLines
+		source = source[:maxLines]
+	}
+	rows := make([]string, 0, len(source)+1)
+	cut := false
+	for _, line := range source {
+		line = termtext.SanitizeLine(line)
+		if wrap {
+			for _, part := range termtext.Wrap(line, textW) {
+				rows = append(rows, toolOutputIndent+part)
+			}
+			continue
+		}
+		if fitted := termtext.Fit(line, textW); fitted != line {
+			line, cut = fitted, true
+		}
+		rows = append(rows, toolOutputIndent+line)
+	}
+	var notes []string
+	if hidden > 0 {
+		notes = append(notes, fmt.Sprintf("… %d more lines", hidden))
+	}
+	if cut {
+		notes = append(notes, "long lines cut")
+	}
+	if len(notes) > 0 {
+		footer := strings.Join(notes, " · ") + " · ctrl+g for full output"
+		rows = append(rows, termtext.Fit(toolOutputIndent+footer, width))
+	}
+	return rows
+}
+
+// liveTailRows fits the live scrollback tail of a running pty tool to the
+// row width. A terminal session's screen is full of escape sequences and
+// carriage returns, so each line is sanitized before it is measured.
+func liveTailRows(tail []string, width int) []string {
+	if len(tail) == 0 {
+		return nil
+	}
+	textW := max(width-len(toolOutputIndent), 8)
+	rows := make([]string, 0, len(tail))
+	for _, line := range tail {
+		rows = append(rows, toolOutputIndent+termtext.Fit(termtext.SanitizeLine(line), textW))
+	}
+	return rows
 }
 
 // renderPtyLiveTail returns the last few settled scrollback lines of the pty
@@ -177,139 +291,15 @@ func hasRunningTool(items []ToolItem) bool {
 	return false
 }
 
+// formatRunningToolGroupLabel is the header of a group of consecutive calls
+// of one tool while one of them still runs: the calls' descriptors when
+// their arguments give some ("Editing a.go, b.go…"), else the count in the
+// tool's wording ("Running 2 commands…").
 func formatRunningToolGroupLabel(name string, group []ToolItem) string {
-	count := len(group)
 	if desc := formatDetailedGroupLabel(name, true, group); desc != "" {
 		return desc
 	}
-	switch name {
-	case "file-read":
-		if count == 1 {
-			return "Reading 1 file…"
-		}
-		return fmt.Sprintf("Reading %d files…", count)
-	case "file-write":
-		if count == 1 {
-			return "Writing 1 file…"
-		}
-		return fmt.Sprintf("Writing %d files…", count)
-	case "file-edit", "multi-edit":
-		if count == 1 {
-			return "Editing 1 file…"
-		}
-		return fmt.Sprintf("Editing %d files…", count)
-	case "repo-search":
-		if count == 1 {
-			return "Searching 1 query…"
-		}
-		return fmt.Sprintf("Searching %d queries…", count)
-	case "tool-search":
-		if count == 1 {
-			return "Searching 1 tool query…"
-		}
-		return fmt.Sprintf("Searching %d tool queries…", count)
-	case "web-search":
-		if count == 1 {
-			return "Searching 1 web query…"
-		}
-		return fmt.Sprintf("Searching %d web queries…", count)
-	case "web-fetch":
-		if count == 1 {
-			return "Fetching 1 page…"
-		}
-		return fmt.Sprintf("Fetching %d pages…", count)
-	case "download":
-		if count == 1 {
-			return "Downloading 1 file…"
-		}
-		return fmt.Sprintf("Downloading %d files…", count)
-	case "shell-exec", "bash", "bash-output":
-		if count == 1 {
-			return "Running 1 command…"
-		}
-		return fmt.Sprintf("Running %d commands…", count)
-	case "glob":
-		if count == 1 {
-			return "Matching 1 pattern…"
-		}
-		return fmt.Sprintf("Matching %d patterns…", count)
-	case "grep":
-		if count == 1 {
-			return "Grepping 1 pattern…"
-		}
-		return fmt.Sprintf("Grepping %d patterns…", count)
-	case "ls":
-		if count == 1 {
-			return "Listing 1 directory…"
-		}
-		return fmt.Sprintf("Listing %d directories…", count)
-	case "task-create":
-		if count == 1 {
-			return "Creating 1 task…"
-		}
-		return fmt.Sprintf("Creating %d tasks…", count)
-	case "task-get":
-		if count == 1 {
-			return "Reading 1 task…"
-		}
-		return fmt.Sprintf("Reading %d tasks…", count)
-	case "task-update":
-		if count == 1 {
-			return "Updating 1 task…"
-		}
-		return fmt.Sprintf("Updating %d tasks…", count)
-	case "task-list":
-		if count == 1 {
-			return "Listing tasks…"
-		}
-		return fmt.Sprintf("Listing tasks %d times…", count)
-	case "task-delete":
-		if count == 1 {
-			return "Deleting 1 task…"
-		}
-		return fmt.Sprintf("Deleting %d tasks…", count)
-	case "ask-user":
-		if count == 1 {
-			return "Asking 1 question…"
-		}
-		return fmt.Sprintf("Asking %d questions…", count)
-	case "mcp-list-resources":
-		if count == 1 {
-			return "Listing MCP resources…"
-		}
-		return fmt.Sprintf("Listing MCP resources %d times…", count)
-	case "mcp-read-resource":
-		if count == 1 {
-			return "Reading 1 MCP resource…"
-		}
-		return fmt.Sprintf("Reading %d MCP resources…", count)
-	case "mcp-auth":
-		if count == 1 {
-			return "Updating MCP auth…"
-		}
-		return fmt.Sprintf("Updating MCP auth %d times…", count)
-	case "enter-worktree":
-		if count == 1 {
-			return "Entering 1 worktree…"
-		}
-		return fmt.Sprintf("Entering %d worktrees…", count)
-	case "exit-worktree":
-		if count == 1 {
-			return "Exiting 1 worktree…"
-		}
-		return fmt.Sprintf("Exiting %d worktrees…", count)
-	case "send-message":
-		if count == 1 {
-			return "Sending 1 message…"
-		}
-		return fmt.Sprintf("Sending %d messages…", count)
-	case "agent":
-		if count == 1 {
-			return "Delegating 1 task…"
-		}
-		return fmt.Sprintf("Delegating %d tasks…", count)
-	}
-	return fmt.Sprintf("Using %s %d time(s)…", humanizeToolID(name), count)
+	return runningVerb(name) + " " + toolNounCount(name, len(group)) + "…"
 }
 
 func formatToolGroupLabel(name string, group []ToolItem) string {
@@ -363,12 +353,9 @@ func formatDetailedGroupLabel(name string, running bool, group []ToolItem) strin
 
 func toolDescriptor(name, argsJSON string) string {
 	switch name {
-	case "file-read", "file-write", "file-edit", "multi-edit", "enter-worktree", "exit-worktree", "ls":
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
-			return truncateLabel(args.Path, 36)
+	case "file-read", "file-write", "file-edit", "multi-edit", "view-image", "enter-worktree", "exit-worktree", "ls":
+		if p := strings.TrimSpace(filePathArg(argsJSON)); p != "" {
+			return termtext.FitLeft(termtext.SingleLine(p), 36)
 		}
 	case "repo-search", "tool-search", "web-search", "grep":
 		var args struct {
@@ -403,7 +390,7 @@ func toolDescriptor(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Command) != "" {
-			return "$ " + truncateLabel(args.Command, 36)
+			return "$ " + labelCommand(args.Command, 36)
 		}
 	case "pty-write", "pty-kill":
 		var args struct {
@@ -441,70 +428,6 @@ func toolDescriptor(name, argsJSON string) string {
 	return ""
 }
 
-func runningVerb(name string) string {
-	switch name {
-	case "file-read":
-		return "Reading"
-	case "file-write":
-		return "Writing"
-	case "file-edit", "multi-edit":
-		return "Editing"
-	case "repo-search", "tool-search", "web-search":
-		return "Searching"
-	case "web-fetch":
-		return "Fetching"
-	case "download":
-		return "Downloading"
-	case "shell-exec", "bash", "bash-output":
-		return "Running"
-	case "pty-start":
-		return "Starting"
-	case "pty-write":
-		return "Driving"
-	case "pty-kill":
-		return "Closing"
-	case "glob":
-		return "Matching"
-	case "grep":
-		return "Grepping"
-	case "ls":
-		return "Listing"
-	case "todo-write":
-		return "Writing"
-	case "task-create":
-		return "Creating"
-	case "task-get":
-		return "Reading"
-	case "task-update":
-		return "Updating"
-	case "task-list":
-		return "Listing"
-	case "task-delete":
-		return "Deleting"
-	case "ask-user":
-		return "Asking"
-	case "enter-plan-mode":
-		return "Entering"
-	case "exit-plan-mode":
-		return "Exiting"
-	case "mcp-list-resources":
-		return "Listing"
-	case "mcp-read-resource":
-		return "Reading"
-	case "mcp-auth":
-		return "Updating"
-	case "enter-worktree":
-		return "Entering"
-	case "exit-worktree":
-		return "Exiting"
-	case "send-message":
-		return "Sending"
-	case "agent":
-		return "Delegating"
-	}
-	return "Using"
-}
-
 func humanizeToolID(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return "Tool"
@@ -524,8 +447,17 @@ func humanizeToolID(name string) string {
 	return strings.Join(parts, " ")
 }
 
+// formatApprovalCommandLabel is the text of the approval dialog's summary
+// row for an approval request's Command: "$ <command>" for a command, or a
+// sentence naming the target of a network call ("network <tool> <target>").
+//
+// The target is never shortened here. The dialog cuts the row to the
+// terminal and, when anything is cut, shows the whole label in its preview
+// (buildApprovalPreview): the end of a URL (the real domain after a long
+// host name, a query string carrying data out) is what the user has to see
+// before allowing the call.
 func formatApprovalCommandLabel(command string) string {
-	command = strings.TrimSpace(command)
+	command = trimShellBlanks(command)
 	if command == "" {
 		return ""
 	}
@@ -538,30 +470,38 @@ func formatApprovalCommandLabel(command string) string {
 		}
 		switch toolID {
 		case "web-search":
-			return fmt.Sprintf("Searching web for %q", truncateLabel(target, 60))
+			return fmt.Sprintf("Searching web for %q", target)
 		case "web-fetch":
-			return fmt.Sprintf("Fetching %s", truncateLabel(target, 60))
+			return fmt.Sprintf("Fetching %s", target)
 		case "download":
-			return fmt.Sprintf("Downloading %s", truncateLabel(target, 60))
+			return fmt.Sprintf("Downloading %s", target)
 		case "mcp-list-resources":
-			return fmt.Sprintf("Listing MCP resources for %s", truncateLabel(target, 40))
+			return fmt.Sprintf("Listing MCP resources for %s", target)
 		case "mcp-read-resource":
-			return fmt.Sprintf("Reading MCP resource %s", truncateLabel(target, 50))
+			return fmt.Sprintf("Reading MCP resource %s", target)
 		case "mcp-auth":
-			return fmt.Sprintf("Updating MCP auth for %s", truncateLabel(target, 40))
+			return fmt.Sprintf("Updating MCP auth for %s", target)
 		default:
-			return fmt.Sprintf("Using network tool %s on %s", humanizeToolID(toolID), truncateLabel(target, 50))
+			return fmt.Sprintf("Using network tool %s on %s", humanizeToolID(toolID), target)
 		}
 	}
 	return "$ " + command
 }
 
-func renderDiffBlock(diffText string, expanded bool) string {
+// renderDiffBlock renders the diff a file tool produced, under its "●" row.
+// Collapsed it shows the first 20 lines; expanded (ctrl+o) all of them.
+//
+// Every row is cut to width. The diff stays in the unified layout even on a
+// wide terminal: a transcript block switching to two columns at some width
+// would make the same edit look different after a resize, so the width
+// handed to diff.Render is kept below diff.SideBySideMinWidth.
+func renderDiffBlock(diffText string, width int, expanded bool) string {
 	maxLines := 20
 	if expanded {
 		maxLines = 0
 	}
 	return diff.Render(diffText, diff.Options{
+		Width:      min(max(width, 20), diff.SideBySideMinWidth-1),
 		MaxLines:   maxLines,
 		ExpandHint: "(ctrl+o to expand)",
 		Indent:     "       ",
@@ -655,26 +595,4 @@ func primaryAgentIDs(manifest config.AgentManifest) []string {
 		seen[spec.ID] = struct{}{}
 	}
 	return ids
-}
-
-func nextMode(mode string) string {
-	switch mode {
-	case "plan":
-		return "coding"
-	case "coding":
-		return "ask"
-	default:
-		return "plan"
-	}
-}
-
-func prevMode(mode string) string {
-	switch mode {
-	case "plan":
-		return "ask"
-	case "coding":
-		return "plan"
-	default:
-		return "coding"
-	}
 }

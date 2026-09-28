@@ -28,7 +28,7 @@ func newPermRuntime(permission config.PermissionLevel, callback ShellApprovalCal
 
 func TestYOLO_AllowsNonWhitelistedCommandWithoutCallback(t *testing.T) {
 	rt := newPermRuntime(config.PermissionYOLO, nil, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("YOLO should allow any command without a callback: %v", err)
 	}
 }
@@ -39,14 +39,14 @@ func TestYOLO_BypassesPermissionRuleDeny(t *testing.T) {
 	}
 	rt := newPermRuntime(config.PermissionYOLO, nil, rules)
 	// Even a deny-all rule must be bypassed in YOLO mode.
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("YOLO should bypass permission rule deny: %v", err)
 	}
 }
 
 func TestYOLO_AllowsDangerousGitReset(t *testing.T) {
 	rt := newPermRuntime(config.PermissionYOLO, nil, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "git reset --hard HEAD"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "git reset --hard HEAD"); err != nil {
 		t.Errorf("YOLO should allow dangerous commands like git reset --hard: %v", err)
 	}
 }
@@ -58,7 +58,7 @@ func TestYOLO_NeverInvokesApprovalCallback(t *testing.T) {
 		return ShellApprovalDeny, nil
 	}
 	rt := newPermRuntime(config.PermissionYOLO, callback, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("YOLO should allow command: %v", err)
 	}
 	if called {
@@ -69,7 +69,7 @@ func TestYOLO_NeverInvokesApprovalCallback(t *testing.T) {
 func TestYOLO_AllowsChainedNonWhitelistedCommands(t *testing.T) {
 	rt := newPermRuntime(config.PermissionYOLO, nil, nil)
 	cmd := "npm install && npm run build && npm test"
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", cmd); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", cmd); err != nil {
 		t.Errorf("YOLO should allow chained commands: %v", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestYOLO_AllowsChainedNonWhitelistedCommands(t *testing.T) {
 
 func TestAskFirst_BlocksNonWhitelistedCommandWithoutCallback(t *testing.T) {
 	rt := newPermRuntime(config.PermissionAskFirst, nil, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err == nil {
 		t.Error("ask-first should block non-whitelisted commands when no callback is set")
 	}
 }
@@ -86,7 +86,7 @@ func TestAskFirst_BlocksNonWhitelistedCommandWithoutCallback(t *testing.T) {
 func TestAskFirst_AllowsWhitelistedCommands(t *testing.T) {
 	rt := newPermRuntime(config.PermissionAskFirst, nil, nil)
 	for _, cmd := range []string{"ls", "pwd", "git diff", "git status", "cat README.md", "go test ./..."} {
-		if err := rt.authorizeShellCommand(context.Background(), "shell-exec", cmd); err != nil {
+		if err := rt.authorizeShellCommand(context.Background(), "bash", cmd); err != nil {
 			t.Errorf("ask-first should allow whitelisted command %q: %v", cmd, err)
 		}
 	}
@@ -97,10 +97,10 @@ func TestAskFirst_BlocksDangerousCommandsEvenWithApprovaingCallback(t *testing.T
 		return ShellApprovalAllowOnce, nil
 	}
 	rt := newPermRuntime(config.PermissionAskFirst, callback, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "git reset --hard HEAD"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "git reset --hard HEAD"); err == nil {
 		t.Error("ask-first should block dangerous commands (git reset --hard) regardless of callback")
 	}
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "rm -rf /"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "rm -rf /"); err == nil {
 		t.Error("ask-first should block dangerous commands (rm -rf /) regardless of callback")
 	}
 }
@@ -112,7 +112,7 @@ func TestAskFirst_InvokesCallbackForNonWhitelisted(t *testing.T) {
 		return ShellApprovalAllowOnce, nil
 	}
 	rt := newPermRuntime(config.PermissionAskFirst, callback, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("callback returned allow-once so command should succeed: %v", err)
 	}
 	if !called {
@@ -125,7 +125,7 @@ func TestAskFirst_DeniesWhenCallbackDenies(t *testing.T) {
 		return ShellApprovalDeny, nil
 	}
 	rt := newPermRuntime(config.PermissionAskFirst, callback, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err == nil {
 		t.Error("ask-first should return an error when the callback denies the command")
 	}
 }
@@ -139,7 +139,7 @@ func TestAskFirst_RespectsPermissionRuleDeny(t *testing.T) {
 	}
 	rt := newPermRuntime(config.PermissionAskFirst, callback, rules)
 	// Permission rule deny must block even when the callback would approve.
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err == nil {
 		t.Error("ask-first should block when a permission rule denies the command")
 	}
 }
@@ -154,7 +154,7 @@ func TestAskFirst_RespectsPermissionRuleAllow_SkipsCallback(t *testing.T) {
 		return ShellApprovalDeny, nil
 	}
 	rt := newPermRuntime(config.PermissionAskFirst, callback, rules)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("ask-first with an allow rule should succeed without invoking the callback: %v", err)
 	}
 	if callbackCalled {
@@ -172,11 +172,11 @@ func TestAskFirst_AllowAlways_PersistsToSession(t *testing.T) {
 	rt := newPermRuntime(config.PermissionAskFirst, callback, nil)
 	rt.cwd = cwd
 
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Fatalf("first call should succeed: %v", err)
 	}
 	// Second call for the same command must not invoke the callback again.
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Fatalf("second call should succeed (already approved for session): %v", err)
 	}
 	if calls != 1 {
@@ -188,7 +188,7 @@ func TestAskFirst_AllowAlways_PersistsToSession(t *testing.T) {
 
 func TestRestricted_BlocksNonWhitelistedCommandWithoutCallback(t *testing.T) {
 	rt := newPermRuntime(config.PermissionRestricted, nil, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err == nil {
 		t.Error("restricted should block non-whitelisted commands when no callback is set")
 	}
 }
@@ -196,7 +196,7 @@ func TestRestricted_BlocksNonWhitelistedCommandWithoutCallback(t *testing.T) {
 func TestRestricted_AllowsWhitelistedCommands(t *testing.T) {
 	rt := newPermRuntime(config.PermissionRestricted, nil, nil)
 	for _, cmd := range []string{"ls", "pwd", "git diff", "go build ./..."} {
-		if err := rt.authorizeShellCommand(context.Background(), "shell-exec", cmd); err != nil {
+		if err := rt.authorizeShellCommand(context.Background(), "bash", cmd); err != nil {
 			t.Errorf("restricted should allow whitelisted command %q: %v", cmd, err)
 		}
 	}
@@ -207,7 +207,7 @@ func TestRestricted_BlocksDangerousCommands(t *testing.T) {
 		return ShellApprovalAllowOnce, nil
 	}
 	rt := newPermRuntime(config.PermissionRestricted, callback, nil)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "git reset --hard HEAD"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "git reset --hard HEAD"); err == nil {
 		t.Error("restricted should block dangerous commands regardless of callback")
 	}
 }
@@ -220,7 +220,7 @@ func TestRestricted_RespectsPermissionRuleDeny(t *testing.T) {
 		return ShellApprovalAllowOnce, nil
 	}
 	rt := newPermRuntime(config.PermissionRestricted, callback, rules)
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err == nil {
 		t.Error("restricted should block when a permission rule denies the command")
 	}
 }
@@ -233,13 +233,13 @@ func TestPermissionFn_MidRunSwitchToYOLO_SkipsApproval(t *testing.T) {
 	rt.permissionFn = func() config.PermissionLevel { return level }
 
 	// Restricted with no callback: non-whitelisted command is blocked.
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err == nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err == nil {
 		t.Fatal("restricted should block non-whitelisted command")
 	}
 	// The user switches to yolo mid-run: the same command now passes without
 	// any approval callback.
 	level = config.PermissionYOLO
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("after live switch to yolo the command should be allowed: %v", err)
 	}
 }
@@ -255,14 +255,14 @@ func TestPermissionFn_MidRunSwitchAwayFromYOLO_RequiresApproval(t *testing.T) {
 	rt := newPermRuntime(config.PermissionYOLO, callback, nil)
 	rt.permissionFn = func() config.PermissionLevel { return level }
 
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Fatalf("yolo should allow: %v", err)
 	}
 	if called {
 		t.Fatal("yolo should not invoke the approval callback")
 	}
 	level = config.PermissionRestricted
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run deploy"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run deploy"); err != nil {
 		t.Errorf("callback allows, so the command should succeed: %v", err)
 	}
 	if !called {
@@ -273,7 +273,7 @@ func TestPermissionFn_MidRunSwitchAwayFromYOLO_RequiresApproval(t *testing.T) {
 func TestPermissionFn_EmptyFallsBackToSnapshot(t *testing.T) {
 	rt := newPermRuntime(config.PermissionYOLO, nil, nil)
 	rt.permissionFn = func() config.PermissionLevel { return "" }
-	if err := rt.authorizeShellCommand(context.Background(), "shell-exec", "npm run build"); err != nil {
+	if err := rt.authorizeShellCommand(context.Background(), "bash", "npm run build"); err != nil {
 		t.Errorf("empty live level should fall back to the yolo snapshot: %v", err)
 	}
 }
@@ -392,8 +392,8 @@ func TestYOLO_PropagatesPermissionToSubAgents(t *testing.T) {
 	pm, providerURL, modelName := newScriptedManager(t, []string{
 		// Orchestrator delegates to "code" worker
 		`TOOL_CALL {"name":"agent","arguments":{"target":"code","task":"run npm build"}}`,
-		// Code worker runs shell-exec
-		`TOOL_CALL {"name":"shell-exec","arguments":{"command":"npm run build"}}`,
+		// Code worker runs bash
+		`TOOL_CALL {"name":"bash","arguments":{"command":"npm run build"}}`,
 		"FINAL\ndone",
 	})
 
@@ -414,7 +414,7 @@ func TestYOLO_PropagatesPermissionToSubAgents(t *testing.T) {
 		},
 		Tools: []config.ToolSpec{
 			{ID: "agent", Name: "Agent", Kind: "builtin", Enabled: true, TimeoutSec: 60, PermittedActions: []string{"read", "write", "execute", "git", "search", "plan", "ask"}, PrimaryOnly: true},
-			{ID: "shell-exec", Name: "Shell", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"execute"}},
+			{ID: "bash", Name: "Shell", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: true, PermittedActions: []string{"execute"}},
 			{ID: "comment", Name: "Comment", Kind: "builtin", Enabled: true, TimeoutSec: 5, PermittedActions: []string{"read"}},
 		},
 		Agents: []config.AgentSpec{
@@ -434,7 +434,7 @@ func TestYOLO_PropagatesPermissionToSubAgents(t *testing.T) {
 				Name:             "Code",
 				Mode:             "worker",
 				Role:             config.AgentRoleWorker,
-				AllowedTools:     []string{"shell-exec", "comment"},
+				AllowedTools:     []string{"bash", "comment"},
 				PermittedActions: []string{"execute"},
 				// Intentionally set to restricted in the manifest — YOLO must override it.
 				Permission: config.PermissionRestricted,

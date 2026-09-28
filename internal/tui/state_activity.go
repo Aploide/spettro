@@ -144,7 +144,7 @@ func (m *Model) recordApprovalTrace(t agent.ToolTrace) {
 	}
 	toolID := strings.TrimSpace(payload.ToolID)
 	if toolID == "" {
-		toolID = "shell-exec"
+		toolID = "bash"
 	}
 	segment := strings.TrimSpace(payload.Segment)
 	if segment == "" {
@@ -254,31 +254,6 @@ func (m *Model) finishAgentActivity(agentID, status, content, thinking string) {
 	m.currentRunKey = ""
 }
 
-func (m *Model) recordAssistantActivity(agentID, content, thinking string, isPlan bool) {
-	title := "Assistant response"
-	if isPlan {
-		title = "Plan output"
-	}
-	bodyParts := []string{}
-	if strings.TrimSpace(content) != "" {
-		bodyParts = append(bodyParts, strings.TrimSpace(content))
-	}
-	if strings.TrimSpace(thinking) != "" {
-		bodyParts = append(bodyParts, "Reasoning\n"+strings.TrimSpace(thinking))
-	}
-	m.upsertActivity(activityItem{
-		Key:     fmt.Sprintf("message:%d", time.Now().UnixNano()),
-		Kind:    "message",
-		ID:      title,
-		AgentID: agentID,
-		Title:   title,
-		Detail:  truncateLabel(strings.TrimSpace(content), 120),
-		Body:    strings.Join(bodyParts, "\n\n"),
-		Status:  "done",
-		At:      time.Now(),
-	})
-}
-
 func (m *Model) recordToolActivity(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return
@@ -288,10 +263,7 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 		agentID = m.mode
 	}
 	key := fmt.Sprintf("tool:%s:%s", t.Name, t.Args)
-	title := formatToolLabel(t.Name, t.Args)
-	if t.Status == "running" {
-		title = formatRunningLabel(t.Name, t.Args)
-	}
+	title := m.toolLabel(t.Name, t.Args, t.Status == "running")
 	bodyParts := []string{}
 	if summary := summarizeToolArgs(t.Name, t.Args); summary != "" {
 		bodyParts = append(bodyParts, summary)
@@ -322,17 +294,33 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 	})
 }
 
+// maxActivityItems caps the side panel's activity feed (decision D8): the
+// oldest items are dropped past it and counted in activityDropped, which the
+// panel's subtitle reports. Without a cap a long session made every frame
+// scan and lay out tens of thousands of items.
+const maxActivityItems = 2000
+
+// upsertActivity replaces the feed item with the same key or appends it.
+// The scan runs from the newest item: an update is almost always to a
+// call that just started (running, then done), so it stops within a few
+// items, and the cap bounds the worst case.
 func (m *Model) upsertActivity(item activityItem) {
 	if item.At.IsZero() {
 		item.At = time.Now()
 	}
-	for i := range m.activityFeed {
+	for i := len(m.activityFeed) - 1; i >= 0; i-- {
 		if m.activityFeed[i].Key == item.Key {
 			m.activityFeed[i] = item
 			return
 		}
 	}
 	m.activityFeed = append(m.activityFeed, item)
+	if over := len(m.activityFeed) - maxActivityItems; over > 0 {
+		// Copy into a fresh slice rather than reslicing, so the dropped
+		// items (tool bodies can be large) are released.
+		m.activityFeed = append([]activityItem(nil), m.activityFeed[over:]...)
+		m.activityDropped += over
+	}
 }
 
 func extractCommentMessage(argsJSON, output string) string {

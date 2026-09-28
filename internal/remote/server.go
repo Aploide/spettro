@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -94,17 +95,23 @@ type Server struct {
 	bindHost   string
 
 	mu      sync.RWMutex
-	subs    map[chan Event]struct{}
+	subs    map[chan Event]subscriber
 	recent  []Event
 	seq     uint64
 	closed  bool
 	running bool
+	// lastAnswererLeft is when the most recent subscriber that may answer
+	// questions (not an observer) disconnected; zero until one does.
+	lastAnswererLeft time.Time
 
 	statusMu sync.RWMutex
 	status   Status
 
-	// pendingApprovals maps tool_id -> channel awaiting approval decision.
+	// pendingApprovals maps approval_id -> *pendingApproval, one per
+	// approval waiting for a client's decision (see RequestApproval).
 	pendingApprovals sync.Map
+	// approvalSeq numbers approval requests; see RequestApproval.
+	approvalSeq atomic.Uint64
 	// pendingAskUsers maps question_id -> channel awaiting user answer.
 	pendingAskUsers sync.Map
 }
@@ -145,8 +152,15 @@ func NewServer(opts Options) (*Server, error) {
 		bindHost:    host,
 		submitCh:    make(chan SubmitRequest, buf),
 		interruptCh: make(chan struct{}, 8),
-		subs:        map[chan Event]struct{}{},
+		subs:        map[chan Event]subscriber{},
 	}, nil
+}
+
+// subscriber describes one /events connection.
+type subscriber struct {
+	// observer is set by ?observe=1: a client that follows the stream (a
+	// log tailer, CI) but never answers ask_user or approval requests.
+	observer bool
 }
 
 // Host returns the interface address the server is bound to (e.g. "127.0.0.1" or "0.0.0.0").
@@ -284,6 +298,31 @@ func (s *Server) Stop() error {
 	close(s.submitCh)
 	close(s.interruptCh)
 	return nil
+}
+
+// SubscriberCount reports how many clients are connected to /events right
+// now, observers included. Whether anyone could answer a question is
+// Answerers' job: an observer never answers.
+func (s *Server) SubscriberCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.subs)
+}
+
+// Answerers reports how many connected /events clients might answer a
+// question — every subscriber except observers (?observe=1) — and when the
+// last such client disconnected (zero if none has). The second value lets a
+// headless run wait briefly for a client that is reconnecting instead of
+// deciding nobody is there.
+func (s *Server) Answerers() (connected int, lastLeft time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sub := range s.subs {
+		if !sub.observer {
+			connected++
+		}
+	}
+	return connected, s.lastAnswererLeft
 }
 
 // Publish records an event in the replay buffer and fans it out to every
@@ -509,13 +548,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	ch := make(chan Event, 32)
+	sub := subscriber{observer: queryFlag(r.URL.Query().Get("observe"))}
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
-	s.subs[ch] = struct{}{}
+	s.subs[ch] = sub
 	backlog := append([]Event(nil), s.recent...)
 	s.mu.Unlock()
 
@@ -529,6 +569,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		// returning, so the channel will be garbage-collected once the
 		// publisher's snapshot is released.
 		delete(s.subs, ch)
+		if !sub.observer {
+			s.lastAnswererLeft = time.Now()
+		}
 		s.mu.Unlock()
 	}()
 
@@ -563,21 +606,36 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// RequestApproval publishes an approval_request event and blocks until the
-// Android client responds via POST /approval. ctx cancellation returns deny.
-func (s *Server) RequestApproval(ctx context.Context, toolID, command, reason string) (ApprovalDecision, error) {
-	ch := make(chan ApprovalDecision, 1)
-	s.pendingApprovals.Store(toolID, ch)
-	defer s.pendingApprovals.Delete(toolID)
+// pendingApproval is one approval waiting for a client: the tool that asked
+// (for clients that answer by tool_id) and where the decision goes.
+type pendingApproval struct {
+	toolID string
+	ch     chan ApprovalDecision
+}
 
-	s.Publish("approval_request", map[string]any{
-		"tool_id": toolID,
-		"command": command,
-		"reason":  reason,
-	})
+// RequestApproval publishes an approval_request event (ApprovalEvent: the
+// whole command and diff) and blocks until a client responds via POST
+// /approval. ctx cancellation returns deny.
+//
+// Every request gets its own approval_id, carried by the event, and the
+// answer must name it: sub-agents run in parallel, so two approvals can be
+// pending at once, and both can come from the same tool ("bash") or from no
+// tool at all (network access has no tool_id). Keyed by tool_id, an answer
+// meant for the request a client showed would go to whichever request
+// registered last. A client that only sends tool_id is still served while
+// that tool_id is unambiguous (see handleApproval).
+func (s *Server) RequestApproval(ctx context.Context, req ApprovalRequest) (ApprovalDecision, error) {
+	id := fmt.Sprintf("a-%d", s.approvalSeq.Add(1))
+	pending := &pendingApproval{toolID: req.ToolID, ch: make(chan ApprovalDecision, 1)}
+	s.pendingApprovals.Store(id, pending)
+	defer s.pendingApprovals.Delete(id)
+
+	data := ApprovalEvent(req)
+	data["approval_id"] = id
+	s.Publish("approval_request", data)
 
 	select {
-	case dec := <-ch:
+	case dec := <-pending.ch:
 		return dec, nil
 	case <-ctx.Done():
 		return ApprovalDecision{Decision: "deny"}, ctx.Err()
@@ -591,26 +649,69 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ToolID   string `json:"tool_id"`
-		Decision string `json:"decision"`
-		Instead  string `json:"instead,omitempty"`
+		ApprovalID string `json:"approval_id"`
+		ToolID     string `json:"tool_id"`
+		Decision   string `json:"decision"`
+		Instead    string `json:"instead,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	val, ok := s.pendingApprovals.Load(body.ToolID)
-	if !ok {
-		http.Error(w, "no pending approval for tool_id", http.StatusNotFound)
+	if body.ApprovalID == "" && body.Decision != "deny" {
+		// Only a denial may name its request by tool alone: see findApproval.
+		http.Error(w, "an allow must name the approval_id of the request it approves", http.StatusConflict)
 		return
 	}
-	ch := val.(chan ApprovalDecision)
+	pending, status, msg := s.findApproval(body.ApprovalID, body.ToolID)
+	if pending == nil {
+		http.Error(w, msg, status)
+		return
+	}
 	select {
-	case ch <- ApprovalDecision{Decision: body.Decision, Instead: body.Instead}:
+	case pending.ch <- ApprovalDecision{Decision: body.Decision, Instead: body.Instead}:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		http.Error(w, "approval already answered", http.StatusConflict)
 	}
+}
+
+// findApproval finds the pending approval an answer is for: the one named
+// by approvalID, or, for a client that sends only tool_id, the one pending
+// approval of that tool. When several approvals of that tool are pending
+// the answer is refused (409) rather than guessed: it could approve a call
+// the user never saw. On failure it returns the HTTP status and message.
+//
+// A tool_id alone can still name the wrong request when only one is
+// pending: the one the client shows may have been withdrawn (its window ran
+// out, the run was cancelled) and another call of the same tool asked
+// since, which the client has not drawn yet. handleApproval therefore takes
+// a tool_id-only answer for a denial only, where the worst outcome is a
+// call denied that the user would have allowed; an allow must carry the
+// approval_id of what it approves.
+func (s *Server) findApproval(approvalID, toolID string) (*pendingApproval, int, string) {
+	if approvalID != "" {
+		if val, ok := s.pendingApprovals.Load(approvalID); ok {
+			return val.(*pendingApproval), 0, ""
+		}
+		return nil, http.StatusNotFound, "no pending approval for approval_id"
+	}
+	var match *pendingApproval
+	count := 0
+	s.pendingApprovals.Range(func(_, val any) bool {
+		if p := val.(*pendingApproval); p.toolID == toolID {
+			match = p
+			count++
+		}
+		return count < 2
+	})
+	switch count {
+	case 0:
+		return nil, http.StatusNotFound, "no pending approval for tool_id"
+	case 1:
+		return match, 0, ""
+	}
+	return nil, http.StatusConflict, "several approvals are pending for this tool_id; answer with approval_id"
 }
 
 // AskUserReply is what a client sent back for one ask-user interaction.
@@ -724,4 +825,13 @@ func generateToken(byteLen int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+// queryFlag reads a boolean query parameter: 1, true, yes (any case) are true.
+func queryFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }

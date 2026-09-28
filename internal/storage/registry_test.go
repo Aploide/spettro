@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"spettro/internal/testhome"
 )
 
 // writeFile creates a file with parents.
@@ -49,12 +51,16 @@ func writeSession(t *testing.T, globalDir, id, projectHash string, updated time.
 
 // TestMain sandboxes the spool scan: without this, tests running Clean on a
 // real machine could delete genuine spettro-spool-* dirs under /tmp.
+func TestHomeIsIsolated(t *testing.T) { testhome.Check(t) }
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "spettro-registry-test-spool-*")
 	if err == nil {
 		spoolRoot = dir
 	}
-	code := m.Run()
+	// testhome.Main also points HOME at a throwaway directory, so no test
+	// can touch the real ~/.spettro.
+	code := testhome.Main(m)
 	if dir != "" {
 		os.RemoveAll(dir)
 	}

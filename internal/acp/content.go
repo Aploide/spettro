@@ -3,8 +3,8 @@ package acp
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +13,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/agent"
+	"spettro/internal/config"
 	"spettro/internal/session"
 )
 
@@ -23,15 +24,49 @@ type turnState struct {
 	bridge    *bridge
 	ctx       context.Context
 	sessionID acpsdk.SessionId
+	// cwd is the session's working directory. Relative paths in tool
+	// arguments are resolved against it, because ACP locations must be
+	// absolute.
+	cwd string
+	// agentID is the agent the turn runs (the session's mode). Only its own
+	// words reach the chat as agent messages; a sub-agent's narration would
+	// read as the main agent talking.
+	agentID string
+	// manifest is the session's agent manifest, which says which tool names
+	// belong to tools of the operator's own (see cardTitle).
+	manifest config.AgentManifest
 
 	mu  sync.Mutex
 	seq int
-	// open maps a running tool call (name+args) to its ACP tool call IDs so
-	// the completion trace, which repeats name+args, updates the right call.
-	open map[string][]acpsdk.ToolCallId
+	// open maps a running tool call (agent, name and args) to the ACP tool
+	// calls announced for it, oldest first, so the completion trace, which
+	// repeats agent, name and args, updates the right card. Identical calls
+	// running at once share a key and complete in announcement order.
+	open map[string][]openToolCall
+	// awaiting holds the cards currently showing a permission prompt (see
+	// approvalToolCallID and settleApprovalCard).
+	awaiting map[acpsdk.ToolCallId]bool
+	// lastNarration is the most recent narration of the turn's own agent
+	// sent to the chat, so a run's final content that repeats it is not
+	// sent twice (see repeatsNarration).
+	lastNarration string
 	// workflow is the in-flight workflow run whose tool call is rewritten as
 	// the run progresses; nil outside a workflow.
 	workflow *acpWorkflow
+}
+
+// openToolCall is a tool call the editor has been told is running.
+type openToolCall struct {
+	id acpsdk.ToolCallId
+	// seq orders calls by announcement; the most recent call wins when a
+	// permission request cannot tell candidates apart (approvalToolCallID).
+	seq int
+	// agentID is the agent that made the call, as its trace names it;
+	// name is the tool's canonical name and args its decoded arguments (nil
+	// when not JSON). The approval flow matches on all three.
+	agentID string
+	name    string
+	args    toolArgs
 }
 
 // sessionUpdate sends a session/update notification, dropping it silently if
@@ -77,15 +112,24 @@ func (t *turnState) onUsage(ev agent.UsageEvent, contextWindow int) {
 }
 
 // onTool translates ToolTrace events into ACP tool_call / tool_call_update
-// notifications. "comment" traces are transient progress notes already
-// covered by the tool updates themselves, so they are dropped.
+// notifications:
+//
+//   - a "running" trace announces a tool_call (in_progress) with its kind,
+//     title, locations and rawInput (see tools.go for how each is derived
+//     and bounded);
+//   - the completion trace ("success" or "error") sends a tool_call_update
+//     with the final status and the result as content: a diff per file the
+//     call changed, then the text output and any attached images;
+//   - "comment" traces never become cards: see onComment;
+//   - "approval" traces record a decision the editor either made itself
+//     (session/request_permission) or sees as the tool call failing with
+//     the policy's reason, so they are dropped.
 func (t *turnState) onTool(tr agent.ToolTrace) {
-	if tr.Name == "comment" {
-		// Steering delivery is the one comment worth surfacing: it is the
-		// user's confirmation that their mid-run message reached the model.
-		if strings.HasPrefix(tr.Output, "steering delivered") {
-			t.sessionUpdate(acpsdk.UpdateAgentMessageText("✔ " + tr.Output + "\n"))
-		}
+	switch tr.Name {
+	case "comment":
+		t.onComment(tr)
+		return
+	case "approval":
 		return
 	}
 	// Workflow traces drive a single long-lived tool call; the helper reports
@@ -95,17 +139,26 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 	}
 	key := tr.AgentID + "\x00" + tr.Name + "\x00" + tr.Args
 	if tr.Status == "running" {
-		id := t.nextToolCallID("call")
 		t.mu.Lock()
-		t.open[key] = append(t.open[key], id)
+		call := openToolCall{
+			id:      t.nextToolCallIDLocked("call"),
+			seq:     t.seq,
+			agentID: tr.AgentID,
+			name:    agent.CanonicalToolName(tr.Name),
+			args:    decodeToolArgs(tr.Args),
+		}
+		if t.open == nil {
+			t.open = map[string][]openToolCall{}
+		}
+		t.open[key] = append(t.open[key], call)
 		t.mu.Unlock()
 		t.sessionUpdate(acpsdk.StartToolCall(
-			id,
-			toolCallTitle(tr),
-			acpsdk.WithStartKind(toolKind(tr.Name)),
+			call.id,
+			t.cardTitle(tr),
+			acpsdk.WithStartKind(t.cardKind(tr.Name)),
 			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
-			acpsdk.WithStartLocations(toolLocations(tr.Args)),
-			acpsdk.WithStartRawInput(rawJSON(tr.Args)),
+			acpsdk.WithStartLocations(toolLocations(tr.Args, t.cwd)),
+			acpsdk.WithStartRawInput(boundedRawInput(tr.Args)),
 		))
 		return
 	}
@@ -114,48 +167,121 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 	if tr.Status == "error" {
 		status = acpsdk.ToolCallStatusFailed
 	}
+	content := append(fileChangeContent(tr.FileChanges), toolOutputContent(tr.Output, tr.Images)...)
+	rawOutput := map[string]any{"output": clipBytes(tr.Output, maxToolTextBytes)}
+
 	t.mu.Lock()
-	stack := t.open[key]
+	queue := t.open[key]
 	var id acpsdk.ToolCallId
-	known := len(stack) > 0
+	known := len(queue) > 0
 	if known {
-		id = stack[len(stack)-1]
-		t.open[key] = stack[:len(stack)-1]
+		id = queue[0].id
+		if len(queue) == 1 {
+			delete(t.open, key)
+		} else {
+			t.open[key] = queue[1:]
+		}
 	}
 	t.mu.Unlock()
 
 	if !known {
-		// Completion without a matching start (e.g. a call rejected before
-		// execution): emit a single already-finished tool call.
+		// Completion without a matching start (a call rejected before it
+		// ran, e.g. a retired name whose arguments do not convert): emit a
+		// single already-finished tool call.
 		t.sessionUpdate(acpsdk.StartToolCall(
 			t.nextToolCallID("call"),
-			toolCallTitle(tr),
-			acpsdk.WithStartKind(toolKind(tr.Name)),
+			t.cardTitle(tr),
+			acpsdk.WithStartKind(t.cardKind(tr.Name)),
 			acpsdk.WithStartStatus(status),
-			acpsdk.WithStartLocations(toolLocations(tr.Args)),
-			acpsdk.WithStartRawInput(rawJSON(tr.Args)),
-			acpsdk.WithStartContent(toolOutputContent(tr.Output, tr.Images)),
+			acpsdk.WithStartLocations(toolLocations(tr.Args, t.cwd)),
+			acpsdk.WithStartRawInput(boundedRawInput(tr.Args)),
+			acpsdk.WithStartContent(content),
+			acpsdk.WithStartRawOutput(rawOutput),
 		))
-		return
+	} else {
+		opts := []acpsdk.ToolCallUpdateOpt{
+			acpsdk.WithUpdateStatus(status),
+			acpsdk.WithUpdateContent(content),
+			acpsdk.WithUpdateRawOutput(rawOutput),
+		}
+		if len(tr.FileChanges) > 0 {
+			// The changed files' absolute paths are authoritative (a sub-agent
+			// in a worktree names paths relative to the worktree), so they
+			// replace the locations guessed from the arguments.
+			opts = append(opts, acpsdk.WithUpdateLocations(fileChangeLocations(tr.FileChanges)))
+		}
+		t.sessionUpdate(acpsdk.UpdateToolCall(id, opts...))
 	}
-	t.sessionUpdate(acpsdk.UpdateToolCall(
-		id,
-		acpsdk.WithUpdateStatus(status),
-		acpsdk.WithUpdateContent(toolOutputContent(tr.Output, tr.Images)),
-		acpsdk.WithUpdateRawOutput(map[string]any{"output": tr.Output}),
-	))
 	if status == acpsdk.ToolCallStatusCompleted {
 		t.publishPlanIfTaskTool(tr.Name)
 	}
+}
+
+// onComment handles "comment" traces. Three of them are words for the user
+// and are sent as agent_message_chunk text, each ending in a blank line so
+// the next message or tool card starts on its own:
+//
+//   - narration, the prose the model wrote in a step that also called tools
+//     (without this the editor would only ever see the final answer);
+//   - a call of the comment tool, whose message the model addressed to the
+//     user ("one short line shown to the user");
+//   - the note that a mid-run steering message reached the model.
+//
+// Only the turn's own agent speaks in the chat. A sub-agent's narration and
+// comment-tool messages would read as the main agent talking, and its
+// steering notes are not the user's: a sub-agent's private steering queue
+// carries only the runtime's time-limit wrap-up notice. All of those are
+// dropped, like the runtime's own progress notes ("Starting bash (...)"),
+// which repeat what the tool cards already show.
+func (t *turnState) onComment(tr agent.ToolTrace) {
+	text := t.commentChatText(tr)
+	if text == "" {
+		return
+	}
+	if tr.Narration {
+		t.mu.Lock()
+		t.lastNarration = text
+		t.mu.Unlock()
+	}
+	t.sessionUpdate(acpsdk.UpdateAgentMessageText(text + "\n\n"))
+}
+
+// commentChatText is the chat message a "comment" trace becomes, or "" when
+// it stays out of the chat (see onComment for which ones are shown).
+func (t *turnState) commentChatText(tr agent.ToolTrace) string {
+	if t.agentID != "" && tr.AgentID != t.agentID {
+		// A sub-agent's comment: never the turn's own words.
+		return ""
+	}
+	text := ""
+	switch {
+	case strings.HasPrefix(tr.Output, "steering delivered"):
+		text = "✔ " + tr.Output
+	case tr.Narration:
+		text = tr.Output
+	case tr.Status == "running":
+		// Only a call of the comment tool announces itself as running; the
+		// runtime's notes arrive already finished.
+		text = decodeToolArgs(tr.Args).str("message")
+	}
+	return strings.TrimSpace(text)
+}
+
+// repeatsNarration reports whether content is the narration the chat was
+// sent last. A /goal run that ends with goal-complete and no summary
+// returns the prose of its last step as its content, and that prose was
+// already narrated.
+func (t *turnState) repeatsNarration(content string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastNarration != "" && t.lastNarration == strings.TrimSpace(content)
 }
 
 // publishPlanIfTaskTool mirrors the persistent session task graph to the ACP
 // client as a plan update whenever a task-mutating tool succeeds, so editors
 // render the agent's live task list.
 func (t *turnState) publishPlanIfTaskTool(toolName string) {
-	switch toolName {
-	case "todo-write", "task-create", "task-update", "task-delete":
-	default:
+	if agent.CanonicalToolName(toolName) != "todo-write" {
 		return
 	}
 	todos, err := session.LoadTodos(t.bridge.opts.GlobalDir, string(t.sessionID))
@@ -214,214 +340,117 @@ func (t *turnState) nextToolCallIDLocked(prefix string) acpsdk.ToolCallId {
 	return acpsdk.ToolCallId(fmt.Sprintf("%s-%d", prefix, t.seq))
 }
 
-// openToolCallID returns the most recent in-flight tool call for the given
-// tool name (used to attach a shell permission request to the tool call the
-// editor is already rendering), or a fresh ID when none is open.
-func (t *turnState) openToolCallID(toolName string) acpsdk.ToolCallId {
-	t.mu.Lock()
-	for key, stack := range t.open {
-		parts := strings.SplitN(key, "\x00", 3)
-		if len(parts) == 3 && parts[1] == toolName && len(stack) > 0 {
-			id := stack[len(stack)-1]
-			t.mu.Unlock()
-			return id
-		}
-	}
-	t.mu.Unlock()
-	return t.nextToolCallID("perm")
+// promptContent is an ACP prompt's content blocks, read. The typed text and
+// the attached contexts are kept apart because a skill command must be
+// parsed from what the user typed alone: an attached file is context for
+// the turn, never part of the skill's arguments (see Prompt).
+type promptContent struct {
+	// typed is what the user typed: the text blocks in order, each resource
+	// link written as an @path mention.
+	typed string
+	// contexts are the files the editor embedded as resources, each
+	// rendered as a "Context from <path>:" fenced block.
+	contexts []string
+	// images are the image blocks, decoded to files for the vision channel.
+	images []string
+	// mentioned are the resource links' paths (the run's RequiredReads).
+	mentioned []string
 }
 
-func toolCallTitle(tr agent.ToolTrace) string {
-	// Sub-agent lifecycle traces get a human title ("agent code#3: fix auth
-	// tests") so editors show which swarm/delegation member is doing what
-	// instead of a raw JSON blob.
-	if tr.Name == "agent" {
-		var args struct {
-			Agent string `json:"agent"`
-			Task  string `json:"task"`
-		}
-		if json.Unmarshal([]byte(tr.Args), &args) == nil && args.Agent != "" {
-			title := "agent " + args.Agent
-			if args.Task != "" {
-				task := args.Task
-				if len(task) > 120 {
-					task = task[:120] + "…"
-				}
-				title += ": " + task
-			}
-			return title
-		}
-	}
-	if tr.Name == "workflow" || tr.Name == "workflow-progress" {
-		var args struct {
-			Workflow string `json:"workflow"`
-			Phase    string `json:"phase"`
-			Kind     string `json:"kind"`
-		}
-		if json.Unmarshal([]byte(tr.Args), &args) == nil && args.Workflow != "" {
-			switch args.Kind {
-			case "phase":
-				return "workflow " + args.Workflow + " ▸ " + args.Phase
-			case "log":
-				return "workflow " + args.Workflow + " · log"
-			}
-			return "workflow " + args.Workflow
-		}
-	}
-	title := tr.Name
-	if tr.Args != "" {
-		args := tr.Args
-		const maxArgs = 120
-		if len(args) > maxArgs {
-			args = args[:maxArgs] + "…"
-		}
-		title += " " + args
-	}
-	// Swarm members carry instance names like "code#3"; prefixing them keeps
-	// every tool call attributable when dozens of agents interleave.
-	if strings.ContainsRune(tr.AgentID, '#') {
-		title = "[" + tr.AgentID + "] " + title
-	}
-	return title
+// task is the prompt the model receives for this content: the typed text,
+// then the attached contexts.
+func (p promptContent) task() string {
+	return p.withContexts(p.typed)
 }
 
-// toolKind classifies Spettro tool IDs into ACP tool kinds so editors pick
-// the right icon/affordance.
-func toolKind(name string) acpsdk.ToolKind {
-	n := strings.ToLower(name)
-	switch {
-	case strings.HasPrefix(n, "workflow"):
-		return acpsdk.ToolKindThink
-	case n == "view-image":
-		return acpsdk.ToolKindRead
-	case strings.Contains(n, "edit"), strings.Contains(n, "write"), strings.Contains(n, "patch"):
-		return acpsdk.ToolKindEdit
-	case strings.Contains(n, "read"):
-		return acpsdk.ToolKindRead
-	case strings.Contains(n, "search"), strings.Contains(n, "grep"), strings.Contains(n, "glob"), n == "ls":
-		return acpsdk.ToolKindSearch
-	case strings.Contains(n, "shell"), strings.Contains(n, "bash"), strings.Contains(n, "exec"):
-		return acpsdk.ToolKindExecute
-	case strings.Contains(n, "http"), strings.Contains(n, "fetch"), strings.Contains(n, "web"):
-		return acpsdk.ToolKindFetch
-	case strings.Contains(n, "agent"), strings.Contains(n, "todo"), strings.Contains(n, "plan"):
-		return acpsdk.ToolKindThink
-	default:
-		return acpsdk.ToolKindOther
+// withContexts appends the attached contexts to text, which is the typed
+// text or a prompt built from it (a skill's instructions).
+func (p promptContent) withContexts(text string) string {
+	if len(p.contexts) == 0 {
+		return text
 	}
+	return strings.TrimSpace(text) + "\n\n" + strings.Join(p.contexts, "\n\n")
 }
 
-// toolLocations extracts a file path from the tool's JSON args, if present,
-// so "follow the agent" editors can jump to the file being touched.
-func toolLocations(args string) []acpsdk.ToolCallLocation {
-	m, ok := rawJSON(args).(map[string]any)
-	if !ok {
-		return nil
-	}
-	for _, k := range []string{"path", "file", "file_path", "filename"} {
-		if p, ok := m[k].(string); ok && p != "" {
-			return []acpsdk.ToolCallLocation{{Path: p}}
-		}
-	}
-	return nil
-}
-
-// rawJSON parses the single-line args string for rawInput; on failure the
-// original string is passed through so nothing is lost.
-func rawJSON(args string) any {
-	if args == "" {
-		return nil
-	}
-	var v any
-	if err := json.Unmarshal([]byte(args), &v); err != nil {
-		return args
-	}
-	return v
-}
-
-// toolOutputContent renders a tool's text output plus any images it attached
-// (screenshot, view-image) as ACP content blocks, so capable editors show the
-// captured image inline with the tool call. Unreadable image files are
-// skipped — the text output still names the path.
-func toolOutputContent(output string, images []string) []acpsdk.ToolCallContent {
-	var out []acpsdk.ToolCallContent
-	if output != "" {
-		out = append(out, acpsdk.ToolContent(acpsdk.TextBlock(output)))
-	}
-	for _, p := range images {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		out = append(out, acpsdk.ToolContent(acpsdk.ImageBlock(base64.StdEncoding.EncodeToString(data), imageMime(p))))
-	}
-	return out
-}
-
-// imageMime is the inverse of imageExt: extension → MIME type for tool-attached
-// image files.
-func imageMime(path string) string {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	default:
-		return "image/png"
-	}
-}
-
-// promptFromBlocks flattens the ACP prompt content into the single task
-// string LLMAgent consumes: text blocks in order, resource links surfaced as
-// @-mentions (and RequiredReads), embedded text resources appended as fenced
-// context, images decoded to files for the vision channel.
-func promptFromBlocks(blocks []acpsdk.ContentBlock, mediaDir string) (task string, images []string, mentioned []string, err error) {
+// readPromptContent reads the ACP prompt content blocks: text blocks in
+// order, resource links surfaced as @-mentions (and RequiredReads),
+// embedded text resources kept as fenced context, images decoded to files
+// in mediaDir.
+func readPromptContent(blocks []acpsdk.ContentBlock, mediaDir string) (promptContent, error) {
+	var p promptContent
 	var text strings.Builder
-	var contexts []string
 	imgN := 0
 	for _, block := range blocks {
 		switch {
 		case block.Text != nil:
 			text.WriteString(block.Text.Text)
 		case block.ResourceLink != nil:
-			path := uriToPath(block.ResourceLink.Uri)
+			// A file link becomes an @-mention and a required read; any
+			// other link (a web page, an editor-specific scheme) is only
+			// mentioned, since there is no file for file-read to open.
+			uri := block.ResourceLink.Uri
+			path, isFile := fileURIPath(uri)
 			text.WriteString("@")
+			if !isFile {
+				text.WriteString(uri)
+				continue
+			}
 			text.WriteString(path)
-			mentioned = append(mentioned, path)
+			p.mentioned = append(p.mentioned, path)
 		case block.Resource != nil:
 			if tr := block.Resource.Resource.TextResourceContents; tr != nil {
-				contexts = append(contexts, fmt.Sprintf("Context from %s:\n```\n%s\n```", uriToPath(tr.Uri), tr.Text))
+				p.contexts = append(p.contexts, fmt.Sprintf("Context from %s:\n```\n%s\n```", uriToPath(tr.Uri), tr.Text))
 			}
 		case block.Image != nil:
 			if block.Image.Data == "" {
 				continue
 			}
 			if err := ensureMediaDir(mediaDir); err != nil {
-				return "", nil, nil, fmt.Errorf("media dir: %w", err)
+				return promptContent{}, fmt.Errorf("media dir: %w", err)
 			}
 			raw, derr := base64.StdEncoding.DecodeString(block.Image.Data)
 			if derr != nil {
-				return "", nil, nil, fmt.Errorf("decode image: %w", derr)
+				return promptContent{}, fmt.Errorf("decode image: %w", derr)
 			}
 			imgN++
-			p := filepath.Join(mediaDir, fmt.Sprintf("prompt-img-%d%s", imgN, imageExt(block.Image.MimeType)))
-			if werr := os.WriteFile(p, raw, 0o600); werr != nil {
-				return "", nil, nil, fmt.Errorf("write image: %w", werr)
+			path := filepath.Join(mediaDir, fmt.Sprintf("prompt-img-%d%s", imgN, imageExt(block.Image.MimeType)))
+			if werr := os.WriteFile(path, raw, 0o600); werr != nil {
+				return promptContent{}, fmt.Errorf("write image: %w", werr)
 			}
-			images = append(images, p)
+			p.images = append(p.images, path)
 		}
 	}
-	task = text.String()
-	if len(contexts) > 0 {
-		task = strings.TrimSpace(task) + "\n\n" + strings.Join(contexts, "\n\n")
-	}
-	return task, images, mentioned, nil
+	p.typed = text.String()
+	return p, nil
 }
 
+// uriToPath returns the local path of a file:// URI, or uri unchanged when
+// it is not one (it then only labels embedded context).
 func uriToPath(uri string) string {
-	return strings.TrimPrefix(uri, "file://")
+	if path, ok := fileURIPath(uri); ok {
+		return path
+	}
+	return uri
+}
+
+// fileURIPath decodes a file:// URI into a local path: percent-escapes are
+// decoded ("My%20Proj" is "My Proj"), an empty or "localhost" authority is
+// accepted, and a Windows drive path ("/C:/x") loses its leading slash.
+// ok is false for any other scheme or a remote authority, which name no
+// file this process can read.
+func fileURIPath(uri string) (path string, ok bool) {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "file" || u.Path == "" {
+		return "", false
+	}
+	if u.Host != "" && u.Host != "localhost" {
+		return "", false
+	}
+	p := u.Path
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p), true
 }
 
 func imageExt(mime string) string {

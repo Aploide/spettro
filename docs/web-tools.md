@@ -32,7 +32,7 @@ an agent uses to actually *read* a page found via `web-search`.
   50 000. Longer content is truncated to the per-tool history budget
   (see `toolOutputHistoryLimit` in `llm_runtime_prompt.go`) and the
   omitted portion is written to a session-scoped **spool** file so the
-  model can page through it with `job-output {"job_id":"spool:N","offset":Z}`.
+  model can page through it with `tool-output {"id":"spool:N","offset":Z}`.
 
 ### Output format
 
@@ -85,12 +85,12 @@ preserves the full result in a session-scoped spool file on disk. The model
 receives a truncated head with a footer like:
 
 ```
-[truncated: 480 of 1050 lines omitted; use job-output {"job_id":"spool:3","offset":4160} to read more]
+[truncated: 480 of 1050 lines omitted; use tool-output {"id":"spool:3","offset":4160} to read more]
 ```
 
-The model can then call `job-output` with the `spool:N` ID and an `offset` to
+The model can then call `tool-output` with the `spool:N` ID and an `offset` to
 page through the omitted portion. This is the same paging mechanism used by
-other spooled tools (`file-read`, `grep`, `repo-search`, `shell-exec`, `bash`).
+other spooled tools (`file-read`, `grep`, `glob`, `bash`).
 
 Spool files are session state: they are deleted when the session ends (TUI
 exit, `/exit`, or goal completion).

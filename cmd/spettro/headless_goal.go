@@ -6,21 +6,14 @@ import (
 	"os"
 	"os/signal"
 	"slices"
-	"strings"
 	"syscall"
 	"time"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/jobs"
-	"spettro/internal/lsp"
-	"spettro/internal/models"
 	"spettro/internal/provider"
-	"spettro/internal/pty"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
-	"spettro/internal/spettro"
-	"spettro/internal/storage"
 )
 
 // runHeadlessGoal runs the agent in goal mode without the TUI. It loops
@@ -29,25 +22,16 @@ import (
 func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	// Kill detached background shell jobs on exit; they are in their own
-	// process groups and would otherwise outlive the run.
-	defer jobs.Default().KillAll()
-	defer pty.Default().KillAll()
-	defer jobs.Spool().Cleanup()
-	// Language servers keep workspace files open for as long as they run.
-	defer lsp.ShutdownAll()
+	// Background jobs, PTY sessions and language servers the run started
+	// must not outlive it. Every exit below goes through exitSession,
+	// because os.Exit would skip this deferred call.
+	defer releaseSessionResources()
 
-	store, err := storage.New(cwd)
+	boot, err := bootstrapSession(cwd, sandboxOverrides)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "storage error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
-
-	cfg, err := config.LoadFull()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
-	}
+	store, pm, manifest, cfg := boot.store, boot.providers, boot.manifest, boot.cfg
 
 	// Headless goal mode defaults to yolo permission for unattended operation
 	// unless explicitly overridden
@@ -56,44 +40,12 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 		cfg.Permission = config.PermissionYOLO
 	}
 
-	pm := provider.NewManager()
-	pm.SetAPIKeys(cfg.APIKeys)
-
-	if cat, err := models.Load(); err == nil {
-		pm.SetCatalog(cat)
-	}
-	for _, endpoint := range cfg.LocalEndpoints {
-		if localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint]); err == nil {
-			pm.AddLocalModels(localModels)
-		}
-	}
-	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
-		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
-		if infos, err := spettro.ListModels(context.Background(), cfg.APIKeys[spettro.ProviderID]); err == nil {
-			pm.SetSpettro(spettro.InferenceBaseURL(), spettroInfosToModels(infos))
-		}
-	}
-	models.RefreshBackground(pm.SetCatalog)
-
-	// Don't run with a model whose provider has no credentials (fresh install
-	// or removed key): fall back to the best connected model.
-	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
-
-	manifest, _ := config.LoadAgentManifestForProject(cwd)
-
-	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox error: %v\n", err)
-		os.Exit(1)
-	}
-	sb := agent.NewSandboxState(sandboxPolicy)
-
-	if sandboxPolicy.Enabled() {
-		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
-		if err := sandbox.ConfineParent(writable); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
-		}
-	}
+	// A goal run starts working at once and needs the full model list (the
+	// context window of a local or subscription model), so it waits for the
+	// discovery; each request is bounded by its own client timeout.
+	<-startModelDiscovery(ctx, cfg, pm, true, nil).Done()
+	resolveActiveModel(&cfg, pm)
+	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
 	sessionID := "headless-goal-" + session.ProjectHash(cwd)
 	sessionDir := session.SessionDir(store.GlobalDir, sessionID)
@@ -108,7 +60,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 	spec, ok := manifest.AgentByID("coding")
 	if !ok {
 		fmt.Fprintf(os.Stderr, "coding agent not found in manifest\n")
-		os.Exit(1)
+		exitSession(1)
 	}
 
 	// Append goal-complete to allowed tools
@@ -142,7 +94,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 		select {
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "\nInterrupted\n")
-			os.Exit(1)
+			exitSession(1)
 		default:
 		}
 
@@ -163,6 +115,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
+			MaxTokens:       cfg.TokenBudget,
+			MaxOutputTokens: cfg.MaxOutputTokens,
+			Thinking:        configuredThinking(pm, cfg),
 			Ultra:           cfg.UltraActive(),
 			Messages:        history,
 			Manifest:        &manifest,
@@ -185,8 +140,9 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 				return agent.ShellApprovalAllowOnce, nil
 			},
 			AskUser: func(ctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
-				// In headless mode, we can't ask the user, so return error
-				return nil, fmt.Errorf("cannot ask user in headless mode")
+				// Nobody is attending a headless goal run; the ask-user tool
+				// tells the agent to proceed on its own judgment.
+				return nil, agent.ErrNoUserAvailable
 			},
 		}
 
@@ -196,7 +152,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			if ctx.Err() != nil {
 				// Context cancelled, exit
 				fmt.Fprintf(os.Stderr, "\nInterrupted during execution\n")
-				os.Exit(1)
+				exitSession(1)
 			}
 			// Continue to next iteration on transient errors, but count a
 			// strike so a persistently failing provider still terminates
@@ -204,7 +160,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			errorStrikes++
 			if errorStrikes >= state.NoProgressLimit {
 				fmt.Fprintf(os.Stderr, "\n✗ Goal stopped: %d consecutive iterations failed. Last error: %v\n", errorStrikes, err)
-				os.Exit(1)
+				exitSession(1)
 			}
 			fmt.Fprintf(os.Stderr, "Agent error: %v — continuing (%d/%d strikes)\n", err, errorStrikes, state.NoProgressLimit)
 			continue
@@ -226,20 +182,27 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 		case agent.GoalDecisionComplete:
 			fmt.Printf("\n✓ Goal complete: %s\n", reason)
 			fmt.Printf("Iterations: %d, Duration: %s\n", state.Iteration, time.Since(state.StartedAt).Round(time.Second))
-			os.Exit(0)
+			exitSession(0)
 
 		case agent.GoalDecisionMaxIterations:
 			fmt.Fprintf(os.Stderr, "\n✗ Goal stopped: %s (limit: %d)\n", reason, state.MaxIterations)
-			os.Exit(1)
+			exitSession(1)
 
 		case agent.GoalDecisionStalled:
 			fmt.Fprintf(os.Stderr, "\n✗ Goal stalled: %s (no progress for %d iterations)\n", reason, state.NoProgress)
-			os.Exit(1)
+			exitSession(1)
 
 		case agent.GoalDecisionContinue:
 			fmt.Printf("Continuing (no-progress: %d/%d)...\n", state.NoProgress, state.NoProgressLimit)
 		}
 	}
+}
+
+// configuredThinking returns the user's thinking_level for the active model,
+// or "" (no thinking parameter) when the model does not support reasoning —
+// the same rule the TUI and the ACP bridge apply.
+func configuredThinking(pm *provider.Manager, cfg config.UserConfig) provider.ThinkingLevel {
+	return pm.ConfiguredThinking(cfg.ActiveProvider, cfg.ActiveModel, cfg.ThinkingLevel)
 }
 
 // resolveContextWindow looks up the context window size for the active model.

@@ -20,11 +20,11 @@ func TestShellExecSpoolsAndJobOutputPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := r.runShellTool(context.Background(), "shell-exec", args, "shell-exec")
+	out, err := r.runShellTool(context.Background(), "bash", args, "bash")
 	if err != nil {
-		t.Fatalf("shell-exec: %v", err)
+		t.Fatalf("bash: %v", err)
 	}
-	m := regexp.MustCompile(`"job_id":"(spool:\d+)","offset":(\d+)`).FindStringSubmatch(out)
+	m := regexp.MustCompile(`tool-output \{"id":"(spool:\d+)","offset":(\d+)`).FindStringSubmatch(out)
 	if m == nil {
 		t.Fatalf("no spool footer in shell output; tail: %q", out[len(out)-200:])
 	}
@@ -44,7 +44,7 @@ func TestBashOutputWithJobIDRoutesToJobOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &toolRuntime{cwd: t.TempDir(), permission: config.PermissionYOLO, readSet: map[string]struct{}{}}
-	out, err := r.execute(context.Background(), toolCall{Tool: "bash-output", Args: []byte(`{"job_id":"` + id + `","offset":0}`)}, map[string]struct{}{"bash-output": {}})
+	out, err := r.execute(context.Background(), toolCall{Tool: "bash-output", Args: []byte(`{"job_id":"` + id + `","offset":0}`)}, map[string]struct{}{"bash": {}})
 	if err != nil {
 		t.Fatalf("bash-output with job_id: %v", err)
 	}

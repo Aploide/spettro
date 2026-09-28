@@ -1,0 +1,314 @@
+# Built-in tools
+
+These are the tools Spettro's agents call. Which ones an agent gets is set by
+its `allowed_tools` in [`spettro.agents.toml`](../AGENTS.md); each request
+only carries the schemas of the tools that agent may use.
+
+| Area | Tools |
+|---|---|
+| Files | `file-read`, `file-write`, `file-edit` (one `old_string`/`new_string`, or several `edits[]` applied atomically), `view-image` |
+| Search | `grep` (a regex `pattern`, or a `symbol` for ranked definitions then usages; see [symbol index](symbol-index.md)), `glob` (a path `pattern`, or no pattern to list one directory) |
+| Shell | `bash` (the host shell: bash, or PowerShell on Windows; `run_in_background` starts a job), `job-output`, `job-kill`, `pty-start`, `pty-write`, `pty-kill` ([pty](pty.md)) |
+| Output | `tool-output` (pages a spooled result; see [session](session.md#tool-output-spooling)) |
+| Language server | `lsp` (`op`: `diagnostics`, `references`, `definition`, `hover` or `restart`), `rename-symbol` ([lsp](lsp.md)) |
+| Tasks | `todo-write` (read, replace, merge into or prune the session task list; see [session](session.md#task-graph)), `task-stop`, `goal-complete` |
+| Web | `web-search`, `web-fetch`, `download` ([web tools](web-tools.md)) |
+| Delegation | `agent`, `ultra` ([ultra](ultra.md)), `workflow` ([workflows](workflows.md)), `send-message` |
+| User and session | `ask-user`, `comment`, `save-memory`, `config`, `enter-plan-mode`, `exit-plan-mode`, `enter-worktree`, `exit-worktree` |
+| Skills and tools | `skill` (load a skill by `name`, or list them; see [skills](skills.md)), `tool-search` |
+| MCP | `mcp-list-resources`, `mcp-read-resource`, `mcp-auth` |
+
+## Workspace scope
+
+The tools that take a path (`file-read`, `file-write`, `file-edit`,
+`view-image`, `grep`, `glob`, `download`, `lsp`, a `bash` `cwd`) only reach
+files under the workspace, in every permission mode, `yolo` included. A path
+that leaves it (`../x`, `/tmp/x`) is refused before anything is read,
+written or approved, with an error that says to use `bash` for a scratch
+file elsewhere; the coding prompt says the same, so scratch scripts are
+piped to the interpreter through `bash` or written to the system temp
+directory from the shell. A `bash` `cwd` outside the workspace gets its own
+error instead, saying to `cd` there in the command itself. Commands run through `bash` are governed by the
+shell's approval rules and the [sandbox](sandbox.md), not by this check.
+Under an active sandbox, a path whose real target leaves the workspace
+through a symlink is refused too. Without one, a `file-write`, `file-edit`,
+`download` or `rename-symbol` through a symlink is allowed, but its approval
+names the file actually written (`file-edit notes.md (through a symlink:
+writes /home/me/.zshrc)`), and if the symlink is pointed elsewhere while the
+approval is on screen the write fails instead of landing in the new target.
+A `bash` call with a `cwd` is approved as `cd <dir> && <command>`, since the
+same command does different things in different directories (`make
+install` runs the Makefile it finds there).
+
+## Search tools
+
+`grep` and `glob` walk the workspace the same way: the directories `.git`,
+`.spettro`, `vendor`, `node_modules`, `dist` and `build` are skipped below the
+search root, and every `.gitignore` from the filesystem root down applies
+with git's rules (a nested file overrides its parent, the last matching rule
+wins, `!` re-includes, an ignored directory hides everything in it). Rules
+match case-sensitively, as git does with `core.ignorecase=false` (git on
+macOS and Windows defaults to `true`, so there a rule `Build/` would also
+hide `build/` for git but not for these tools).
+Symlinked directories are not followed; `glob` lists symlinks to files,
+`grep` skips them unless named as `path`.
+
+`grep` runs [ripgrep](https://github.com/BurntSushi/ripgrep) when it can and
+a built-in Go search otherwise; both give the same answers. When `rg` is not
+on PATH, the first `grep` that has to use the Go search starts a background
+download of ripgrep 15.2.0 for the platform into `~/.spettro/bin` (macOS,
+Linux, Windows; x86-64 and ARM). The archive's SHA-256 is pinned in Spettro
+and checked before anything is unpacked. The download never delays a tool
+call, and a failure (offline, a proxy, an unsupported platform) only means
+the Go search stays in use for the session. It is skipped when the OS
+sandbox confines the network (`sandbox_net`), and `ripgrep_download_disabled`
+in `config.json` turns it off (see [Configuration](configuration.md#search)).
+
+Results are listed in walk order (a directory's entries by name, depth
+first). When `max_results` cuts a result, the Go search always keeps the
+first matches in that order; with ripgrep, which searches files in
+parallel, which files make the cut can vary between runs (the listing
+itself stays sorted, and the footer says the result was truncated).
+
+`glob` starts its walk at the directory prefix its pattern names
+(`internal/agent/**/*.go` reads only `internal/agent`), so a narrow pattern
+is fast on any tree size. The prefix must name the directories exactly as
+they are spelled on disk, also on a case-insensitive filesystem. With
+`path` naming a file, the pattern is matched against the file's name and
+its workspace path (`*` and `*.go` both list `sub/b.go`).
+
+## Deferred tools
+
+An agent holding `tool-search` gets only its core tools advertised up front:
+`agent`, `glob`, `grep`, `file-read`, `file-write`, `file-edit`, `bash`,
+`job-output`, `job-kill`, `tool-output`, `todo-write`, `web-fetch`, `lsp`,
+`ask-user`, `comment`, `tool-search`, `goal-complete`, the plan-mode tools,
+`ultra`, `workflow` and the MCP resource tools (plus `skill` when the model
+may load any skill), and any tool it holds that its prompt names in backticks (the
+coding agent's prompt names `view-image`, the ask agent's `web-search`).
+Its other tools (`send-message`, `save-memory`, `config`, `download`,
+`task-stop`, the `pty-*` tools, `rename-symbol`, `mcp-auth`,
+the worktree tools, ...) are deferred: the system prompt names them in one
+line, and a `tool-search` for a name or keyword returns the matching tools'
+descriptions and schemas and advertises them from the next step on. A
+deferred tool stays callable: a call by name runs, and advertises it too.
+Loaded tools follow the core ones in `allowed_tools` order, and the
+conversation records which are loaded, even through compaction. The tool
+list therefore changes only when a tool is loaded, and a later turn of the
+conversation advertises exactly the list the last request did. Deferral
+never grants anything: `tool-search` only finds tools on the agent's
+`allowed_tools`, and an agent without `tool-search` gets all its tools
+advertised.
+
+With no language server configured or installed for the workspace (see
+[lsp](lsp.md)), `lsp` and `rename-symbol` are neither advertised nor found by
+`tool-search`, and the system prompt says there is none. This is decided
+once per process, for the life of that process: a server installed while
+spettro runs is picked up only after spettro restarts (a new session in the
+same TUI or ACP process does not re-check).
+
+## Shell environment
+
+The system prompt's Environment section tells the agent which OS and shell
+its `bash` calls run under. When `python` is not installed but `python3` is,
+it adds a line saying to use `python3`, and likewise for `pip` and `pip3`,
+since models type the bare names by habit. The check asks the same login
+shell the `bash` tool uses (`command -v`), so PATH additions from the user's
+profile count; on a PowerShell or cmd host it searches spettro's own PATH.
+The login shell runs in its own process group, as `bash` tool commands do,
+and is given 5 seconds: on timeout the whole group is killed and no line is
+added. Like the language-server check it runs once per process: the Environment
+section is part of the cached system prompt and never changes mid-session.
+
+## Stale-read guard
+
+`file-edit` and an overwriting `file-write` are refused when the file changed
+on disk since the agent last saw all of it (its last `file-read`, or its own
+write): "modified on disk since you last read it". The agent must read it
+again, so it never writes over an edit the user, another process or another
+agent made in between. What the agent saw is a hash of the content, so a
+touch or a same-content rewrite does not count, and it is carried in the
+conversation, so a file read in an earlier turn still counts as read.
+
+Changes the agent's own foreground `bash` commands make (a formatter, a code
+generator, `sed -i`) do not trip the guard for `file-edit`. Just before such a
+command runs, Spettro checks which files it holds a hash for still hold
+exactly that content; right after, it re-hashes those whose size,
+modification time, change time (ctime) or inode the command changed, and the
+command's output ends with a note naming them (`note: this command changed
+files you had read (...)`), since their line numbers moved. A file that had
+already changed from outside before the command started is left alone, so
+that change is still caught.
+
+The check before the command is a `stat` when the file's identity can vouch
+for its content: the platform records a ctime (Linux and macOS; no user
+program can set it back, so an edit that restores the old mtime, as
+`touch -r`, `rsync -t --inplace` or `tar -x` do, still moves it), and the
+file last changed at least 2 seconds before its content was last confirmed,
+so a second change within the same timestamp tick (1 s on HFS+, 2 s on FAT)
+cannot hide behind an unchanged identity. Otherwise (a file written or read
+moments ago, a hash carried from an earlier turn, a file whose identity
+moved, or Windows, where Spettro reads no ctime) the file is re-read and its
+hash compared, and once confirmed long enough after its last change it needs
+only a `stat` from then on.
+
+The model has not seen what its command wrote, so a file re-hashed this way
+cannot be overwritten whole with `file-write` until it is read again
+(`changed by one of your bash commands since you last read it`): writing a
+file computed from the old read would revert the command's output. An
+append or a `file-edit` (whose `old_string` must match the current text)
+still works, and the mark is carried in the conversation like the hashes.
+
+The work is bounded (a stat of at most 1024 files per command, never a
+directory walk, at most 32 files and 8 MiB hashed before it and 32 MiB
+re-read after it), and a file past a bound keeps its old hash, which errs on
+the side of the guard. Two cases are not told apart: a change another
+process makes to such a file while the agent's command runs counts as the
+command's (though the `file-write` rule above keeps it from being
+overwritten unseen), and changes made by background jobs
+(`run_in_background`) are never treated as the agent's own.
+
+## Retired names
+
+Several tools used to exist twice under different names, and the read-only
+language-server tools were four tools for what is one tool with an operation.
+Each group now has one canonical tool, and the old names are hidden aliases:
+a call under an old name still runs, as the canonical tool, but only the
+canonical tool is advertised to the model or listed by `tool-search`.
+
+| Canonical | Retired names | How a retired call maps |
+|---|---|---|
+| `bash` | `shell-exec`, `bash-output` | Same arguments. |
+| `file-edit` | `multi-edit` | Same arguments (`edits[]`). |
+| `grep` | `repo-search` | `{"query": q}` becomes `{"symbol": q}`. |
+| `glob` | `ls` | `{"path": p}` becomes a pattern-less `glob`, which lists `p`. |
+| `todo-write` | `task-create`, `task-update` | One task, merged by `id`. |
+| | `task-delete` | `delete: [id]`, or `clear_completed`. |
+| | `task-get`, `task-list` | A read; returns the whole list. |
+| `skill` | `skill-read`, `activate-skill`, `skill-activate` | Same arguments (`name`, or `skill`). |
+| | `skill-list` | Same arguments (`query`); no `name`, so it lists. |
+| `lsp` | `diagnostics` | Same arguments, with `op: "diagnostics"`. |
+| | `references` | `op: "references"`, or `op: "definition"` for `kind: "definition"`. |
+| | `hover` | Same arguments, with `op: "hover"`. |
+| | `lsp-restart` | Same arguments, with `op: "restart"`. |
+
+The canonical tool must be allowed: an old name never grants access the agent
+does not already have. Permission rules, the tool trace and the TUI and ACP
+clients see the canonical name. Hooks match the canonical name and the name
+the model called; a hook for `shell-exec` or `bash-output`, which were the
+very same tool as `bash`, also keeps firing on `bash`, and a hook for a
+former language-server tool fires on the `lsp` op that replaced it however
+the model calls it (see [hooks](hooks.md#matcher-syntax)). Which `lsp` ops an
+agent may call is set by `lsp-op` permission rules, with the op as the
+pattern (`{ permission = "lsp-op", pattern = "restart", action = "deny" }`);
+rules naming the former tools no longer decide anything. A tool of your own
+that shares a canonical or retired name is not an alias of anything: see
+[below](#tools-of-your-own-with-a-built-ins-name).
+
+`task-update` keeps its old contract: an unknown `id` is an error rather
+than a new task, and an empty `dependencies` list leaves the stored ones as
+they are.
+
+Manifests are migrated on load. v12 replaces the old names in
+`allowed_tools` (only where the agent could actually call the old tool) and
+removes the former `grok-image`/`grok-video` generators; v13 does the same
+for the language-server tools, and gives an agent that held only some of
+them an `lsp-op` rule denying each of the other ops, so it gains none. Other
+permission rules are left as written. v14 folds `skill-read` and
+`skill-list` into `skill` the same way (an agent that held only
+`skill-list` gets `skill`, which also loads skills: both only read the
+SKILL.md files the catalog exposes). No migration folds anything into a
+canonical name a tool of your own holds (see below). See the v12, v13 and
+v14 notes in [AGENTS.md](../AGENTS.md#root-fields).
+
+## Misspelt tool names
+
+Models trained on other harnesses often call a tool by a near spelling:
+`web_fetch`, `file_read`, `todo_write`, `Bash`. A call under a name Spettro
+does not know at all (not a built-in, a retired name, or a manifest tool or
+alias) is compared with the agent's tools ignoring case and reading `_` and
+spaces as `-`. When exactly one tool on the agent's `allowed_tools` matches,
+the call runs as that tool; a retired name that matches counts as its
+canonical tool (`task_create` is a `todo-write` call). Permission rules,
+approvals, the trace and the clients see the tool's real name, and hooks
+match both it and the spelling the model used.
+
+When no allowed tool matches, or two do, nothing runs and the call fails as
+not allowed; for an unknown name the error names up to three allowed tools
+closest to it (`did you mean "file-read"?`), counting the same words in
+another order (`read_file`) as closest. Matching never grants anything:
+only tools the agent may already call are candidates, and a name Spettro
+knows (an explorer calling `file-write`) is never re-routed.
+
+## Tools of your own with a built-in's name
+
+A tool you define in the manifest (`kind` `mcp`, `script` or `http`) may use
+any `id` or alias, a built-in's included: a canonical name (`bash`,
+`file-edit`, `grep`, `glob`, `todo-write`, `skill`, `lsp`) or a retired
+one (`shell-exec`, `bash-output`, `multi-edit`, `repo-search`, `ls`,
+`task-*`, `skill-read`, `skill-list`, `activate-skill`, `skill-activate`,
+`diagnostics`, `references`, `hover`, `lsp-restart`). One rule covers every
+such name.
+
+**Your tool wins every call made by its name.** A call under that name is
+never turned into a call of a built-in and never runs a built-in's code, and
+your tool is never advertised with a built-in's description or schema.
+Permission rules and hooks written for the name apply to your tool's calls.
+The TUI's transcript and activity panel label them with your tool's name
+(`References`, not `Found references to ...`), never with the built-in's
+wording, and so do an ACP editor's tool cards (`references {"symbol":...}`
+with a kind guessed from the name, not `LSP` with kind `search`).
+Spettro does not run `mcp`, `script` or `http` tools yet: a call of one is
+checked against the allow-list, permission rules and hooks like any other
+call, then fails with an error saying nothing was run.
+
+**The built-ins your tool shadows stay reachable under their own names.**
+
+- Your tool takes a retired name (an `ls` script): the canonical built-in
+  (`glob`) is unaffected. Hooks and rules written for `ls` are your tool's
+  and never apply to `glob`, not even for `shell-exec` and `bash-output`,
+  whose hooks otherwise also fire on every `bash` call.
+- Your tool takes a canonical name (a `bash` script): that tool's retired
+  names stop being aliases and stand *unfolded*. An agent that holds a
+  built-in under a retired name (a `shell-exec` tool of kind `builtin`)
+  calls it by that name: the built-in's code runs (here, the shell), and the
+  allow-list, permission rules, approval (the `shell-exec` entry's
+  `requires_approval` and rules), hooks, traces and loop detection all see
+  `shell-exec`. It is advertised under its own name, and is deferred or
+  core as its canonical tool is. A retired tool whose arguments differ from
+  its canonical tool's (`repo-search`, `task-*`, `diagnostics`,
+  `references`, `hover`, `lsp-restart`) is advertised with its old
+  description and schema, which Spettro converts to the canonical tool's
+  arguments. `skill-read` and `skill-list` also keep their old description
+  and schema, because each did only half of what `skill` does (load one
+  skill, or list them); the `skill` tool's code runs on their arguments
+  unchanged. With your own `skill`, the skill list in the system prompt
+  tells the model to call `skill-read` when the agent holds it, and is left
+  out when the agent holds no built-in that loads skills. The others
+  (`shell-exec`, `bash-output`, `multi-edit`, `ls`, `activate-skill`,
+  `skill-activate`) are carried out by the canonical tool on their
+  arguments unchanged, so they are advertised with the canonical tool's
+  description and schema: an unfolded `ls` is described as `glob`, not as
+  the old directory listing, because `glob`'s code is what runs.
+  A retired name the agent does not hold is refused as not allowed: it never
+  becomes a call of your tool. Hooks and rules written for `bash` are your
+  tool's and do not apply to `shell-exec`.
+
+In a manifest written from today's defaults, the retired names live only as
+aliases on the canonical built-in's definition, and taking a canonical name
+means replacing that definition (tool IDs are unique). Its retired names
+then answer to nothing. Unfolded built-ins matter for manifests migrated
+from before v12, v13 or v14 that already had such a tool.
+
+**Migrations never hand your tool out in a built-in's place.** v12, v13 and
+v14 fold nothing into a canonical name your tool holds (as its `id` or an
+alias): that group's built-ins keep their own definitions and allow-list
+entries. Your tool is never folded into a built-in, never given a
+built-in's aliases, never added to a built-in's aliases, and no allow-list
+entry is ever rewritten to point at it. The earlier retrofits follow the same
+rule: the v11 `general-purpose` agent is granted built-ins only (a built-in
+under a retired name when your tool holds the canonical one), and the v6-v8
+retrofits read only built-ins as trust (holding a `grep` script of yours does
+not earn `repo-search`) and grant only built-ins. The built-in `bash` gets
+its long-standing `bash-output` alias only while no other tool uses that
+name.

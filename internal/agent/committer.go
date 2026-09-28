@@ -12,7 +12,7 @@ import (
 
 // coAuthor is the canonical commit trailer Spettro stamps onto every commit
 // it writes. The exact string is also auto-injected by EnforceCommitCoAuthor
-// when an LLM agent issues `git commit` through shell-exec/bash, so keep both
+// when an LLM agent issues `git commit` through the bash tool, so keep both
 // callers in sync via the single shared spettroCoAuthorTrailer constant.
 const coAuthor = spettroCoAuthorTrailer
 

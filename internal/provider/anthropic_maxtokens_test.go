@@ -1,50 +1,33 @@
 package provider
 
-import "testing"
+import (
+	"testing"
 
+	"spettro/internal/models"
+)
+
+// max_tokens on the Anthropic path: an explicit (already resolved) cap is
+// sent as is, and a thinking budget fits under it rather than raising it;
+// only with no cap at all is max_tokens raised to hold the budget.
 func TestAnthropicMaxTokensResolution(t *testing.T) {
 	cases := []struct {
 		name      string
 		req       Request
-		wantMin   int64 // resolved maxTokens must be >= this
-		wantExact int64 // if > 0, must equal exactly
+		wantExact int
 	}{
-		{
-			name:      "explicit MaxTokens honoured",
-			req:       Request{MaxTokens: 16000},
-			wantExact: 16000,
-		},
-		{
-			name:      "zero falls back to default",
-			req:       Request{MaxTokens: 0},
-			wantExact: 16384,
-		},
-		{
-			name:    "thinking budget forces max_tokens above budget",
-			req:     Request{MaxTokens: 1000, Thinking: "high"},
-			wantMin: int64(ThinkingBudgetTokens(ThinkingHigh)) + 1,
-		},
+		{name: "explicit MaxTokens honoured", req: Request{Prompt: "hi", MaxTokens: 16000}, wantExact: 16000},
+		{name: "thinking fits under an explicit cap", req: Request{Prompt: "hi", MaxTokens: 16000, Thinking: ThinkingHigh}, wantExact: 16000},
+		{name: "no cap: raised to hold the budget", req: Request{Prompt: "hi", Thinking: ThinkingHigh},
+			wantExact: ThinkingBudgetTokens(ThinkingHigh) + thinkingAnswerReserve},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			const defaultMaxTokens = int64(16384)
-			maxTokens := defaultMaxTokens
-			if tc.req.MaxTokens > 0 {
-				maxTokens = int64(tc.req.MaxTokens)
+			call := buildFantasyCall("anthropic", models.APIAnthropic, "claude-sonnet-4-5", tc.req)
+			if got := sentMaxOutput(call); got != tc.wantExact {
+				t.Errorf("max_tokens = %d, want %d", got, tc.wantExact)
 			}
-			if budget := ThinkingBudgetTokens(ThinkingLevel(tc.req.Thinking)); budget > 0 {
-				needed := int64(budget) + 4096
-				if needed > maxTokens {
-					maxTokens = needed
-				}
-			}
-
-			if tc.wantExact > 0 && maxTokens != tc.wantExact {
-				t.Errorf("maxTokens = %d, want %d", maxTokens, tc.wantExact)
-			}
-			if tc.wantMin > 0 && maxTokens < tc.wantMin {
-				t.Errorf("maxTokens = %d, want >= %d", maxTokens, tc.wantMin)
+			if b := thinkingBudgetOf(t, call); b > 0 && int(b) >= sentMaxOutput(call) {
+				t.Errorf("budget_tokens %d not below max_tokens %d", b, sentMaxOutput(call))
 			}
 		})
 	}

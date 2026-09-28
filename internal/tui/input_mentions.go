@@ -11,67 +11,14 @@ import (
 
 func (m *Model) syncInputSuggestions() tea.Cmd {
 	val := m.ta.Value()
+	if val != m.cmdQuery {
+		// A new query: highlight the best match again (see cmdQuery).
+		m.cmdQuery = val
+		m.cmdCursor = 0
+		m.mentionCursor = 0
+	}
 	if strings.HasPrefix(val, "/") {
-		if strings.HasPrefix(val, "/permission") && len(val) > len("/permission") {
-			filter := strings.TrimPrefix(val, "/permission")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range permissionCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
-			m.cmdItems = items
-			if m.cmdCursor >= len(m.cmdItems) {
-				m.cmdCursor = 0
-			}
-			m.mentionItems = nil
-			m.mentionCursor = 0
-			return nil
-		}
-		if strings.HasPrefix(val, "/thinking") && len(val) > len("/thinking") && m.activeModelSupportsReasoning() {
-			filter := strings.TrimPrefix(val, "/thinking")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range thinkingCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
-			m.cmdItems = items
-			if m.cmdCursor >= len(m.cmdItems) {
-				m.cmdCursor = 0
-			}
-			m.mentionItems = nil
-			m.mentionCursor = 0
-			return nil
-		}
-		if strings.HasPrefix(val, "/think") && !strings.HasPrefix(val, "/thinking") && len(val) > len("/think") && m.activeModelSupportsReasoning() {
-			filter := strings.TrimPrefix(val, "/think")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range thinkCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
-			m.cmdItems = items
-			if m.cmdCursor >= len(m.cmdItems) {
-				m.cmdCursor = 0
-			}
-			m.mentionItems = nil
-			m.mentionCursor = 0
-			return nil
-		}
-		if strings.HasPrefix(val, "/skill") && !strings.HasPrefix(val, "/skills") && len(val) > len("/skill") {
-			filter := strings.TrimPrefix(val, "/skill")
-			filter = strings.TrimPrefix(filter, " ")
-			var items []commandDef
-			for _, c := range skillCommands {
-				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
-					items = append(items, c)
-				}
-			}
+		if items, ok := m.slashSubMenu(val); ok {
 			m.cmdItems = items
 			if m.cmdCursor >= len(m.cmdItems) {
 				m.cmdCursor = 0
@@ -93,6 +40,15 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 	m.cmdItems = nil
 	m.cmdCursor = 0
 
+	if query, ok := activeSkillMentionQuery(val); ok {
+		m.mentionItems = m.filterSkillMentions(query, 8)
+		m.mentionKind = mentionSkill
+		if m.mentionCursor >= len(m.mentionItems) {
+			m.mentionCursor = 0
+		}
+		return nil
+	}
+
 	query, ok := activeMentionQuery(val)
 	if !ok {
 		m.mentionItems = nil
@@ -101,12 +57,112 @@ func (m *Model) syncInputSuggestions() tea.Cmd {
 	}
 
 	m.mentionItems = filterMentionFiles(m.repoFiles, query, 8)
+	m.mentionKind = mentionFile
 	if m.mentionCursor >= len(m.mentionItems) {
 		m.mentionCursor = 0
 	}
 	// Trigger a background re-scan so newly added/removed files show up
 	// in the @-mention list. Throttled by scheduleRepoScan.
 	return m.scheduleRepoScan()
+}
+
+// slashSubMenu returns the completion menu for a command whose argument has
+// its own list of choices (/permission <level>, /thinking <level>, ...),
+// filtered by what was typed after the command, and ok = true when val is
+// such a command.
+//
+// A sub-menu opens only once the command is followed by a space. Matching
+// the bare prefix would capture every name that merely starts with the
+// command: /thinker, /thinking-partner and /permissions-audit (skills), or
+// the built-in /permissions, would open a sub-menu instead of reaching the
+// main menu where they are listed.
+func (m *Model) slashSubMenu(val string) ([]commandDef, bool) {
+	reasoning := m.activeModelSupportsReasoning()
+	subMenus := []struct {
+		command string
+		items   []commandDef
+		// enabled is false when the command itself is hidden: thinking
+		// levels apply only to reasoning-capable models.
+		enabled bool
+	}{
+		{"/permission", permissionCommands, true},
+		{"/thinking", thinkingCommands, reasoning},
+		{"/think", thinkCommands, reasoning},
+		{"/skill", skillCommands, true},
+	}
+	for _, sub := range subMenus {
+		filter, ok := strings.CutPrefix(val, sub.command+" ")
+		if !ok || !sub.enabled {
+			continue
+		}
+		var items []commandDef
+		for _, c := range sub.items {
+			if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
+				items = append(items, c)
+			}
+		}
+		return items, true
+	}
+	return nil, false
+}
+
+// mentionKind says what the mention palette is completing.
+type mentionKind int
+
+const (
+	// mentionFile completes an @path mention from the repository files.
+	mentionFile mentionKind = iota
+	// mentionSkill completes a $skill-name mention from the skills the
+	// user may run (Codex style; see skills.ExpandMentions).
+	mentionSkill
+)
+
+// sigil is the character that starts a mention of this kind.
+func (k mentionKind) sigil() string {
+	if k == mentionSkill {
+		return "$"
+	}
+	return "@"
+}
+
+// activeSkillMentionQuery reports whether the last token of the input is a
+// $mention being typed, and returns what follows the "$".
+//
+// A bare "$" is not a mention yet: prompts about regexes and shells end
+// with one ("lines that end with $", "echo $"), and an open palette would
+// make Enter complete a skill name instead of sending the prompt. The
+// palette opens from the first character after the "$".
+func activeSkillMentionQuery(input string) (string, bool) {
+	lastSpace := strings.LastIndexAny(input, " \n\t")
+	token := input[lastSpace+1:]
+	query, ok := strings.CutPrefix(token, "$")
+	if !ok || query == "" {
+		return "", false
+	}
+	return query, true
+}
+
+// filterSkillMentions returns up to limit names of user-invocable skills
+// whose name contains query (case-insensitive), names starting with it
+// first. An empty result closes the palette, so "$HOME" or "$5" typed in a
+// prompt shows nothing unless a skill actually matches.
+func (m Model) filterSkillMentions(query string, limit int) []string {
+	q := strings.ToLower(query)
+	var prefix, other []string
+	for _, s := range m.skillCatalog().ForUser() {
+		name := strings.ToLower(s.Name)
+		switch {
+		case strings.HasPrefix(name, q):
+			prefix = append(prefix, s.Name)
+		case strings.Contains(name, q):
+			other = append(other, s.Name)
+		}
+	}
+	out := append(prefix, other...)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func activeMentionQuery(input string) (string, bool) {
@@ -152,7 +208,7 @@ func (m Model) acceptMention() Model {
 	if lastSpace >= 0 {
 		prefix = current[:lastSpace+1]
 	}
-	m.ta.SetValue(prefix + "@" + chosen + " ")
+	m.ta.SetValue(prefix + m.mentionKind.sigil() + chosen + " ")
 	m.mentionItems = nil
 	m.mentionCursor = 0
 	return m

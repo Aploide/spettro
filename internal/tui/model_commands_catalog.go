@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"spettro/internal/commands"
@@ -28,7 +29,7 @@ var allCommands = []commandDef{
 	{"/tasks", "manage session tasks"},
 	{"/mcp", "list/read/auth MCP resources"},
 	{"/skill", "manage Agent Skills (list/install/info/enable/disable/uninstall/where/reload)"},
-	{"/skills", "alias of /skill list"},
+	{"/skills", "list discovered skills and where each comes from"},
 	{"/hooks", "list effective runtime hooks"},
 	{"/memory", "show/edit/clear persistent cross-session memory"},
 	{"/memory mine", "scan saved sessions and draft candidate memories into the review inbox"},
@@ -68,8 +69,8 @@ var skillCommands = []commandDef{
 	{"/skill list", "list discovered skills and their scope/source"},
 	{"/skill install", "install from local path, https git URL, or owner/repo"},
 	{"/skill info", "show metadata, resources, and body excerpt for a skill"},
-	{"/skill enable", "enable a skill in this project"},
-	{"/skill disable", "disable a skill without uninstalling it"},
+	{"/skill enable", "show a disabled skill again, in every project"},
+	{"/skill disable", "hide a skill in every project without uninstalling it"},
 	{"/skill uninstall", "remove an installed skill"},
 	{"/skill where", "list every discovery root and whether it exists"},
 	{"/skill reload", "re-scan skill directories"},
@@ -99,6 +100,26 @@ var thinkCommands = []commandDef{
 	{"/think max", "maximum reasoning effort (~100k thinking tokens on Anthropic)"},
 }
 
+// hiddenCommandAliases are names handleCommand accepts that allCommands
+// does not list. Together with allCommands they make up builtinCommandNames;
+// keep this in sync when adding a case to handleCommand's switch.
+var hiddenCommandAliases = []string{"/quit", "/next", "/thinking", "/workflow"}
+
+// builtinCommandNames returns every slash-command name the TUI handles
+// itself, lower-cased, without sub-commands ("/loop stop" counts as /loop).
+// A custom command or skill with one of these names is never reachable as
+// /name: the built-in wins.
+func builtinCommandNames() map[string]bool {
+	names := map[string]bool{}
+	for _, c := range allCommands {
+		names[strings.ToLower(strings.Fields(c.name)[0])] = true
+	}
+	for _, alias := range hiddenCommandAliases {
+		names[alias] = true
+	}
+	return names
+}
+
 // requiresParam reports whether the slash command must be followed by a
 // sub-parameter before it can be executed. Selecting such a command from the
 // completion menu always opens the second-level selector instead of running.
@@ -120,8 +141,9 @@ func (m Model) activeModelSupportsReasoning() bool {
 	return m.providers.SupportsReasoning(m.cfg.ActiveProvider, m.cfg.ActiveModel)
 }
 
-// filterCommands matches query against the built-in catalog plus any
-// user-defined custom commands discovered at startup.
+// filterCommands matches query against the built-in catalog, then the
+// user-defined custom commands discovered at startup, then the skills the
+// user can run (see skillMenuEntries).
 func (m Model) filterCommands(query string) []commandDef {
 	catalog := make([]commandDef, 0, len(allCommands)+len(m.customCommands))
 	for _, c := range allCommands {
@@ -139,15 +161,71 @@ func (m Model) filterCommands(query string) []commandDef {
 		}
 		catalog = append(catalog, commandDef{"/" + c.Name, desc})
 	}
+	catalog = append(catalog, m.skillMenuEntries()...)
+	// The query is trimmed because completing a command leaves the input as
+	// "/clear " (name plus a space, ready for an argument), and the menu is
+	// filtered again from that text. Untrimmed, "clear " matches no name, so
+	// /clear fell to a description match and the next Enter ran whichever
+	// command's description contains "clear " (/memory) instead.
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return catalog
 	}
+	// Matches are ranked, catalog order kept within a rank: the command
+	// named exactly as typed first, then names starting with the query,
+	// then names containing it, then commands matched only by their
+	// description. Enter runs the highlighted entry, so without the ranking
+	// typing "/skills" highlighted "/skill" (its description says "Agent
+	// Skills" and it comes first in the catalog) and Enter opened the wrong
+	// command's sub-menu.
 	q := strings.ToLower(query)
-	var out []commandDef
+	var ranked [4][]commandDef
 	for _, c := range catalog {
-		if strings.Contains(strings.ToLower(c.name), q) || strings.Contains(strings.ToLower(c.desc), q) {
-			out = append(out, c)
+		if rank, ok := commandMatchRank(c, q); ok {
+			ranked[rank] = append(ranked[rank], c)
 		}
+	}
+	return slices.Concat(ranked[0], ranked[1], ranked[2], ranked[3])
+}
+
+// commandMatchRank ranks how well command c matches the lowercase query q
+// (see filterCommands): 0 exact name, 1 name prefix, 2 name substring,
+// 3 description substring. ok is false when c does not match at all.
+func commandMatchRank(c commandDef, q string) (rank int, ok bool) {
+	name := strings.TrimPrefix(strings.ToLower(c.name), "/")
+	switch {
+	case name == q:
+		return 0, true
+	case strings.HasPrefix(name, q):
+		return 1, true
+	case strings.Contains(name, q):
+		return 2, true
+	case strings.Contains(strings.ToLower(c.desc), q):
+		return 3, true
+	}
+	return 0, false
+}
+
+// skillMenuEntries lists the user-invocable skills as /name entries for the
+// slash-command menu, skipping any name a built-in or custom command already
+// uses (those win when run, so offering the skill would be misleading). The
+// description starts with the skill's argument hint, when it has one.
+func (m Model) skillMenuEntries() []commandDef {
+	taken := builtinCommandNames()
+	for _, c := range m.customCommands {
+		taken["/"+strings.ToLower(c.Name)] = true
+	}
+	var out []commandDef
+	for _, s := range m.skillCatalog().ForUser() {
+		name := "/" + s.Name
+		if taken[strings.ToLower(name)] {
+			continue
+		}
+		desc := "skill: " + s.ListingDescription()
+		if s.ArgumentHint != "" {
+			desc = "skill " + s.ArgumentHint + ": " + s.ListingDescription()
+		}
+		out = append(out, commandDef{name, desc})
 	}
 	return out
 }
@@ -292,7 +370,9 @@ const helpText = `commands:
   /loop status  show loop schedule, iterations, next run
   /tasks         manage tasks (list/add/done/set/show)
   /mcp           manage MCP resources (list/read/auth)
-  /skill         manage Agent Skills (list/install/uninstall/info/enable/disable)
+  /skills        list Agent Skills and where each comes from
+  /<skill> [args]  run a skill (also: mention $skill in a prompt)
+  /skill         manage Agent Skills (install/uninstall/info/enable/disable/where/reload)
   /skill install <source>   install from path, https git URL, or owner/repo
   /hooks         list effective runtime hooks (project + global)
   /memory        show persistent memory (user + project)
@@ -331,7 +411,9 @@ keys:
   ctrl+f         attach a file to the next message
   ctrl+r         remove last file attachment
   ctrl+b         toggle side activity panel
-  ctrl+o         toggle expanded tool context in side panel
+  ctrl+o         toggle tool details in the transcript (in an approval: the preview)
+  ctrl+g         toggle full, untrimmed tool outputs
+  pgup pgdn      scroll the transcript
   drag (mouse)   select text on screen; release copies it to the clipboard
   ctrl+t         toggle text-select mode (release mouse for terminal selection)
 

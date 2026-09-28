@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"charm.land/fantasy"
-	openai "github.com/openai/openai-go/v3"
+	openai "github.com/charmbracelet/openai-go"
 
 	"spettro/internal/budget"
 	"spettro/internal/models"
@@ -32,10 +32,33 @@ type Manager struct {
 	catalog       []Model
 	localModels   []Model
 	spettroModels []Model
+	// snapshot indexes the three lists above (see modelSnapshot).
+	snapshot      *modelSnapshot
 	apiKeys       map[string]string
 	providerAPIs  map[string]string
 	providerKinds map[string]string // provider id -> models.APIOpenAI | models.APIAnthropic
 	usageRec      usageRecorder
+	// streamAll routes every request through the streaming path, even when
+	// the caller wants no live tokens (see SetStreamAll).
+	streamAll bool
+	// wire selects the chat-completions client (see SetWireMode); the zero
+	// value means WireNative.
+	wire WireMode
+	// encoder caches request encodings for the native client (see
+	// chatEncoder); created on first use.
+	encoder *chatEncoder
+	// effortDowngrades remembers, per provider, model and thinking level, the
+	// lower level Send stepped down to after the backend rejected the
+	// reasoning_effort value, so later sends start there instead of walking
+	// the ladder again on every call (see rememberedThinking).
+	effortDowngrades map[string]ThinkingLevel
+	// localGen counts, per local endpoint provider id, the changes made to
+	// that endpoint's model list, and spettroGen the changes made to the
+	// Spettro Subscription models. Background model discovery uses them to
+	// apply a late result only if nobody changed the list since it started
+	// (see AddLocalModelsIfUnchanged). Guarded by mu.
+	localGen   map[string]uint64
+	spettroGen uint64
 }
 
 func NewManager() *Manager {
@@ -43,7 +66,21 @@ func NewManager() *Manager {
 		apiKeys:       map[string]string{},
 		providerAPIs:  map[string]string{},
 		providerKinds: map[string]string{},
+		snapshot:      emptySnapshot(),
 	}
+}
+
+// SetStreamAll makes every request stream, including those of callers that
+// set no OnStream (sub-agents, headless runs, compaction). Streaming is what
+// lets the idle watchdog turn a stalled connection into a retryable
+// ErrStreamIdle instead of an indefinite hang, and what recovers tool calls
+// cut off at the output limit on OpenAI-compatible backends. Production
+// hosts turn it on; it is off by default so plain JSON test servers keep
+// working. Anthropic-protocol requests always stream regardless.
+func (m *Manager) SetStreamAll(on bool) {
+	m.mu.Lock()
+	m.streamAll = on
+	m.mu.Unlock()
 }
 
 func (m *Manager) SetAPIKeys(keys map[string]string) {
@@ -65,6 +102,7 @@ func (m *Manager) SetCatalog(cat models.Catalog) {
 	}
 	m.mu.Lock()
 	m.catalog = built
+	m.rebuildSnapshotLocked()
 	m.providerKinds = kinds
 	for k, v := range m.providerAPIs {
 		if strings.HasPrefix(k, "http://") || strings.HasPrefix(k, "https://") {
@@ -84,18 +122,27 @@ func (m *Manager) SetCatalog(cat models.Catalog) {
 // in-flight inference still resolves while a fresh list is being fetched.
 func (m *Manager) SetSpettro(inferenceBaseURL string, models []Model) {
 	m.mu.Lock()
+	m.setSpettroLocked(inferenceBaseURL, models)
+	m.mu.Unlock()
+}
+
+// setSpettroLocked is SetSpettro with m.mu held.
+func (m *Manager) setSpettroLocked(inferenceBaseURL string, models []Model) {
 	m.spettroModels = models
+	m.rebuildSnapshotLocked()
 	if inferenceBaseURL != "" {
 		m.providerAPIs[spettroProviderID] = inferenceBaseURL
 	}
-	m.mu.Unlock()
+	m.spettroGen++
 }
 
 // ClearSpettro removes the Spettro Subscription models and endpoint (logout).
 func (m *Manager) ClearSpettro() {
 	m.mu.Lock()
 	m.spettroModels = nil
+	m.rebuildSnapshotLocked()
 	delete(m.providerAPIs, spettroProviderID)
+	m.spettroGen++
 	m.mu.Unlock()
 }
 
@@ -103,9 +150,16 @@ func (m *Manager) AddLocalModels(models []Model) {
 	if len(models) == 0 {
 		return
 	}
+	m.mu.Lock()
+	m.addLocalModelsLocked(models)
+	m.mu.Unlock()
+}
+
+// addLocalModelsLocked replaces the models of the endpoint models come from
+// (models must be non-empty and from one endpoint). m.mu must be held.
+func (m *Manager) addLocalModelsLocked(models []Model) {
 	providerID := models[0].Provider
 	baseURL := strings.TrimRight(providerID, "/") + "/v1"
-	m.mu.Lock()
 	filtered := m.localModels[:0:0]
 	for _, mod := range m.localModels {
 		if mod.Provider != providerID {
@@ -113,8 +167,9 @@ func (m *Manager) AddLocalModels(models []Model) {
 		}
 	}
 	m.localModels = append(filtered, models...)
+	m.rebuildSnapshotLocked()
 	m.providerAPIs[providerID] = baseURL
-	m.mu.Unlock()
+	m.bumpLocalGenLocked(providerID)
 }
 
 func (m *Manager) RemoveLocalModels(providerID string) {
@@ -126,25 +181,18 @@ func (m *Manager) RemoveLocalModels(providerID string) {
 		}
 	}
 	m.localModels = filtered
+	m.rebuildSnapshotLocked()
 	delete(m.providerAPIs, providerID)
+	m.bumpLocalGenLocked(providerID)
 	m.mu.Unlock()
 }
 
+// Models returns a copy of every known model in display order: Spettro
+// Subscription models, then the catalog (or the built-in fallback list when
+// no catalog is loaded), then local endpoints. It is for listings (pickers,
+// provider lists); per-request checks use Lookup, which does not copy.
 func (m *Manager) Models() []Model {
-	m.mu.RLock()
-	cat := m.catalog
-	local := m.localModels
-	spettro := m.spettroModels
-	m.mu.RUnlock()
-	base := cat
-	if len(base) == 0 {
-		base = fallbackModels
-	}
-	out := make([]Model, 0, len(spettro)+len(base)+len(local))
-	out = append(out, spettro...)
-	out = append(out, base...)
-	out = append(out, local...)
-	return out
+	return append([]Model(nil), m.models().models...)
 }
 
 func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
@@ -270,30 +318,18 @@ func (m *Manager) ProviderNames() []string {
 }
 
 func (m *Manager) SupportsVision(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.Vision
-		}
-	}
-	return false
+	mod, _ := m.Lookup(providerName, modelName)
+	return mod.Vision
 }
 
 func (m *Manager) SupportsToolCalls(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.ToolCall
-		}
-	}
-	return false
+	mod, _ := m.Lookup(providerName, modelName)
+	return mod.ToolCall
 }
 
 func (m *Manager) ModelContext(providerName, modelName string) int {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.Context
-		}
-	}
-	return 0
+	mod, _ := m.Lookup(providerName, modelName)
+	return mod.Context
 }
 
 // SupportsReasoning reports whether the thinking switcher should be offered
@@ -303,37 +339,79 @@ func (m *Manager) ModelContext(providerName, modelName string) int {
 // true: OpenAI-compatible servers that don't know reasoning_effort ignore
 // it, and ones that reject it trigger the downgrade ladder, so offering the
 // switcher is safe and refusing it would lock out genuinely reasoning-capable
-// local models.
+// local models. Spettro Subscription models are offered it unless the plan's
+// model list marks them reasoning:false (NoReasoning): the inference proxy
+// forwards reasoning_effort to its upstream, the list need not flag
+// reasoning, and a rejection steps down the same ladder.
 func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return item.Reasoning || item.Local
-		}
+	item, ok := m.Lookup(providerName, modelName)
+	if !ok {
+		return true
 	}
-	return true
+	if item.NoReasoning {
+		return false
+	}
+	return item.Reasoning || item.Local || providerName == spettroProviderID
+}
+
+// ConfiguredThinking is the thinking level a run on the model sends for the
+// user's thinking_level setting: the level itself when the model supports
+// reasoning (see SupportsReasoning), "" (no thinking parameter) otherwise.
+// Every host (TUI, headless, ACP) starts its runs from it, so the setting
+// means the same everywhere: a token budget on Anthropic, reasoning_effort
+// on OpenAI and OpenAI-compatible backends (the Spettro Subscription
+// included).
+func (m *Manager) ConfiguredThinking(providerName, modelName, level string) ThinkingLevel {
+	level = strings.TrimSpace(level)
+	if level == "" || !m.SupportsReasoning(providerName, modelName) {
+		return ""
+	}
+	return ThinkingLevel(level)
+}
+
+// isLocalEndpoint reports whether the model is served by a local endpoint
+// (a probed local server, or a provider identified by its URL).
+func (m *Manager) isLocalEndpoint(providerName, modelName string) bool {
+	if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
+		return true
+	}
+	item, _ := m.Lookup(providerName, modelName)
+	return item.Local
 }
 
 func (m *Manager) HasModel(providerName, modelName string) bool {
-	for _, item := range m.Models() {
-		if item.Provider == providerName && item.Name == modelName {
-			return true
-		}
-	}
-	return false
+	_, ok := m.Lookup(providerName, modelName)
+	return ok
 }
 
 // Send dispatches req and transparently waits out rate limits rather than
 // surfacing them as errors. The only rate limit this currently applies to is
 // the Spettro Subscription overflow tier: pro/max accounts get throttled onto
-// a free-tier model once their credit budget is exhausted, and the backend always returns 429 with
-// a bounded Retry-After for that specific case, so retrying is guaranteed to
-// eventually succeed. Any other error (including 429s from other providers)
-// is returned immediately.
+// a free-tier model once their credit budget is exhausted, and the backend
+// returns 429 with a bounded Retry-After for that specific case. The waits
+// back off exponentially with jitter (see nextRateLimitWait), so parallel
+// sessions throttled together do not retry in lockstep, and they are
+// bounded in time: once waiting would pass rateLimitMaxWait, the 429 is
+// returned, wrapped in ErrRateLimitRetriesExhausted. Any other error
+// (including 429s from other providers) is returned immediately.
 func (m *Manager) Send(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
+	req.Thinking = m.rememberedThinking(providerName, modelName, req.Thinking)
+	// limited counts the sends rate limited so far; waited, the time spent
+	// waiting them out.
+	limited := 0
+	var waited time.Duration
+	// unflaggedFrom is the level a bare 400 made Send drop on a Spettro
+	// model the plan does not flag as reasoning (see
+	// unflaggedThinkingFallback); remembered only if the retry succeeds.
+	var unflaggedFrom ThinkingLevel
 	for {
 		resp, err := m.sendOnce(ctx, providerName, modelName, req)
 		if err == nil {
+			if unflaggedFrom != "" {
+				m.recordEffortDowngrade(providerName, modelName, unflaggedFrom, "")
+			}
 			m.usageRec.record(providerName, modelName, resp.Usage)
+			resp.Thinking = req.Thinking
 			return resp, nil
 		}
 		// A model may reject the requested thinking level (e.g. an effort enum
@@ -341,18 +419,32 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		// than aborting the run, step the level down and retry so the user
 		// keeps continuity; at "" no thinking parameter is sent at all.
 		if next, ok := m.downgradedThinking(providerName, req.Thinking, err); ok {
+			if !isAnthropicAPI(providerName, m.providerKind(providerName)) && isReasoningEffortError(err) {
+				m.recordEffortDowngrade(providerName, modelName, req.Thinking, next)
+			}
 			req.Thinking = next
+			continue
+		}
+		if unflaggedFrom == "" && m.unflaggedThinkingFallback(providerName, modelName, req.Thinking, err) {
+			unflaggedFrom = req.Thinking
+			req.Thinking = ""
 			continue
 		}
 		retryAfter, ok := rateLimitRetryAfter(providerName, err)
 		if !ok {
 			return Response{}, err
 		}
+		limited++
+		delay, ok := nextRateLimitWait(limited, waited, retryAfter)
+		if !ok {
+			return Response{}, fmt.Errorf("%w (%d attempts over %s): %w", ErrRateLimitRetriesExhausted, limited, waited.Round(time.Second), err)
+		}
+		waited += delay
 		if req.OnRateLimit != nil {
-			req.OnRateLimit(retryAfter)
+			req.OnRateLimit(delay)
 		}
 		select {
-		case <-time.After(retryAfter):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return Response{}, ctx.Err()
 		}
@@ -424,6 +516,7 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	apiKey := m.apiKeys[providerName]
 	baseURL := m.providerAPIs[providerName]
 	apiKind := m.providerKinds[providerName]
+	streamAll := m.streamAll
 	m.mu.RUnlock()
 	if providerName == "anthropic" {
 		apiKind = models.APIAnthropic
@@ -448,47 +541,67 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 		// (history retains them, so switching back restores vision) and leave a
 		// text placeholder so the model knows something was omitted.
 		req = stripImages(req)
+		// The caller's estimate measured the request before its images were
+		// replaced by text placeholders; measure the request that is sent.
+		req.PromptTokens = 0
 	}
 
-	var allParts []string
-	if len(req.Messages) > 0 {
-		allParts = append(allParts, req.System)
-		for _, m := range req.Messages {
-			allParts = append(allParts, m.Content)
+	// The input budget (config token_budget) caps the PROMPT: estimate the
+	// whole request, tool results and tool schemas included — they are most
+	// of a coding session's context. The output cap is a separate field.
+	// A caller that already estimated this request passes the estimate.
+	promptTokens := req.PromptTokens
+	if promptTokens <= 0 {
+		promptTokens = EstimateRequestTokens(req)
+	}
+	if req.InputBudget > 0 {
+		if err := budget.CheckTokens(req.InputBudget, promptTokens); err != nil {
+			return Response{}, err
 		}
-	} else {
-		allParts = append(allParts, req.Prompt)
 	}
-	allParts = append(allParts, req.Images...)
-	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
-		return Response{}, err
+	window := req.ContextWindow
+	if window <= 0 {
+		window = m.ModelContext(providerName, modelName)
 	}
+	req.MaxTokens = m.resolveMaxOutput(providerName, apiKind, modelName, req.MaxTokens, window, promptTokens)
+	req.localEndpoint = m.isLocalEndpoint(providerName, modelName)
 
 	// The fantasy path handles images natively (FilePart on user messages), so
 	// vision requests take the same primary path as everything else — the
 	// legacy adapters below are only the fallback, and they drop native tool
 	// definitions, so detouring there would break tool use mid-run.
-	if req.OnStream != nil {
-		resp, err := sendWithFantasyStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
+	//
+	// Anthropic-protocol requests always stream, even when the caller wants
+	// no live tokens: the SDK refuses non-streaming requests whose max_tokens
+	// could take over 10 minutes (anything above ~21k), and the stream path
+	// carries the idle watchdog that turns a stalled connection into a
+	// retryable error instead of a hang. With streamAll every request does.
+	anthropicAPI := isAnthropicAPI(providerName, apiKind)
+	if req.OnStream != nil || anthropicAPI || streamAll {
+		resp, err := m.sendStream(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
-			return finalizeResponse(resp, providerName, modelName, allParts), nil
+			return finalizeResponse(resp, providerName, modelName, req), nil
 		}
 		if !shouldFallbackToLegacy(err) {
-			// Streaming failed for a non-fallback reason (e.g. the provider
-			// does not support the stream endpoint). Retry once without
-			// streaming before surfacing the error so a run never dies just
-			// because live tokens were unavailable.
+			// Streaming failed. Only a failure that could be specific to the
+			// stream endpoint (an unclassified error, or a 4xx that is not
+			// auth, rate limit or context overflow) earns one non-streaming
+			// attempt; transient, auth and overflow failures would fail the
+			// same way and belong to the caller's retry/compaction policy.
+			if anthropicAPI || !worthNonStreamingRetry(err) {
+				return Response{}, err
+			}
 			noStream := req
 			noStream.OnStream = nil
 			if resp, rerr := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, noStream); rerr == nil {
-				return finalizeResponse(resp, providerName, modelName, allParts), nil
+				return finalizeResponse(resp, providerName, modelName, req), nil
 			}
 			return Response{}, err
 		}
 	} else {
 		resp, err := sendWithFantasy(ctx, providerName, apiKind, modelName, apiKey, baseURL, req)
 		if err == nil {
-			return finalizeResponse(resp, providerName, modelName, allParts), nil
+			return finalizeResponse(resp, providerName, modelName, req), nil
 		}
 		if !shouldFallbackToLegacy(err) {
 			return Response{}, err
@@ -503,7 +616,20 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 	if err != nil {
 		return Response{}, err
 	}
-	return finalizeResponse(resp, providerName, modelName, allParts), nil
+	return finalizeResponse(resp, providerName, modelName, req), nil
+}
+
+// worthNonStreamingRetry reports whether a failed streaming request should
+// be retried once without streaming (see sendOnce).
+func worthNonStreamingRetry(err error) bool {
+	switch ClassifyRetry(err) {
+	case RetryTransient, RetryContextOverflow:
+		return false
+	}
+	if status, _, ok := httpErrorDetails(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		return false
+	}
+	return !isThinkingLevelError(err)
 }
 
 // downgradedThinking decides whether err is worth retrying at a lower
@@ -531,6 +657,79 @@ func (m *Manager) downgradedThinking(providerName string, level ThinkingLevel, e
 	return next, true
 }
 
+func effortDowngradeKey(providerName, modelName string, level ThinkingLevel) string {
+	return providerName + "\x00" + modelName + "\x00" + string(level)
+}
+
+// recordEffortDowngrade records that the model rejected level and Send
+// stepped down to next. Only reasoning_effort rejections are recorded: they
+// are about the values the model accepts, the same on every call. Anthropic
+// thinking errors can depend on the request (a budget against its
+// max_tokens, a history without thinking blocks), so those are retried fresh
+// each time.
+func (m *Manager) recordEffortDowngrade(providerName, modelName string, level, next ThinkingLevel) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.effortDowngrades == nil {
+		m.effortDowngrades = map[string]ThinkingLevel{}
+	}
+	m.effortDowngrades[effortDowngradeKey(providerName, modelName, level)] = next
+}
+
+func (m *Manager) providerKind(providerName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.providerKinds[providerName]
+}
+
+// unflaggedThinkingFallback reports whether a send to a Spettro Subscription
+// model that the plan does not flag as reasoning should be retried once
+// without the thinking parameter. Such a model gets reasoning_effort on
+// trust (see SupportsReasoning), and the proxy may pass an upstream's
+// rejection of it on as a bare 400 that no longer names the parameter, which
+// downgradedThinking cannot recognize. When the retry succeeds, Send
+// remembers that the model takes no reasoning_effort.
+func (m *Manager) unflaggedThinkingFallback(providerName, modelName string, level ThinkingLevel, err error) bool {
+	if providerName != spettroProviderID || level == "" || ClassifyRetry(err) != RetryNever {
+		return false
+	}
+	if status, _, ok := httpErrorDetails(err); !ok || status != http.StatusBadRequest {
+		return false
+	}
+	if item, ok := m.Lookup(providerName, modelName); ok {
+		return !item.Reasoning
+	}
+	return true
+}
+
+// rememberedThinking returns the level a send at level starts from: level
+// itself, or the lower level an earlier send settled on after the model
+// rejected it (see recordEffortDowngrade).
+func (m *Manager) rememberedThinking(providerName, modelName string, level ThinkingLevel) ThinkingLevel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	// Each remembered step goes strictly down the ladder, so this ends; the
+	// bound only guards against a corrupted map.
+	for range 8 {
+		if level == "" {
+			return level
+		}
+		next, ok := m.effortDowngrades[effortDowngradeKey(providerName, modelName, level)]
+		if !ok {
+			return level
+		}
+		level = next
+	}
+	return level
+}
+
+// isReasoningEffortError reports whether err is a backend rejecting the
+// reasoning_effort parameter or its value.
+func isReasoningEffortError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "reasoning_effort") || strings.Contains(msg, "reasoning.effort") || strings.Contains(msg, "reasoning effort")
+}
+
 // isThinkingLevelError reports whether err looks like a provider rejecting
 // the reasoning/thinking configuration (as opposed to auth, rate limit, or
 // any other failure).
@@ -538,28 +737,83 @@ func isThinkingLevelError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "reasoning_effort") || strings.Contains(msg, "reasoning.effort") || strings.Contains(msg, "reasoning effort") {
+	if isReasoningEffortError(err) {
 		return true
 	}
+	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "budget_tokens") || strings.Contains(msg, "thinking.enabled") || strings.Contains(msg, "extended thinking") {
+		return true
+	}
+	// "When `thinking` is enabled, a final `assistant` message must start
+	// with a thinking block": the history cannot satisfy thinking, so step
+	// down (to off) rather than fail the run.
+	if strings.Contains(msg, "must start with a thinking block") {
 		return true
 	}
 	return false
 }
 
-// defaultRateLimitRetryAfter is used when a 429 carries no (or an
-// unparsable) Retry-After header. It matches the backend overflow bucket's
-// worst-case refill window (6s) plus the same +1s margin the backend itself
-// adds when it does send the header.
-const defaultRateLimitRetryAfter = 7 * time.Second
+// Rate-limit waits in Manager.Send. The wait before retry n is
+// rateLimitBaseDelay doubled n-1 times, capped at the server's Retry-After
+// when it sends one (but never below rateLimitBaseDelay) and at
+// rateLimitMaxDelay otherwise, with equal jitter (half fixed, half random)
+// so clients throttled together spread out even at the cap. A Retry-After
+// is the refill time of the backend's bucket, a worst case: an early retry
+// often gets through, and a late one only wastes time.
+//
+// The retries are bounded in time, not in count: early retries are cheap,
+// and a throttled request should keep its place for as long as the bound
+// allows (a sub-agent that gives up is re-run from scratch or fails, its
+// progress lost). Past rateLimitMaxWait of waiting the 429 is returned.
+const rateLimitMaxDelay = 20 * time.Second
 
-// rateLimitRetryAfter reports how long to wait before retrying req after err,
-// or false if err is not a rate limit the CLI should wait out. Only the
+// rateLimitBaseDelay and rateLimitMaxWait are variables so tests can shrink
+// them.
+var (
+	rateLimitBaseDelay = time.Second
+	rateLimitMaxWait   = 3 * time.Minute
+)
+
+// ErrRateLimitRetriesExhausted wraps the 429 Manager.Send returns once it
+// has stopped waiting out a rate limit. Neither the agent loop nor the
+// ultra and workflow sub-agent runners retry it again (see ClassifyRetry):
+// the waiting already happened here.
+var ErrRateLimitRetriesExhausted = errors.New("rate limited: gave up retrying")
+
+// rateLimitJitter returns a random fraction in [0, 1); swappable in tests.
+var rateLimitJitter = rand.Float64
+
+// rateLimitDelay is the wait before retrying a request that has now been
+// rate limited attempts times (1 after the first 429). retryAfter is the
+// server's hint, 0 when it sent none.
+func rateLimitDelay(attempts int, retryAfter time.Duration) time.Duration {
+	ceiling := rateLimitMaxDelay
+	if retryAfter > 0 {
+		ceiling = max(retryAfter, rateLimitBaseDelay)
+	}
+	d := rateLimitBaseDelay << min(max(attempts-1, 0), 16)
+	d = min(d, ceiling)
+	return d/2 + time.Duration(rateLimitJitter()*float64(d/2))
+}
+
+// nextRateLimitWait reports how long to wait before retrying a request that
+// has now been rate limited attempts times after waiting waited in all, or
+// false once that wait would take the total past rateLimitMaxWait.
+func nextRateLimitWait(attempts int, waited, retryAfter time.Duration) (time.Duration, bool) {
+	delay := rateLimitDelay(attempts, retryAfter)
+	if waited+delay > rateLimitMaxWait {
+		return 0, false
+	}
+	return delay, true
+}
+
+// rateLimitRetryAfter reports whether err is a rate limit the CLI should
+// wait out, with the server's Retry-After (0 when it sent none). Only the
 // Spettro Subscription provider is eligible: it is the sole source of the
 // overflow-tier 429 (pro/max accounts throttled onto a free model once their
-// budget is exhausted), which always resolves on its own within a few
-// seconds. 429s from any other provider are treated as ordinary errors.
+// budget is exhausted), which resolves on its own within seconds. 429s from
+// any other provider are treated as ordinary errors (the agent loop's
+// RetryPolicy handles them).
 func rateLimitRetryAfter(providerName string, err error) (time.Duration, bool) {
 	if providerName != spettroProviderID {
 		return 0, false
@@ -568,7 +822,8 @@ func rateLimitRetryAfter(providerName string, err error) (time.Duration, bool) {
 	if !ok || statusCode != http.StatusTooManyRequests {
 		return 0, false
 	}
-	return retryAfterDuration(header), true
+	hint, _ := parseRetryAfter(header)
+	return hint, true
 }
 
 // httpErrorDetails unwraps err looking for the HTTP status code and response
@@ -588,22 +843,6 @@ func httpErrorDetails(err error) (statusCode int, header http.Header, ok bool) {
 		return apiErr.StatusCode, apiErr.Response.Header, true
 	}
 	return 0, nil, false
-}
-
-func retryAfterDuration(header http.Header) time.Duration {
-	v := header.Get("Retry-After")
-	if v == "" {
-		return defaultRateLimitRetryAfter
-	}
-	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return defaultRateLimitRetryAfter
 }
 
 func legacyAdapterFor(providerName, apiKind, apiKey, baseURL string) (Adapter, error) {
@@ -636,11 +875,23 @@ func resolveOpenAICompatibleBaseURL(providerName, baseURL string) (string, error
 	return "", fmt.Errorf("no API endpoint configured for provider %q", providerName)
 }
 
-func finalizeResponse(resp Response, providerName, modelName string, allParts []string) Response {
+// finalizeResponse stamps resp with the model that produced it and, when
+// the provider reported no usage, estimates the tokens from the system
+// prompt and message texts of req.
+func finalizeResponse(resp Response, providerName, modelName string, req Request) Response {
 	resp.Provider = providerName
 	resp.Model = modelName
 	if resp.EstimatedTokens == 0 {
-		resp.EstimatedTokens = budget.EstimateTokens(allParts...)
+		var parts []string
+		if len(req.Messages) > 0 {
+			parts = append(parts, req.System)
+			for _, m := range req.Messages {
+				parts = append(parts, m.Content)
+			}
+		} else {
+			parts = append(parts, req.Prompt)
+		}
+		resp.EstimatedTokens = budget.EstimateTokens(parts...)
 	}
 	return resp
 }

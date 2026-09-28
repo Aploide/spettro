@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"slices"
 	"strings"
@@ -12,92 +11,36 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/remote"
 	"spettro/internal/sandbox"
 	"spettro/internal/session"
-	"spettro/internal/spettro"
-	"spettro/internal/storage"
 )
-
-// spettroInfosToModels converts Spettro backend model entries into provider
-// models tagged with the "spettro" provider.
-func spettroInfosToModels(infos []spettro.ModelInfo) []provider.Model {
-	out := make([]provider.Model, 0, len(infos))
-	for _, mi := range infos {
-		out = append(out, provider.Model{
-			Provider:     spettro.ProviderID,
-			ProviderName: spettro.ProviderName,
-			Name:         mi.ID,
-			DisplayName:  mi.ID,
-			ToolCall:     true,
-			Vision:       mi.Vision,
-			Context:      mi.ContextWindow,
-		})
-	}
-	return out
-}
 
 func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overrides) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	// Whatever the submissions started must not outlive the server.
+	defer releaseSessionResources()
 
-	store, err := storage.New(cwd)
+	boot, err := bootstrapSession(cwd, sandboxOverrides)
 	if err != nil {
-		fatal("storage error: %v", err)
+		fatal("%v", err)
 	}
+	store, pm, manifest := boot.store, boot.providers, boot.manifest
+	// The server reports ready without waiting for the network; the first
+	// submission waits (bounded) for local endpoints and the subscription
+	// model list instead.
+	discovery := startModelDiscovery(ctx, boot.cfg, pm, true, nil)
+	cfg := boot.cfg
+	resolveActiveModel(&cfg, pm)
 
-	cfg, err := config.LoadFull()
-	if err != nil {
-		fatal("config error: %v", err)
-	}
-
-	pm := provider.NewManager()
-	pm.SetAPIKeys(cfg.APIKeys)
-
-	if cat, err := models.Load(); err == nil {
-		pm.SetCatalog(cat)
-	}
-	for _, endpoint := range cfg.LocalEndpoints {
-		if localModels, err := provider.ProbeLocalServer(context.Background(), endpoint, cfg.APIKeys[endpoint]); err == nil {
-			pm.AddLocalModels(localModels)
-		}
-	}
-	// Register the Spettro Subscription endpoint + models when signed in.
-	if strings.TrimSpace(cfg.APIKeys[spettro.ProviderID]) != "" {
-		pm.SetSpettro(spettro.InferenceBaseURL(), nil)
-		if infos, err := spettro.ListModels(context.Background(), cfg.APIKeys[spettro.ProviderID]); err == nil {
-			pm.SetSpettro(spettro.InferenceBaseURL(), spettroInfosToModels(infos))
-		}
-	}
-	models.RefreshBackground(pm.SetCatalog)
-
-	// Don't run with a model whose provider has no credentials (fresh install
-	// or removed key): fall back to the best connected model.
-	cfg.ActiveProvider, cfg.ActiveModel = pm.ResolveActive(cfg.ActiveProvider, cfg.ActiveModel, cfg.APIKeys)
-
-	manifest, _ := config.LoadAgentManifestForProject(cwd)
 	mode := manifest.DefaultAgent
 	if mode == "" {
 		mode = "plan"
 	}
-
 	// One SandboxState for the server lifetime, shared across submissions.
-	sandboxPolicy, err := resolveSandboxPolicy(sandboxOverrides, manifest)
-	if err != nil {
-		fatal("sandbox error: %v", err)
-	}
-	sb := agent.NewSandboxState(sandboxPolicy)
-
-	// Write-confine the server process itself as defense-in-depth (best-effort;
-	// the model surface is confined at the shell and file-tool layers).
-	if sandboxPolicy.Enabled() {
-		writable := append([]string{store.GlobalDir, store.ProjectDir, cwd}, sandboxPolicy.ExtraWritable...)
-		if err := sandbox.ConfineParent(writable); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: parent sandbox not applied: %v\n", err)
-		}
-	}
+	sb := agent.NewSandboxState(boot.sandboxPolicy)
 
 	server, err := remote.NewServer(remote.Options{BindHost: bindHost})
 	if err != nil {
@@ -129,6 +72,9 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 		cancelRun  context.CancelFunc
 		tokensUsed int
 		msgCount   int
+		// pendingPlan is the answer of the last successful plan-mode run,
+		// which /approve hands to the coding agent (see takeApprovedPlan).
+		pendingPlan string
 	)
 
 	// Interrupt handler goroutine.
@@ -160,6 +106,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 				return
 			}
 
+			discovery.Wait(sessionModelsWait)
 			// Reload config to pick up key changes made via /models.
 			if freshCfg, ferr := config.LoadFull(); ferr == nil {
 				cfg = freshCfg
@@ -167,8 +114,23 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 			}
 
 			msg := strings.TrimSpace(req.Message)
+			// run is what the agent receives; msg stays what the user sent
+			// (a skill invocation or $mention expands into the skill's
+			// instructions, which the event stream should not echo).
+			run, isSkill, skillErr := resolveHeadlessPrompt(cwd, cfg, msg)
+			if skillErr != nil {
+				req.Reply <- remote.SubmitResponse{Accepted: true, Note: "skill failed"}
+				server.Publish("assistant_error", map[string]any{"error": skillErr.Error(), "mode": mode})
+				continue
+			}
 
-			if strings.HasPrefix(msg, "/") {
+			if plan, ok := takeApprovedPlan(msg, &pendingPlan, &manifest); ok && !isSkill {
+				// /approve runs the pending plan with the coding agent, as
+				// the TUI's /approve does; the run below reports it like
+				// any other prompt.
+				mode = "coding"
+				run = plan
+			} else if strings.HasPrefix(msg, "/") && !isSkill {
 				reply, note := handleHeadlessCommand(msg, &mode, &cfg, pm, &manifest)
 				req.Reply <- remote.SubmitResponse{Accepted: true, Note: note}
 				server.Publish("remote_command", map[string]any{
@@ -231,10 +193,14 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					ProviderName:    func() string { return cfg.ActiveProvider },
 					ModelName:       func() string { return cfg.ActiveModel },
 					CWD:             cwd,
+					MaxTokens:       cfg.TokenBudget,
+					MaxOutputTokens: cfg.MaxOutputTokens,
+					Thinking:        configuredThinking(pm, cfg),
 					Ultra:           cfg.UltraActive(),
 					Manifest:        &manifest,
 					SandboxState:    sb,
 					SessionDir:      sessionDir,
+					ContextWindow:   pm.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
 					Compact:         cfg.CompactConfig(),
 					ToolCallback: func(tr agent.ToolTrace) {
 						data := map[string]any{
@@ -255,7 +221,13 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 						if cfg.Permission == config.PermissionYOLO {
 							return agent.ShellApprovalAllowOnce, nil
 						}
-						dec, err := server.RequestApproval(sctx, ar.ToolID, ar.Command, ar.Reason)
+						dec, err := server.RequestApproval(sctx, remote.ApprovalRequest{
+							ToolID:   ar.ToolID,
+							Command:  ar.Command,
+							Reason:   ar.Reason,
+							Segments: ar.Segments,
+							Diff:     ar.Diff,
+						})
 						if err != nil {
 							return agent.ShellApprovalDeny, err
 						}
@@ -276,17 +248,12 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					// question; the rest come back skipped rather than
 					// defaulted, which is what the model needs to be told.
 					AskUser: func(sctx context.Context, form agent.AskUserForm) ([]agent.AskUserAnswer, error) {
-						qid := fmt.Sprintf("q-%d", msgCount)
-						reply, err := server.RequestAskUser(sctx, qid, agent.RemoteAskUserPayload(form, 0))
-						if err != nil {
-							return nil, err
-						}
-						return agent.AnswersFromRemote(form, reply.Answer, reply.Answers), nil
+						return headlessAskUser(sctx, server, nextQuestionID(), form, headlessAskUserWait())
 					},
 				}
 				ag.Spec.Permission = cfg.Permission
 
-				result, runErr := ag.Run(runCtx, msg)
+				result, runErr := ag.Run(runCtx, run)
 
 				mu.Lock()
 				cancelRun = nil
@@ -305,6 +272,9 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 						"tokens_used": result.TokensUsed,
 						"mode":        mode,
 					})
+					if mode == "plan" && strings.TrimSpace(result.Content) != "" {
+						pendingPlan = result.Content
+					}
 				}
 			}
 
@@ -324,6 +294,23 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 			})
 		}
 	}
+}
+
+// takeApprovedPlan reports whether msg is /approve with a plan pending and
+// a coding agent to run it; it then returns the plan and clears it, so a
+// plan runs at most once. /approve without a plan is left to
+// handleHeadlessCommand, which says there is none.
+func takeApprovedPlan(msg string, pendingPlan *string, manifest *config.AgentManifest) (string, bool) {
+	fields := strings.Fields(msg)
+	if len(fields) == 0 || fields[0] != "/approve" || strings.TrimSpace(*pendingPlan) == "" {
+		return "", false
+	}
+	if _, ok := manifest.AgentByID("coding"); !ok {
+		return "", false
+	}
+	plan := *pendingPlan
+	*pendingPlan = ""
+	return plan, true
 }
 
 func handleHeadlessCommand(
@@ -347,6 +334,10 @@ func handleHeadlessCommand(
 			"  /approve           run the pending plan",
 			"  /help              show this help",
 		}, "\n"), "help displayed"
+
+	case "/approve":
+		// takeApprovedPlan handles /approve when a plan is pending.
+		return "no pending plan — run a prompt in plan mode first", "no pending plan"
 
 	case "/mode", "/next":
 		next := nextHeadlessMode(*mode, manifest)
@@ -407,7 +398,7 @@ func handleHeadlessCommand(
 		return "permission: " + string(perm), "permission updated"
 
 	case "/exit", "/quit":
-		os.Exit(0)
+		exitSession(0)
 		return "", ""
 
 	default:

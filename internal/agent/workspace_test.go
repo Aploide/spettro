@@ -326,7 +326,6 @@ func TestConcurrentWorktreeMergesAllLand(t *testing.T) {
 	type outcome struct {
 		name  string
 		merge workspaceMerge
-		err   error
 	}
 	results := make([]outcome, members)
 	spaces := make([]*agentWorkspace, members)
@@ -459,5 +458,27 @@ func TestFinalizeKeepsTheUsersIdentity(t *testing.T) {
 	}
 	if got := gitOut(t, repo, "log", "-1", "--format=%cn"); got != "test" {
 		t.Fatalf("committer = %q, want the repo's own identity", got)
+	}
+}
+
+// Project prompt overrides (.spettro/agents/*.md) and uncommitted
+// instruction files live in the main checkout only: .spettro/ is never
+// checked out into a worktree. Worktree-isolated sub-agents must still see
+// them.
+func TestWorktreeAgentsSeeMainCheckoutOverridesAndInstructions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	repo := testGitRepo(t)
+	writeFileAt(t, filepath.Join(repo, ".spettro", "agents", "code.md"), "PROJECT OVERRIDE PROMPT")
+	writeFileAt(t, filepath.Join(repo, "SPETTRO.md"), "Uncommitted project rules.")
+	ws, err := newAgentWorkspace(context.Background(), repo, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ws.cleanup(context.Background()) })
+	if got := loadPromptOrFallback(ws.subCWD, "agents/code.md", "fallback"); got != "PROJECT OVERRIDE PROMPT" {
+		t.Fatalf("worktree prompt = %.80q, want the project override", got)
+	}
+	if got := freshSessionContext(ws.subCWD); !strings.Contains(got, "Uncommitted project rules.") {
+		t.Fatalf("worktree session context lacks the main checkout's SPETTRO.md:\n%s", got)
 	}
 }

@@ -21,7 +21,7 @@ func TestRunPreToolHooksDenyBlocks(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("deny-all", hooks.EventPreToolUse, "*", `echo '{"decision":"deny","reason":"not allowed"}'`),
 	}}}
-	updated, denyReason, err := r.runPreToolHooks(context.Background(), "shell-exec", json.RawMessage(`{"command":"ls"}`))
+	updated, denyReason, err := r.runPreToolHooks(context.Background(), "bash", json.RawMessage(`{"command":"ls"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestRunPreToolHooksDenyFallbackReason(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("quiet-deny", hooks.EventPreToolUse, "*", `echo '{"decision":"block"}'`),
 	}}}
-	_, denyReason, err := r.runPreToolHooks(context.Background(), "shell-exec", nil)
+	_, denyReason, err := r.runPreToolHooks(context.Background(), "bash", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestRunPreToolHooksAllowRewritesShellArgs(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("rewrite", hooks.EventPreToolUse, "*", `echo '{"decision":"allow","updated_args":{"command":"ls -la"}}'`),
 	}}}
-	updated, denyReason, err := r.runPreToolHooks(context.Background(), "shell-exec", json.RawMessage(`{"command":"ls"}`))
+	updated, denyReason, err := r.runPreToolHooks(context.Background(), "bash", json.RawMessage(`{"command":"ls"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestRunPreToolHooksSkipsDisabledAndNonMatching(t *testing.T) {
 		hookRule("other-tool", hooks.EventPreToolUse, "read-*", `echo '{"decision":"deny"}'`),
 		hookRule("other-event", hooks.EventPostToolUse, "*", `echo '{"decision":"deny"}'`),
 	}}}
-	updated, denyReason, err := r.runPreToolHooks(context.Background(), "shell-exec", json.RawMessage(`{}`))
+	updated, denyReason, err := r.runPreToolHooks(context.Background(), "bash", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestRunPreToolHooksFailingHookPropagatesError(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("boom", hooks.EventPreToolUse, "*", "exit 1"),
 	}}}
-	if _, _, err := r.runPreToolHooks(context.Background(), "shell-exec", nil); err == nil {
+	if _, _, err := r.runPreToolHooks(context.Background(), "bash", nil); err == nil {
 		t.Fatal("expected error from failing hook")
 	}
 }
@@ -109,7 +109,7 @@ func TestRunPermissionRequestHooks(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("auto-allow", hooks.EventPermissionRequest, "shell-*", `echo '{"decision":"allow","reason":"trusted"}'`),
 	}}}
-	decision, reason, err := r.runPermissionRequestHooks(context.Background(), "shell-exec", "ls")
+	decision, reason, err := r.runPermissionRequestHooks(context.Background(), "bash", "ls")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,14 +130,29 @@ func TestRunPostToolHooksError(t *testing.T) {
 	r := &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("post-ok", hooks.EventPostToolUse, "*", shelltest.DiscardStdin()),
 	}}}
-	if err := r.runPostToolHooks(context.Background(), "shell-exec", nil, "output"); err != nil {
+	if err := r.runPostToolHooks(context.Background(), "bash", nil, "output"); err != nil {
 		t.Fatal(err)
 	}
 
 	r = &toolRuntime{hooksConfig: hooks.EffectiveConfig{Rules: []hooks.EffectiveRule{
 		hookRule("post-fail", hooks.EventPostToolUse, "*", shelltest.Exit(2)),
 	}}}
-	if err := r.runPostToolHooks(context.Background(), "shell-exec", nil, "output"); err == nil {
+	if err := r.runPostToolHooks(context.Background(), "bash", nil, "output"); err == nil {
 		t.Fatal("expected error from failing post hook")
+	}
+}
+
+// TestWrittenFileAcceptsPathAlias checks that the PostToolUse re-stamp finds
+// the file of a write sent with the file_path alias the write tools accept.
+func TestWrittenFileAcceptsPathAlias(t *testing.T) {
+	r := &toolRuntime{cwd: t.TempDir()}
+	for _, args := range []string{`{"path":"a.txt","content":"x"}`, `{"file_path":"a.txt","content":"x"}`} {
+		_, rel, ok := r.writtenFile(toolCall{Tool: "file-write", Args: json.RawMessage(args)})
+		if !ok || rel != "a.txt" {
+			t.Errorf("writtenFile(%s) = %q, %v; want a.txt", args, rel, ok)
+		}
+	}
+	if _, _, ok := r.writtenFile(toolCall{Tool: "file-read", Args: json.RawMessage(`{"path":"a.txt"}`)}); ok {
+		t.Error("file-read is not a write")
 	}
 }

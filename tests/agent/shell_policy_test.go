@@ -147,3 +147,43 @@ func TestIsBlockedCommand_NoPreserveRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestAlwaysAllowedCommandRefusesWritingFlags pins that the approval
+// shortcut for "safe" commands looks at the arguments, not only the leading
+// words: each of these runs a program or writes a file, so it must go
+// through the normal approval path under ask-first and restricted.
+func TestAlwaysAllowedCommandRefusesWritingFlags(t *testing.T) {
+	for _, cmd := range []string{
+		"rg --pre=rm x victim.go",
+		"rg --pre rm x victim.go",
+		"git diff --output=written.txt",
+		"git diff --ext-diff",
+		"git -c diff.external=evil diff",
+		"GIT_EXTERNAL_DIFF=evil git diff",
+		"env GIT_EXTERNAL_DIFF=evil git diff",
+		"GOFLAGS=-toolexec=evil go build ./...",
+		"go test -exec evil ./...",
+		"go build -toolexec evil ./...",
+		"go vet -vettool=evil ./...",
+		"make test SHELL=/tmp/evil",
+		"make build -f other.mk",
+	} {
+		if agent.IsAlwaysAllowedCommandForTesting(cmd) {
+			t.Errorf("%q must not skip approval", cmd)
+		}
+	}
+	for _, cmd := range []string{
+		"rg -n TODO internal",
+		"git diff --stat HEAD~1",
+		"git status --short",
+		"LC_ALL=C grep -rn foo .",
+		"go test ./internal/agent -run TestX -count=1",
+		"go build ./...",
+		"go vet ./...",
+		"make test",
+	} {
+		if !agent.IsAlwaysAllowedCommandForTesting(cmd) {
+			t.Errorf("%q should stay always allowed", cmd)
+		}
+	}
+}

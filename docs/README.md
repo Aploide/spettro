@@ -8,6 +8,7 @@
 - [Windows notes](windows.md) — install, shell dialect, sandbox and PTY differences
 - [Interactive PTY sessions](pty.md) — pty-start/pty-write/pty-kill: the agent drives REPLs, debuggers, ssh through a real terminal
 - [Architecture overview](architecture.md)
+- [Performance](performance.md) — measured start-up, CPU, memory and tool timings, how to reproduce them, targets not met
 - [Session Lifecycle](session.md) — auto-save, resume, compact, clear, auto-compact
 - [Goal Mode](goal.md) — autonomous `/goal` runs
 - [Agent Skills](skills.md)
@@ -15,7 +16,8 @@
 - [Checkpointing and Rewind](checkpointing.md) — auto-snapshots before file edits, `/rewind`
 - [Storage report and cleanup](storage.md) — `/storage`, `spettro clean`, artifact inventory
 - [Language Server (LSP) Integration](lsp.md) — zero-config diagnostics, references, go-to-definition
-- [Symbol-aware repo search](symbol-index.md) — ranked definitions in `repo-search`, cached symbol index
+- [Built-in tools](tools.md) — the tools agents call, and the retired names that still route to them
+- [Symbol-aware repo search](symbol-index.md) — ranked definitions from `grep`'s `symbol` lookup, cached symbol index
 - [Web Tools](web-tools.md) — web-search, web-fetch markdown engine, download
 - [Vision](vision.md) — view-image tool, agent-driven screenshots
 - [Persistent Memory](memory.md) — save-memory tool, `/memory`, cross-session context

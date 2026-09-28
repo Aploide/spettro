@@ -261,7 +261,10 @@ func TestWorkflowFooterStaysOutOfTheWay(t *testing.T) {
 			fmt.Sprintf("verify:%d", i), "Verify", "running", false))
 	}
 
+	// A terminal the side panel fits in, so the footer may point at it.
+	m.width = 120
 	for _, height := range []int{20, 24, 40, 60} {
+		m.height = height
 		// The budget the renderer would actually hand it, border excluded.
 		rows := footerBudget(height) - 2
 		summary := m.workflowSummaryLines(90, rows)
@@ -291,6 +294,14 @@ func TestWorkflowFooterStaysOutOfTheWay(t *testing.T) {
 			t.Fatalf("height %d: no pointer to the full tree:\n%s", height, joined)
 		}
 	}
+
+	// On a terminal too narrow for the panel, ctrl+b shows nothing, so the
+	// footer does not point at it.
+	m.width, m.height = 80, 24
+	if joined := strings.Join(m.workflowSummaryLines(76, footerBudget(24)-2), "\n"); strings.Contains(joined, "ctrl+b") {
+		t.Fatalf("80x24: the footer points at a panel that cannot be drawn:\n%s", joined)
+	}
+	m.width = 120
 
 	// A taller terminal may show more of the live work than a short one.
 	short := len(m.workflowSummaryLines(90, footerBudget(20)-2))
