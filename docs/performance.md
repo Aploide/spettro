@@ -124,6 +124,33 @@ Notes on the comparison columns:
 - **200-turn TUI session** replays 200 scripted turns through the TUI and
   records total CPU, the latency of each turn and peak RSS.
 
+## Model-side speed (end-to-end coding tasks)
+
+Once the engine's own overhead fell below 2 % of a task's wall time, the
+remaining time is the model's: how many tokens it writes per turn. On
+2026-09-28 the coding prompt (`agents/coding.md`) was reworded so the model
+thinks only as far as its next tool call, writes code and checks into files
+instead of drafting them in its reasoning, and keeps final answers short.
+Every verification rule stayed as it was.
+
+The change was measured on the 20-task benchmark suite with the Spettro
+subscription model SuperFast, all three configurations running at the same
+time under the same load:
+
+| Configuration | Passed | Mean wall time | Mean tokens per task | Output tokens per call |
+|---|---|---|---|---|
+| OpenCode 1.18.32 (1 run per task) | 19/20 | 219 s | 422k | 1,165 |
+| Spettro before the rewording (2 runs) | 38/40 | 202 s | 439k | 1,264 |
+| Spettro after the rewording (2 runs) | 38/40 | 182 s | 322k | 1,149 |
+
+Tokens per task dropped 27 % (24 % on an earlier 10-task screen) with the
+same pass rate; both builds failed the same two runs. Wall time dropped 10 %
+on average and the change was faster on 15 of 20 tasks, but the gain is in
+long tasks (the ones where the model used to deliberate at length before its
+first edit); the median task is unchanged. Model-side times vary by about
+25 % between runs on different days, so compare configurations only when
+they run side by side, as here.
+
 ## How to reproduce
 
 ### Micro-benchmarks (in the repository, run in CI form)
