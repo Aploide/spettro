@@ -130,10 +130,15 @@ func dropOldest(turns []provider.Message, names map[string]string, caps renderCa
 	for i, m := range turns {
 		parts[i] = renderTurn(m, names, caps)
 	}
-	// suffix[i] is the rendered length of turns[i:].
-	suffix := make([]int, len(parts)+1)
+	// suffix[i] is the rendered length of turns[i:]. It has exactly one entry
+	// per part (a running total from the end) rather than len(parts)+1 with a
+	// zero sentinel, so the allocation size needs no arithmetic on a length
+	// that comes from the transcript (CodeQL go/allocation-size-overflow).
+	suffix := make([]int, len(parts))
+	total := 0
 	for i := len(parts) - 1; i >= 0; i-- {
-		suffix[i] = suffix[i+1] + len(parts[i])
+		total += len(parts[i])
+		suffix[i] = total
 	}
 	for skip := 1; skip < len(parts); skip++ {
 		note := omittedNote(skip)
