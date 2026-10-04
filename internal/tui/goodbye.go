@@ -47,7 +47,7 @@ func PrintGoodbye(final tea.Model) {
 	accentStyle := lipgloss.NewStyle().Foreground(p.AccentPurple)
 
 	fmt.Println()
-	for _, line := range eyesActing {
+	for _, line := range eyesNormal {
 		fmt.Println(eyeStyle.Render(line))
 	}
 	fmt.Println()

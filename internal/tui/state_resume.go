@@ -369,6 +369,10 @@ func (m Model) updateTrust(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "3", "n", "N", "esc", "ctrl+c":
 		return m, tea.Quit
 	}
+	if !m.showTrust {
+		m.startEyesIntroIfVisible()
+		return m, m.armTimers()
+	}
 	return m, nil
 }
 
