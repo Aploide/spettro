@@ -34,6 +34,11 @@ type Release struct {
 
 func httpClient() *http.Client { return &http.Client{Timeout: 15 * time.Second} }
 
+// downloadClient leaves the total response time to the request context. An
+// update archive can take longer than the short timeout used for API and
+// checksum requests, especially on a slow connection.
+func downloadClient() *http.Client { return &http.Client{} }
+
 // FetchLatestRelease asks GitHub for the newest published release of Repo,
 // bypassing the release-check cache (see LatestRelease).
 func FetchLatestRelease(ctx context.Context) (*Release, error) {

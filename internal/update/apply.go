@@ -132,7 +132,7 @@ func downloadToTemp(ctx context.Context, url, dir string) (path string, sum stri
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := httpClient().Do(req)
+	resp, err := downloadClient().Do(req)
 	if err != nil {
 		return "", "", err
 	}
