@@ -23,22 +23,32 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	eyesClosed, eyesAggressive, eyesNormal = parseEyeFrames(string(data))
+}
+
+// parseEyeFrames splits the frame file into its three sections. A Windows
+// checkout with autocrlf gives the file CRLF endings, so each line is
+// stripped of its carriage return before it is matched or kept — otherwise
+// no section marker matches and the art slices stay empty.
+func parseEyeFrames(data string) (closed, aggressive, normal []string) {
 	section := ""
-	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(data, "\n"), "\n") {
+		line = strings.TrimRight(line, "\r")
 		switch line {
 		case "CLOSED", "AGGRESSIVE", "NORMAL":
 			section = line
 		default:
 			switch section {
 			case "CLOSED":
-				eyesClosed = append(eyesClosed, line)
+				closed = append(closed, line)
 			case "AGGRESSIVE":
-				eyesAggressive = append(eyesAggressive, line)
+				aggressive = append(aggressive, line)
 			case "NORMAL":
-				eyesNormal = append(eyesNormal, line)
+				normal = append(normal, line)
 			}
 		}
 	}
+	return closed, aggressive, normal
 }
 
 // eyeFrameArt opens the eyes into the aggressive frame, holds it briefly,

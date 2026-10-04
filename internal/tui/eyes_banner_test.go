@@ -30,7 +30,9 @@ func TestEyesIntroWaitsForTrustThenAdvances(t *testing.T) {
 	if !m.eyeIntroStarted || !m.needsAnimation() {
 		t.Fatalf("accepting trust must start the intro animation")
 	}
-	for range 3 {
+	// The intro advances one frame every third tick of the 60 Hz animation
+	// tick, keeping the ~50 ms per frame it ran at when the tick was 50 ms.
+	for range 9 {
 		next, _ = m.Update(tickMsg(time.Now()))
 		m = next.(Model)
 	}
@@ -48,11 +50,29 @@ func TestEyesIntroWaitsForTrustThenAdvances(t *testing.T) {
 	}
 }
 
+// parseEyeFrames must survive a CRLF checkout: a Windows clone with
+// autocrlf hands it carriage returns, which must not blank out the sections.
+func TestParseEyeFramesAcceptsCRLF(t *testing.T) {
+	lf := strings.Join([]string{"CLOSED", "shut", "AGGRESSIVE", "wide", "NORMAL", "calm"}, "\n")
+	for name, data := range map[string]string{
+		"lf":   lf,
+		"crlf": strings.ReplaceAll(lf, "\n", "\r\n"),
+	} {
+		closed, aggressive, normal := parseEyeFrames(data)
+		if len(closed) != 1 || closed[0] != "shut" || aggressive[0] != "wide" || normal[0] != "calm" {
+			t.Fatalf("%s: sections parsed as %q, %q, %q", name, closed, aggressive, normal)
+		}
+	}
+}
+
 func TestIdleEyesBlinkStopsOnFirstUserMessage(t *testing.T) {
 	m := footerModel(120, 40)
 	m.ready = true
 	m.eyeIntroStarted = true
 	m.eyeIntroFrame = eyeIntroFrames - 1
+	// The intro only advances on a tick whose frame counter lands on a
+	// multiple of three; start one short of that so the next tick finishes it.
+	m.eyeFrame = 2
 	next, _ := m.Update(tickMsg(time.Now()))
 	m = next.(Model)
 	if !m.idleEyesArmed || m.eyeIntroFrame != eyeIntroFrames {

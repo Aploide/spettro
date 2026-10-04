@@ -199,8 +199,10 @@ func lumaOfHex(t *testing.T, hex string) float64 {
 }
 
 func TestPlanLabelMaxIsSlow(t *testing.T) {
-	// Consecutive ticks must render identically most of the time; the label
-	// should step roughly seven times a second slower than the tick.
+	// The MAX rainbow interpolates its hue on every frame, so consecutive
+	// ticks no longer render identically; "slow" is the period instead. One
+	// full trip around the rainbow takes planLabelFrameDivisor frames per
+	// colour stop — the ~150 ms per step the label has always had.
 	changes := 0
 	prev := renderPlanLabel("max", 0)
 	for frame := 1; frame < planLabelFrameDivisor*4; frame++ {
@@ -210,11 +212,15 @@ func TestPlanLabelMaxIsSlow(t *testing.T) {
 		}
 		prev = cur
 	}
-	if changes > 4 {
-		t.Fatalf("MAX changed %d times in %d frames — still too fast", changes, planLabelFrameDivisor*4)
-	}
 	if changes == 0 {
 		t.Fatal("MAX stopped animating entirely")
+	}
+	period := planLabelFrameDivisor * len(theme.Current().RampRainbow)
+	if renderPlanLabel("max", 0) != renderPlanLabel("max", period) {
+		t.Fatalf("MAX should complete one rainbow cycle in %d frames, not more", period)
+	}
+	if renderPlanLabel("max", 0) == renderPlanLabel("max", period-1) {
+		t.Fatalf("MAX rainbow should take the full %d frames, not fewer", period)
 	}
 	// Non-animated tiers are unaffected.
 	if renderPlanLabel("pro", 0) != renderPlanLabel("pro", 99) {

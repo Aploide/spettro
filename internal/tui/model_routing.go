@@ -140,6 +140,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// armTimers).
 		m.tickArmed = false
 		m.eyeFrame++
+		// The intro advances every third tick, keeping the ~50 ms per frame it
+		// ran at before the animation tick moved from 50 ms to 60 Hz.
 		if m.eyeIntroStarted && m.eyeIntroFrame < eyeIntroFrames && m.eyeFrame%3 == 0 {
 			m.eyeIntroFrame++
 			m.refreshViewport()

@@ -70,9 +70,11 @@ does not grow with the length of the session:
   redraws the transcript rows and the working indicator only (a tick also
   redraws the chrome parts that animate, such as a glaring task). The frame
   is joined from rows measured once.
-- **Idle**. The 50 ms animation tick runs only while something animates
-  (a run, onboarding and sign-in spinners, the MAX plan label, a goal's clock,
-  running delegations, in-progress tasks, glowing input keywords); a 1 s
+- **Idle**. The 60 Hz animation tick runs only while something animates
+  (the startup eyes intro, a run, onboarding and sign-in spinners, the MAX
+  plan label, a goal's clock, running delegations, in-progress tasks, glowing
+  input keywords); the idle eyes blink runs on its own slow tick chain until
+  the first user message; a 1 s
   clock tick redraws the status bar while a `/loop` counts down or a
   background job or pty session runs (either can end with no message
   reaching the TUI); banners clear with a one-shot timer; the input cursor
