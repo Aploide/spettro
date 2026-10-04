@@ -140,7 +140,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// armTimers).
 		m.tickArmed = false
 		m.eyeFrame++
-		if m.eyeIntroStarted && m.eyeIntroFrame < eyeIntroFrames {
+		if m.eyeIntroStarted && m.eyeIntroFrame < eyeIntroFrames && m.eyeFrame%3 == 0 {
 			m.eyeIntroFrame++
 			m.refreshViewport()
 			if m.eyeIntroFrame == eyeIntroFrames && !m.hasUserMessage() && !m.idleEyesArmed {

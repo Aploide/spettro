@@ -403,7 +403,7 @@ func (m Model) viewOnboardingVerifying() string {
 
 	// Animated bounce bar
 	barInner := 36
-	pos := (m.eyeFrame / 2) % (barInner * 2)
+	pos := (m.eyeFrame / 6) % (barInner * 2)
 	if pos >= barInner {
 		pos = barInner*2 - pos
 	}
@@ -417,7 +417,7 @@ func (m Model) viewOnboardingVerifying() string {
 			filled[idx] = '█'
 		}
 	}
-	spinFrame := spinnerFrames[m.eyeFrame%len(spinnerFrames)]
+	spinFrame := spinnerFrames[(m.eyeFrame/3)%len(spinnerFrames)]
 	barStr := lipgloss.NewStyle().Foreground(mc).Render("▐") +
 		lipgloss.NewStyle().Foreground(mc).Render(string(filled)) +
 		lipgloss.NewStyle().Foreground(mc).Render("▌")

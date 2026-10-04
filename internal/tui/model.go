@@ -911,13 +911,13 @@ func (m Model) applyTheme(k theme.Kind) Model {
 	return m
 }
 
-// tick is the 50 ms animation frame: the working indicator, glare, the MAX
+// tick is the 60 Hz animation frame: the working indicator, glare, the MAX
 // plan label, onboarding and sign-in spinners, running delegations and
 // in-progress tasks all advance on eyeFrame. It is armed only while one of
 // them is on screen (needsAnimation); an idle TUI used to wake 20 times a
 // second for nothing, most of its 4-5 % idle CPU.
 func tick() tea.Cmd {
-	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Tick(time.Second/60, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}

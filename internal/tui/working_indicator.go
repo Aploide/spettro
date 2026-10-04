@@ -15,10 +15,10 @@ import (
 // having lost its glyph for a step, not as a pulse.
 var workingSymbols = []string{"✻", "✽", "✶", "✳", "✶", "✽"}
 
-// workingSymbolFrameDivisor slows the glyph to ~200 ms a step off the 50 ms
+// workingSymbolFrameDivisor slows the glyph to ~200 ms a step off the 60 Hz
 // tick, roughly half the pace of the glare sweep so the two read as one
 // motion instead of competing.
-const workingSymbolFrameDivisor = 4
+const workingSymbolFrameDivisor = 12
 
 // workingVerbs is the pool the per-run status word is drawn from: mostly
 // playful English, with a few ghost/Italian ones for the Spettro house style.
