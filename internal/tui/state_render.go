@@ -350,7 +350,15 @@ func (m Model) transcriptWidth() int {
 // to the viewport rather than the pane, because that is the width it is
 // centred inside.
 func (m Model) eyesBanner() string {
-	return renderEyesStatic(m.mode, m.transcriptWidth())
+	return renderEyesAt(m.mode, m.transcriptWidth(), m.eyeBannerFrame())
+}
+
+// startEyesIntroIfVisible keeps the one-shot logo animation paused behind the
+// first-run trust dialog. The first visible TUI paint stays on closed eyes.
+func (m *Model) startEyesIntroIfVisible() {
+	if m.ready && m.width > 0 && !m.showTrust {
+		m.eyeIntroStarted = true
+	}
 }
 
 func (m Model) recalcLayout() Model {

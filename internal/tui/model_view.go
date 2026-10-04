@@ -245,11 +245,10 @@ func (m Model) viewSep(width int) string {
 		Render(strings.Repeat("─", width))
 }
 
-// planLabelFrameDivisor slows the MAX rainbow down. The frame counter ticks
-// every 50 ms; advancing a hue per tick made the label strobe in the corner of
-// the eye, which is the opposite of what a status label should do. One step
-// per 150 ms keeps it visibly alive without pulling focus.
-const planLabelFrameDivisor = 3
+// planLabelFrameDivisor sets the MAX rainbow's hue pace. The frame counter
+// ticks at 60 Hz; colors are interpolated between hue steps so the
+// animation keeps its pace without jumping between them.
+const planLabelFrameDivisor = 9
 
 // renderPlanLabel renders a plan name with its tier color.
 // "max" animates through rainbow colors using the given frame counter.
@@ -268,7 +267,11 @@ func renderPlanLabel(plan string, frame int) string {
 		rainbow := theme.Current().RampRainbow
 		var out strings.Builder
 		for i, ch := range label {
-			c := rainbow[(i+frame/planLabelFrameDivisor)%len(rainbow)]
+			position := float64(i) + float64(frame)/planLabelFrameDivisor
+			position = math.Mod(position, float64(len(rainbow)))
+			index := int(position)
+			fraction := position - float64(index)
+			c := theme.Lerp(rainbow[index], rainbow[(index+1)%len(rainbow)], fraction)
 			out.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch)))
 		}
 		return out.String()
@@ -636,32 +639,23 @@ func renderGlare(text string, frame int, agentColor color.Color) string {
 	if n == 0 {
 		return ""
 	}
-	// one position step every 3 frames (150 ms at 50 ms/frame)
+	// Move at one rune per nine frames (150 ms at 60 Hz), blending
+	// between adjacent color stops on every frame.
 	padding := 6
 	cycleLen := n + padding
-	pos := (frame/3)%cycleLen - padding/2
+	pos := math.Mod(float64(frame)/9, float64(cycleLen)) - float64(padding)/2
 
 	grad := glareGradient(agentColor)
 
 	var sb strings.Builder
 	for i, r := range runes {
-		dist := i - pos
-		if dist < 0 {
-			dist = -dist
+		dist := math.Abs(float64(i) - pos)
+		stop := min(int(dist), len(grad)-1)
+		fraction := dist - float64(stop)
+		if stop == len(grad)-1 {
+			fraction = 0
 		}
-		var fg color.Color
-		switch {
-		case dist == 0:
-			fg = grad[0]
-		case dist == 1:
-			fg = grad[1]
-		case dist == 2:
-			fg = grad[2]
-		case dist <= 4:
-			fg = grad[3]
-		default:
-			fg = grad[4]
-		}
+		fg := theme.Lerp(grad[stop], grad[min(stop+1, len(grad)-1)], fraction)
 		sb.WriteString(lipgloss.NewStyle().Foreground(fg).Render(string(r)))
 	}
 	return sb.String()

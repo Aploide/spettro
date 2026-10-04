@@ -113,6 +113,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m = m.applyWindowSize(msg.Width, msg.Height)
+		m.startEyesIntroIfVisible()
 	case tea.BackgroundColorMsg:
 		// The answer to Init's OSC 11 query, and occasionally an unsolicited
 		// report after the user switches their terminal's own theme mid
@@ -139,6 +140,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// armTimers).
 		m.tickArmed = false
 		m.eyeFrame++
+		// The intro advances every third tick, keeping the ~50 ms per frame it
+		// ran at before the animation tick moved from 50 ms to 60 Hz.
+		if m.eyeIntroStarted && m.eyeIntroFrame < eyeIntroFrames && m.eyeFrame%3 == 0 {
+			m.eyeIntroFrame++
+			m.refreshViewport()
+			if m.eyeIntroFrame == eyeIntroFrames && !m.hasUserMessage() && !m.idleEyesArmed {
+				m.idleEyesArmed = true
+				cmds = append(cmds, idleEyesTick(idleEyesRest))
+			}
+		}
 		// Auto-clear expired banners so the status bar falls back to
 		// goal info (or empty) after 5 seconds.
 		if m.banner != "" && !m.bannerClearAt.IsZero() && time.Since(m.bannerClearAt) >= 0 {
@@ -149,6 +160,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.transcriptHasLiveTail() {
 			// A running pty tool's live tail comes from the pty session,
 			// not from the message, so only a repaint shows it moving.
+			m.refreshViewport()
+		}
+	case idleEyesTickMsg:
+		m.idleEyesArmed = false
+		if m.eyeIntroStarted && m.eyeIntroFrame >= eyeIntroFrames && !m.hasUserMessage() {
+			m.idleEyesFrame = (m.idleEyesFrame + 1) % (idleEyesFrames + 1)
+			m.refreshViewport()
+			delay := idleEyesStep
+			if m.idleEyesFrame == 0 {
+				delay = idleEyesRest
+			}
+			m.idleEyesArmed = true
+			cmds = append(cmds, idleEyesTick(delay))
+		} else {
+			m.idleEyesFrame = 0
 			m.refreshViewport()
 		}
 	case bannerExpiredMsg:

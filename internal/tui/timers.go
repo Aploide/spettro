@@ -42,6 +42,8 @@ func (m *Model) armTimers() tea.Cmd {
 // TestAnimatedElementsKeepTicking.
 func (m Model) needsAnimation() bool {
 	switch {
+	case m.eyeIntroStarted && m.eyeIntroFrame < eyeIntroFrames:
+		return true
 	case m.thinking:
 		// Working indicator (glare, symbol, elapsed time), running tool
 		// rows, live pty tails.
@@ -63,6 +65,24 @@ func (m Model) needsAnimation() bool {
 		return true
 	}
 	return false
+}
+
+// The idle blink of the eyes logo runs on its own slow tick chain rather
+// than the animation tick: the intro sits on the open frame, then a brief
+// run of fast frames (idleEyesStep each) plays the blink down and up, and
+// the chain rests on the open eyes for idleEyesRest before blinking again.
+// The chain re-arms itself until the first user message stops it.
+const (
+	idleEyesStep   = 60 * time.Millisecond
+	idleEyesRest   = 4 * time.Second
+	idleEyesFrames = 6 // blink frames; frame 0 is the open-eyes rest
+)
+
+// idleEyesTickMsg advances the idle blink by one frame.
+type idleEyesTickMsg struct{}
+
+func idleEyesTick(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return idleEyesTickMsg{} })
 }
 
 // clockTickInterval is how often the clock tick redraws the status bar.

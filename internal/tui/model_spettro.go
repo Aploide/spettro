@@ -294,14 +294,14 @@ func (m Model) viewLogin() string {
 			styleMuted.Render("enter — try again  •  esc — cancel"),
 		)
 	case "loading":
-		spinFrame := spinnerFrames[m.eyeFrame%len(spinnerFrames)]
+		spinFrame := spinnerFrames[(m.eyeFrame/3)%len(spinnerFrames)]
 		lines = append(lines,
 			title,
 			"",
 			lipgloss.NewStyle().Foreground(mc).Render(spinFrame+" Signed in — loading your plan…"),
 		)
 	case "waiting":
-		spinFrame := spinnerFrames[m.eyeFrame%len(spinnerFrames)]
+		spinFrame := spinnerFrames[(m.eyeFrame/3)%len(spinnerFrames)]
 		lines = append(lines,
 			title,
 			"",
@@ -313,7 +313,7 @@ func (m Model) viewLogin() string {
 			styleMuted.Render("esc — cancel"),
 		)
 	default: // initiating
-		spinFrame := spinnerFrames[m.eyeFrame%len(spinnerFrames)]
+		spinFrame := spinnerFrames[(m.eyeFrame/3)%len(spinnerFrames)]
 		lines = append(lines,
 			title,
 			"",

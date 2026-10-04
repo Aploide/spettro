@@ -11,7 +11,89 @@ import (
 )
 
 // eyeArtRow is a row of the acting art distinctive enough to find in a frame.
-var eyeArtRow = eyesActing[3]
+func eyeArtRow() string { return eyesClosed[6] }
+
+func TestEyesIntroWaitsForTrustThenAdvances(t *testing.T) {
+	m := footerModel(120, 40)
+	m.showTrust = true
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = next.(Model)
+	if m.eyeIntroStarted || m.needsAnimation() {
+		t.Fatalf("the intro must wait while the trust prompt is visible")
+	}
+	closed := ansi.Strip(m.renderMessages())
+	if !strings.Contains(closed, eyesClosed[5]) {
+		t.Fatalf("initial transcript must render the closed eye frame")
+	}
+	next, _ = m.Update(tea.KeyPressMsg{Code: '1'})
+	m = next.(Model)
+	if !m.eyeIntroStarted || !m.needsAnimation() {
+		t.Fatalf("accepting trust must start the intro animation")
+	}
+	// The intro advances one frame every third tick of the 60 Hz animation
+	// tick, keeping the ~50 ms per frame it ran at when the tick was 50 ms.
+	for range 9 {
+		next, _ = m.Update(tickMsg(time.Now()))
+		m = next.(Model)
+	}
+	if m.eyeIntroFrame != 3 {
+		t.Fatalf("startup ticks advanced to frame %d, want 3", m.eyeIntroFrame)
+	}
+	if opened := ansi.Strip(m.renderMessages()); opened == closed {
+		t.Fatalf("startup ticks must repaint the intro animation")
+	}
+	if strings.Join(eyeFrameArt(10), "\n") != strings.Join(eyeFrameArt(15), "\n") {
+		t.Fatalf("aggressive eyes should hold visibly before the normal frame")
+	}
+	if strings.Join(eyeFrameArt(15), "\n") == strings.Join(eyeFrameArt(24), "\n") {
+		t.Fatalf("the animation should finish on the normal eyes")
+	}
+}
+
+// parseEyeFrames must survive a CRLF checkout: a Windows clone with
+// autocrlf hands it carriage returns, which must not blank out the sections.
+func TestParseEyeFramesAcceptsCRLF(t *testing.T) {
+	lf := strings.Join([]string{"CLOSED", "shut", "AGGRESSIVE", "wide", "NORMAL", "calm"}, "\n")
+	for name, data := range map[string]string{
+		"lf":   lf,
+		"crlf": strings.ReplaceAll(lf, "\n", "\r\n"),
+	} {
+		closed, aggressive, normal := parseEyeFrames(data)
+		if len(closed) != 1 || closed[0] != "shut" || aggressive[0] != "wide" || normal[0] != "calm" {
+			t.Fatalf("%s: sections parsed as %q, %q, %q", name, closed, aggressive, normal)
+		}
+	}
+}
+
+func TestIdleEyesBlinkStopsOnFirstUserMessage(t *testing.T) {
+	m := footerModel(120, 40)
+	m.ready = true
+	m.eyeIntroStarted = true
+	m.eyeIntroFrame = eyeIntroFrames - 1
+	// The intro only advances on a tick whose frame counter lands on a
+	// multiple of three; start one short of that so the next tick finishes it.
+	m.eyeFrame = 2
+	next, _ := m.Update(tickMsg(time.Now()))
+	m = next.(Model)
+	if !m.idleEyesArmed || m.eyeIntroFrame != eyeIntroFrames {
+		t.Fatalf("finishing the intro should arm the idle blink")
+	}
+	next, _ = m.Update(idleEyesTickMsg{})
+	m = next.(Model)
+	if m.idleEyesFrame != 1 || m.eyeBannerFrame() != eyeIntroFrames+1 {
+		t.Fatalf("the idle blink did not advance its first frame")
+	}
+	m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: "first message"})
+	m.refreshViewport()
+	if m.eyeBannerFrame() != eyeIntroFrames {
+		t.Fatalf("the logo should return to normal after the first user message")
+	}
+	next, _ = m.Update(idleEyesTickMsg{})
+	m = next.(Model)
+	if m.idleEyesArmed || m.idleEyesFrame != 0 {
+		t.Fatalf("the idle blink should stop after the first user message")
+	}
+}
 
 // The logo opens the scrollback instead of sitting above it: it is the first
 // thing renderMessages emits, both with and without a transcript, and it is
@@ -20,7 +102,7 @@ func TestEyesBannerOpensTheScrollback(t *testing.T) {
 	m := footerModel(120, 40)
 
 	empty := m.renderMessages()
-	if !strings.HasPrefix(ansi.Strip(empty), strings.Repeat(" ", (m.vp.Width()-eyeArtWidth)/2)+eyesActing[0]) {
+	if !strings.HasPrefix(ansi.Strip(empty), strings.Repeat(" ", (m.transcriptWidth()-eyeArtWidth)/2)+eyesClosed[0]) {
 		t.Fatalf("an empty transcript must still open with the logo:\n%q", ansi.Strip(empty))
 	}
 	if !strings.Contains(empty, "no messages yet") {
@@ -29,22 +111,22 @@ func TestEyesBannerOpensTheScrollback(t *testing.T) {
 
 	m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: "hello"})
 	body := ansi.Strip(m.renderMessages())
-	if idx := strings.Index(body, eyeArtRow); idx < 0 {
+	if idx := strings.Index(body, eyeArtRow()); idx < 0 {
 		t.Fatalf("the logo must lead the transcript:\n%s", body)
 	} else if idx > strings.Index(body, "hello") {
 		t.Fatalf("the logo must come before the first message:\n%s", body)
 	}
 }
 
-// The banner is static: it renders identically whatever the animation frame
-// is, which is what keeps the render cache's repeat renders byte-identical.
+// The banner frame is stable until the startup animation advances, keeping
+// repeated renders byte-identical.
 func TestEyesBannerIsStatic(t *testing.T) {
 	m := footerModel(120, 40)
 	m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: "hello"})
 
 	m.eyeFrame = 0
 	first := m.renderMessages()
-	m.eyeFrame = 157 // mid-blink for the old animated renderer
+	m.eyeIntroFrame = 0
 	m.thinking = true
 	second := m.renderMessages()
 
@@ -63,7 +145,7 @@ func TestEyesAreNotInTheFixedFrame(t *testing.T) {
 
 	frame := ansi.Strip(m.View().Content)
 	lines := strings.Split(frame, "\n")
-	if strings.Contains(lines[0], eyeArtRow) || strings.Contains(lines[1], eyeArtRow) {
+	if strings.Contains(lines[0], eyeArtRow()) || strings.Contains(lines[1], eyeArtRow()) {
 		t.Fatalf("the logo must not sit between the header and the pane:\n%s", frame)
 	}
 
@@ -72,7 +154,7 @@ func TestEyesAreNotInTheFixedFrame(t *testing.T) {
 	}
 	m = m.recalcLayout()
 	m.refreshViewport()
-	if strings.Contains(ansi.Strip(m.View().Content), eyeArtRow) {
+	if strings.Contains(ansi.Strip(m.View().Content), eyeArtRow()) {
 		t.Fatalf("the logo should have scrolled away once the chat filled the pane")
 	}
 }
@@ -107,8 +189,8 @@ func TestEyesBannerFollowsAModeSwitch(t *testing.T) {
 	}
 
 	frame := ansi.Strip(m.View().Content)
-	if !strings.Contains(frame, eyesPlanning[3]) || strings.Contains(frame, eyeArtRow) {
-		t.Fatalf("the logo must repaint with the new mode's art:\n%s", frame)
+	if !strings.Contains(frame, eyesClosed[6]) {
+		t.Fatalf("the shared logo must remain visible after the mode switch:\n%s", frame)
 	}
 }
 
@@ -117,8 +199,8 @@ func TestEyesBannerFollowsAModeSwitch(t *testing.T) {
 func TestEyesBannerFitsNarrowPanes(t *testing.T) {
 	for _, width := range []int{30, 46, 80, 99, 120} {
 		art := renderEyesStatic("coding", width)
-		if got := lipgloss.Height(art); got != len(eyesActing) {
-			t.Fatalf("width %d: %d rows, want %d", width, got, len(eyesActing))
+		if got := lipgloss.Height(art); got != len(eyesNormal) {
+			t.Fatalf("width %d: %d rows, want %d", width, got, len(eyesNormal))
 		}
 		if got := lipgloss.Width(art); got > width {
 			t.Fatalf("width %d: art is %d columns wide", width, got)
@@ -132,7 +214,7 @@ func TestEyesBannerIsPinnedToTopOnAFreshSession(t *testing.T) {
 	m := footerModel(120, 18)
 	m.refreshViewport()
 
-	if !strings.Contains(ansi.Strip(m.View().Content), eyesActing[0]) {
+	if !strings.Contains(ansi.Strip(m.View().Content), eyesClosed[0]) {
 		t.Fatalf("the top of the logo must be visible on a fresh session:\n%s", ansi.Strip(m.View().Content))
 	}
 }

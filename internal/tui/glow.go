@@ -73,14 +73,14 @@ func sampleRamp(ramp []rgbColor, pos float64) rgbColor {
 	return ramp[i%len(ramp)].lerp(ramp[(i+1)%len(ramp)], scaled-float64(i))
 }
 
-// Animation speeds, in frames at the TUI's 50 ms tick. Both are deliberately
+// Animation speeds, in frames at the TUI's 60 Hz tick. Both are deliberately
 // unhurried: this sits under the cursor while someone is typing, and anything
 // quick enough to notice as motion is quick enough to be a distraction.
 const (
 	// ultracodeDriftFrames is one full trip through the colour ramp.
-	ultracodeDriftFrames = 140.0 // 7s
+	ultracodeDriftFrames = 420.0 // 7s
 	// ultracodeSweepFrames is one pass of the specular highlight.
-	ultracodeSweepFrames = 64.0 // 3.2s
+	ultracodeSweepFrames = 192.0 // 3.2s
 	// ultracodeSweepPad is how far past each end the highlight travels, so
 	// there is a beat of calm between passes instead of a strobe.
 	ultracodeSweepPad = 7.0
