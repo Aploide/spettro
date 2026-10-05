@@ -912,6 +912,13 @@ func (s *shared) dispatch(ctx context.Context, req Request, nested, admitted boo
 		s.emit(Event{Kind: EventAgentStart, Phase: req.Phase, Label: req.Label, Instance: req.Instance, AgentType: req.AgentType, Index: req.Index, Cached: true, Nested: nested})
 		value, err := decodeCached(entry.Output, req.Schema)
 		if err == nil {
+			// Re-recorded in this run's journal, so a run resumed from this
+			// one replays it too rather than paying for it again (see the
+			// same note on replayed checkpoint answers).
+			_ = s.opts.Journal.Append(JournalEntry{
+				Kind: JournalKindAgent, Key: key, Index: req.Index, Label: req.Label, Phase: req.Phase,
+				Instance: req.Instance, AgentType: req.AgentType, Output: entry.Output, Tokens: entry.Tokens,
+			})
 			s.emit(Event{Kind: EventAgentDone, Phase: req.Phase, Label: req.Label, Instance: req.Instance, AgentType: req.AgentType, Index: req.Index, Output: entry.Output, Cached: true, Nested: nested})
 			return entry.Output, value, nil
 		}

@@ -245,6 +245,14 @@ func (r *vmRun) raiseCheckpoint(ctx context.Context, msg string, data any, key s
 	// pausing, as it replays agents: the point of resuming is not to be asked
 	// the same thing twice.
 	if entry, ok := s.opts.Journal.TakeCheckpoint(key); ok {
+		// The answer goes into this run's journal too. Resuming is routinely
+		// chained — the idle reaper stops a run paused too long and points at
+		// resume_from_run_id for it — and the next link loads only this
+		// journal: an answer replayed but not re-recorded would be asked again.
+		_ = s.opts.Journal.Append(JournalEntry{
+			Kind: JournalKindCheckpoint, Key: key, Index: seq, Instance: id,
+			Label: msg, Phase: phase, Output: entry.Output,
+		})
 		ev := Event{Phase: phase, Message: msg, CheckpointID: id, Auto: auto, Cached: true, Nested: r.nested}
 		ev.Kind, ev.Output = EventCheckpoint, encodeJSON(data)
 		s.emit(ev)

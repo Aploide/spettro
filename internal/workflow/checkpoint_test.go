@@ -554,3 +554,63 @@ func TestCheckpointReplayIgnoresKeyOrder(t *testing.T) {
 		t.Fatalf("value = %#v", res.Value)
 	}
 }
+
+// A run resumed from a resumed run still replays everything: each run's
+// journal re-records what it replayed, so a chain of resumes — the idle reaper
+// stops a paused run and points at resume_from_run_id for it — never asks the
+// same question twice nor pays for the same agent again.
+func TestChainedResumesReplayEverything(t *testing.T) {
+	dir := t.TempDir()
+	script := header(`
+		const a = await checkpoint('q')
+		const b = await agent('use ' + a)
+		const c = await checkpoint('later')
+		return b + c
+	`)
+	stopAtLater := func(prev, name string, runner *fakeRunner) string {
+		t.Helper()
+		runDir := filepath.Join(dir, name)
+		j, err := OpenJournal(runDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer j.Close()
+		if prev != "" {
+			if err := j.LoadCache(filepath.Join(dir, prev)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		h := startRun(t, script, Options{Checkpoints: true, Journal: j, Runner: runner})
+		cp := wantCheckpoint(t, nextStep(t, h))
+		if cp.Message == "q" {
+			if prev != "" {
+				t.Fatalf("%s: asked %q again after resuming from %s", name, cp.Message, prev)
+			}
+			if err := h.Resume(cp.ID, "yes"); err != nil {
+				t.Fatal(err)
+			}
+			cp = wantCheckpoint(t, nextStep(t, h))
+		}
+		if cp.Message != "later" {
+			t.Fatalf("%s: paused at %+v", name, cp)
+		}
+		h.Stop()
+		<-h.Done()
+		return name
+	}
+
+	r1 := stopAtLater("", "run-1", echoRunner(0))
+	r2 := stopAtLater(r1, "run-2", echoRunner(0))
+	live := echoRunner(0)
+	stopAtLater(r2, "run-3", live)
+	if live.count() != 0 {
+		t.Fatalf("run-3 re-ran %d agents that run-2 had replayed", live.count())
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, r2, "journal.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"kind":"checkpoint"`) || !strings.Contains(string(raw), `"kind":"agent"`) || !strings.Contains(string(raw), `"instance":"cp-1"`) {
+		t.Fatalf("run-2's journal does not carry what it replayed:\n%s", raw)
+	}
+}
