@@ -77,6 +77,10 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 	// approval decision.
 	s.permission = cfg.Permission
 	history := s.history
+	// Every firing shares the session's workflow state: a workflow paused at
+	// a checkpoint in one iteration can be continued in the next.
+	ultracode := s.ultracode
+	workflowRuns := s.liveWorkflowRunsLocked()
 	b.mu.Unlock()
 
 	livePermission := func() config.PermissionLevel {
@@ -145,6 +149,9 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 			MaxOutputTokens: cfg.MaxOutputTokens,
 			Thinking:        thinking,
 			Ultra:           cfg.UltraActive(),
+			Ultracode:       ultracode,
+			WorkflowSize:    cfg.WorkflowSizeTier(),
+			WorkflowRuns:    workflowRuns,
 			Messages:        history,
 			Manifest:        &manifest,
 			SandboxState:    b.opts.SandboxState,

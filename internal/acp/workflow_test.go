@@ -2,10 +2,14 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
@@ -111,6 +115,8 @@ func TestACPWorkflowToolTitles(t *testing.T) {
 			`{"workflow":"audit","kind":"phase","phase":"Scan"}`, ""),
 		"workflow audit · log": wfTrace("workflow-progress", "success",
 			`{"workflow":"audit","kind":"log"}`, "hi"),
+		"workflow audit ⏸ cp-2": wfTrace("workflow-progress", "success",
+			`{"workflow":"audit","kind":"checkpoint","checkpoint_id":"cp-2","message":"m"}`, "{}"),
 	}
 	for want, tr := range cases {
 		if got := toolCallTitle(tr); got != want {
@@ -163,6 +169,97 @@ func TestACPWorkflowsTextAndRunRewrite(t *testing.T) {
 	for _, in := range []string{"/workflows", "/workflows list", "/workflows run missing", "/ultra on"} {
 		if _, ok := acpWorkflowRunPrompt(cwd, in); ok {
 			t.Fatalf("%q must not be rewritten into a prompt", in)
+		}
+	}
+}
+
+// A saved workflow is a template: the run prompt has the agent read and adapt
+// it (or run it as-is by name), lists its declared params, passes JSON args
+// through byte for byte, and treats anything else as the task.
+func TestACPWorkflowRunPromptIsATemplate(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	dir := filepath.Join(cwd, ".spettro", workflow.SavedWorkflowsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "export const meta = {name: 'audit', description: 'Audit the repo', params: {" +
+		"base: {type: 'string', description: 'branch to diff against', default: 'main'}, " +
+		"focus: {type: 'string', description: 'what to look at', required: true}}}\nreturn args"
+	if err := os.WriteFile(filepath.Join(dir, "audit.js"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plain.js"),
+		[]byte("export const meta = {name: 'plain', description: 'No params'}\nreturn 1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name, input string
+		want, not   []string
+	}{
+		{
+			name:  "json args keep their whitespace",
+			input: "/workflows run audit   {\"focus\": \"auth  and   session\",\n \"base\": \"dev\"}",
+			want: []string{
+				"ultracode", "template", "script_path", filepath.Join(dir, "audit.js"),
+				"adapt anything task-specific or stale", "discovered at runtime",
+				`"args": {"focus": "auth  and   session",` + "\n" + ` "base": "dev"}`,
+				`base (string, default "main") — branch to diff against`,
+				"focus (string, required) — what to look at",
+			},
+			not: []string{"Do not rewrite", "Task:"},
+		},
+		{
+			name:  "free text is the task",
+			input: "/workflows run audit look at the login flow\nand the token refresh",
+			want:  []string{`{"name": "audit"}`, "Task: look at the login flow\nand the token refresh", "fits the task below"},
+			not:   []string{`"args"`},
+		},
+		{
+			name:  "no args",
+			input: "/workflow start plain",
+			want:  []string{`{"name": "plain"}`, "Declared params: none"},
+			not:   []string{"Task:", `"args"`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt, ok := acpWorkflowRunPrompt(cwd, tc.input)
+			if !ok {
+				t.Fatalf("%q was not rewritten", tc.input)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt missing %q:\n%s", want, prompt)
+				}
+			}
+			for _, not := range tc.not {
+				if strings.Contains(prompt, not) {
+					t.Errorf("prompt must not contain %q:\n%s", not, prompt)
+				}
+			}
+			if !agent.WorkflowRequested(prompt) {
+				t.Error("the rewritten prompt does not activate workflows")
+			}
+		})
+	}
+}
+
+func TestRestAfterFields(t *testing.T) {
+	cases := []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"/workflows run audit", 3, ""},
+		{"/workflows run audit {\"a\":  1}", 3, "{\"a\":  1}"},
+		{"  /workflows\trun\naudit \n line one\n  line two  ", 3, "line one\n  line two"},
+		{"/workflows run", 3, ""},
+	}
+	for _, tc := range cases {
+		if got := restAfterFields(tc.in, tc.n); got != tc.want {
+			t.Errorf("restAfterFields(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
 		}
 	}
 }
@@ -245,5 +342,396 @@ func TestACPWorkflowFinishWithoutStart(t *testing.T) {
 	if turn.onWorkflowTool(wfTrace("workflow", "success",
 		`{"agents":1,"cached":0,"failed":0,"run_id":"wf_9","tokens":1,"workflow":"audit"}`, "done")) {
 		t.Fatal("a finish with no open run must not be claimed")
+	}
+}
+
+// recordedUpdate is one session/update notification a recording turn sent.
+type recordedUpdate struct {
+	Kind       string `json:"sessionUpdate"`
+	ToolCallID string `json:"toolCallId"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	Content    []struct {
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"content"`
+}
+
+func (u recordedUpdate) text() string {
+	var parts []string
+	for _, c := range u.Content {
+		parts = append(parts, c.Content.Text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// wireRecorder is the client end of a connection whose notifications the
+// tests read back.
+type wireRecorder struct {
+	b   *bridge
+	out *syncBuffer
+}
+
+func newWireRecorder(t *testing.T) *wireRecorder {
+	t.Helper()
+	b := newBridge(Options{})
+	out := &syncBuffer{}
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	b.conn = acpsdk.NewAgentSideConnection(b, out, pr)
+	return &wireRecorder{b: b, out: out}
+}
+
+// turn starts a prompt turn on the recorder's connection that shares cards
+// with every other turn built from the same set, as a session's turns do.
+func (r *wireRecorder) turn(cards *acpWorkflowCards) *turnState {
+	return &turnState{
+		bridge:    r.b,
+		ctx:       context.Background(),
+		sessionID: "sess-wf",
+		open:      map[string][]openToolCall{},
+		workflows: cards,
+	}
+}
+
+// updates waits until at least n notifications are on the wire and returns
+// them in order.
+func (r *wireRecorder) updates(t *testing.T, n int) []recordedUpdate {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var got []recordedUpdate
+		for _, line := range strings.Split(r.out.String(), "\n") {
+			var msg struct {
+				Method string `json:"method"`
+				Params struct {
+					Update recordedUpdate `json:"update"`
+				} `json:"params"`
+			}
+			if json.Unmarshal([]byte(line), &msg) == nil && msg.Method == "session/update" {
+				got = append(got, msg.Params.Update)
+			}
+		}
+		if len(got) >= n || time.Now().After(deadline) {
+			if len(got) < n {
+				t.Fatalf("want %d notifications, got %d: %+v", n, len(got), got)
+			}
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A run paused at a checkpoint is not finished: its card stays in progress,
+// says what it waits for, and the session keeps its state for whoever
+// continues it.
+func TestACPWorkflowPausedKeepsCardOpen(t *testing.T) {
+	rec := newWireRecorder(t)
+	cards := newACPWorkflowCards()
+	turn := rec.turn(cards)
+
+	turn.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","phases":[{"title":"Scan"}]}`, ""))
+	turn.onWorkflowTool(wfTrace("agent", "success",
+		`{"agent":"gp#1","task":"scan a","workflow":"audit","run_id":"wf_1","phase":"Scan"}`, ""))
+	if !turn.onWorkflowTool(wfTrace("workflow", "paused",
+		`{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1","message":"which findings to fix?"}`, "")) {
+		t.Fatal("a paused trace must be claimed")
+	}
+
+	w := cards.runs["wf_1"]
+	if w == nil || turn.workflow != w {
+		t.Fatalf("paused run must stay on the session and the turn: cards=%v turn=%v", cards.runs, turn.workflow)
+	}
+	if w.status != "paused" || w.checkpointID != "cp-1" {
+		t.Fatalf("paused state = %q %q", w.status, w.checkpointID)
+	}
+	if want := "⏸ paused at cp-1 — waiting for orchestrator: which findings to fix?"; !strings.Contains(w.render(), want) {
+		t.Fatalf("render missing %q:\n%s", want, w.render())
+	}
+
+	ups := rec.updates(t, 3)
+	last := ups[len(ups)-1]
+	if last.ToolCallID != string(w.callID) || last.Status != "in_progress" {
+		t.Fatalf("a paused card must stay in progress, last update = %+v", last)
+	}
+	if !strings.Contains(last.text(), "waiting for orchestrator") {
+		t.Fatalf("the paused card must say it is waiting: %q", last.text())
+	}
+}
+
+// The continue call's "running" trace (resumed:true) may arrive in a later
+// turn. It must find the run's card where the earlier turn left it, keep
+// everything recorded so far, and show it in the turn that drives it now.
+func TestACPWorkflowResumeInLaterTurnReattaches(t *testing.T) {
+	rec := newWireRecorder(t)
+	cards := newACPWorkflowCards()
+	first := rec.turn(cards)
+
+	first.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","description":"Audit","phases":[{"title":"Scan"},{"title":"Fix"}]}`, ""))
+	first.onWorkflowTool(wfTrace("agent", "success",
+		`{"agent":"gp#1","task":"scan a","workflow":"audit","run_id":"wf_1","phase":"Scan"}`, ""))
+	first.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"log"}`, "3 findings"))
+	first.onWorkflowTool(wfTrace("workflow", "paused",
+		`{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1","message":"fix which?"}`, ""))
+	w := cards.runs["wf_1"]
+	oldID := w.callID
+
+	second := rec.turn(cards)
+	if !second.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","resumed":true}`, "")) {
+		t.Fatal("the resumed trace must be claimed")
+	}
+	if cards.runs["wf_1"] != w || second.workflow != w {
+		t.Fatal("a resumed run must re-attach to its existing card state, not start a new one")
+	}
+	if w.status != "running" || w.checkpointID != "" {
+		t.Fatalf("resuming must clear the pause: status=%q cp=%q", w.status, w.checkpointID)
+	}
+	if len(w.agents) != 1 || len(w.logs) != 1 || len(w.phases) != 2 || w.description != "Audit" {
+		t.Fatalf("resumed card lost state: %+v", w)
+	}
+	if w.callID == oldID || w.turn != second {
+		t.Fatalf("the continuing turn must announce the card itself: id %q (was %q)", w.callID, oldID)
+	}
+
+	second.onWorkflowTool(wfTrace("agent", "running",
+		`{"agent":"gp#2","task":"fix a","workflow":"audit","run_id":"wf_1","phase":"Fix"}`, ""))
+	if len(w.agents) != 2 {
+		t.Fatalf("members after resume = %+v", w.agents)
+	}
+	if !second.onWorkflowTool(wfTrace("workflow", "success",
+		`{"run_id":"wf_1","workflow":"audit","agents":2,"cached":0,"failed":0,"tokens":9}`, "2 agents")) {
+		t.Fatal("finish must be claimed")
+	}
+	if _, ok := cards.runs["wf_1"]; ok || second.workflow != nil {
+		t.Fatal("a finished run must leave the session's cards")
+	}
+
+	// On the wire: the earlier turn's card is closed with a pointer forward,
+	// and the later turn opens its own card carrying the state so far.
+	// Four from the first turn (start, member, log, pause), four from the
+	// second (close the old card, open the new one, member, finish).
+	ups := rec.updates(t, 8)
+	var closedOld, openedNew bool
+	for _, u := range ups {
+		if u.ToolCallID == string(oldID) && u.Status == "completed" &&
+			strings.Contains(u.text(), "continued in a later turn") &&
+			strings.Contains(u.text(), "paused at cp-1") {
+			closedOld = true
+		}
+		if u.Kind == "tool_call" && u.ToolCallID == string(w.callID) && strings.Contains(u.text(), "gp#1") {
+			openedNew = true
+		}
+	}
+	if !closedOld || !openedNew {
+		t.Fatalf("closedOld=%v openedNew=%v updates=%+v", closedOld, openedNew, ups)
+	}
+}
+
+// Continued in the turn that paused it, the run keeps its card and ID.
+func TestACPWorkflowResumeInSameTurnKeepsCard(t *testing.T) {
+	turn := newSilentTurn()
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	w := turn.workflow
+	id := w.callID
+	turn.onWorkflowTool(wfTrace("workflow", "paused", `{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1"}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit","resumed":true}`, ""))
+	if turn.workflow != w || w.callID != id || w.status != "running" {
+		t.Fatalf("same-turn continue must reuse the card: %+v", w)
+	}
+}
+
+// A run starting over under a run_id the session already knows (not a
+// continue) gets a fresh card whose ID cannot collide with the old one's.
+func TestACPWorkflowRestartWithoutResumedStartsFresh(t *testing.T) {
+	turn := newSilentTurn()
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow-progress", "success", `{"run_id":"wf_1","workflow":"audit","kind":"log"}`, "old"))
+	old := turn.workflow
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	if turn.workflow == old || len(turn.workflow.logs) != 0 {
+		t.Fatal("a non-resumed start must not inherit the previous card's state")
+	}
+	if turn.workflow.callID == old.callID {
+		t.Fatalf("restarted card reused ID %q", old.callID)
+	}
+}
+
+// The model's own call of the workflow tool is a "workflow" trace too, but its
+// arguments are the tool's: it must stay a generic card, also when it is a
+// continue call naming a run the session holds.
+func TestACPWorkflowToolCallTraceIsNotALifecycleTrace(t *testing.T) {
+	turn := newSilentTurn()
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	for _, args := range []string{
+		`{"name":"audit","args":{"deep":true}}`,
+		`{"continue_run_id":"wf_1","reply":{"fix":["a"]}}`,
+		`{"continue_run_id":"wf_1","stop":true}`,
+	} {
+		for _, status := range []string{"running", "success"} {
+			if turn.onWorkflowTool(wfTrace("workflow", status, args, "")) {
+				t.Fatalf("tool-call trace %s (%s) was claimed", args, status)
+			}
+		}
+	}
+	if turn.workflow == nil {
+		t.Fatal("a tool-call trace closed the run's card")
+	}
+}
+
+func TestACPWorkflowCheckpointProgress(t *testing.T) {
+	turn := newSilentTurn()
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	if !turn.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"checkpoint","phase":"Scan","checkpoint_id":"cp-1","message":"pick targets"}`,
+		`{"findings":[1,2,3]}`)) {
+		t.Fatal("a checkpoint trace must be claimed")
+	}
+	turn.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"checkpoint","checkpoint_id":"cp-2","message":"again","cached":true}`, "null"))
+	out := turn.workflow.render()
+	for _, want := range []string{"⏸ cp-1 pick targets", "⏸ cp-2 (answer replayed) again"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "findings") {
+		t.Fatalf("checkpoint data belongs to the orchestrator, not the card:\n%s", out)
+	}
+}
+
+// Statuses this code does not know never read as done: not for a member, and
+// not for the run, which stays open instead of being closed as completed.
+func TestACPWorkflowUnknownStatusesAreNotDone(t *testing.T) {
+	turn := newSilentTurn()
+	turn.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","phases":[{"title":"Scan"}]}`, ""))
+	turn.onWorkflowTool(wfTrace("agent", "queued",
+		`{"agent":"gp#1","task":"t","workflow":"audit","run_id":"wf_1","phase":"Scan"}`, ""))
+	out := turn.workflow.render()
+	if strings.Contains(out, "✓") || !strings.Contains(out, "0/1 done") || !strings.Contains(out, "· gp#1") {
+		t.Fatalf("an unknown member status rendered as done:\n%s", out)
+	}
+
+	if !turn.onWorkflowTool(wfTrace("workflow", "draining", `{"run_id":"wf_1","workflow":"audit"}`, "")) {
+		t.Fatal("an unknown lifecycle status must still be claimed")
+	}
+	if turn.workflow == nil {
+		t.Fatal("an unknown lifecycle status closed the card")
+	}
+	if !strings.Contains(turn.workflow.render(), "status: draining") {
+		t.Fatalf("unknown status not shown:\n%s", turn.workflow.render())
+	}
+
+	if !turn.onWorkflowTool(wfTrace("workflow", "stopped", `{"run_id":"wf_1","workflow":"audit"}`, "stopped by orchestrator")) {
+		t.Fatal("a stop must be claimed")
+	}
+	if turn.workflow != nil {
+		t.Fatal("a stopped run must close its card")
+	}
+}
+
+func TestACPWorkflowAgentGlyphs(t *testing.T) {
+	for status, want := range map[string]string{
+		"success": "✓", "error": "✗", "running": "▶", "queued": "·", "": "·",
+	} {
+		if got := agentGlyph(status); got != want {
+			t.Errorf("agentGlyph(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
+func TestACPWorkflowDynamicPhases(t *testing.T) {
+	turn := newSilentTurn()
+	turn.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","phases":[{"title":"Scan","detail":"find candidates"}]}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"phase","phase":"Scan","dynamic":false}`, "Scan"))
+	turn.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"phase","phase":"Verify auth","detail":"3 suspects","dynamic":true}`, "Verify auth"))
+	out := turn.workflow.render()
+	for _, want := range []string{"○ Scan — pending", "↳ find candidates", "○ Verify auth (added at runtime) — pending", "↳ 3 suspects"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Scan (added at runtime)") {
+		t.Fatalf("a declared phase was marked dynamic:\n%s", out)
+	}
+	if strings.Index(out, "Scan") > strings.Index(out, "Verify auth") {
+		t.Fatalf("declared phases come first:\n%s", out)
+	}
+}
+
+func TestACPWorkflowSizeInTitle(t *testing.T) {
+	cases := []struct {
+		args, title, body string
+	}{
+		{`{"run_id":"wf_1","workflow":"audit"}`, "workflow audit", ""},
+		{`{"run_id":"wf_1","workflow":"audit","size":"large","size_agents":30}`, "workflow audit · large", "size: large (~30 agents, a guideline)"},
+		{`{"run_id":"wf_1","workflow":"audit","size":"unbounded","size_agents":0,"budget_tokens":500000}`,
+			"workflow audit · unbounded · budget 500k", "size: unbounded (no guideline) · budget 500k tokens"},
+	}
+	for _, tc := range cases {
+		turn := newSilentTurn()
+		turn.onWorkflowTool(wfTrace("workflow", "running", tc.args, ""))
+		if got := turn.workflow.title(); got != tc.title {
+			t.Errorf("title(%s) = %q, want %q", tc.args, got, tc.title)
+		}
+		if out := turn.workflow.render(); tc.body != "" && !strings.Contains(out, tc.body) {
+			t.Errorf("render(%s) missing %q:\n%s", tc.args, tc.body, out)
+		}
+	}
+}
+
+func TestCompactTokens(t *testing.T) {
+	for n, want := range map[int]string{
+		999: "999", 1000: "1k", 1500: "1.5k", 500_000: "500k", 750_000: "750k",
+		1_000_000: "1m", 1_500_000: "1.5m", 2_000_000: "2m", 1_250_000: "1.25m",
+	} {
+		if got := compactTokens(n); got != want {
+			t.Errorf("compactTokens(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestACPWorkflowLogTailIsBounded(t *testing.T) {
+	w := &acpWorkflow{name: "audit"}
+	for i := range maxWorkflowLogLines + 10 {
+		w.addLog(fmt.Sprintf("round %d", i))
+	}
+	if len(w.logs) != maxWorkflowLogLines || w.dropped != 10 {
+		t.Fatalf("logs=%d dropped=%d", len(w.logs), w.dropped)
+	}
+	out := w.render()
+	if !strings.Contains(out, "… 10 earlier lines") || strings.Contains(out, "round 9\n") ||
+		!strings.Contains(out, fmt.Sprintf("round %d", maxWorkflowLogLines+9)) {
+		t.Fatalf("render:\n%s", out)
+	}
+}
+
+// A trace reaching a turn that has ended (a paused run stopped later reports
+// through the turn that started it) must not take the card away from the turn
+// now showing it.
+func TestACPWorkflowDeadTurnDoesNotStealCard(t *testing.T) {
+	cards := newACPWorkflowCards()
+	// Both turns are silent (cancelled contexts drop every notification); a
+	// card nobody has announced yet is still taken by the turn that opens it.
+	live := newSilentTurn()
+	live.workflows = cards
+	live.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	w := cards.runs["wf_1"]
+	dead := newSilentTurn()
+	dead.workflows = cards
+	dead.onWorkflowTool(wfTrace("workflow-progress", "success", `{"run_id":"wf_1","workflow":"audit","kind":"log"}`, "late"))
+	if w.turn != live || w.attach != 1 {
+		t.Fatalf("a dead turn took the card: turn=%p live=%p attach=%d", w.turn, live, w.attach)
+	}
+	if len(w.logs) != 1 {
+		t.Fatal("the late trace's content must still be recorded")
 	}
 }

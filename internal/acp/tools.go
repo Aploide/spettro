@@ -313,6 +313,8 @@ func toolCallTitle(tr agent.ToolTrace) string {
 				title = "workflow " + wf + " ▸ " + args.str("phase")
 			case "log":
 				title = "workflow " + wf + " · log"
+			case "checkpoint":
+				title = "workflow " + wf + " ⏸ " + args.str("checkpoint_id")
 			default:
 				title = "workflow " + wf
 			}

@@ -2,9 +2,9 @@ package acp
 
 // Extended slash-command surface for ACP clients: the read-only, text-
 // resolvable commands the TUI offers (/stats, /tasks, /jobs, /hooks, /diff,
-// /plan, /permissions, /ultra, /workflows) so GUI clients driving the binary
-// reach feature parity with the interactive CLI without reimplementing any
-// of it. Everything here mirrors the TUI implementations in internal/tui
+// /plan, /permissions, /ultra, /ultracode, /workflows, /workflow-size) so GUI
+// clients driving the binary reach feature parity with the interactive CLI
+// without reimplementing any of it. Everything here mirrors the TUI implementations in internal/tui
 // (model_commands_ext.go, model_stats.go, model_state.go).
 
 import (
@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"spettro/internal/config"
 	"spettro/internal/hooks"
@@ -55,6 +56,12 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 	case "/ultra":
 		return acpUltraText(cfg, fields), false, true
 
+	case "/ultracode":
+		return acpUltracodeText(s, fields), false, true
+
+	case "/workflow-size":
+		return acpWorkflowSizeText(cfg, fields[1:]), false, true
+
 	case "/workflows", "/workflow":
 		// "run" is the one subcommand that needs a turn, and only when the
 		// named workflow actually resolves — the bridge has already rewritten
@@ -65,12 +72,16 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 			switch strings.ToLower(fields[1]) {
 			case "run", "start":
 				if len(fields) < 3 {
-					return "usage: /workflows run <name> [json]", false, true
+					return "usage: /workflows run <name> [json | task description]", false, true
 				}
 				if _, _, err := workflow.Load(s.cwd, fields[2]); err != nil {
 					return err.Error(), false, true
 				}
 				return "", false, false
+			case "size":
+				// The TUI's spelling of /workflow-size, accepted here too so
+				// the same muscle memory works in an editor.
+				return acpWorkflowSizeText(cfg, fields[2:]), false, true
 			}
 		}
 		return acpWorkflowsText(s.cwd, fields), false, true
@@ -473,6 +484,68 @@ func acpUltraText(cfg *config.UserConfig, fields []string) string {
 	return "ultra off"
 }
 
+// acpUltracodeText mirrors /ultracode: toggle the session's standing
+// ultracode opt-in. It is per session and not persisted, unlike /ultra: the
+// keyword in a message opts one turn in, and this opts in every turn of the
+// one conversation it was typed in — another editor window, or this one
+// after a restart, starts with it off. Caller holds the bridge mutex.
+func acpUltracodeText(s *acpSession, fields []string) string {
+	next := !s.ultracode
+	if len(fields) >= 2 {
+		switch strings.ToLower(strings.TrimSpace(fields[1])) {
+		case "on":
+			next = true
+		case "off":
+			next = false
+		case "status":
+			if s.ultracode {
+				return "ultracode: on for this session"
+			}
+			return "ultracode: off"
+		default:
+			return "usage: /ultracode [on|off]"
+		}
+	}
+	s.ultracode = next
+	if next {
+		return "ultracode on for this session — every substantive task is orchestrated through workflows " +
+			"(understand → design → implement → review), as if each message said \"ultracode\". /ultracode off to stop."
+	}
+	return "ultracode off — workflows run only when a message asks for one"
+}
+
+// acpWorkflowSizeText mirrors /workflows size (TUI): with no argument it shows
+// the current tier and what each means; with one it persists the new tier,
+// which every session and a TUI alongside then plan their workflows around.
+func acpWorkflowSizeText(cfg *config.UserConfig, args []string) string {
+	if len(args) == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "workflow size: %s\n", cfg.WorkflowSizeTier())
+		for _, tier := range config.WorkflowSizes {
+			marker := " "
+			if tier == cfg.WorkflowSizeTier() {
+				marker = "*"
+			}
+			fmt.Fprintf(&b, " %s %-10s %s\n", marker, tier, workflowSizeSummary(tier))
+		}
+		b.WriteString("a guideline the agent plans scripts around, not a hard cap\n")
+		b.WriteString("usage: /workflow-size <" + strings.Join(config.WorkflowSizes, "|") + ">")
+		return b.String()
+	}
+	tier, ok := validWorkflowSize(args[0])
+	if !ok || len(args) > 1 {
+		return "usage: /workflow-size <" + strings.Join(config.WorkflowSizes, "|") + ">"
+	}
+	if _, err := config.Update(func(c *config.UserConfig) error {
+		c.WorkflowSize = tier
+		return nil
+	}); err != nil {
+		return "error: " + err.Error()
+	}
+	cfg.WorkflowSize = tier
+	return "workflow size set to " + tier + " — " + workflowSizeSummary(tier)
+}
+
 // acpPermissionsText mirrors /permissions: show the permission summary, set
 // the level, or toggle debug output.
 func acpPermissionsText(s *acpSession, cfg *config.UserConfig, fields []string) string {
@@ -579,17 +652,25 @@ func acpWorkflowsText(cwd string, fields []string) string {
 			}
 			fmt.Fprintf(&b, "  %-24s [%s] %s\n", s.Name, s.Scope, s.Meta.Description)
 		}
-		b.WriteString("\nrun one with /workflows run <name>")
+		b.WriteString("\nrun one with /workflows run <name> [json | task]: the agent adapts it to the task as a template")
 		return strings.TrimRight(b.String(), "\n")
 	default:
-		return "usage: /workflows [list|show <name>|run <name> [json]|where]"
+		return "usage: /workflows [list|show <name>|run <name> [json | task]|size [tier]|where]"
 	}
 }
 
-// acpWorkflowRunPrompt rewrites "/workflows run <name> [json]" into the plain
-// request that makes the agent invoke that saved script. ok is false for
+// acpWorkflowRunPrompt rewrites "/workflows run <name> [json | task]" into the
+// plain request that makes the agent run that saved workflow. ok is false for
 // anything else, including a run of a workflow that does not exist — the
 // error then travels the normal command path instead of becoming a prompt.
+//
+// A saved workflow is a template, not a recording: the prompt has the agent
+// read it, check it fits, and adapt whatever is task-specific or stale before
+// running it — or run it by name when it fits as-is. Whatever follows the
+// name is passed through untouched: valid JSON becomes the run's args, and
+// anything else is the task the template is applied to. The remainder is cut
+// from the raw input rather than re-joined from fields, which would collapse
+// the whitespace inside JSON strings and the line breaks of a task.
 func acpWorkflowRunPrompt(cwd, input string) (string, bool) {
 	fields := strings.Fields(input)
 	if len(fields) < 3 {
@@ -606,7 +687,7 @@ func acpWorkflowRunPrompt(cwd, input string) (string, bool) {
 		return "", false
 	}
 	name := fields[2]
-	script, _, err := workflow.Load(cwd, name)
+	script, path, err := workflow.Load(cwd, name)
 	if err != nil {
 		return "", false
 	}
@@ -615,13 +696,78 @@ func acpWorkflowRunPrompt(cwd, input string) (string, bool) {
 		return "", false
 	}
 	quoted, _ := json.Marshal(name)
-	rawArgs := strings.TrimSpace(strings.Join(fields[3:], " "))
+	quotedPath, _ := json.Marshal(path)
+	rest := restAfterFields(input, 3)
+	var rawArgs, taskText string
+	if rest != "" && json.Valid([]byte(rest)) {
+		rawArgs = rest
+	} else {
+		taskText = rest
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "ultracode: run the saved workflow %s — %s.\nCall the workflow tool with {\"name\": %s",
-		quoted, meta.Description, quoted)
-	if rawArgs != "" && json.Valid([]byte(rawArgs)) {
+	fmt.Fprintf(&b, "ultracode: run the saved workflow %s — %s.\n", quoted, meta.Description)
+	fmt.Fprintf(&b, "It is a template, not a fixed script. Read the saved template (script_path %s) and check it fits", quotedPath)
+	if taskText != "" {
+		b.WriteString(" the task below")
+	}
+	b.WriteString("; adapt anything task-specific or stale (work-lists must be discovered at runtime, never replayed from a hardcoded list) " +
+		"and run the adapted script inline, or run it by name with args if it fits as-is: call the workflow tool with {\"name\": ")
+	b.Write(quoted)
+	if rawArgs != "" {
 		b.WriteString(", \"args\": " + rawArgs)
 	}
-	b.WriteString("}. Do not rewrite the script; run it as saved, then review the result and act on it.")
+	b.WriteString("}.\n")
+	b.WriteString("Declared params: " + describeWorkflowParams(meta.Params) + "\n")
+	if taskText != "" {
+		b.WriteString("Task: " + taskText + "\n")
+	}
+	b.WriteString("Then review the result and act on it.")
 	return b.String(), true
+}
+
+// describeWorkflowParams lists a template's declared params for the run
+// prompt, so the agent knows what it may pass before opening the script.
+func describeWorkflowParams(params []workflow.ParamMeta) string {
+	if len(params) == 0 {
+		return "none — anything task-specific is written into the script, so adapt it rather than replay it."
+	}
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		var quals []string
+		if p.Type != "" && p.Type != "any" {
+			quals = append(quals, p.Type)
+		}
+		if p.Required {
+			quals = append(quals, "required")
+		}
+		if p.Default != nil {
+			if def, err := json.Marshal(p.Default); err == nil {
+				quals = append(quals, "default "+string(def))
+			}
+		}
+		part := p.Name
+		if len(quals) > 0 {
+			part += " (" + strings.Join(quals, ", ") + ")"
+		}
+		if p.Description != "" {
+			part += " — " + p.Description
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// restAfterFields returns input without its first n whitespace-separated
+// fields, keeping the rest verbatim (trimmed only at the ends).
+func restAfterFields(input string, n int) string {
+	rest := strings.TrimLeftFunc(input, unicode.IsSpace)
+	for range n {
+		i := strings.IndexFunc(rest, unicode.IsSpace)
+		if i < 0 {
+			return ""
+		}
+		rest = strings.TrimLeftFunc(rest[i:], unicode.IsSpace)
+	}
+	return strings.TrimSpace(rest)
 }

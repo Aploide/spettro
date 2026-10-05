@@ -112,6 +112,54 @@ type acpSession struct {
 	// the configured maximum, auto compaction pauses (mirrors the TUI) and
 	// the pre-turn guard falls back to asking the user instead.
 	autoCompactFailures int
+	// ultracode is the session's /ultracode toggle: while on, every turn
+	// behaves as if the user had written the keyword (see
+	// agent.LLMAgent.Ultracode). Per session and never persisted — it is a
+	// standing opt-in to spend heavily, which should not leak into another
+	// editor window or survive a restart.
+	ultracode bool
+	// workflowRuns holds this session's workflow runs paused at a
+	// checkpoint, so the model can continue one in a later turn; every
+	// agent the session builds shares it (see liveWorkflowRunsLocked).
+	// Stopped when the session closes or its history is cleared.
+	workflowRuns *agent.WorkflowRuns
+	// workflowCards is the editor-side view of those runs: each run's card
+	// state, kept across turns for the same reason (see acpWorkflowCards).
+	workflowCards *acpWorkflowCards
+}
+
+// liveWorkflowRunsLocked returns the session's workflow-run registry,
+// creating it on first use. Caller holds the bridge mutex.
+func (s *acpSession) liveWorkflowRunsLocked() *agent.WorkflowRuns {
+	if s.workflowRuns == nil {
+		s.workflowRuns = agent.NewWorkflowRuns()
+	}
+	return s.workflowRuns
+}
+
+// workflowCardsLocked returns the session's workflow cards, creating them on
+// first use. Caller holds the bridge mutex.
+func (s *acpSession) workflowCardsLocked() *acpWorkflowCards {
+	if s.workflowCards == nil {
+		s.workflowCards = newACPWorkflowCards()
+	}
+	return s.workflowCards
+}
+
+// stopWorkflowsLocked stops every workflow run the session holds — a paused
+// one would otherwise sit on its goroutine until the idle reaper got to it —
+// and forgets their cards. The stop happens off the caller's goroutine: the
+// caller holds the bridge mutex, and a stopping run reports through
+// callbacks that may need it. Caller holds the bridge mutex.
+func (s *acpSession) stopWorkflowsLocked() {
+	runs := s.workflowRuns
+	s.workflowRuns = nil
+	if s.workflowCards != nil {
+		s.workflowCards.reset()
+	}
+	if runs != nil {
+		go runs.StopAll()
+	}
 }
 
 var _ acpsdk.Agent = (*bridge)(nil)
@@ -352,9 +400,11 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	b.mu.Lock()
 	s, ok := b.sessions[string(params.SessionId)]
 	var announced bool
+	var workflowCards *acpWorkflowCards
 	if ok {
 		announced = s.commandsAnnounced
 		s.commandsAnnounced = true
+		workflowCards = s.workflowCardsLocked()
 	}
 	b.mu.Unlock()
 	if !ok {
@@ -396,6 +446,7 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		ctx:       ctx,
 		sessionID: params.SessionId,
 		cwd:       s.cwd,
+		workflows: workflowCards,
 	}
 	// shownTask, when set, is what the transcript records as the user's
 	// message instead of task: a skill invocation or $mention sends the
@@ -565,6 +616,8 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	// running agent picks it up on its next approval decision.
 	s.permission = cfg.Permission
 	history := s.history
+	ultracode := s.ultracode
+	workflowRuns := s.liveWorkflowRunsLocked()
 	// First turn after session/load: no structured history exists yet, so
 	// fall back to the flattened stored transcript (mirrors the TUI's resume).
 	flatHistory := ""
@@ -603,6 +656,9 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		MaxOutputTokens: cfg.MaxOutputTokens,
 		Thinking:        thinking,
 		Ultra:           cfg.UltraActive(),
+		Ultracode:       ultracode,
+		WorkflowSize:    cfg.WorkflowSizeTier(),
+		WorkflowRuns:    workflowRuns,
 		RequiredReads:   mentioned,
 		Images:          images,
 		History:         flatHistory,
@@ -742,6 +798,10 @@ func (b *bridge) CloseSession(_ context.Context, params acpsdk.CloseSessionReque
 	if ok {
 		cancel = s.runCancel
 		delete(b.sessions, string(params.SessionId))
+		// A run paused at a checkpoint waits for a turn of this session,
+		// and there will be none: stop it now rather than leave it to the
+		// idle reaper.
+		s.stopWorkflowsLocked()
 	}
 	b.mu.Unlock()
 	if !ok {
@@ -751,6 +811,23 @@ func (b *bridge) CloseSession(_ context.Context, params acpsdk.CloseSessionReque
 		cancel()
 	}
 	return acpsdk.CloseSessionResponse{}, nil
+}
+
+// stopAllWorkflows stops the workflow runs of every session on the
+// connection, for when the connection itself ends.
+func (b *bridge) stopAllWorkflows() {
+	b.mu.Lock()
+	var all []*agent.WorkflowRuns
+	for _, s := range b.sessions {
+		if s.workflowRuns != nil {
+			all = append(all, s.workflowRuns)
+			s.workflowRuns = nil
+		}
+	}
+	b.mu.Unlock()
+	for _, runs := range all {
+		runs.StopAll()
+	}
 }
 
 // errSessionNotFound is the error for a request naming a session this
@@ -810,13 +887,14 @@ func (b *bridge) SetSessionConfigOption(_ context.Context, params acpsdk.SetSess
 }
 
 // sharedSettings fingerprints the settings every session on the connection
-// shares. Only the mode is per session; the model, permission level,
-// thinking level and Ultra live in the user config, so a change made from
-// one session applies to all of them (and to a TUI running alongside).
+// shares. Only the mode (and the /ultracode toggle) is per session; the
+// model, permission level, thinking level, Ultra and the workflow size tier
+// live in the user config, so a change made from one session applies to all
+// of them (and to a TUI running alongside).
 func sharedSettings(cfg *config.UserConfig) string {
 	return strings.Join([]string{
 		cfg.ActiveProvider, cfg.ActiveModel, string(cfg.Permission),
-		cfg.ThinkingLevel, strconv.FormatBool(cfg.Ultra),
+		cfg.ThinkingLevel, strconv.FormatBool(cfg.Ultra), cfg.WorkflowSizeTier(),
 	}, "\x00")
 }
 

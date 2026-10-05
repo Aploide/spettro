@@ -1,12 +1,14 @@
 package acp
 
 import (
+	"fmt"
 	"strings"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/workflow"
 )
 
 // Session config option IDs. These are the stable identifiers echoed back by
@@ -17,12 +19,15 @@ const (
 	configIDPermission = "permission"
 	configIDThinking   = "thinking"
 	configIDUltra      = "ultra"
+	// configIDWorkflowSize is the size tier workflow runs plan around
+	// (config.WorkflowSize).
+	configIDWorkflowSize = "workflow_size"
 )
 
 // buildConfigOptions renders Spettro's live state (agent mode, model,
-// permission level, thinking level) as ACP session configuration options —
-// the mechanism modern clients (Zed, ...) use to draw the mode/model/permission
-// selectors in their editor toolbar. This supersedes the deprecated
+// permission level, thinking level, Ultra, workflow size) as ACP session
+// configuration options — the mechanism modern clients (Zed, ...) use to draw
+// the mode/model/permission selectors in their editor toolbar. This supersedes the deprecated
 // SessionModeState "modes" field, which newer clients no longer render.
 //
 // Order matters: the array is the agent's preferred priority, so mode and
@@ -40,6 +45,7 @@ func buildConfigOptions(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		permissionConfigOption(cfg),
 		thinkingConfigOption(cfg),
 		ultraConfigOption(cfg),
+		workflowSizeConfigOption(cfg),
 	}
 }
 
@@ -205,6 +211,52 @@ func ultraConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	}}
 }
 
+// workflowSizeConfigOption is the workflow size tier as a select. It is shown
+// whether or not workflows are in use this turn: the toolbar is built once
+// per config update, and a control that appeared only once a message said
+// "ultracode" would flicker in and out. Each option's description gives the
+// tier's agent guideline, read from workflow.SizeTiers so it cannot drift
+// from what the engine tells scripts.
+func workflowSizeConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
+	options := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(config.WorkflowSizes))
+	for _, tier := range config.WorkflowSizes {
+		options = append(options, acpsdk.SessionConfigSelectOption{
+			Name:        strings.ToUpper(tier[:1]) + tier[1:],
+			Value:       acpsdk.SessionConfigValueId(tier),
+			Description: new(workflowSizeSummary(tier)),
+		})
+	}
+	return acpsdk.SessionConfigOption{Select: &acpsdk.SessionConfigOptionSelect{
+		Id:           configIDWorkflowSize,
+		Name:         "Workflow size",
+		Description:  new("How many agents a workflow run plans around (a guideline, not a cap)"),
+		CurrentValue: acpsdk.SessionConfigValueId(cfg.WorkflowSizeTier()),
+		Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &options},
+		Type:         "select",
+	}}
+}
+
+// workflowSizeSummary describes a size tier in a few words, for the config
+// option and /workflow-size.
+func workflowSizeSummary(tier string) string {
+	size := workflow.ResolveSize(tier)
+	if size.Agents <= 0 {
+		return fmt.Sprintf("no agent guideline · fan-outs up to ~%d wide", size.Fanout)
+	}
+	return fmt.Sprintf("~%d agents per run · fan-outs up to ~%d wide", size.Agents, size.Fanout)
+}
+
+// validWorkflowSize normalises a tier name and reports whether it is one.
+func validWorkflowSize(value string) (string, bool) {
+	tier := strings.ToLower(strings.TrimSpace(value))
+	for _, t := range config.WorkflowSizes {
+		if t == tier {
+			return tier, true
+		}
+	}
+	return "", false
+}
+
 // applyConfigOption mutates session/config state in response to a
 // session/set_config_option request, mirroring the equivalent slash commands.
 // Persistent settings (model, permission, thinking) are written to the user
@@ -298,6 +350,20 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 			return err
 		}
 		cfg.Ultra = enabled
+		return nil
+
+	case configIDWorkflowSize:
+		tier, ok := validWorkflowSize(value)
+		if !ok {
+			return acpsdk.NewInvalidParams(map[string]any{"error": "invalid workflow size: " + value + " (use " + strings.Join(config.WorkflowSizes, ", ") + ")"})
+		}
+		if _, err := config.Update(func(c *config.UserConfig) error {
+			c.WorkflowSize = tier
+			return nil
+		}); err != nil {
+			return err
+		}
+		cfg.WorkflowSize = tier
 		return nil
 	}
 	return acpsdk.NewInvalidParams(map[string]any{"error": "unknown config option: " + configID})

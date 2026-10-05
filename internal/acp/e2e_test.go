@@ -56,7 +56,7 @@ func TestACPEndToEnd_HandshakeAndSessionLifecycle(t *testing.T) {
 			ids = append(ids, string(opt.Boolean.Id))
 		}
 	}
-	if strings.Join(ids, ",") != "mode,model,permission,thinking,ultra" {
+	if strings.Join(ids, ",") != "mode,model,permission,thinking,ultra,workflow_size" {
 		t.Errorf("config options = %v", ids)
 	}
 	sid := resp.SessionId
