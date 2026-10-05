@@ -83,8 +83,22 @@ log(`${slices.length} slices planned`)
 // The first round audits the planned slices. Every later round plans fresh
 // angles from what has been seen, and untilDry stops after two rounds that
 // turn up nothing new, after eight rounds, or when the token budget runs out.
+//
 // A finding already seen is not verified again: the skeptics are the
-// expensive part of a round.
+// expensive part of a round. "Seen" has to include this round too. The
+// slices' find and verify stages run concurrently, so two slices reporting
+// the same finding (or one slice reporting it twice) would each send it to
+// its own skeptics, and untilDry would only drop the duplicate after both
+// were paid for. Stage callbacks run one at a time on the script's single
+// thread, so checking and recording a key in the same synchronous filter is
+// enough to claim it: the first copy is verified, every later one skipped.
+//
+// The Audit phase is entered here, not merely named in each agent's opts:
+// only phase() moves the run into a phase, so without it round one's agents
+// and log lines would belong to Plan, the result's phase list would skip
+// Audit, and an auto_checkpoint run would never pause between the two.
+phase('Audit')
+const known = new Set()
 let sweeps = 0
 const raised = await untilDry(async (_round, seen) => {
   let where = 'Audit'
@@ -99,12 +113,16 @@ const raised = await untilDry(async (_round, seen) => {
       `other call paths, other spellings of the same mistake. Return no tasks if you think coverage is complete.`,
       { label: `plan ${where}`, phase: where })
   }
-  const known = new Set(seen.map(key))
   const out = await pipeline(
     work,
     slice => find(slice, where),
     found => parallel(((found && found.findings) || [])
-      .filter(f => !known.has(key(f)))
+      .filter(f => {
+        const k = key(f)
+        if (known.has(k)) return false
+        known.add(k)
+        return true
+      })
       .map(f => () => verify(f, where))),
   )
   return out.flat().filter(Boolean)

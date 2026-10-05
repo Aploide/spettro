@@ -43,7 +43,10 @@ try to refute every finding before you report it
 ```
 
 Either grants the agent the `workflow` tool for **that turn only**, and
-appends the authoring guidance to its system prompt. Ordinary uses of the
+appends the authoring guidance to its system prompt. The one exception is
+a run [paused at a checkpoint](#orchestrator-in-the-loop): while the
+session holds one, every turn gets the tool, so the run can be continued
+without repeating the keyword. Ordinary uses of the
 word stay quiet — "our deploy workflow is broken" and
 `.github/workflows/ci.yml` do not activate anything, and `ultracoded` is
 not the keyword.
@@ -176,12 +179,20 @@ The body runs inside an async function, so `await` and a top-level
 ### The header
 
 `export const meta` must be a **pure object literal**: no variables,
-calls, spreads or template interpolation. Spettro parses it before
-anything runs, in a JS runtime with every global removed (`String`,
-`JSON` and `Math` included) and a one-second time limit. A header that
-tries to compute something fails there instead of quietly doing work
-before you have seen what the workflow is, and a header that loops fails
-in a second instead of freezing `/workflows` listings.
+calls, spreads or template interpolation. Spettro checks that before it
+evaluates anything, on the parsed header alone. Objects, arrays, strings,
+numbers (negative ones included), booleans, `null` and template strings
+with no `${…}` pass. Anything else fails with no code run: a call, a
+variable, a spread, an operator, a regex literal. A header that tries to
+compute something fails there instead of quietly doing work before you
+have seen what the workflow is. A regex is refused because some patterns
+take exponential time to compile or match, and a timer cannot interrupt
+that, so it would freeze `/workflows` listings.
+
+Only a header that passes is evaluated, in a JS runtime with every global
+removed (`String`, `JSON` and `Math` included) and a one-second time
+limit. That evaluation is a backstop. The literal-only check is what
+keeps a header from running code.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -243,6 +254,25 @@ counted, shown in the panel, and reported in the tool result, so the
 orchestrating agent knows to re-dispatch — but `.filter(Boolean)` is
 still the habit to keep.
 
+A *script* error inside a `parallel` thunk or a `pipeline` stage also
+turns that branch into `null`, so the other branches keep their results.
+That never happens silently. The run logs the branch, the error and the
+script line it was thrown on:
+
+```text
+pipeline(): item 3 at stage 2 dropped to null: TypeError: Cannot read property 'findings' of undefined (adaptive-audit.workflow.js:104:22)
+parallel(): item 0 dropped to null: ReferenceError: verdcit is not defined (review.workflow.js:57:9)
+```
+
+A failed `agent()` does not throw, so it never shows up here. It is
+counted as a failure instead.
+
+A script that does not compile is rejected before anything runs. The
+error quotes the offending line with a caret under the column, so a long
+prompt line does not have to be counted by hand. When the line has more
+than two backticks, the error also points out the usual cause: a
+backtick quoted inside a template literal ends that literal.
+
 Transient provider failures (rate limits, availability) are retried per
 agent with the same backoff Ultra uses: 3 s, 6 s, 12 s.
 
@@ -266,6 +296,7 @@ plus a few helpers, so the script decides the shape at runtime:
 phase('Plan')
 const slices = await plan(`Split ${args.scope} into slices to audit for ${args.concern}.`)
 
+phase('Audit')
 const findings = await untilDry(async (round, seen) => {
   if (round > 0) phase(`Sweep ${round}`, { detail: `${seen.length} findings so far` })
   const found = await parallel(slices.map(s => () =>
@@ -283,7 +314,12 @@ checkpoint before anything is fixed.
 `meta.phases` is the plan you know before the run starts. `phase(title,
 {detail})` with a title that is not declared adds a phase at runtime, in
 the order the script reaches it. The TUI panel and the ACP card mark an
-added phase so you can tell it from the declared plan. A phase the script
+added phase so you can tell it from the declared plan. Only `phase()`
+moves the run into a phase, declared or not: `opts.phase` on an `agent()`
+call files that one agent under a title, but the run's current phase, its
+log lines, its phase list and its [automatic
+checkpoints](#orchestrator-in-the-loop) still follow the last `phase()`
+call. A phase the script
 never reaches never appears, which is why
 [`adaptive-audit.js`](examples/workflows/adaptive-audit.js) declares only
 its two fixed stages and adds its sweep rounds and the fix stage when, and
@@ -398,27 +434,58 @@ script you do not trust yet without editing checkpoints into it.
 call that started it:
 
 - **TUI and ACP.** The session owns its paused runs, so one can be
-  continued in a later turn, after you have weighed in. `/clear`,
-  switching or resuming another session, closing an ACP session, and
-  quitting stop every paused run.
-- **Headless and `/goal`.** Paused runs belong to the turn, so they must
-  be continued within it, which is what the model does anyway.
+  continued in a later turn, after you have weighed in. That includes
+  every iteration of a TUI or ACP `/goal` or `/loop`: they share the
+  session's runs, so a run paused in one iteration can be continued in
+  the next. `/clear`, switching or resuming another session, closing an
+  ACP session, and quitting stop every paused run.
+- **Headless**, including `spettro --goal`. Paused runs belong to the
+  turn, so they must be continued within it, which is what the model
+  does anyway.
 - **Esc** stops a run that is *running*, as before. A run that is
   paused is not running, and outlives the call that returned it.
 - **Idle reaper.** A run left paused for 30 minutes without a continue
   is stopped. Its journal is kept, and the result tells the model it can
   pick the run up with `resume_from_run_id`.
 
+A run stopped on purpose — answered with `stop`, reaped while idle, or
+stopped because its session ended — is **stopped**, not failed. Its
+journal and partial result are kept like any other run's, and the panel
+and the ACP card show `■ stopped: <reason>` in a neutral colour rather
+than the failure red. The reason says what stopped it: the orchestrator,
+the idle reaper, or the session ending (`/clear` in an ACP editor says
+`the conversation was cleared`). A paused run
+stopped by the reaper or by `/clear` has no tool call left to report
+through, so the host is told separately and closes the panel or card
+itself. Otherwise it would read `waiting for orchestrator` for good.
+
 Continuing a run that is no longer live is an error that lists the runs
 that are. If the run's journal still exists, the error says to resume it
 instead.
+
+**Continuing in a later turn.** You do not have to repeat `ultracode`,
+or ask for a workflow again, to answer a paused run. While the session holds a paused run, every turn
+gets the `workflow` tool and its guidance, plus a line listing each
+paused run: its run ID, name, checkpoint ID and message. "Fix 1 and 3",
+written in the next message, is enough. The guidance is the
+judge-it variant unless ultracode is on, so a *new* run the model starts
+in that turn still asks for your consent as usual. Continuing never asks.
+The list is computed once when the turn starts, which keeps the prompt
+byte-stable for caching.
 
 **Resuming replays answers.** Answered checkpoints are written to the
 journal like agent calls. A run [resumed](#resuming-a-run) from it gets
 the recorded reply back at the same `checkpoint()` without pausing (the
 panel marks it as replayed), so an edited script does not ask the same
-question twice. Answers are keyed by the message and data, so a
-checkpoint whose data changed asks again.
+question twice. A checkpoint the journal has no answer for pauses and
+waits for the orchestrator, as on a fresh run. Explicit `checkpoint()`
+answers are keyed by the message and the data, so one whose data
+changed asks again. Automatic phase-boundary checkpoints are keyed by their message alone
+(`phase <previous> finished; next: <title>`). Their agent and failure
+counts are left out on purpose: a resumed run re-runs the agents that
+failed, so it can reach the same boundary with different counts. A
+changed count therefore does not make an automatic checkpoint ask again,
+and the recorded reply replays.
 
 **No orchestrator.** A host with no model to answer resolves
 `checkpoint()` to `null` immediately and logs `checkpoint skipped (no
@@ -512,10 +579,12 @@ while (budget.total && budget.remaining() > 50_000) {
 }
 ```
 
-The target is a **hard ceiling**: once `spent()` reaches `total`, further
-`agent()` calls throw. Guard the loop on `budget.total` — with no target
-set, `remaining()` is `Infinity` and the loop would run to the 1000-agent
-cap.
+The target is a **hard ceiling on starting work**: once `spent()` reaches
+`total`, further `agent()` calls throw. Agents already running when that
+happens finish, so a wide fan-out can end somewhat past the total; size
+each wave against `remaining()` when the overshoot matters. Guard the
+loop on `budget.total` — with no target set, `remaining()` is `Infinity`
+and the loop would run to the 1000-agent cap.
 
 You can set the budget yourself from the message, with a standalone `+`
 and an amount in thousands or millions of tokens:
@@ -528,9 +597,13 @@ ultracode: find every unchecked error in internal/ +500k
 in a message that turns workflows on (or while `/ultracode` is on), and
 lights up in the input box with the keyword. It is **one pool for the
 whole turn**, not a budget per run: each workflow started in that turn
-gets what earlier runs left over as its default `budget_tokens`. An
-explicit `budget_tokens` on a call takes precedence, and the model is told
-the total in its prompt.
+gets what earlier runs left over as its default `budget_tokens`. Once the
+pool is spent, a new run that sets no `budget_tokens` of its own is
+refused before any agent starts, with an error saying the turn's budget is
+spent. It does not start with a token or two and dispatch a full first
+wave anyway. An explicit `budget_tokens` on a call takes precedence over
+the pool, which is how the model overrides it when you ask. The model is
+told the total in its prompt.
 
 ## Watching a run
 
@@ -557,7 +630,9 @@ the token budget when one is set). Phases added at runtime are marked
 with a `+`. A run paused at a checkpoint shows `⏸ paused at cp-1 —
 waiting for orchestrator: <message>` and stops animating. Unlike a
 finished run, a paused one is kept when the next turn starts, because
-that turn is usually the one that continues it.
+that turn is usually the one that continues it. A run that was stopped
+on purpose ends with a neutral `■ stopped: <reason>` instead of the red
+failure mark; see [stopped runs](#orchestrator-in-the-loop).
 
 **ACP editors.** The run opens a single `workflow <name>` tool call
 whose content is rewritten as it progresses, so the editor shows the
@@ -565,7 +640,9 @@ same phase tree growing in place. Each sub-agent additionally gets its
 own tool call, so "follow the agent" navigation keeps working. A paused
 run keeps its card in progress with a `⏸ waiting for orchestrator` line.
 When a later turn continues the run, it keeps the phases, agents and log
-lines it already had.
+lines it already had. A stopped run closes its card as completed, not
+failed, with a `■ stopped: <reason>` line, even when the stop happens
+between turns (see [ACP](acp.md)).
 
 ## Saved workflows
 
@@ -697,7 +774,9 @@ fan-out of N identical prompts resumes correctly too.
 
 Answered checkpoints are keyed the same way, by a hash of the message and
 the data. A resumed run gets the recorded reply without pausing, and a
-checkpoint whose data changed pauses again. Journals written before
+checkpoint whose data changed, or that the journal never answered, pauses
+again. Automatic phase-boundary checkpoints are keyed by their message
+alone, so their changing agent counts do not make them ask again. Journals written before
 checkpoints existed have no `kind` field; every entry in them is read as
 an agent call.
 

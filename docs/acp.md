@@ -135,7 +135,13 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `in_progress` with a `⏸ waiting for orchestrator: <message>` line. The
   session keeps the run's state by run ID, so when a later turn continues
   it, the new card starts with the phases, agents and log lines the run
-  already had. Closing the session stops its paused runs.
+  already had. A run that ends because it was stopped on purpose — the
+  model answered its checkpoint with `stop`, it sat paused past the idle
+  limit, or `/clear` ended the conversation it was waiting on — closes its
+  card as `completed`, not `failed`, with a `■ stopped: <reason>` line. A
+  paused run stopped while no turn is running has no turn to report
+  through, so that close arrives as a `session/update` of its own, outside
+  any prompt turn. Closing the session stops its paused runs.
 - **Permissions** — every approval the runtime asks for (shell commands,
   file writes and edits, network access) is routed through
   `session/request_permission` on the tool call's own card, so the editor
