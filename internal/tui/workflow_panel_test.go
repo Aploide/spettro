@@ -864,3 +864,36 @@ func TestSessionRegistryOffersTheStopHook(t *testing.T) {
 		t.Fatal("the panel should watch the session registry")
 	}
 }
+
+// TestWorkflowObserverTracesStayOutOfTheTranscript: the observer's progress
+// and lifecycle traces drive the panel only. In the transcript they read as
+// stray tool rows — "Workflow Progress", and a second "Ran 1 workflow" for a
+// single call — so only the tool loop's own report of the call is a row.
+func TestWorkflowObserverTracesStayOutOfTheTranscript(t *testing.T) {
+	cases := []struct {
+		trace agent.ToolTrace
+		want  bool
+	}{
+		{agent.ToolTrace{Name: "workflow-progress", Status: "success", Args: `{"run_id":"wf_1","workflow":"w","kind":"phase","phase":"Find"}`}, true},
+		{agent.ToolTrace{Name: "workflow", Status: "running", Args: `{"run_id":"wf_1","workflow":"w","origin":"inline","phases":[]}`}, true},
+		{agent.ToolTrace{Name: "workflow", Status: "paused", Args: `{"run_id":"wf_1","workflow":"w","checkpoint_id":"cp-1","message":"m"}`}, true},
+		{agent.ToolTrace{Name: "workflow", Status: "stopped", Args: `{"run_id":"wf_1","workflow":"w","reason":"stopped by the orchestrator"}`}, true},
+		// The tool loop's report of the call itself stays a transcript row.
+		{agent.ToolTrace{Name: "workflow", Status: "running", Args: `{"script":"export const meta = {}"}`}, false},
+		{agent.ToolTrace{Name: "workflow", Status: "success", Args: `{"continue_run_id":"wf_1","reply":"yes"}`}, false},
+		{agent.ToolTrace{Name: "workflow", Status: "success", Args: `{"name":"file-audit","show":true}`}, false},
+		{agent.ToolTrace{Name: "bash", Status: "success", Args: `{"command":"ls"}`}, false},
+	}
+	for _, tc := range cases {
+		if got := isWorkflowObserverTrace(tc.trace); got != tc.want {
+			t.Errorf("isWorkflowObserverTrace(%s %s %s) = %v, want %v", tc.trace.Name, tc.trace.Status, tc.trace.Args, got, tc.want)
+		}
+	}
+
+	m := newWorkflowModel(t)
+	before := len(m.liveTools)
+	m.applyToolTrace(agent.ToolTrace{Name: "workflow-progress", Status: "success", Args: `{"run_id":"wf_1","workflow":"w","kind":"log"}`, Output: "hello"})
+	if len(m.liveTools) != before || m.currentTool != nil {
+		t.Errorf("a progress trace became a transcript tool row")
+	}
+}

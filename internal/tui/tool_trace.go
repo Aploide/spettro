@@ -15,6 +15,9 @@ func (m *Model) applyToolTrace(t agent.ToolTrace) []tea.Cmd {
 	var cmds []tea.Cmd
 	m.applyToolTraceToObservability(t)
 	m.publishRemoteToolTrace(t)
+	if isWorkflowObserverTrace(t) {
+		return nil
+	}
 	if t.Name == "comment" {
 		if t.Status == "success" {
 			if message := extractCommentMessage(t.Args, t.Output); message != "" {

@@ -707,7 +707,9 @@ func acpWorkflowRunPrompt(cwd, input string) (string, bool) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "ultracode: run the saved workflow %s — %s.\n", quoted, meta.Description)
-	fmt.Fprintf(&b, "It is a template, not a fixed script. Read the saved template (script_path %s) and check it fits", quotedPath)
+	// Read through the workflow tool's show argument, not the file tools: a
+	// global template lives under ~/.spettro, out of the file tools' reach.
+	fmt.Fprintf(&b, "It is a template, not a fixed script. Read the saved template (call the workflow tool with {\"name\": %s, \"show\": true}; it is %s) and check it fits", quoted, quotedPath)
 	if taskText != "" {
 		b.WriteString(" the task below")
 	}

@@ -202,7 +202,7 @@ func TestACPWorkflowRunPromptIsATemplate(t *testing.T) {
 			name:  "json args keep their whitespace",
 			input: "/workflows run audit   {\"focus\": \"auth  and   session\",\n \"base\": \"dev\"}",
 			want: []string{
-				"ultracode", "template", "script_path", filepath.Join(dir, "audit.js"),
+				"ultracode", "template", `"show": true`, filepath.Join(dir, "audit.js"),
 				"adapt anything task-specific or stale", "discovered at runtime",
 				`"args": {"focus": "auth  and   session",` + "\n" + ` "base": "dev"}`,
 				`base (string, default "main") — branch to diff against`,

@@ -232,7 +232,7 @@ func TestWorkflowRunPromptTreatsTheScriptAsATemplate(t *testing.T) {
 	for _, want := range []string{
 		"ultracode: run the saved workflow \"audit\"",
 		"Task: look at the auth package",
-		`script_path "/repo/.spettro/workflows/audit.js"`,
+		`{"name": "audit", "show": true}`,
 		"discovered at runtime",
 		"run the adapted script inline",
 		`{"name": "audit"}`,

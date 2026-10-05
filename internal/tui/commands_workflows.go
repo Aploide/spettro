@@ -216,10 +216,13 @@ func workflowRunPrompt(name, path string, meta workflow.Meta, rawArgs, task stri
 	if task != "" {
 		fmt.Fprintf(&b, "Task: %s\n", task)
 	}
-	fmt.Fprintf(&b, "Read the saved template (script_path %s) and check it fits the task. "+
+	// The template is read through the workflow tool's show argument rather
+	// than the file tools: a global template lives under ~/.spettro, which
+	// the file tools cannot reach from the workspace.
+	fmt.Fprintf(&b, "Read the saved template (call the workflow tool with {\"name\": %s, \"show\": true}; it is %s) and check it fits the task. "+
 		"Adapt anything task-specific or stale — work-lists must be discovered at runtime, never replayed "+
 		"from a hardcoded list — and run the adapted script inline; or, if it fits as-is, run it by name "+
-		"with {\"name\": %s", jsonQuote(path), jsonQuote(name))
+		"with {\"name\": %s", jsonQuote(name), jsonQuote(path), jsonQuote(name))
 	if rawArgs != "" {
 		b.WriteString(", \"args\": " + rawArgs)
 	}

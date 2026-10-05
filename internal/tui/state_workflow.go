@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"spettro/internal/agent"
 )
 
 // Workflow runs get their own state rather than folding into parallelAgents:
@@ -170,7 +172,22 @@ type workflowTraceArgs struct {
 // of them is the tool loop reporting the call itself.
 var workflowToolInputKeys = []string{
 	"script", "script_path", "name", "args", "resume_from_run_id", "max_concurrency",
-	"save_as", "save_scope", "continue_run_id", "reply", "stop", "auto_checkpoint",
+	"save_as", "save_scope", "continue_run_id", "reply", "stop", "auto_checkpoint", "show",
+}
+
+// isWorkflowObserverTrace reports whether t is one of the workflow observer's
+// own traces — progress, or a run's lifecycle — rather than a tool call.
+// Those drive the workflow panel; in the transcript they read as extra tool
+// rows ("Workflow Progress", a second and third "Ran 1 workflow" for one
+// call), so they stay out of it.
+func isWorkflowObserverTrace(t agent.ToolTrace) bool {
+	switch t.Name {
+	case "workflow-progress":
+		return true
+	case "workflow":
+		return isWorkflowLifecycleTrace(t.Args, t.Status)
+	}
+	return false
 }
 
 // workflowLifecycleMarkers are, per lifecycle status, payload keys only the
