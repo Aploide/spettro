@@ -132,8 +132,10 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	}
 	// Same for paused workflow runs: one registry per Model, so a run the
 	// orchestrator paused in this turn can be continued in the next.
+	var watchRuns tea.Cmd
 	if m.workflowRuns == nil {
 		m.workflowRuns = agent.NewWorkflowRuns()
+		watchRuns = m.watchWorkflowRuns()
 	}
 	events := newRunEventQueue()
 	m.runEvents = events
@@ -289,6 +291,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	a.CheckpointPrepare = checkpointPrepare
 
 	return m, tea.Batch(
+		watchRuns,
 		waitForRunEvents(events),
 		waitForUsage(usageCh),
 		waitForShellApproval(approvalCh),

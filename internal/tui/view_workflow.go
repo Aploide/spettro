@@ -78,11 +78,16 @@ func agentStatusGlyph(status string) (string, lipgloss.Style) {
 // workflowTitleStyle is the run's title colour and marker. A paused run gets
 // its own: it is neither working (nothing animates, nothing is spending) nor
 // finished — it is waiting on the orchestrator, and must not read as either.
+// So does a stopped one: it was ended on purpose (the orchestrator's stop,
+// the idle reaper, the session going away), which is neither a success nor
+// the failure red would claim.
 func workflowTitleStyle(status string) (lipgloss.Style, string) {
 	pal := theme.Current()
 	switch status {
 	case "failed":
 		return lipgloss.NewStyle().Bold(true).Foreground(pal.Error), "✗"
+	case "stopped":
+		return lipgloss.NewStyle().Bold(true).Foreground(pal.TextDim), "■"
 	case "running":
 		return lipgloss.NewStyle().Bold(true).Foreground(pal.Info), "◆"
 	case "paused":

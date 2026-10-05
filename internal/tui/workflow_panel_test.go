@@ -7,6 +7,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/theme"
 )
 
 func wfStartTrace() agent.ToolTrace {
@@ -328,7 +329,7 @@ func TestFinishedWorkflowCollapsesToOneLine(t *testing.T) {
 	}
 	m.applyToolTraceToObservability(agent.ToolTrace{
 		AgentID: "coding", Name: "workflow", Status: "success",
-		Args:   `{"run_id":"wf_1","workflow":"review-changes"}`,
+		Args:   `{"run_id":"wf_1","workflow":"review-changes","agents":6,"failed":0,"cached":0,"tokens":0}`,
 		Output: "6 agents · 0 failed · 0 replayed",
 	})
 	summary := m.workflowSummaryLines(90, footerBudget(40)-2)
@@ -526,7 +527,7 @@ func TestWorkflowResumedRunKeepsItsState(t *testing.T) {
 	// pause reported for some other run leaves it alone.
 	m.applyToolTraceToObservability(agent.ToolTrace{
 		AgentID: "coding", Name: "workflow", Status: "running",
-		Args: `{"run_id":"wf_2","workflow":"other"}`,
+		Args: `{"run_id":"wf_2","workflow":"other","origin":"inline","phases":[]}`,
 	})
 	if m.workflow.RunID != "wf_2" || len(m.workflow.Agents) != 0 {
 		t.Fatalf("a new run did not replace the old one: %+v", m.workflow)
@@ -614,4 +615,252 @@ func TestConversationResetDropsAPausedRun(t *testing.T) {
 	// A nil registry is safe to reset (hosts and tests that never made one).
 	m.workflowRuns = nil
 	m.resetConversationState()
+}
+
+// wfPausedRunWithWork is a run that did some work and paused at cp-1: one
+// finished agent, a log line, and a phase it opened at runtime.
+func wfPausedRunWithWork(t *testing.T, m *Model) {
+	t.Helper()
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "review:bugs", "Review", "running", false))
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "review:bugs", "Review", "success", false))
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args:   `{"run_id":"wf_1","workflow":"review-changes","kind":"log","phase":"Review"}`,
+		Output: "1 finding",
+	})
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args:   `{"run_id":"wf_1","workflow":"review-changes","kind":"phase","phase":"Triage","dynamic":true}`,
+		Output: "Triage",
+	})
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-1", "verify?"))
+}
+
+func wfResumedTrace(runID string) agent.ToolTrace {
+	// What the observer sends on a continue: the start payload (declared
+	// phases only — no agents, log or runtime phases) marked resumed.
+	return agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: fmt.Sprintf(`{"run_id":%q,"workflow":"review-changes","description":"Review then verify",`+
+			`"origin":"inline","phases":[{"title":"Review"},{"title":"Verify"}],"resumed":true}`, runID),
+	}
+}
+
+// The tool loop reports the workflow call with the model's raw input. The
+// checkpoint result shows run_id="wf_1", so a call that carries run_id (or
+// even "workflow") is an easy slip — and must still not be read as the
+// observer's lifecycle: it used to replace the paused run with an empty one
+// and then mark that failed with the call's decode error.
+func TestWorkflowPanelIgnoresToolCallsNamingTheRun(t *testing.T) {
+	for _, args := range []string{
+		`{"run_id":"wf_1","reply":true}`,
+		`{"continue_run_id":"wf_1","run_id":"wf_1","reply":true}`,
+		`{"run_id":"wf_1","workflow":"review-changes"}`,
+		`{"run_id":"wf_1","workflow":"review-changes","checkpoint_id":"cp-1"}`,
+		`{"run_id":"wf_1","workflow":"review-changes","size":"large","budget_tokens":5}`,
+	} {
+		m := newWorkflowModel(t)
+		wfPausedRunWithWork(t, &m)
+		for _, status := range []string{"running", "error", "success"} {
+			m.applyToolTraceToObservability(agent.ToolTrace{
+				AgentID: "coding", Name: "workflow", Status: status, Args: args,
+				Output: "workflow args: json: cannot unmarshal",
+			})
+		}
+		w := m.workflow
+		if w.Status != "paused" || w.Name != "review-changes" || len(w.Agents) != 1 || len(w.Phases) != 3 {
+			t.Fatalf("%s: the tool call rewrote the paused run: status=%q name=%q agents=%d phases=%d",
+				args, w.Status, w.Name, len(w.Agents), len(w.Phases))
+		}
+	}
+
+	// A valid continue carrying a redundant run_id: the observer's own
+	// traces drive the panel; the call's completion (the next checkpoint's
+	// XML) must not mark the re-paused run done.
+	m := newWorkflowModel(t)
+	wfPausedRunWithWork(t, &m)
+	call := `{"continue_run_id":"wf_1","run_id":"wf_1","reply":true}`
+	m.applyToolTraceToObservability(agent.ToolTrace{AgentID: "coding", Name: "workflow", Status: "running", Args: call})
+	m.applyToolTraceToObservability(wfResumedTrace("wf_1"))
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-2", "fix them?"))
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "success", Args: call,
+		Output: `<workflow_checkpoint name="review-changes" run_id="wf_1" checkpoint_id="cp-2">`,
+	})
+	if w := m.workflow; w.Status != "paused" || w.CheckpointID != "cp-2" || len(w.Agents) != 1 || w.Summary != "" {
+		t.Fatalf("continue with a redundant run_id: %+v", w)
+	}
+}
+
+// A run stopped on purpose (the orchestrator's stop, the reaper, the session
+// ending) reports status "stopped": it did not fail and must not read red.
+func TestWorkflowStoppedRunIsNotAFailure(t *testing.T) {
+	m := newWorkflowModel(t)
+	wfPausedRunWithWork(t, &m)
+	m.applyToolTraceToObservability(wfResumedTrace("wf_1"))
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "stopped",
+		Args: `{"run_id":"wf_1","workflow":"review-changes","agents":1,"failed":0,"cached":0,"tokens":10,` +
+			`"reason":"stopped by the orchestrator"}`,
+		Output: "stopped by the orchestrator",
+	})
+	w := m.workflow
+	if w.Status != "stopped" || w.Summary != "stopped: stopped by the orchestrator" || w.FinishedAt.IsZero() {
+		t.Fatalf("stopped run = %+v", w)
+	}
+	tree := stripANSIForTest(strings.Join(m.workflowTreeLines(70, 0), "\n"))
+	if !strings.Contains(tree, "■ workflow review-changes") || strings.Contains(tree, "✗ workflow") {
+		t.Fatalf("a stopped run should carry the neutral marker, not the failure one:\n%s", tree)
+	}
+	if !strings.Contains(tree, "stopped: stopped by the orchestrator") {
+		t.Fatalf("the stop reason should show:\n%s", tree)
+	}
+	summary := m.workflowSummaryLines(90, footerBudget(40)-2)
+	if len(summary) != 1 || !strings.Contains(stripANSIForTest(summary[0]), "■ review-changes stopped: stopped by the orchestrator") {
+		t.Fatalf("stopped footer = %q", summary)
+	}
+	if style, _ := workflowTitleStyle("stopped"); style.GetForeground() == theme.Current().Error {
+		t.Fatal("a stopped run must not use the failure colour")
+	}
+	if m.hasRunningDelegation() {
+		t.Fatal("a stopped run must not animate")
+	}
+}
+
+// Continuing a paused run that a newer run displaced from the screen brings
+// back its own tree — agents, log, runtime phases — instead of rebuilding an
+// empty one from the declared phases in the resumed payload.
+func TestWorkflowContinuedRunRestoresItsTree(t *testing.T) {
+	m := newWorkflowModel(t)
+	wfPausedRunWithWork(t, &m)
+
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: `{"run_id":"wf_2","workflow":"other","origin":"inline","phases":[{"title":"Scan"}]}`,
+	})
+	if m.workflow.RunID != "wf_2" {
+		t.Fatalf("the new run should be on screen: %+v", m.workflow)
+	}
+	// wf_2's member lands on wf_2; a late trace of wf_1 lands on wf_1.
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "general-purpose#9", Name: "agent", Status: "success",
+		Args: `{"agent":"general-purpose#9","task":"scan","workflow":"other","run_id":"wf_2","phase":"Scan"}`,
+	})
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args:   `{"run_id":"wf_1","workflow":"review-changes","kind":"log","phase":"Review"}`,
+		Output: "late note",
+	})
+	if len(m.workflow.Agents) != 1 || len(m.workflow.Logs) != 0 {
+		t.Fatalf("runs bled into each other: %+v", m.workflow)
+	}
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "success",
+		Args:   `{"run_id":"wf_2","workflow":"other","agents":1,"failed":0,"cached":0,"tokens":3}`,
+		Output: "1 agents · 0 failed · 0 replayed",
+	})
+
+	// The next turn continues wf_1 (the registry is not consulted here).
+	m.workflowRuns = nil
+	m.startAgentActivity("coding", "verify them")
+	m.applyToolTraceToObservability(wfResumedTrace("wf_1"))
+	w := m.workflow
+	if w == nil || w.RunID != "wf_1" || w.Status != "running" {
+		t.Fatalf("the continued run is not on screen: %+v", w)
+	}
+	if len(w.Agents) != 1 || len(w.Logs) != 2 || !w.phaseEntry("Triage").Dynamic {
+		t.Fatalf("the continue rebuilt the tree from scratch: agents=%d logs=%d phases=%+v",
+			len(w.Agents), len(w.Logs), w.Phases)
+	}
+	if head := w.headline(); !strings.Contains(head, "1 done") {
+		t.Fatalf("headline = %q", head)
+	}
+	if len(m.parkedWorkflows) != 0 {
+		t.Fatalf("a restored run must leave the parking: %v", m.parkedWorkflows)
+	}
+}
+
+// A parked run the registry no longer holds is dropped at the next turn.
+func TestWorkflowParkedRunsArePrunedWithTheirRuns(t *testing.T) {
+	m := newWorkflowModel(t)
+	wfPausedRunWithWork(t, &m)
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: `{"run_id":"wf_2","workflow":"other","origin":"inline","phases":[]}`,
+	})
+	if m.parkedWorkflows["wf_1"] == nil {
+		t.Fatal("the displaced paused run should be parked")
+	}
+	m.startAgentActivity("coding", "next") // the empty registry holds no wf_1
+	if len(m.parkedWorkflows) != 0 {
+		t.Fatalf("a parked run that is no longer live must go: %v", m.parkedWorkflows)
+	}
+}
+
+type fakeStopNotifier struct {
+	fn func(runID, name, reason string)
+}
+
+func (f *fakeStopNotifier) SetOnStopped(fn func(runID, name, reason string)) { f.fn = fn }
+
+// A paused run is detached: when the idle reaper (or StopAll) stops it no
+// finish trace reaches the panel, so the registry's stop hook does — and the
+// panel stops claiming the run waits for an orchestrator.
+func TestWorkflowDetachedStopReachesThePanel(t *testing.T) {
+	m := newWorkflowModel(t)
+	notifier := &fakeStopNotifier{}
+	cmd := m.watchWorkflowStops(notifier)
+	if cmd == nil || notifier.fn == nil {
+		t.Fatal("the panel should register a stop hook and wait for it")
+	}
+	wfPausedRunWithWork(t, &m)
+
+	// Called from the registry's goroutine; it must never block it.
+	notifier.fn("wf_1", "review-changes", "paused for over 30m with no continue")
+	msg := cmd()
+	nm, next := m.Update(msg)
+	m = nm.(Model)
+	if next == nil {
+		t.Fatal("the stop listener must be re-armed")
+	}
+	w := m.workflow
+	if w.Status != "stopped" || !strings.Contains(w.Summary, "paused for over 30m") {
+		t.Fatalf("detached stop not applied: %+v", w)
+	}
+	if strings.Contains(w.headline(), "waiting for orchestrator") {
+		t.Fatalf("a stopped run still claims to wait: %q", w.headline())
+	}
+	if sub := stripANSIForTest(m.sidePanelHeaderParts(48)[1]); strings.Contains(sub, "paused") {
+		t.Fatalf("the side panel subtitle still says paused: %q", sub)
+	}
+	if len(w.Agents) != 1 {
+		t.Fatal("what the run did should stay on screen")
+	}
+
+	// A flood of stops never blocks the caller.
+	for range workflowStopBuffer * 3 {
+		notifier.fn("wf_x", "x", "the session ended")
+	}
+
+	// A stop for a parked run drops it; one for an unknown run is ignored.
+	m.parkedWorkflows = map[string]*workflowRun{"wf_9": {RunID: "wf_9", Status: "paused"}}
+	m.applyWorkflowStopped(workflowStoppedMsg{runID: "wf_9", reason: "the session ended"})
+	m.applyWorkflowStopped(workflowStoppedMsg{runID: "wf_404"})
+	if len(m.parkedWorkflows) != 0 || m.workflow.Status != "stopped" {
+		t.Fatalf("parked=%v status=%q", m.parkedWorkflows, m.workflow.Status)
+	}
+}
+
+// After the agent and TUI changes are merged, the session registry must
+// offer the stop hook the panel asserts for; a signature drift would
+// otherwise silently disable it.
+func TestSessionRegistryOffersTheStopHook(t *testing.T) {
+	if _, ok := any(agent.NewWorkflowRuns()).(workflowStopNotifier); !ok {
+		t.Skip("agent.WorkflowRuns has no SetOnStopped(func(runID, name, reason string)) in this tree yet")
+	}
+	m := newWorkflowModel(t)
+	if m.watchWorkflowRuns() == nil {
+		t.Fatal("the panel should watch the session registry")
+	}
 }

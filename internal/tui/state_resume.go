@@ -39,6 +39,7 @@ func (m *Model) resetConversationState() {
 	if m.workflow != nil && m.workflow.Status == "paused" {
 		m.workflow = nil
 	}
+	m.parkedWorkflows = nil
 }
 
 func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
@@ -49,7 +50,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	m.activityFeed = nil
 	m.activityDropped = 0
 	m.parallelAgents = nil
-	m.workflow = nil
+	m.dropWorkflows()
 	m.recentApprovals = nil
 	for i, ev := range events {
 		at := ev.At
@@ -199,7 +200,7 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.sessionID = state.Metadata.ID
 			m.todos = state.Todos
 			m.parallelAgents = nil
-			m.workflow = nil
+			m.dropWorkflows()
 			m.activityFeed = nil
 			m.activityDropped = 0
 			// The carried history, context gauge and pending plan belong to

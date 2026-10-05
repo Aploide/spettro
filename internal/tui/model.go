@@ -509,6 +509,11 @@ type Model struct {
 	// workflow is the most recent workflow run, kept after it finishes so the
 	// panel still shows the whole tree until the next turn clears it.
 	workflow *workflowRun
+	// parkedWorkflows holds runs a newer run displaced from the screen while
+	// they were paused (or still running), keyed by run id, so a later
+	// continue brings back their tree. Pruned at each turn start like the
+	// run on screen (clearSettledWorkflow).
+	parkedWorkflows map[string]*workflowRun
 	// workflowRuns holds the session's workflow runs paused at a checkpoint,
 	// so the orchestrating model can continue one in a later turn. A paused
 	// run is a goroutine mid-script and outlives the turn that started it;
@@ -516,6 +521,9 @@ type Model struct {
 	// the conversation goes away (/clear, /resume, quit). Pointer: survives
 	// Bubble Tea's value copies.
 	workflowRuns *agent.WorkflowRuns
+	// workflowStops carries the registry's reports of detached runs it
+	// stopped (idle reaper, StopAll) to Update; see watchWorkflowRuns.
+	workflowStops chan workflowStoppedMsg
 	// ultracode is the session's standing ultracode opt-in (/ultracode):
 	// every turn behaves as if the message said "ultracode". Deliberately
 	// not persisted — it changes how much work every turn does, so a new
@@ -799,6 +807,9 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
 	m.livePerm.set(cfg.Permission)
+	if cmd := m.watchWorkflowRuns(); cmd != nil {
+		m.startupCmds = append(m.startupCmds, cmd)
+	}
 	if m.modelUpdates != nil {
 		m.startupCmds = append(m.startupCmds, waitForModelsChanged(m.modelUpdates))
 	}
