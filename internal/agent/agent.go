@@ -269,8 +269,10 @@ type LLMAgent struct {
 //
 // Both tools bypass the manifest's PrimaryOnly/handoff gating by design — any
 // top-level agent on any model may fan out — and neither is ever granted to a
-// sub-agent, which is what stops a swarm from spawning swarms.
-func fanOutTools(allowed []string, ultra, workflows bool, depth int) ([]string, string) {
+// sub-agent, which is what stops a swarm from spawning swarms. The same rule
+// keeps the ultracode guidance off sub-agents: a workflow member told to run
+// a workflow for every task would only be told to do something it cannot.
+func fanOutTools(allowed []string, ultra bool, workflows workflowGuidance, depth int) ([]string, string) {
 	if depth != 0 {
 		return allowed, ""
 	}
@@ -281,13 +283,37 @@ func fanOutTools(allowed []string, ultra, workflows bool, depth int) ([]string, 
 		}
 		prompt += ultraPromptSection
 	}
-	if workflows {
+	if workflows.Enabled {
 		if !slices.Contains(allowed, workflowToolID) {
 			allowed = append(allowed, workflowToolID)
 		}
-		prompt += workflowPromptSection
+		prompt += workflows.prompt()
 	}
 	return allowed, prompt
+}
+
+// workflowGuidanceFor decides, once per run, how workflows apply to task:
+// whether the tool is granted, which guidance variant the prompt carries,
+// and the size and budget it states.
+//
+// Ultracode — the keyword in the message, or the host's session toggle —
+// selects the standing-mode guidance; a plain-English request ("use a
+// workflow") gets the judge-it guidance. A "+500k" budget directive is only
+// honoured on a turn that has workflows at all: elsewhere "+500k" is just
+// text.
+func (a LLMAgent) workflowGuidanceFor(task string) workflowGuidance {
+	ultracode := a.Ultracode || WorkflowPreapproved(task)
+	g := workflowGuidance{
+		Enabled:   a.Workflows || ultracode || WorkflowRequested(task),
+		Ultracode: ultracode,
+		SizeTier:  a.WorkflowSize,
+	}
+	if g.Enabled {
+		if tokens, ok := ParseBudgetDirective(task); ok {
+			g.BudgetTokens = tokens
+		}
+	}
+	return g
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -302,11 +328,16 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	var fanOutPrompt string
-	// Workflows are a per-turn opt-in: the user writes the keyword in their
-	// message, or a host sets the flag. Detection lives in the runner so every
-	// surface (TUI, ACP, goal, Telegram, headless) honours the keyword without
-	// each one re-implementing it.
-	allowedTools, fanOutPrompt = fanOutTools(allowedTools, a.Ultra, a.Workflows || WorkflowRequested(task), a.DelegationDepth)
+	// Workflows are a per-turn opt-in: the user writes the keyword or asks in
+	// their own words, or the host's ultracode toggle stands in for the
+	// keyword on every turn. Detection lives in the runner so every surface
+	// (TUI, ACP, goal, Telegram, headless) honours it without each one
+	// re-implementing it.
+	workflows := a.workflowGuidanceFor(task)
+	if a.DelegationDepth != 0 {
+		workflows = workflowGuidance{}
+	}
+	allowedTools, fanOutPrompt = fanOutTools(allowedTools, a.Ultra, workflows, a.DelegationDepth)
 	systemPrompt += fanOutPrompt
 	logToolCalls := true
 	maxWorkers := 4
@@ -327,9 +358,13 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt: systemPrompt,
 		UserTask:     task,
-		// The keyword is a standing yes; a plain-English request is not, and
-		// the workflow tool confirms before spending on the latter.
-		WorkflowPreapproved: a.Workflows || WorkflowPreapproved(task),
+		// The keyword (or the ultracode toggle) is a standing yes; a
+		// plain-English request is not, and the workflow tool confirms before
+		// spending on the latter.
+		WorkflowPreapproved: a.Workflows || workflows.Ultracode,
+		WorkflowSize:        workflows.SizeTier,
+		WorkflowBudget:      workflows.BudgetTokens,
+		WorkflowRuns:        a.WorkflowRuns,
 		History:             a.History,
 		Messages:            a.Messages,
 		CWD:                 a.CWD,

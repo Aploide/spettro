@@ -17,6 +17,9 @@ import (
 type WorkflowRuns struct {
 	mu   sync.Mutex
 	runs map[string]*liveWorkflow
+	// ended holds tombstones for runs the registry stopped on its own,
+	// keyed by run id: see noteEnded.
+	ended map[string]string
 }
 
 // NewWorkflowRuns returns an empty registry.
@@ -55,15 +58,6 @@ func (w *WorkflowRuns) put(run *liveWorkflow) {
 	w.runs[run.runID] = run
 }
 
-func (w *WorkflowRuns) remove(runID string) {
-	if w == nil {
-		return
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	delete(w.runs, runID)
-}
-
 // ids lists the live run IDs, sorted, for error messages.
 func (w *WorkflowRuns) ids() []string {
 	if w == nil {
@@ -100,9 +94,62 @@ func (w *WorkflowRuns) Paused() []PausedWorkflow {
 	return out
 }
 
+// removeRun drops run from the registry, unless the slot already holds a
+// different run under the same id (it never should; ids are unique).
+func (w *WorkflowRuns) removeRun(run *liveWorkflow) {
+	if w == nil || run == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.runs[run.runID] == run {
+		delete(w.runs, run.runID)
+	}
+}
+
+// maxEndedRuns bounds the tombstones kept for runs the registry stopped on
+// its own, so a long session cannot grow the map without limit.
+const maxEndedRuns = 64
+
+// noteEnded remembers why a run the registry stopped by itself (the idle
+// reaper) is gone, so a later continue_run_id gets that reason instead of a
+// bare "unknown run".
+func (w *WorkflowRuns) noteEnded(runID, reason string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ended == nil {
+		w.ended = map[string]string{}
+	}
+	if len(w.ended) >= maxEndedRuns {
+		for id := range w.ended {
+			delete(w.ended, id)
+			break
+		}
+	}
+	w.ended[runID] = reason
+}
+
+// endedReason returns why the registry stopped runID, if it did.
+func (w *WorkflowRuns) endedReason(runID string) (string, bool) {
+	if w == nil {
+		return "", false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	reason, ok := w.ended[runID]
+	return reason, ok
+}
+
 // StopAll stops every live run and empties the registry. Hosts call it when
 // the session the runs belong to goes away: /clear, a session switch, the
 // process exiting, an ACP session closing.
+//
+// It waits (briefly, see workflowStopAllGrace) for the stopped runs to write
+// their result and close their journal, so a process exiting right after
+// still leaves a complete transcript to resume from.
 func (w *WorkflowRuns) StopAll() {
 	if w == nil {
 		return
@@ -112,6 +159,12 @@ func (w *WorkflowRuns) StopAll() {
 	w.runs = map[string]*liveWorkflow{}
 	w.mu.Unlock()
 	for _, r := range runs {
-		r.stop()
+		r.stopWith("stopped by the host: the turn or session the run belonged to ended")
+	}
+	deadline := time.Now().Add(workflowStopAllGrace)
+	for _, r := range runs {
+		if !r.wait(time.Until(deadline)) {
+			return
+		}
 	}
 }

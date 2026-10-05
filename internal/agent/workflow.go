@@ -29,10 +29,11 @@ import (
 
 const (
 	workflowToolID = "workflow"
-	// workflowKeyword opts a single turn into workflows. It is a one-shot
-	// switch on purpose: injecting the tool and its guidance changes the
-	// system prompt, and a persistent toggle would pay that cache cost on
-	// every turn for a capability most turns do not need.
+	// workflowKeyword opts a single turn into workflows — ultracode, the
+	// standing-mode guidance included. It is a one-shot switch by default:
+	// injecting the tool and its guidance changes the system prompt, and
+	// paying that on every turn is only right for a user who asked for it,
+	// which is what the host's session toggle (LLMAgent.Ultracode) is for.
 	workflowKeyword = "ultracode"
 	// workflowMaxItems caps one parallel()/pipeline() call.
 	workflowMaxItems = 4096
@@ -155,12 +156,26 @@ func WorkflowActivationSpans(task string) [][2]int {
 	return spans
 }
 
-// workflowPromptSection is appended to the system prompt when workflows are
+// The workflow guidance is appended to the system prompt when workflows are
 // active. Like the Ultra section it is fixed for the whole run, which keeps
-// the prompt-cache prefix byte-stable.
-const workflowPromptSection = `
+// the prompt-cache prefix byte-stable: workflowGuidance.prompt composes it
+// once, in Run, from the consts below and the run's size tier and budget.
+//
+// It comes in two variants that share one core. A plain-English request ("use
+// a workflow") gets the judge-it variant: the tool is offered, the model
+// decides whether the task earns it, the user confirms. Ultracode — the
+// keyword or the host's session toggle — gets the standing-mode variant: a
+// workflow is the default for every substantive task. The two policies
+// contradict each other, which is why neither lives in the core.
 
-WORKFLOWS are available this turn: the user asked for one, either with the word "ultracode" or in their own words. You have the workflow tool, which runs a JavaScript orchestration script you write, so the control flow around your sub-agents is deterministic instead of re-decided by you every step.
+// workflowToolIntro opens both variants.
+const workflowToolIntro = `You have the workflow tool, which runs a JavaScript orchestration script you write, so the control flow around your sub-agents is deterministic instead of re-decided by you every step.`
+
+// workflowJudgeSection is the policy when the user asked for a workflow in
+// their own words: availability, not an instruction.
+const workflowJudgeSection = `
+
+WORKFLOWS are available this turn: the user asked for one in their own words. ` + workflowToolIntro + `
 
 Availability is not an instruction to use it. Judge the task: if it is a single edit, a question, a quick fix, or anything you would finish in a few tool calls, just do the work and do not mention the tool. A workflow multiplies token usage — every agent() call is a full agent run — so it has to earn that.
 
@@ -168,13 +183,27 @@ Use it when the work has structure worth encoding — fan out and verify, severa
 
 If the user explicitly asked for a workflow and the task genuinely does not warrant one, do the work directly and say in one line why a script would not have helped. Do not manufacture phases to look busy.
 
-There may be no saved workflow for what the user wants, and that is the normal case: write one. Check what exists first if it is plausible one does (the name would be in .spettro/workflows), otherwise author the script yourself from the shape of the task.
+Spettro asks the user to confirm before the run starts, and they may choose to keep the script without running it. That is theirs to decide: if they decline, do not run it anyway and do not re-propose it — do the work directly.`
 
-When the script is worth keeping — the user will plainly want it again, or they asked for a reusable one — set save_as so it lands in .spettro/workflows and can be re-run by name later. Do not save one-off scripts; a folder of near-duplicates is worse than none.
+// ultracodePromptSection is the policy when ultracode is on: the opt-in is
+// standing, and a workflow is the default for substantive work.
+const ultracodePromptSection = `
 
-Unless the user wrote "ultracode", Spettro asks them to confirm before the run starts, and they may choose to keep the script without running it. That is theirs to decide: if they decline, do not run it anyway and do not re-propose it — do the work directly.
+WORKFLOWS are available and ULTRACODE is on: the user's opt-in is standing, not a one-off request. ` + workflowToolIntro + `
 
-Scout inline first (list the files, scope the diff, find the call sites), then hand the discovered work-list to a script. You stay in the loop between workflows: read each result and decide the next phase yourself.
+Author and run a workflow for every substantive task by default. The goal is the most exhaustive, correct answer — token cost is not the constraint here (respect the size guideline below, though). Work solo only on conversational turns (a question, a clarification) or trivial mechanical edits (a rename, a typo, a one-line fix).
+
+For multi-phase work — understand → design → implement → review — run several workflows in sequence, one per phase, and read each result before deciding the next; never fold the whole job into one script whose later phases were decided before you saw the earlier ones. Lean toward adversarially verifying what a workflow finds: independent skeptics that try to refute each finding, diverse lenses over the same code, loop-until-dry sweeps (untilDry), and a final completeness critic asking what was missed. Use checkpoint() inside a script when its next stage depends on your judgement of interim results.
+
+Runs start without a confirmation prompt: the user already said yes.`
+
+// workflowPromptCore is the shared half: how to work with the tool and the
+// script API.
+const workflowPromptCore = `
+
+Scout inline first (list the files, scope the diff, find the call sites), then hand the discovered work-list to a script. Anything the script still has to discover it discovers at runtime — plan(), an agent with a schema — never from a list hardcoded from memory. You stay in the loop between workflows: read each result and decide the next phase yourself.
+
+Generate a fresh script for the task in front of you; that is the default. Saved workflows (.spettro/workflows) are TEMPLATES, not finished answers: when one plausibly fits, read it (script_path, or /workflows show <name>), adapt it to this task — discover work-lists at runtime, never replay a hardcoded file list — and run the adapted script inline. Run one by name, with args for its meta.params, only when it fits as-is. When a script is worth keeping — the user will plainly want it again, or asked for a reusable one — set save_as and write it as a template: declare meta.params for everything task-specific and discover the work at runtime. Do not save one-off scripts; a folder of near-duplicates is worse than none.
 
 The script must begin with a pure object literal header and then use the provided globals:
 
@@ -182,17 +211,22 @@ export const meta = {
   name: 'review-changes',
   description: 'Review the diff, then adversarially verify each finding',
   phases: [{title: 'Review'}, {title: 'Verify'}],
+  params: {base: {type: 'string', description: 'branch to diff against', default: 'main'}},
 }
 phase('Review')
 const results = await pipeline(DIMENSIONS,
-  d => agent(` + "`Review the diff for ${d}`" + `, {label: 'review:' + d, phase: 'Review', schema: FINDINGS}),
+  d => agent(` + "`Review the diff against ${args.base} for ${d}`" + `, {label: 'review:' + d, phase: 'Review', schema: FINDINGS}),
   review => parallel(review.findings.map(f => () =>
     agent('Try to refute: ' + f.title, {phase: 'Verify', schema: VERDICT}))))
 return results.flat().filter(Boolean)
 
 Use opts.schema whenever a stage produces data the next stage consumes. Spettro appends the contract to the prompt, parses the answer back, and retries the agent with the parse error if it does not fit — hand-rolling JSON.parse over the text in the script gets none of that, and one malformed answer silently drops a result.
 
-Globals: agent(prompt, opts) → the sub-agent's final text, or the parsed object when opts.schema is a JSON Schema, or null if it failed; parallel(thunks) → runs all concurrently and waits for every one (a barrier); pipeline(items, ...stages) → pushes each item through every stage independently with NO barrier between stages; phase(title); log(message); args (whatever the tool call passed); budget.remaining(); workflow(name, args) to run a saved workflow as a sub-step.
+Globals: agent(prompt, opts) → the sub-agent's final text, or the parsed object when opts.schema is a JSON Schema, or null if it failed; parallel(thunks) → runs all concurrently and waits for every one (a barrier); pipeline(items, ...stages) → pushes each item through every stage independently with NO barrier between stages; phase(title, {detail}) → starts a progress group (phases not declared in meta.phases are fine: they show as added at runtime); log(message); args (the tool call's args, checked against meta.params); budget.remaining(); size → {tier, agents, fanout, spawned(), remaining()}, the size guideline; plan(prompt, {max}) → one agent turns a goal into a work-list [{label, prompt, phase?, data?}], capped at size.fanout; untilDry(round, {key, dry, maxRounds}) → calls round(i, seen) until rounds stop finding new items, returning every fresh item; workflow(name, args) or workflow({script, args}) → runs a saved or freshly generated script as a sub-step; checkpoint(message, data) → pauses the run and resolves to your reply.
+
+meta.params declares a script's inputs — params: {base: {type, description, required, default}, focus: 'a description'} — with type one of string, number, boolean, array, object, any. A missing required param or a wrong type fails the run before any agent starts.
+
+The orchestrator stays in the loop through checkpoints. await checkpoint('Fix these?', findings) makes the tool call return with the checkpoint: read it, then call the workflow tool with {"continue_run_id": "<run id>", "reply": <any JSON>} — the script receives reply as checkpoint()'s value — or {"continue_run_id": "<run id>", "stop": true} to end the run. Every in-flight agent finishes before the pause and nothing runs while it waits. auto_checkpoint: true on the first call also pauses at every phase boundary. Without an orchestrator (resume replays, non-interactive hosts) checkpoint() resolves to null, so treat null as "carry on with the default".
 
 Prefer pipeline over parallel-then-parallel: a barrier is only right when a stage genuinely needs every previous result at once (dedup across the whole set, an early exit on zero findings). Give agent() a label and a phase so the user can follow the run.
 
@@ -201,6 +235,55 @@ Every agent is a fresh sub-agent that cannot see your context or the other agent
 With isolation:"worktree" the agent runs inside its own checkout, so give it REPOSITORY-RELATIVE paths ("internal/budget/budget.go"). An absolute path built from the main checkout points outside its worktree: the edit lands in the shared tree, the worktree merges back empty, and the isolation you asked for silently did nothing.
 
 Date.now(), Math.random() and argless new Date() are unavailable (they would break resume); pass timestamps in through args and vary work by index.`
+
+// workflowPromptSection is the judge-it variant, ultracodeWorkflowSection
+// the standing-mode one; both before the per-run size and budget lines.
+const (
+	workflowPromptSection    = workflowJudgeSection + workflowPromptCore
+	ultracodeWorkflowSection = ultracodePromptSection + workflowPromptCore
+)
+
+// workflowGuidance is what a run knows about workflows when its prompt is
+// built: whether the tool is granted, which variant of the guidance applies,
+// and the run's sizing. It is decided once, in Run, so the prompt it renders
+// stays byte-stable for the whole run.
+type workflowGuidance struct {
+	// Enabled grants the workflow tool.
+	Enabled bool
+	// Ultracode selects the standing-mode guidance over the judge-it one.
+	Ultracode bool
+	// SizeTier is the configured size tier ("" means medium).
+	SizeTier string
+	// BudgetTokens is the turn's "+500k"-style budget directive; 0 when the
+	// user set none.
+	BudgetTokens int
+}
+
+// prompt renders the guidance appended to the system prompt.
+func (g workflowGuidance) prompt() string {
+	if !g.Enabled {
+		return ""
+	}
+	section := workflowPromptSection
+	if g.Ultracode {
+		section = ultracodeWorkflowSection
+	}
+	section += "\n\n" + workflowSizeLine(g.SizeTier)
+	if g.BudgetTokens > 0 {
+		section += "\n\n" + fmt.Sprintf("The user set a token budget of %d tokens for this turn. It is the default budget_tokens of every workflow you run this turn, and the pool is shared: each run gets what the earlier ones left. Scripts see it as budget.total and budget.remaining(); agent() throws once it is spent, so size the fan-outs to fit.", g.BudgetTokens)
+	}
+	return section
+}
+
+// workflowSizeLine states the run's size guideline, read from the same tier
+// table the engine exposes to scripts as the size global.
+func workflowSizeLine(tier string) string {
+	size := workflow.ResolveSize(tier)
+	if size.Agents <= 0 {
+		return fmt.Sprintf("Workflow size guideline: %s — no agent guideline; size each workflow to the task (plan() still caps one work-list at %d unless you pass max). The hard runaway cap is %d agents per run.", size.Tier, size.Fanout, workflowMaxAgents)
+	}
+	return fmt.Sprintf("Workflow size guideline: %s — keep each workflow under ~%d agents and each fan-out under ~%d (scripts can read size.agents and size.fanout). This is a guideline, not a hard limit: go past it only when the task plainly needs to.", size.Tier, size.Agents, size.Fanout)
+}
 
 type workflowArgs struct {
 	Script          string          `json:"script"`
@@ -212,10 +295,23 @@ type workflowArgs struct {
 	BudgetTokens    int             `json:"budget_tokens"`
 	SaveAs          string          `json:"save_as"`
 	SaveScope       string          `json:"save_scope"`
+	// ContinueRunID continues a run paused at a checkpoint; Reply is what the
+	// script's checkpoint() resolves to, Stop ends the run instead, and
+	// CheckpointID (optional) must name the pending checkpoint.
+	ContinueRunID string          `json:"continue_run_id"`
+	Reply         json.RawMessage `json:"reply"`
+	Stop          bool            `json:"stop"`
+	CheckpointID  string          `json:"checkpoint_id"`
+	// AutoCheckpoint pauses the run at every phase boundary as well.
+	AutoCheckpoint bool `json:"auto_checkpoint"`
+	// Size overrides the configured size tier for this run.
+	Size string `json:"size"`
 }
 
 // runWorkflow is the workflow tool: resolve the script, run it, and hand the
-// script's return value back to the model together with what the run did.
+// script's return value back to the model together with what the run did —
+// or, when the script pauses at a checkpoint, hand the checkpoint over and
+// keep the run alive for a later call to continue.
 func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 	var args workflowArgs
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
@@ -231,6 +327,16 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 	// ask-first would turn that into a wall of approval prompts.
 	if r.perm() == config.PermissionAskFirst {
 		return "", fmt.Errorf("workflow: requires restricted or yolo permission (current: ask-first)")
+	}
+	if id := strings.TrimSpace(args.ContinueRunID); id != "" {
+		return r.continueWorkflow(ctx, id, args)
+	}
+	if args.Stop || workflowReplyGiven(args.Reply) || strings.TrimSpace(args.CheckpointID) != "" {
+		return "", fmt.Errorf("workflow: reply, stop and checkpoint_id only apply with continue_run_id (the run id from the checkpoint result)")
+	}
+	tier, err := workflowSizeTier(args.Size, r.workflowSize)
+	if err != nil {
+		return "", err
 	}
 
 	script, origin, err := r.resolveWorkflowScript(args)
@@ -270,7 +376,7 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 		savedAt = path
 	}
 	if decision == workflowSaveOnly {
-		return renderWorkflowSaved(meta, savedAt), nil
+		return renderWorkflowSaved(meta, savedAt) + workflowSaveLint(meta, script), nil
 	}
 
 	runID := newWorkflowRunID()
@@ -279,7 +385,6 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 		// Persistence is a convenience; a run that cannot journal still runs.
 		journal = nil
 	}
-	defer journal.Close()
 	if journal != nil {
 		_ = journal.WriteFile("script.js", script)
 		if encoded, err := json.MarshalIndent(meta, "", "  "); err == nil {
@@ -288,47 +393,266 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 		if args.ResumeFromRunID != "" {
 			prior, err := r.findWorkflowRunDir(args.ResumeFromRunID, origin)
 			if err != nil {
+				_ = journal.Close()
 				return "", fmt.Errorf("workflow: %w", err)
 			}
 			if err := journal.LoadCache(prior); err != nil {
+				_ = journal.Close()
 				return "", fmt.Errorf("workflow: resume from %s: %w", args.ResumeFromRunID, err)
 			}
 		}
 	}
 
-	obs := &workflowObserver{rt: r, runID: runID, meta: meta}
-	obs.start(origin)
+	size := workflow.ResolveSize(tier)
+	maxConcurrency := args.MaxConcurrency
+	if maxConcurrency <= 0 {
+		// The tier's default (small runs four at a time); 0 leaves the
+		// engine's own.
+		maxConcurrency = size.Concurrency
+	}
+	budget := args.BudgetTokens
+	if budget <= 0 {
+		budget = r.workflowBudgetLeft()
+	}
+
+	obs := &workflowObserver{rt: r, runID: runID, meta: meta, origin: origin,
+		sizeTier: size.Tier, sizeAgents: size.Agents, budget: budget}
+	obs.start()
 	runner := &workflowRunner{rt: r, runID: runID}
-	result, runErr := workflow.Run(ctx, script, workflow.Options{
+	// The run lives on a context of its own: a run paused at a checkpoint
+	// must survive this tool call returning (its context is cancelled the
+	// moment it does) and the turn ending. The tool call's context still
+	// bounds the wait, and cancelling it while the run is running stops the
+	// run (driveWorkflow), so Esc stops a workflow as it always did.
+	handle, err := workflow.Start(context.WithoutCancel(ctx), script, workflow.Options{
 		Runner:           runner,
 		Observer:         obs.handle,
-		MaxConcurrency:   args.MaxConcurrency,
+		MaxConcurrency:   maxConcurrency,
 		MaxAgents:        workflowMaxAgents,
 		MaxItems:         workflowMaxItems,
-		BudgetTokens:     args.BudgetTokens,
+		BudgetTokens:     budget,
 		Journal:          journal,
 		DefaultAgentType: defaultWorkflowAgentType(r.manifest),
 		Resolve: func(name string) (string, error) {
 			src, _, err := workflow.Load(r.cwd, name)
 			return src, err
 		},
-		Args: scriptArgs,
+		Args:           scriptArgs,
+		Checkpoints:    true,
+		AutoCheckpoint: args.AutoCheckpoint,
+		SizeTier:       size.Tier,
 	})
-	obs.finish(result, runErr)
+	if err != nil {
+		obs.finish(workflow.Result{}, err)
+		_ = journal.Close()
+		return "", fmt.Errorf("workflow: %w", err)
+	}
+	live := &liveWorkflow{
+		runID: runID, name: meta.Name,
+		handle: handle, journal: journal, observer: obs, runner: runner,
+		meta: meta, script: script, origin: origin, dir: r.workflowRunDir(runID),
+		savedAt: savedAt, saveName: saveName,
+		registry:  r.workflowRegistry(),
+		cancel:    handle.Stop,
+		finalized: make(chan struct{}),
+		busy:      true,
+	}
+	live.registry.put(live)
+	live.watch()
+	r.workflowMu.Lock()
+	r.workflowTurnRuns = append(r.workflowTurnRuns, live)
+	r.workflowMu.Unlock()
+	return r.driveWorkflow(ctx, live)
+}
 
-	if journal != nil {
-		if encoded, err := json.MarshalIndent(result.Value, "", "  "); err == nil {
-			_ = journal.WriteFile("result.json", string(encoded))
+// workflowSizeTier picks a run's size tier: the call's size argument, else
+// the configured tier, else medium. A bad size argument is an error the model
+// can correct; it is not silently read as medium the way a config typo is.
+func workflowSizeTier(arg, configured string) (string, error) {
+	if arg = strings.ToLower(strings.TrimSpace(arg)); arg != "" {
+		if _, ok := workflow.SizeTiers[arg]; !ok {
+			return "", fmt.Errorf("workflow: size %q is not a size tier (use one of %s)", arg, strings.Join(workflow.SizeTierNames, ", "))
 		}
+		return arg, nil
 	}
-	if runErr != nil {
-		return "", fmt.Errorf("%w (run %s; transcript at %s)", runErr, runID, r.workflowRunDir(runID))
+	return workflow.ResolveSize(configured).Tier, nil
+}
+
+// workflowBudgetLeft is the default budget of a new run under the turn's
+// "+500k"-style directive: the directive minus what the turn's earlier runs
+// already spent, so the pool is shared rather than granted to every run in
+// full. It never drops below 1 — 0 would mean "no budget" to the engine, the
+// opposite of a pool that is spent. 0 when the turn has no directive.
+func (r *toolRuntime) workflowBudgetLeft() int {
+	if r.workflowBudget <= 0 {
+		return 0
 	}
-	out := renderWorkflowResult(runID, r.workflowRunDir(runID), origin, meta, result, runner.mergeNotes())
-	if savedAt != "" {
-		out += fmt.Sprintf("\nSaved as a reusable workflow at %s — it can be re-run with /workflows run %s.", savedAt, saveName)
+	r.workflowMu.Lock()
+	runs := append([]*liveWorkflow(nil), r.workflowTurnRuns...)
+	r.workflowMu.Unlock()
+	spent := 0
+	for _, run := range runs {
+		spent += run.handle.Snapshot().Tokens
 	}
-	return out, nil
+	return max(1, r.workflowBudget-spent)
+}
+
+// workflowRegistry is where this runtime's live runs are kept: the host's,
+// or the turn-local one runToolLoop made. A runtime built without either (a
+// test, a direct caller) gets one of its own on first use.
+func (r *toolRuntime) workflowRegistry() *WorkflowRuns {
+	r.workflowMu.Lock()
+	defer r.workflowMu.Unlock()
+	if r.workflowRuns == nil {
+		r.workflowRuns = NewWorkflowRuns()
+	}
+	return r.workflowRuns
+}
+
+// driveWorkflow waits for the run to pause or settle, on behalf of a tool
+// call that has claimed it, and renders what the model reads.
+func (r *toolRuntime) driveWorkflow(ctx context.Context, live *liveWorkflow) (string, error) {
+	step, err := live.handle.Next(ctx)
+	if err != nil {
+		// The wait was cut short — Esc, or the tool's deadline — while the
+		// run was still running. Only a run paused at a checkpoint may
+		// outlive its tool call, so this one is stopped, as before.
+		live.handle.Stop()
+		live.finalize()
+		live.release()
+		return "", fmt.Errorf("%w (run %s; transcript at %s)", err, live.runID, live.dir)
+	}
+	if step.Result != nil {
+		live.finalize()
+		live.release()
+		if step.Err != nil {
+			return "", fmt.Errorf("%w (run %s; transcript at %s)", step.Err, live.runID, live.dir)
+		}
+		out := renderWorkflowResult(live.runID, live.dir, live.origin, live.meta, *step.Result, live.runner.mergeNotes())
+		if live.savedAt != "" {
+			out += fmt.Sprintf("\nSaved as a reusable workflow at %s — it can be re-run with /workflows run %s.", live.savedAt, live.saveName)
+			out += workflowSaveLint(live.meta, live.script)
+		}
+		return out, nil
+	}
+
+	cp := *step.Checkpoint
+	live.markPaused(cp)
+	live.observer.paused(cp)
+	// Detach before returning: this turn's callbacks must not be reached
+	// through the run once the call is over, and nothing runs while paused.
+	live.bind(nil)
+	live.release()
+	return renderWorkflowCheckpoint(live.runID, live.meta, cp, live.handle.Snapshot()), nil
+}
+
+// continueWorkflow answers (or stops) a run paused at a checkpoint. There is
+// no consent prompt: the run was approved when it started, and the
+// orchestrator answering its question is not a new spend decision.
+func (r *toolRuntime) continueWorkflow(ctx context.Context, runID string, args workflowArgs) (string, error) {
+	live := r.workflowRegistry().get(runID)
+	if live == nil {
+		return "", r.unknownWorkflowRunError(runID)
+	}
+	if err := live.claim(); err != nil {
+		return "", err
+	}
+	cp, paused := live.handle.Pending()
+	if want := strings.TrimSpace(args.CheckpointID); paused && want != "" && want != cp.ID {
+		live.release()
+		return "", fmt.Errorf("workflow: run %s is paused at %s, not %s — continue with checkpoint_id %q, or omit checkpoint_id", runID, cp.ID, want, cp.ID)
+	}
+
+	// The run now belongs to this turn: its traces, approvals and questions
+	// go to the live host, not to the turn that started it.
+	live.bind(r)
+	live.observer.resumed()
+
+	if args.Stop || (paused && cp.Auto && workflowReplyStops(args.Reply)) {
+		live.stopWith("stopped by the orchestrator")
+		live.finalize()
+		live.release()
+		return renderWorkflowStopped(live), nil
+	}
+	if paused {
+		var reply any
+		if workflowReplyGiven(args.Reply) {
+			reply = args.Reply
+		}
+		if err := live.handle.Resume(cp.ID, reply); err != nil {
+			// Still paused (or settled under us): hand it back as it was.
+			live.observer.paused(cp)
+			live.bind(nil)
+			live.release()
+			return "", fmt.Errorf("workflow: %w", err)
+		}
+		live.markRunning()
+	}
+	return r.driveWorkflow(ctx, live)
+}
+
+// workflowReplyGiven reports whether the call carries a reply. An explicit
+// null counts as none: it is what a client serialising an unset field sends.
+func workflowReplyGiven(reply json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(reply))
+	return trimmed != "" && trimmed != "null"
+}
+
+// workflowReplyStops reports whether an automatic checkpoint's reply asks to
+// stop the run: {"stop": true}. Only automatic checkpoints read it — the
+// script never sees their reply — while a script's own checkpoint() gets
+// whatever the orchestrator sent, stop key or not.
+func workflowReplyStops(reply json.RawMessage) bool {
+	var v struct {
+		Stop bool `json:"stop"`
+	}
+	return workflowReplyGiven(reply) && json.Unmarshal(reply, &v) == nil && v.Stop
+}
+
+// renderWorkflowStopped is the result of a run the orchestrator stopped: what
+// it did up to the stop, and how to pick it up again.
+func renderWorkflowStopped(live *liveWorkflow) string {
+	res := live.handle.Snapshot()
+	res.Value = nil
+	return fmt.Sprintf("The %q workflow (run %s) was stopped at your request before the script finished; the counts below are what it did up to the stop.\n", live.meta.Name, live.runID) +
+		renderWorkflowResult(live.runID, live.dir, live.origin, live.meta, res, live.runner.mergeNotes())
+}
+
+// unknownWorkflowRunError explains a continue_run_id that names no live run.
+// The run may have finished, been reaped, or died with the process — in which
+// case its journal is still on disk and resume_from_run_id is the way back.
+func (r *toolRuntime) unknownWorkflowRunError(runID string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "workflow: run %q is not paused at a checkpoint in this session", runID)
+	if reason, ok := r.workflowRegistry().endedReason(runID); ok {
+		fmt.Fprintf(&b, " (it was %s)", reason)
+	}
+	if ids := r.workflowRegistry().ids(); len(ids) > 0 {
+		fmt.Fprintf(&b, "; live runs: %s", strings.Join(ids, ", "))
+	}
+	b.WriteString(".")
+	if dir, err := r.findWorkflowRunDir(runID, ""); err == nil {
+		fmt.Fprintf(&b, " Its journal is kept at %s: re-run its script with script_path=%q and resume_from_run_id=%q, and the finished agents and answered checkpoints replay instead of re-running.",
+			dir, filepath.Join(dir, "script.js"), runID)
+	}
+	return errors.New(b.String())
+}
+
+// workflowArgsRe spots a script reading its args global. It is a lint, not a
+// parser: a mention in a comment counts, which only ever spares a script the
+// note below.
+var workflowArgsRe = regexp.MustCompile(`\bargs\b`)
+
+// workflowSaveLint is the note a saved script gets when nothing in it can
+// vary between runs. Saved workflows are templates; one with no params that
+// never reads args replays the same hardcoded work every time, which is
+// almost never what saving it was for. A note, not a refusal: the script is
+// already saved, and some workflows really are fixed.
+func workflowSaveLint(meta workflow.Meta, script string) string {
+	if len(meta.Params) > 0 || workflowArgsRe.MatchString(script) {
+		return ""
+	}
+	return "\nSaved without meta.params — it will replay the same hardcoded work every time; consider declaring params so it adapts."
 }
 
 // workflowDecision is what the user said about starting a run.
@@ -358,6 +682,9 @@ func (r *toolRuntime) confirmWorkflow(ctx context.Context, meta workflow.Meta, a
 	detail := meta.Description
 	if len(phases) > 0 {
 		detail += "\nPhases: " + strings.Join(phases, " → ")
+	}
+	if params := describeWorkflowParams(meta.Params); params != "" {
+		detail += "\nParams: " + params
 	}
 	saveLabel := "Save it, don't run"
 	saveName := strings.TrimSpace(args.SaveAs)
@@ -397,6 +724,34 @@ func (r *toolRuntime) confirmWorkflow(ctx context.Context, meta workflow.Meta, a
 		return workflowDeclined
 	}
 	return workflowRun
+}
+
+// describeWorkflowParams lists declared params for the consent prompt:
+// "base (string, default "main") — branch to diff against; focus (any,
+// required)".
+func describeWorkflowParams(params []workflow.ParamMeta) string {
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		typ := p.Type
+		if typ == "" {
+			typ = "any"
+		}
+		attrs := []string{typ}
+		if p.Required {
+			attrs = append(attrs, "required")
+		}
+		if p.Default != nil {
+			if encoded, err := json.Marshal(p.Default); err == nil {
+				attrs = append(attrs, "default "+truncate(string(encoded), 60))
+			}
+		}
+		part := fmt.Sprintf("%s (%s)", p.Name, strings.Join(attrs, ", "))
+		if d := strings.TrimSpace(p.Description); d != "" {
+			part += " — " + d
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // renderWorkflowSaved is what the model reads when the user chose to keep the
@@ -532,8 +887,13 @@ func newWorkflowRunID() string {
 
 // workflowRunner executes one agent() call as a Spettro sub-agent.
 type workflowRunner struct {
-	rt    *toolRuntime
-	runID string
+	// rt is the runtime of the turn driving the run; every sub-agent takes
+	// its callbacks (traces, approvals, questions, checkpoints) from it. A run
+	// continued in a later turn is rebound to that turn's runtime, and while
+	// it sits paused it is bound to nothing (see liveWorkflow.bind).
+	bindMu sync.RWMutex
+	rt     *toolRuntime
+	runID  string
 
 	// spaces holds the isolated worktree for each in-flight call, keyed by the
 	// engine's call index. It is keyed per call rather than per attempt
@@ -549,6 +909,23 @@ type workflowRunner struct {
 	notes []string
 }
 
+// errWorkflowDetached is what a call reaching a run nobody is driving gets.
+// Quiescence keeps it theoretical — no agent starts while a run is paused —
+// but a sub-agent must fail cleanly rather than call into a finished turn.
+var errWorkflowDetached = errors.New("workflow: the run is paused and no turn is attached to it")
+
+func (w *workflowRunner) runtime() *toolRuntime {
+	w.bindMu.RLock()
+	defer w.bindMu.RUnlock()
+	return w.rt
+}
+
+func (w *workflowRunner) rebind(rt *toolRuntime) {
+	w.bindMu.Lock()
+	w.rt = rt
+	w.bindMu.Unlock()
+}
+
 func (w *workflowRunner) mergeNotes() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -561,7 +938,11 @@ func (w *workflowRunner) BeginCall(ctx context.Context, req workflow.Request) er
 	if req.Isolation != "worktree" {
 		return nil
 	}
-	ws, err := w.rt.newSubagentWorkspace(ctx, req.Instance)
+	rt := w.runtime()
+	if rt == nil {
+		return errWorkflowDetached
+	}
+	ws, err := rt.newSubagentWorkspace(ctx, req.Instance)
 	if err != nil {
 		return fmt.Errorf("workflow: %w", err)
 	}
@@ -590,9 +971,16 @@ func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runE
 		ws.abandon(mergeCtx)
 		return
 	}
+	rt := w.runtime()
+	if rt == nil {
+		// Nobody to snapshot for or report to: keep the work on its branch
+		// rather than merging it into a checkout no turn is watching.
+		ws.abandon(mergeCtx)
+		return
+	}
 	// The merge writes into the main checkout, which the call's own
 	// snapshots (taken in its worktree) never covered.
-	w.rt.checkpointStep(workflowToolID)
+	rt.checkpointStep(workflowToolID)
 	if m := ws.finalize(mergeCtx); m.Status != "merged" && m.Status != "no_changes" {
 		// Anything that is not a clean merge has to reach both the user and
 		// the model: silently dropping it leaves work on a branch nobody
@@ -602,7 +990,7 @@ func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runE
 		w.mu.Lock()
 		w.notes = append(w.notes, note)
 		w.mu.Unlock()
-		w.rt.emitWorkflowMergeNote(req, note)
+		rt.emitWorkflowMergeNote(req, note)
 	}
 }
 
@@ -621,7 +1009,10 @@ func (w *workflowRunner) workspaceFor(index int) *agentWorkspace {
 }
 
 func (w *workflowRunner) RunAgent(ctx context.Context, req workflow.Request) (workflow.Response, error) {
-	r := w.rt
+	r := w.runtime()
+	if r == nil {
+		return workflow.Response{}, errWorkflowDetached
+	}
 	spec, err := resolveWorkflowTarget(r.manifest, req.AgentType)
 	if err != nil {
 		return workflow.Response{}, err

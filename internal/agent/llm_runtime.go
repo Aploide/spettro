@@ -150,6 +150,14 @@ type toolLoopConfig struct {
 	// WorkflowPreapproved marks the turn as having the user's standing consent
 	// to start a workflow without confirming first (they typed the keyword).
 	WorkflowPreapproved bool
+	// WorkflowSize is the configured workflow size tier ("" means medium).
+	WorkflowSize string
+	// WorkflowBudget is the turn's "+500k"-style token budget directive, a
+	// pool shared by every workflow run in the turn; 0 means none.
+	WorkflowBudget int
+	// WorkflowRuns is the host's registry of live workflow runs; nil gives
+	// the run a turn-local one (see runToolLoop).
+	WorkflowRuns *WorkflowRuns
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
@@ -347,7 +355,17 @@ type toolRuntime struct {
 	// workflowPreapproved skips the workflow tool's confirmation prompt: the
 	// user already said yes by writing the keyword.
 	workflowPreapproved bool
-	shellTimeoutSec     int
+	// workflowSize is the size tier a run gets when the call names none.
+	workflowSize string
+	// workflowBudget is the turn's token budget directive (0: none), and
+	// workflowTurnRuns the runs started this turn, whose spend it is shared
+	// across.
+	workflowBudget   int
+	workflowMu       sync.Mutex
+	workflowTurnRuns []*liveWorkflow
+	// workflowRuns holds the runs paused at a checkpoint, for continue.
+	workflowRuns    *WorkflowRuns
+	shellTimeoutSec int
 	// compactCfg is the auto-compaction policy (zero value → defaults);
 	// compactFailures counts consecutive summarizer failures so the trigger
 	// pauses after MaxFailures instead of burning a failing call every step.
@@ -621,6 +639,17 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	runtime.maxToolCallsPerStep = cfg.MaxToolCalls
 	runtime.goalMode = cfg.GoalMode
 	runtime.workflowPreapproved = cfg.WorkflowPreapproved
+	runtime.workflowSize = cfg.WorkflowSize
+	runtime.workflowBudget = cfg.WorkflowBudget
+	runtime.workflowRuns = cfg.WorkflowRuns
+	if runtime.workflowRuns == nil && cfg.DelegationDepth == 0 {
+		// Without a host registry a paused run can still be continued later
+		// in this turn, but it must not outlive it: nothing would ever
+		// continue or stop it.
+		turnRuns := NewWorkflowRuns()
+		runtime.workflowRuns = turnRuns
+		defer turnRuns.StopAll()
+	}
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	// Project state (.spettro/) comes from the main checkout when this run
 	// is a sub-agent inside an agent worktree; see projectStateDir.

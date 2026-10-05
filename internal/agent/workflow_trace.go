@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"spettro/internal/workflow"
 )
@@ -19,14 +21,38 @@ const (
 // workflowObserver turns engine events into ToolTraces. Hosts already
 // understand traces — the TUI panel, the ACP bridge and the session log all
 // consume the same stream — so a workflow needs no transport of its own.
+//
+// rt is the runtime of the turn currently driving the run. A run paused at a
+// checkpoint outlives the tool call (and possibly the turn) that started it,
+// so rt is swapped by rebind when a later call continues it, and cleared while
+// nobody does: a callback belonging to a finished turn must never be called.
 type workflowObserver struct {
+	mu    sync.RWMutex
 	rt    *toolRuntime
 	runID string
 	meta  workflow.Meta
+	// origin, size and budget describe the run for the lifecycle trace; they
+	// are repeated on a resumed trace so a host that lost the run's state (a
+	// new ACP turn) can rebuild its header.
+	origin     string
+	sizeTier   string
+	sizeAgents int
+	budget     int
+}
+
+// rebind points the observer at rt (nil detaches it). It waits for emits in
+// flight against the old runtime, so once it returns the old turn's callback
+// is not being called any more.
+func (o *workflowObserver) rebind(rt *toolRuntime) {
+	o.mu.Lock()
+	o.rt = rt
+	o.mu.Unlock()
 }
 
 func (o *workflowObserver) emit(name, status string, payload map[string]any, output string) {
-	if o.rt.toolCallback == nil {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.rt == nil || o.rt.toolCallback == nil {
 		return
 	}
 	payload["run_id"] = o.runID
@@ -41,19 +67,56 @@ func (o *workflowObserver) emit(name, status string, payload map[string]any, out
 	})
 }
 
-// start opens the lifecycle trace. Phases are published up front, from the
-// declared meta, so a host can draw the whole plan before the first agent runs
-// instead of growing it one phase at a time.
-func (o *workflowObserver) start(origin string) {
+// startPayload is the lifecycle trace's description of the run: what it is,
+// its declared plan, and the sizing it runs under.
+func (o *workflowObserver) startPayload() map[string]any {
 	phases := make([]map[string]string, 0, len(o.meta.Phases))
 	for _, p := range o.meta.Phases {
 		phases = append(phases, map[string]string{"title": p.Title, "detail": p.Detail})
 	}
-	o.emit(workflowTraceName, "running", map[string]any{
-		"description": o.meta.Description,
-		"phases":      phases,
-		"origin":      origin,
-	}, "")
+	params := make([]map[string]any, 0, len(o.meta.Params))
+	for _, p := range o.meta.Params {
+		params = append(params, map[string]any{
+			"name": p.Name, "type": p.Type, "required": p.Required, "description": p.Description,
+		})
+	}
+	return map[string]any{
+		"description":   o.meta.Description,
+		"phases":        phases,
+		"origin":        o.origin,
+		"size":          o.sizeTier,
+		"size_agents":   o.sizeAgents,
+		"budget_tokens": o.budget,
+		"params":        params,
+	}
+}
+
+// start opens the lifecycle trace. Phases are published up front, from the
+// declared meta, so a host can draw the whole plan before the first agent runs
+// instead of growing it one phase at a time.
+func (o *workflowObserver) start() {
+	o.emit(workflowTraceName, "running", o.startPayload(), "")
+}
+
+// resumed reopens the lifecycle trace when a paused run is continued. It is a
+// "running" trace like start, marked resumed so hosts keep the run's phases,
+// members and log instead of resetting them for what looks like a new run.
+func (o *workflowObserver) resumed() {
+	payload := o.startPayload()
+	payload["resumed"] = true
+	o.emit(workflowTraceName, "running", payload, "")
+}
+
+// paused closes the tool call's share of the lifecycle: the run is waiting on
+// the orchestrator, not finished, so it gets a status of its own that hosts
+// must not read as done.
+func (o *workflowObserver) paused(cp workflow.Checkpoint) {
+	o.emit(workflowTraceName, "paused", map[string]any{
+		"checkpoint_id": cp.ID,
+		"message":       cp.Message,
+		"phase":         cp.Phase,
+		"auto":          cp.Auto,
+	}, cp.Message)
 }
 
 func (o *workflowObserver) finish(res workflow.Result, err error) {
@@ -75,14 +138,41 @@ func (o *workflowObserver) handle(ev workflow.Event) {
 	switch ev.Kind {
 	case workflow.EventPhase:
 		o.emit(workflowProgressTraceName, "success", map[string]any{
-			"kind":  "phase",
-			"phase": ev.Phase,
+			"kind":    "phase",
+			"phase":   ev.Phase,
+			"detail":  ev.Detail,
+			"dynamic": ev.Dynamic,
 		}, ev.Phase)
 	case workflow.EventLog:
 		o.emit(workflowProgressTraceName, "success", map[string]any{
 			"kind":  "log",
 			"phase": ev.Phase,
 		}, ev.Message)
+	case workflow.EventCheckpoint:
+		if ev.Cached {
+			// A resumed run replaying an answered checkpoint does not pause;
+			// a "checkpoint" entry would make hosts show it as waiting.
+			o.emit(workflowProgressTraceName, "success", map[string]any{
+				"kind":  "log",
+				"phase": ev.Phase,
+			}, fmt.Sprintf("checkpoint %s replayed from the journal: %s", ev.CheckpointID, ev.Message))
+			return
+		}
+		o.emit(workflowProgressTraceName, "success", map[string]any{
+			"kind":          "checkpoint",
+			"phase":         ev.Phase,
+			"checkpoint_id": ev.CheckpointID,
+			"message":       ev.Message,
+			"auto":          ev.Auto,
+		}, ev.Output)
+	case workflow.EventResume:
+		if ev.Cached {
+			return
+		}
+		o.emit(workflowProgressTraceName, "success", map[string]any{
+			"kind":  "log",
+			"phase": ev.Phase,
+		}, fmt.Sprintf("checkpoint %s answered", ev.CheckpointID))
 	case workflow.EventAgentStart:
 		o.emitAgent(ev, "running", "")
 	case workflow.EventAgentDone:
@@ -96,7 +186,9 @@ func (o *workflowObserver) handle(ev workflow.Event) {
 // same shape delegation and Ultra produce — with the workflow fields hosts use
 // to group it under its phase.
 func (o *workflowObserver) emitAgent(ev workflow.Event, status, output string) {
-	if o.rt.toolCallback == nil {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.rt == nil || o.rt.toolCallback == nil {
 		return
 	}
 	args, _ := json.Marshal(map[string]any{
@@ -172,4 +264,61 @@ func encodeWorkflowValue(v any) string {
 		return fmt.Sprint(v)
 	}
 	return string(encoded)
+}
+
+// workflowCheckpointLogLines is how many of the run's latest log lines a
+// checkpoint result carries: enough to show what led up to the question
+// without replaying a long run's whole log on every pause.
+const workflowCheckpointLogLines = 20
+
+// renderWorkflowCheckpoint is what the model reads when the run pauses at a
+// checkpoint. The script is asking the orchestrator a question, so the
+// message and data come first, then just enough progress to judge them, then
+// the exact call that answers — a model that has to guess the continue
+// syntax will guess wrong.
+func renderWorkflowCheckpoint(runID string, meta workflow.Meta, cp workflow.Checkpoint, snap workflow.Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "<workflow_checkpoint name=%q run_id=%q checkpoint_id=%q phase=%q", meta.Name, runID, cp.ID, cp.Phase)
+	if cp.Auto {
+		b.WriteString(` auto="true"`)
+	}
+	b.WriteString(">\n")
+	fmt.Fprintf(&b, "<message>%s</message>\n", cp.Message)
+	if cp.Data != nil {
+		b.WriteString("<data>\n")
+		b.WriteString(truncate(encodeWorkflowValue(cp.Data), 24000))
+		b.WriteString("\n</data>\n")
+	}
+	fmt.Fprintf(&b, "<progress>%d agents · %d failed · %d replayed · %d tokens", snap.Agents, snap.Failed, snap.Cached, snap.Tokens)
+	if len(snap.Phases) > 0 {
+		fmt.Fprintf(&b, "; phases: %s", strings.Join(snap.Phases, " → "))
+	}
+	b.WriteString("</progress>\n")
+	if logs := snap.Logs; len(logs) > 0 {
+		if len(logs) > workflowCheckpointLogLines {
+			logs = logs[len(logs)-workflowCheckpointLogLines:]
+		}
+		b.WriteString("<log>\n")
+		for _, line := range logs {
+			b.WriteString(truncate(line, 300))
+			b.WriteByte('\n')
+		}
+		b.WriteString("</log>\n")
+	}
+	b.WriteString("</workflow_checkpoint>\n")
+	if cp.Auto {
+		fmt.Fprintf(&b, "The run finished a phase and is paused before the next one. Review what it did, then call the workflow tool with {\"continue_run_id\":%q} to go on into the next phase, or {\"continue_run_id\":%q,\"stop\":true} to end the run here.", runID, runID)
+	} else {
+		fmt.Fprintf(&b, "The run is paused and waiting for you. Read the data, then call the workflow tool with {\"continue_run_id\":%q,\"reply\":<value>} to continue (the script receives reply as checkpoint()'s return value), or {\"continue_run_id\":%q,\"stop\":true} to stop it.", runID, runID)
+	}
+	fmt.Fprintf(&b, " No agent runs while it waits; a run left paused for %s is stopped (its journal stays resumable with resume_from_run_id).", formatIdle(workflowIdleTimeout))
+	return b.String()
+}
+
+// formatIdle renders the idle timeout the way a person would say it.
+func formatIdle(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d minutes", int(d/time.Minute))
+	}
+	return d.String()
 }

@@ -190,9 +190,26 @@ func TestWorkflowToolHasDescriptionAndSchema(t *testing.T) {
 		t.Fatalf("schema does not parse: %v", err)
 	}
 	props, _ := schema["properties"].(map[string]any)
-	for _, key := range []string{"script", "script_path", "name", "args", "resume_from_run_id"} {
+	for _, key := range []string{"script", "script_path", "name", "args", "resume_from_run_id",
+		"continue_run_id", "reply", "stop", "checkpoint_id", "auto_checkpoint", "size"} {
 		if _, ok := props[key]; !ok {
 			t.Fatalf("schema is missing %q", key)
+		}
+	}
+	size, _ := props["size"].(map[string]any)
+	enum, _ := size["enum"].([]any)
+	if len(enum) != len(workflow.SizeTierNames) {
+		t.Fatalf("size enum %v does not list every tier %v", enum, workflow.SizeTierNames)
+	}
+	for i, tier := range workflow.SizeTierNames {
+		if enum[i] != tier {
+			t.Fatalf("size enum %v does not match the tier table %v", enum, workflow.SizeTierNames)
+		}
+	}
+	desc := builtinNativeToolDescs[workflowToolID]
+	for _, want := range []string{"checkpoint(", "continue_run_id", "stop"} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("tool description does not mention %q", want)
 		}
 	}
 }
@@ -200,12 +217,13 @@ func TestWorkflowToolHasDescriptionAndSchema(t *testing.T) {
 func TestFanOutToolsGrantsByModeAndDepth(t *testing.T) {
 	base := []string{"file-read", "bash"}
 
-	tools, prompt := fanOutTools(base, false, false, 0)
+	on := workflowGuidance{Enabled: true}
+	tools, prompt := fanOutTools(base, false, workflowGuidance{}, 0)
 	if len(tools) != 2 || prompt != "" {
 		t.Fatalf("no mode on should grant nothing: %v %q", tools, prompt)
 	}
 
-	tools, prompt = fanOutTools(base, false, true, 0)
+	tools, prompt = fanOutTools(base, false, on, 0)
 	if !contains(tools, workflowToolID) || contains(tools, ultraToolID) {
 		t.Fatalf("workflows alone should grant only the workflow tool: %v", tools)
 	}
@@ -213,7 +231,7 @@ func TestFanOutToolsGrantsByModeAndDepth(t *testing.T) {
 		t.Fatalf("wrong guidance: %q", prompt)
 	}
 
-	tools, prompt = fanOutTools(base, true, true, 0)
+	tools, prompt = fanOutTools(base, true, on, 0)
 	if !contains(tools, workflowToolID) || !contains(tools, ultraToolID) {
 		t.Fatalf("both modes should grant both tools: %v", tools)
 	}
@@ -222,13 +240,13 @@ func TestFanOutToolsGrantsByModeAndDepth(t *testing.T) {
 	}
 
 	// A sub-agent never orchestrates: that is what stops swarms of swarms.
-	tools, prompt = fanOutTools(base, true, true, 1)
+	tools, prompt = fanOutTools(base, true, workflowGuidance{Enabled: true, Ultracode: true}, 1)
 	if len(tools) != 2 || prompt != "" {
 		t.Fatalf("sub-agents must get neither tool: %v %q", tools, prompt)
 	}
 
 	// Granting twice must not duplicate an already allow-listed tool.
-	tools, _ = fanOutTools([]string{"workflow"}, false, true, 0)
+	tools, _ = fanOutTools([]string{"workflow"}, false, on, 0)
 	if len(tools) != 1 {
 		t.Fatalf("duplicate grant: %v", tools)
 	}
