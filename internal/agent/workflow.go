@@ -1191,14 +1191,14 @@ func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runE
 	}
 	mergeCtx := context.WithoutCancel(ctx)
 	if runErr != nil || ctx.Err() != nil {
-		ws.abandon(mergeCtx)
+		w.notePreserved(req, ws.abandon(mergeCtx))
 		return
 	}
 	rt := w.runtime()
 	if rt == nil {
 		// Nobody to snapshot for or report to: keep the work on its branch
 		// rather than merging it into a checkout no turn is watching.
-		ws.abandon(mergeCtx)
+		w.notePreserved(req, ws.abandon(mergeCtx))
 		return
 	}
 	// The merge writes into the main checkout, which the call's own
@@ -1213,6 +1213,26 @@ func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runE
 		w.mu.Lock()
 		w.notes = append(w.notes, note)
 		w.mu.Unlock()
+		rt.emitWorkflowMergeNote(req, note)
+	}
+}
+
+// notePreserved reports a worktree kept after its call failed or was cut
+// off. A member that edited files and then died leaves that work on a
+// branch; dropping abandon's record — as this path used to — left the branch
+// for nobody to find, while a merge conflict, the lesser problem, was
+// reported. It goes into the same <unmerged> block, and to the live log when
+// a turn is listening.
+func (w *workflowRunner) notePreserved(req workflow.Request, m *workspaceMerge) {
+	if m == nil {
+		return // nothing was changed; the worktree is already gone
+	}
+	note := fmt.Sprintf("%s: workspace %s — branch %q kept at %s%s",
+		req.Instance, m.Status, m.Branch, m.Path, mergeDetail(*m))
+	w.mu.Lock()
+	w.notes = append(w.notes, note)
+	w.mu.Unlock()
+	if rt := w.runtime(); rt != nil {
 		rt.emitWorkflowMergeNote(req, note)
 	}
 }
