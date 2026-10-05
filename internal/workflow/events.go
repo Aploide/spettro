@@ -3,8 +3,8 @@
 // A workflow is a small JavaScript program that decides — in ordinary control
 // flow, not by asking a model — which sub-agents run, in what order, and how
 // their results combine. The script gets a handful of globals (agent, parallel,
-// pipeline, phase, log, args, budget, workflow) and returns a value; everything
-// else is plain JS.
+// pipeline, phase, log, args, budget, size, workflow, checkpoint, plan,
+// untilDry) and returns a value; everything else is plain JS.
 //
 // The engine is deliberately decoupled from Spettro's agent package: it talks
 // to a Runner interface for sub-agent execution and pushes progress through an
@@ -31,6 +31,17 @@ const (
 	EventAgentError EventKind = "agent_error"
 	// EventFinish fires once the script settles, successfully or not.
 	EventFinish EventKind = "finish"
+	// EventCheckpoint fires when the run pauses at a checkpoint and hands the
+	// decision to the orchestrator: Message is the script's question, Output
+	// the checkpoint's data as JSON, CheckpointID its id. It fires when the
+	// pause is surfaced (every in-flight agent has finished), not when the
+	// script called checkpoint(). On a resumed run whose journal already holds
+	// the answer it fires with Cached set, immediately followed by the
+	// matching EventResume — the run does not actually pause.
+	EventCheckpoint EventKind = "checkpoint"
+	// EventResume fires when a checkpoint is answered; Output is the reply as
+	// JSON.
+	EventResume EventKind = "resume"
 )
 
 // Event is one progress notification. Hosts render these (TUI workflow panel,
@@ -60,8 +71,23 @@ type Event struct {
 	Cached bool
 	// Nested marks events produced by a workflow() sub-run.
 	Nested bool
+	// Detail is a phase's one-line description on EventPhase: the one passed
+	// to phase(title, {detail}), else the one declared in meta.phases.
+	Detail string
+	// Dynamic is set on EventPhase when the title was not declared in the
+	// calling script's meta.phases — a phase the script added at runtime, so
+	// hosts that drew the declared plan up front can mark it as new.
+	Dynamic bool
+	// CheckpointID identifies the checkpoint on EventCheckpoint/EventResume
+	// ("cp-1", "cp-2", … across the whole run).
+	CheckpointID string
+	// Auto marks an automatic phase-boundary checkpoint (Options.AutoCheckpoint)
+	// as opposed to one the script raised with checkpoint().
+	Auto bool
 }
 
-// Observer receives progress events. It is called from the engine's single
-// script goroutine, so implementations must not block for long.
+// Observer receives progress events. It is called from the script goroutines,
+// from agent dispatch goroutines and from the goroutine calling Handle.Next or
+// Handle.Resume, so implementations must be safe for concurrent use and must
+// not block for long.
 type Observer func(Event)

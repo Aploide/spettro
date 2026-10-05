@@ -30,8 +30,20 @@ type Journal struct {
 	hits   int
 }
 
-// JournalEntry is one recorded agent call.
+// Journal entry kinds. An entry written before kinds existed has none and is
+// an agent entry: agent calls were all a journal ever recorded.
+const (
+	JournalKindAgent      = "agent"
+	JournalKindCheckpoint = "checkpoint"
+)
+
+// JournalEntry is one recorded agent call or answered checkpoint.
+//
+// For a checkpoint entry, Index is the checkpoint's ordinal, Instance its id
+// ("cp-2"), Label the script's message, and Output the orchestrator's reply as
+// JSON.
 type JournalEntry struct {
+	Kind      string `json:"kind,omitempty"`
 	Key       string `json:"key"`
 	Index     int    `json:"index"`
 	Label     string `json:"label,omitempty"`
@@ -106,23 +118,49 @@ func (j *Journal) LoadCache(dir string) error {
 	return sc.Err()
 }
 
-// Take consumes a cached result for the given key, if one is left.
+func (e JournalEntry) kind() string {
+	if e.Kind == "" {
+		return JournalKindAgent
+	}
+	return e.Kind
+}
+
+// Take consumes a cached agent result for the given key, if one is left.
 func (j *Journal) Take(key string) (JournalEntry, bool) {
+	return j.take(key, JournalKindAgent)
+}
+
+// TakeCheckpoint consumes a cached checkpoint answer for the given key, if one
+// is left. Unlike Take it does not count toward Hits, which reports replayed
+// agents — the number a user reads as "work I did not pay for again".
+func (j *Journal) TakeCheckpoint(key string) (JournalEntry, bool) {
+	return j.take(key, JournalKindCheckpoint)
+}
+
+func (j *Journal) take(key, kind string) (JournalEntry, bool) {
 	if j == nil {
 		return JournalEntry{}, false
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	queue := j.cached[key]
-	if len(queue) == 0 {
-		return JournalEntry{}, false
+	// The two kinds hash disjoint inputs, so a key never holds both; matching
+	// the kind anyway keeps a corrupted or hand-edited journal from feeding an
+	// orchestrator's reply to an agent() call as its answer.
+	for i, e := range queue {
+		if e.kind() != kind {
+			continue
+		}
+		j.cached[key] = append(queue[:i:i], queue[i+1:]...)
+		if kind == JournalKindAgent {
+			j.hits++
+		}
+		return e, true
 	}
-	j.cached[key] = queue[1:]
-	j.hits++
-	return queue[0], true
+	return JournalEntry{}, false
 }
 
-// Hits is how many calls this run replayed from a previous journal.
+// Hits is how many agent calls this run replayed from a previous journal.
 func (j *Journal) Hits() int {
 	if j == nil {
 		return 0
@@ -175,6 +213,19 @@ func callKey(req Request) string {
 	for _, part := range []string{
 		req.Prompt, req.AgentType, req.Model, req.Effort, req.Isolation, string(req.Schema),
 	} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// checkpointKey hashes what identifies a checkpoint for replay: its message
+// and the canonical JSON of its data. Identical checkpoints (a loop asking the
+// same question) replay first-come-first-served like identical agent calls.
+// The leading kind tag keeps the key space disjoint from callKey's.
+func checkpointKey(message, dataJSON string) string {
+	h := sha256.New()
+	for _, part := range []string{JournalKindCheckpoint, message, dataJSON} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}

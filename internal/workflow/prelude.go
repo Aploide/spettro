@@ -1,9 +1,13 @@
 package workflow
 
-// prelude is evaluated before every workflow script. It defines the two
-// orchestration combinators in JavaScript — they are pure control flow over
-// agent(), so implementing them in Go would buy nothing and cost a callback
-// bridge — and removes the non-deterministic globals.
+// prelude is evaluated before every workflow script. It defines the
+// orchestration combinators — parallel, pipeline, plan, untilDry — in
+// JavaScript: they are pure control flow over agent(), so implementing them in
+// Go would buy nothing and cost a callback bridge. It also removes the
+// non-deterministic globals.
+//
+// The helpers read agent, log, size and budget as globals at call time; those
+// are bound right after the prelude runs.
 //
 // Date.now(), Math.random() and argless `new Date()` are disabled on purpose:
 // a workflow must replay identically when resumed from its journal, and a
@@ -77,6 +81,109 @@ const prelude = `
       });
       return chain.catch(function () { return null; });
     }));
+  };
+
+  var PLAN_SCHEMA = {
+    type: 'object',
+    properties: {
+      tasks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            label: { type: 'string' },
+            prompt: { type: 'string' },
+            phase: { type: 'string' }
+          },
+          required: ['label', 'prompt']
+        }
+      }
+    },
+    required: ['tasks']
+  };
+
+  // plan(prompt, opts?) — ask one agent for a work-list and return it as
+  // [{label, prompt, phase?, data?}]. This is how a script discovers its
+  // fan-out at runtime instead of hardcoding a list that goes stale.
+  //
+  // The list is capped at opts.max (default size.fanout), and a cap that bites
+  // is logged: a silently truncated work-list reads to the orchestrator as
+  // "that was everything". A failed planner yields [] — the caller decides
+  // whether an empty plan is an error.
+  globalThis.plan = async function plan(prompt, opts) {
+    opts = opts || {};
+    var agentOpts = { schema: PLAN_SCHEMA, label: opts.label || 'plan' };
+    ['phase', 'agentType', 'model', 'effort'].forEach(function (k) {
+      if (opts[k] !== undefined && opts[k] !== null) agentOpts[k] = opts[k];
+    });
+    var max = typeof opts.max === 'number' && opts.max > 0 ? Math.floor(opts.max) : size.fanout;
+    var out = await agent(String(prompt) +
+      '\n\nReturn the work-list as {"tasks": [{"label", "prompt", "phase"?}]}: one task per independent unit of work, ' +
+      'a short label, and a prompt complete enough for an agent that has seen nothing else.', agentOpts);
+    if (!out || !Array.isArray(out.tasks)) return [];
+    var tasks = out.tasks.filter(function (t) {
+      return t && typeof t.label === 'string' && typeof t.prompt === 'string' && t.prompt.trim() !== '';
+    }).map(function (t) {
+      var task = { label: t.label, prompt: t.prompt };
+      if (typeof t.phase === 'string' && t.phase !== '') task.phase = t.phase;
+      if (t.data !== undefined) task.data = t.data;
+      return task;
+    });
+    if (tasks.length > max) {
+      log('plan(): kept ' + max + ' of ' + tasks.length + ' tasks (' + (tasks.length - max) +
+        ' dropped by the cap of ' + max + ' — pass {max} to widen it)');
+      tasks = tasks.slice(0, max);
+    }
+    return tasks;
+  };
+
+  // untilDry(round, opts?) — loop-until-dry. round(roundIndex, seen) returns
+  // (a promise of) an array of items; items are deduped with opts.key
+  // (default JSON.stringify) against everything seen so far. The loop stops
+  // after opts.dry (default 2) consecutive rounds that found nothing new,
+  // after opts.maxRounds (default 8) rounds, or once the token budget is
+  // spent, and returns every fresh item in discovery order. Each round, and
+  // why the loop stopped, is logged.
+  globalThis.untilDry = async function untilDry(round, opts) {
+    if (typeof round !== 'function') {
+      throw new TypeError('untilDry() takes a round function: (roundIndex, seen) => items');
+    }
+    opts = opts || {};
+    var keyOf = typeof opts.key === 'function' ? opts.key : function (item) { return JSON.stringify(item); };
+    var dry = typeof opts.dry === 'number' && opts.dry > 0 ? Math.floor(opts.dry) : 2;
+    var maxRounds = typeof opts.maxRounds === 'number' && opts.maxRounds > 0 ? Math.floor(opts.maxRounds) : 8;
+    var seen = new Set();
+    var fresh = [];
+    var dryStreak = 0;
+    for (var i = 0; i < maxRounds; i++) {
+      if (budget.remaining() <= 0) {
+        log('untilDry(): stopped before round ' + (i + 1) + ': the token budget is spent');
+        return fresh;
+      }
+      var items = await round(i, fresh.slice());
+      if (items === undefined || items === null) items = [];
+      if (!Array.isArray(items)) {
+        throw new TypeError('untilDry(): round ' + (i + 1) + ' returned a ' + typeof items + ', not an array');
+      }
+      var added = 0;
+      items.forEach(function (item) {
+        if (item === undefined || item === null) return;
+        var key = keyOf(item);
+        if (typeof key !== 'string') key = JSON.stringify(key);
+        if (seen.has(key)) return;
+        seen.add(key);
+        fresh.push(item);
+        added++;
+      });
+      dryStreak = added === 0 ? dryStreak + 1 : 0;
+      log('untilDry(): round ' + (i + 1) + ': ' + added + ' new of ' + items.length + ' (' + fresh.length + ' total)');
+      if (dryStreak >= dry) {
+        log('untilDry(): dry after ' + (i + 1) + ' rounds');
+        return fresh;
+      }
+    }
+    log('untilDry(): stopped at the cap of ' + maxRounds + ' rounds before going dry — pass {maxRounds} to go further');
+    return fresh;
   };
 })();
 `
