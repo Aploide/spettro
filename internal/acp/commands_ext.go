@@ -2,7 +2,7 @@ package acp
 
 // Extended slash-command surface for ACP clients: the read-only, text-
 // resolvable commands the TUI offers (/stats, /tasks, /jobs, /hooks, /diff,
-// /plan, /permissions, /ultra, /ultracode, /workflows, /workflow-size) so GUI
+// /plan, /permissions, /ultra, /workflows, /workflow-size) so GUI
 // clients driving the binary reach feature parity with the interactive CLI
 // without reimplementing any of it. Everything here mirrors the TUI implementations in internal/tui
 // (model_commands_ext.go, model_stats.go, model_state.go).
@@ -55,9 +55,6 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 
 	case "/ultra":
 		return acpUltraText(cfg, fields), false, true
-
-	case "/ultracode":
-		return acpUltracodeText(s, fields), false, true
 
 	case "/workflow-size":
 		return acpWorkflowSizeText(cfg, fields[1:]), false, true
@@ -453,7 +450,15 @@ func gitPathDiff(cwd, path string) string {
 	return sb.String()
 }
 
-// acpUltraText mirrors /ultra: toggle the Ultra swarm mode.
+// acpUltraText mirrors /ultra: toggle the persisted ultracode standing mode
+// (cfg.Ultra), in which every substantive task runs as a dynamic workflow, as
+// if each message said "ultracode". No argument flips it.
+//
+// Turning it on under ask-first is allowed rather than refused: the setting
+// is shared with every session and a TUI alongside, and the user may simply
+// switch permission next. UltraActive keeps it suspended while ask-first is
+// selected (workflows cannot run with a prompt per action), so the reply says
+// so instead of claiming a mode that is not in effect.
 func acpUltraText(cfg *config.UserConfig, fields []string) string {
 	next := !cfg.Ultra
 	if len(fields) >= 2 {
@@ -466,11 +471,6 @@ func acpUltraText(cfg *config.UserConfig, fields []string) string {
 			return "usage: /ultra [on|off]"
 		}
 	}
-	// A swarm runs many sub-agents concurrently; per-action approval prompts
-	// would flood the user, so Ultra requires restricted or yolo.
-	if next && cfg.Permission == config.PermissionAskFirst {
-		return "ultra needs restricted or yolo permission — switch first with /permission"
-	}
 	if _, err := config.Update(func(c *config.UserConfig) error {
 		c.Ultra = next
 		return nil
@@ -478,40 +478,15 @@ func acpUltraText(cfg *config.UserConfig, fields []string) string {
 		return "error: " + err.Error()
 	}
 	cfg.Ultra = next
-	if next {
-		return "ultra on — hard tasks fan out across a swarm of parallel sub-agents"
+	if !next {
+		return "ultra off — workflows run only when a message says \"ultracode\""
 	}
-	return "ultra off"
-}
-
-// acpUltracodeText mirrors /ultracode: toggle the session's standing
-// ultracode opt-in. It is per session and not persisted, unlike /ultra: the
-// keyword in a message opts one turn in, and this opts in every turn of the
-// one conversation it was typed in — another editor window, or this one
-// after a restart, starts with it off. Caller holds the bridge mutex.
-func acpUltracodeText(s *acpSession, fields []string) string {
-	next := !s.ultracode
-	if len(fields) >= 2 {
-		switch strings.ToLower(strings.TrimSpace(fields[1])) {
-		case "on":
-			next = true
-		case "off":
-			next = false
-		case "status":
-			if s.ultracode {
-				return "ultracode: on for this session"
-			}
-			return "ultracode: off"
-		default:
-			return "usage: /ultracode [on|off]"
-		}
+	if !cfg.UltraActive() {
+		return "ultra on (saved) — suspended while permission is ask-first: " +
+			"workflows need restricted or yolo, switch with /permission"
 	}
-	s.ultracode = next
-	if next {
-		return "ultracode on for this session — every substantive task is orchestrated through workflows " +
-			"(understand → design → implement → review), as if each message said \"ultracode\". /ultracode off to stop."
-	}
-	return "ultracode off — workflows run only when a message asks for one"
+	return "ultra on — ultracode: substantive tasks run as dynamic workflows " +
+		"(understand → design → implement → review), as if each message said \"ultracode\""
 }
 
 // acpWorkflowSizeText mirrors /workflows size (TUI): with no argument it shows
@@ -641,7 +616,7 @@ func acpWorkflowsText(cwd string, fields []string) string {
 		saved := workflow.Discover(cwd)
 		if len(saved) == 0 {
 			return "no saved workflows — add scripts to .spettro/workflows/<name>.js or ~/.spettro/workflows/<name>.js.\n" +
-				"Write \"ultracode\" in a message to give the agent the workflow tool for that turn."
+				"Write \"ultracode\" in a message to give the agent the workflow tool for that turn, or /ultra on for every turn."
 		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "saved workflows (%d):\n", len(saved))

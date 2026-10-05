@@ -11,28 +11,32 @@ import (
 	"spettro/internal/provider"
 )
 
-// /ultracode is a per-session toggle: no argument flips it, on/off set it,
-// status reports it, and nothing is written to the shared config.
-func TestUltracodeCommand(t *testing.T) {
+// /ultra toggles the persisted ultracode switch (cfg.Ultra): no argument
+// flips it, on/off set it, and every change is saved so the other sessions
+// and a TUI alongside see it. It is not refused under ask-first; the reply
+// says the setting is saved but suspended until permission allows workflows.
+func TestUltraCommand(t *testing.T) {
 	s := testSession(t)
-	other := testSession(t)
-	cfg := config.UserConfig{}
+	cfg := config.UserConfig{Permission: config.PermissionRestricted}
 	pm := provider.NewManager()
 
 	steps := []struct {
+		perm  config.PermissionLevel
 		input string
 		want  bool
 		reply string
 	}{
-		{"/ultracode", true, "ultracode on for this session"},
-		{"/ultracode", false, "ultracode off"},
-		{"/ultracode on", true, "ultracode on"},
-		{"/ultracode status", true, "ultracode: on"},
-		{"/ultracode bogus", true, "usage: /ultracode [on|off]"},
-		{"/ultracode OFF", false, "ultracode off"},
-		{"/ultracode status", false, "ultracode: off"},
+		{config.PermissionRestricted, "/ultra", true, "ultra on — ultracode: substantive tasks run as dynamic workflows"},
+		{config.PermissionRestricted, "/ultra", false, "ultra off"},
+		{config.PermissionYOLO, "/ultra ON", true, "ultra on — ultracode"},
+		{config.PermissionYOLO, "/ultra bogus", true, "usage: /ultra [on|off]"},
+		{config.PermissionYOLO, "/ultra off", false, "ultra off"},
+		// Ask-first: saved, but reported as suspended rather than refused.
+		{config.PermissionAskFirst, "/ultra on", true, "suspended while permission is ask-first"},
+		{config.PermissionAskFirst, "/ultra", false, "ultra off"},
 	}
 	for _, st := range steps {
+		cfg.Permission = st.perm
 		reply, _, handled := handleExtendedSlashCommand(nil, s, &cfg, pm, st.input)
 		if !handled {
 			t.Fatalf("%q not handled", st.input)
@@ -40,15 +44,47 @@ func TestUltracodeCommand(t *testing.T) {
 		if !strings.Contains(reply, st.reply) {
 			t.Fatalf("%q reply = %q, want it to contain %q", st.input, reply, st.reply)
 		}
-		if s.ultracode != st.want {
-			t.Fatalf("after %q ultracode = %v, want %v", st.input, s.ultracode, st.want)
+		if strings.Contains(strings.ToLower(reply), "swarm") {
+			t.Fatalf("%q reply still mentions the swarm: %q", st.input, reply)
+		}
+		if cfg.Ultra != st.want {
+			t.Fatalf("after %q cfg.Ultra = %v, want %v", st.input, cfg.Ultra, st.want)
+		}
+		saved, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.Ultra != st.want {
+			t.Fatalf("after %q saved ultra = %v, want %v", st.input, saved.Ultra, st.want)
 		}
 	}
-	if other.ultracode {
-		t.Fatal("ultracode leaked into another session")
+}
+
+// /ultracode is gone: the persisted /ultra is the only switch, so the old
+// name is neither handled as a command nor advertised; typed, it falls
+// through to the model, where the "ultracode" keyword still opts the turn in.
+func TestUltracodeCommandRemoved(t *testing.T) {
+	s := testSession(t)
+	cfg := config.UserConfig{}
+	pm := provider.NewManager()
+	for _, in := range []string{"/ultracode", "/ultracode on"} {
+		if _, _, handled := handleSlashCommand(s, &cfg, pm, in); handled {
+			t.Fatalf("%q handled by the core commands", in)
+		}
+		if _, _, handled := handleExtendedSlashCommand(nil, s, &cfg, pm, in); handled {
+			t.Fatalf("%q handled by the extended commands", in)
+		}
 	}
-	if sharedSettings(&cfg) != sharedSettings(&config.UserConfig{}) {
-		t.Fatal("/ultracode must not change the settings shared with other sessions")
+	for _, c := range acpAvailableCommands {
+		if c.Name == "ultracode" {
+			t.Fatal("/ultracode is still advertised")
+		}
+	}
+	if strings.Contains(acpHelpText, "/ultracode") {
+		t.Fatal("help text still lists /ultracode")
+	}
+	if cfg.Ultra {
+		t.Fatal("/ultracode must not touch the /ultra setting")
 	}
 }
 
@@ -183,7 +219,7 @@ func TestWorkflowCommandsAdvertised(t *testing.T) {
 	for _, c := range acpAvailableCommands {
 		advertised[c.Name] = c
 	}
-	for _, name := range []string{"ultracode", "workflow-size", "workflows"} {
+	for _, name := range []string{"ultra", "workflow-size", "workflows"} {
 		if _, ok := advertised[name]; !ok {
 			t.Errorf("/%s is not advertised", name)
 		}
@@ -191,10 +227,17 @@ func TestWorkflowCommandsAdvertised(t *testing.T) {
 			t.Errorf("/%s is not reserved against skills", name)
 		}
 	}
+	// D2 wording: the ultra entry explains the mode as ultracode workflows.
+	if d := advertised["ultra"].Description; !strings.Contains(d, "ultracode") || strings.Contains(strings.ToLower(d), "swarm") {
+		t.Errorf("/ultra description = %q", d)
+	}
+	if strings.Contains(strings.ToLower(acpHelpText), "swarm") {
+		t.Error("help text still mentions the swarm")
+	}
 	if hint := advertised["workflows"].Input.Unstructured.Hint; !strings.Contains(hint, "size") || !strings.Contains(hint, "task") {
 		t.Errorf("/workflows hint = %q", hint)
 	}
-	for _, want := range []string{"/ultracode", "/workflow-size", "/workflows run <name> [json | task]"} {
+	for _, want := range []string{"/ultra [on|off]", "/workflow-size", "/workflows run <name> [json | task]"} {
 		if !strings.Contains(acpHelpText, want) {
 			t.Errorf("help text missing %q", want)
 		}

@@ -25,7 +25,7 @@ const (
 )
 
 // buildConfigOptions renders Spettro's live state (agent mode, model,
-// permission level, thinking level, Ultra, workflow size) as ACP session
+// permission level, thinking level, ultra, workflow size) as ACP session
 // configuration options — the mechanism modern clients (Zed, ...) use to draw
 // the mode/model/permission selectors in their editor toolbar. This supersedes the deprecated
 // SessionModeState "modes" field, which newer clients no longer render.
@@ -201,11 +201,19 @@ func thinkingConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 
 func ultraConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	// Ultra is a boolean config option so clients render an on/off toggle
-	// instead of a two-entry dropdown.
+	// instead of a two-entry dropdown. The toggle shows the saved setting;
+	// when it is on but ask-first suspends it (UltraActive), the description
+	// says so, since the toggle alone would claim a mode that is not in
+	// effect. Options are rebuilt after every permission change, so the note
+	// comes and goes with it.
+	desc := "Ultracode: substantive tasks run as dynamic workflows"
+	if cfg.Ultra && !cfg.UltraActive() {
+		desc += " (suspended under Ask first — workflows need Restricted or YOLO)"
+	}
 	return acpsdk.SessionConfigOption{Boolean: &acpsdk.SessionConfigOptionBoolean{
 		Id:           configIDUltra,
 		Name:         "Ultra",
-		Description:  new("Swarm of parallel sub-agents for hard tasks (works with any model)"),
+		Description:  new(desc),
 		CurrentValue: cfg.Ultra,
 		Type:         "boolean",
 	}}
@@ -338,11 +346,9 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 		default:
 			return acpsdk.NewInvalidParams(map[string]any{"error": "invalid ultra value: " + value})
 		}
-		// A swarm runs many sub-agents concurrently; per-action approval
-		// prompts would flood the client, so Ultra requires restricted or yolo.
-		if enabled && cfg.Permission == config.PermissionAskFirst {
-			return acpsdk.NewInvalidParams(map[string]any{"error": "ultra requires the Restricted or YOLO permission level — change Permission first"})
-		}
+		// Not refused under ask-first: the setting is saved and UltraActive
+		// keeps it suspended until Permission is Restricted or YOLO (the
+		// option's description says so), matching /ultra.
 		if _, err := config.Update(func(c *config.UserConfig) error {
 			c.Ultra = enabled
 			return nil

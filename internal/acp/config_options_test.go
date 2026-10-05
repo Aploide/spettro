@@ -223,10 +223,52 @@ func TestApplyConfigOption_Ultra(t *testing.T) {
 		t.Fatal("expected error for invalid ultra value")
 	}
 
-	// Ask-first permission must reject enabling (approval prompts would flood).
+	// Ask-first does not refuse the toggle: it is saved, and UltraActive
+	// keeps it suspended until the permission allows workflows.
+	cfg.Ultra = false
 	cfg.Permission = config.PermissionAskFirst
-	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err == nil {
-		t.Fatal("expected error enabling ultra under ask-first permission")
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err != nil {
+		t.Fatalf("apply ultra=true under ask-first: %v", err)
+	}
+	if !cfg.Ultra || cfg.UltraActive() {
+		t.Fatalf("under ask-first: Ultra=%v UltraActive=%v, want saved but suspended", cfg.Ultra, cfg.UltraActive())
+	}
+	if saved, err := config.Load(); err != nil || !saved.Ultra {
+		t.Fatalf("ultra not persisted under ask-first: %v %v", saved.Ultra, err)
+	}
+}
+
+// The ultra option describes the ultracode mode (never the removed swarm),
+// and says when ask-first suspends a saved "on", so the toggle does not
+// claim a mode that is not in effect.
+func TestUltraConfigOptionDescription(t *testing.T) {
+	desc := func(cfg config.UserConfig) string {
+		o := ultraConfigOption(&cfg)
+		if o.Boolean == nil || o.Boolean.Description == nil {
+			t.Fatal("ultra option has no description")
+		}
+		return *o.Boolean.Description
+	}
+	cases := []struct {
+		cfg       config.UserConfig
+		suspended bool
+	}{
+		{config.UserConfig{Ultra: false, Permission: config.PermissionAskFirst}, false},
+		{config.UserConfig{Ultra: true, Permission: config.PermissionRestricted}, false},
+		{config.UserConfig{Ultra: true, Permission: config.PermissionYOLO}, false},
+		{config.UserConfig{Ultra: true, Permission: config.PermissionAskFirst}, true},
+	}
+	for _, tc := range cases {
+		d := desc(tc.cfg)
+		if !strings.Contains(d, "Ultracode: substantive tasks run as dynamic workflows") {
+			t.Errorf("%+v: description = %q", tc.cfg, d)
+		}
+		if strings.Contains(strings.ToLower(d), "swarm") {
+			t.Errorf("%+v: description mentions the swarm: %q", tc.cfg, d)
+		}
+		if got := strings.Contains(d, "suspended"); got != tc.suspended {
+			t.Errorf("%+v: suspended note = %v, want %v (%q)", tc.cfg, got, tc.suspended, d)
+		}
 	}
 }
 

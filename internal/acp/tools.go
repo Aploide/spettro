@@ -83,7 +83,6 @@ var builtinToolKinds = map[string]acpsdk.ToolKind{
 	// Planning, delegation and the agent's own bookkeeping.
 	"todo-write":        acpsdk.ToolKindThink,
 	"agent":             acpsdk.ToolKindThink,
-	"ultra":             acpsdk.ToolKindThink,
 	"workflow":          acpsdk.ToolKindThink,
 	"workflow-progress": acpsdk.ToolKindThink,
 	"goal-complete":     acpsdk.ToolKindThink,
@@ -265,12 +264,6 @@ var builtinToolTitles = map[string]func(toolArgs) string{
 		}
 		return "List skills"
 	},
-	"ultra": func(a toolArgs) string {
-		if d := a.str("description"); d != "" {
-			return "ultra: " + d
-		}
-		return "ultra"
-	},
 	"goal-complete":      func(toolArgs) string { return "Goal complete" },
 	"enter-plan-mode":    func(toolArgs) string { return "Enter plan mode" },
 	"exit-plan-mode":     func(toolArgs) string { return "Exit plan mode" },
@@ -297,7 +290,7 @@ func toolCallTitle(tr agent.ToolTrace) string {
 	title := ""
 	switch tr.Name {
 	case "agent":
-		// "agent code#3: fix auth tests" tells which swarm or delegation
+		// "agent code#3: fix auth tests" tells which workflow or delegation
 		// member is doing what, instead of a raw JSON blob. The runtime
 		// also accepts "target" and "id" for the agent to run.
 		if name := args.firstStr("agent", "target", "id"); name != "" {
@@ -330,8 +323,8 @@ func toolCallTitle(tr agent.ToolTrace) string {
 	return finishTitle(tr, title)
 }
 
-// finishTitle attributes a card title to its swarm member and bounds it.
-// Swarm members carry instance names like "code#3"; prefixing them keeps
+// finishTitle attributes a card title to its workflow member and bounds it.
+// Workflow members carry instance names like "code#3"; prefixing them keeps
 // every tool call attributable when dozens of agents interleave.
 //
 // The title is escaped first (termtext.EscapeLines), as the TUI escapes a

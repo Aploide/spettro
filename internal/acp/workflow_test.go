@@ -38,8 +38,8 @@ func TestACPWorkflowTraceHandling(t *testing.T) {
 	turn := newSilentTurn()
 
 	// A trace with no workflow field is none of this code's business.
-	if turn.onWorkflowTool(wfTrace("agent", "running", `{"agent":"code#1","task":"x","swarm":true}`, "")) {
-		t.Fatal("an ultra swarm trace must not be claimed by the workflow path")
+	if turn.onWorkflowTool(wfTrace("agent", "running", `{"agent":"code","task":"x"}`, "")) {
+		t.Fatal("an ordinary delegation trace must not be claimed by the workflow path")
 	}
 	if turn.onWorkflowTool(wfTrace("bash", "running", `{"command":"ls"}`, "")) {
 		t.Fatal("an ordinary tool trace must not be claimed")

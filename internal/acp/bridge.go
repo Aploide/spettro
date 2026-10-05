@@ -112,12 +112,6 @@ type acpSession struct {
 	// the configured maximum, auto compaction pauses (mirrors the TUI) and
 	// the pre-turn guard falls back to asking the user instead.
 	autoCompactFailures int
-	// ultracode is the session's /ultracode toggle: while on, every turn
-	// behaves as if the user had written the keyword (see
-	// agent.LLMAgent.Ultracode). Per session and never persisted — it is a
-	// standing opt-in to spend heavily, which should not leak into another
-	// editor window or survive a restart.
-	ultracode bool
 	// workflowRuns holds this session's workflow runs paused at a
 	// checkpoint, so the model can continue one in a later turn; every
 	// agent the session builds shares it (see liveWorkflowRunsLocked).
@@ -678,9 +672,10 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	// running agent picks it up on its next approval decision.
 	s.permission = cfg.Permission
 	history := s.history
-	// The standing ultracode opt-in: the persisted /ultra toggle (suspended
-	// under ask-first by UltraActive) or the session's own toggle.
-	ultracode := cfg.UltraActive() || s.ultracode
+	// The standing ultracode opt-in is the persisted /ultra toggle, read
+	// through UltraActive so it stays suspended under ask-first, where the
+	// workflow tool cannot run.
+	ultracode := cfg.UltraActive()
 	workflowRuns := s.liveWorkflowRunsLocked()
 	// First turn after session/load: no structured history exists yet, so
 	// fall back to the flattened stored transcript (mirrors the TUI's resume).
@@ -956,8 +951,8 @@ func (b *bridge) SetSessionConfigOption(_ context.Context, params acpsdk.SetSess
 }
 
 // sharedSettings fingerprints the settings every session on the connection
-// shares. Only the mode (and the /ultracode toggle) is per session; the
-// model, permission level, thinking level, Ultra and the workflow size tier
+// shares. Only the mode is per session; the model, permission level,
+// thinking level, the /ultra (ultracode) switch and the workflow size tier
 // live in the user config, so a change made from one session applies to all
 // of them (and to a TUI running alongside).
 func sharedSettings(cfg *config.UserConfig) string {

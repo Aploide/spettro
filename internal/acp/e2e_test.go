@@ -64,6 +64,10 @@ func TestACPEndToEnd_HandshakeAndSessionLifecycle(t *testing.T) {
 	if !strings.Contains(jsonString(cmds), `"name":"skills"`) {
 		t.Errorf("commands not announced: %s", jsonString(cmds))
 	}
+	// /ultra is the one switch for the ultracode mode; /ultracode is gone.
+	if !strings.Contains(jsonString(cmds), `"name":"ultra"`) || strings.Contains(jsonString(cmds), `"name":"ultracode"`) {
+		t.Errorf("announced commands must carry /ultra and not /ultracode: %s", jsonString(cmds))
+	}
 
 	// Bad requests fail as invalid params, not as internal errors.
 	_, err = h.conn.NewSession(h.ctx(), acpsdk.NewSessionRequest{Cwd: "relative/dir", McpServers: []acpsdk.McpServer{}})
@@ -622,7 +626,7 @@ func TestACPEndToEnd_ConcurrentSessionsKeepTheirOwnContext(t *testing.T) {
 }
 
 // A shared setting changed from one session (permission, model, thinking,
-// Ultra live in the user config) reaches the selectors of every other
+// ultra live in the user config) reaches the selectors of every other
 // session on the connection.
 func TestACPEndToEnd_SharedSettingsReachOtherSessions(t *testing.T) {
 	llm := newScriptedLLM(t)
@@ -656,6 +660,59 @@ func TestACPEndToEnd_SharedSettingsReachOtherSessions(t *testing.T) {
 	}
 	if n := len(h.updates(b, "config_option_update")); n != before {
 		t.Errorf("a mode change in A sent B %d updates", n-before)
+	}
+}
+
+// /ultra under ask-first is saved, not refused: the reply and every
+// session's toggle say it is suspended, turns run without ultracode, and once
+// the permission allows workflows the next turn gets the workflow tool with
+// no keyword in the message.
+func TestACPEndToEnd_UltraSuspendedUnderAskFirst(t *testing.T) {
+	llm := newScriptedLLM(t, llmReply{content: "one"}, llmReply{content: "two"})
+	h := newACPHarness(t, llm, config.PermissionAskFirst)
+	h.initialize()
+	a := h.newSession("coding")
+	b := h.newSession("ask")
+
+	before := len(h.updates(b, "config_option_update"))
+	if r, err := h.prompt(a, "/ultra on"); err != nil || r.StopReason != acpsdk.StopReasonEndTurn {
+		t.Fatalf("/ultra on: %v %s", err, jsonString(r))
+	}
+	if got := answersOf(h, a); !strings.Contains(got, "suspended while permission is ask-first") {
+		t.Fatalf("/ultra reply = %q", got)
+	}
+	updates := h.updates(b, "config_option_update")
+	if len(updates) != before+1 {
+		t.Fatalf("session B got %d config updates, want 1", len(updates)-before)
+	}
+	if opts := jsonString(updates[len(updates)-1]["configOptions"]); !strings.Contains(opts, `"currentValue":true`) || !strings.Contains(opts, "suspended under Ask first") {
+		t.Errorf("B's ultra toggle not shown as on and suspended: %s", opts)
+	}
+
+	const workflowTool = `"name":"workflow"`
+	if _, err := h.prompt(a, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	bodies := llm.requestBodies()
+	if strings.Contains(bodies[len(bodies)-1], workflowTool) {
+		t.Fatal("a suspended ultra must not give the turn the workflow tool")
+	}
+
+	if _, err := h.conn.SetSessionConfigOption(h.ctx(), acpsdk.SetSessionConfigOptionRequest{
+		ValueId: &acpsdk.SetSessionConfigOptionValueId{SessionId: a, ConfigId: configIDPermission, Value: acpsdk.SessionConfigValueId(config.PermissionYOLO)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updates = h.updates(b, "config_option_update")
+	if opts := jsonString(updates[len(updates)-1]["configOptions"]); strings.Contains(opts, "suspended") {
+		t.Errorf("ultra still shown as suspended under yolo: %s", opts)
+	}
+	if _, err := h.prompt(a, "hello again"); err != nil {
+		t.Fatal(err)
+	}
+	bodies = llm.requestBodies()
+	if !strings.Contains(bodies[len(bodies)-1], workflowTool) {
+		t.Fatal("an active ultra must give the turn the workflow tool")
 	}
 }
 
