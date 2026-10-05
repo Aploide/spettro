@@ -119,6 +119,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			MaxOutputTokens: cfg.MaxOutputTokens,
 			Thinking:        configuredThinking(pm, cfg),
 			Ultra:           cfg.UltraActive(),
+			WorkflowSize:    cfg.WorkflowSizeTier(),
 			Messages:        history,
 			Manifest:        &manifest,
 			SandboxState:    sb,

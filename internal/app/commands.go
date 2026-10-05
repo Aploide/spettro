@@ -88,6 +88,7 @@ func (a *App) handleCommand(line string) error {
 			ModelName:       func() string { return a.cfg.ActiveModel },
 			CWD:             a.cwd,
 			Ultra:           a.cfg.UltraActive(),
+			WorkflowSize:    a.cfg.WorkflowSizeTier(),
 			ToolCallback:    a.printToolProgress,
 			ShellApproval:   a.promptShellApproval,
 			Manifest:        &a.manifest,
