@@ -314,9 +314,8 @@ func TestWorkspaceSlug(t *testing.T) {
 // before, and a live workflow is the first thing that merges from whichever
 // goroutine an agent happened to finish on.
 //
-// The barrier releases every member at once, which is the shape ultra never
-// produces: it creates its workspaces up front and merges them in a serial
-// loop.
+// The barrier releases every member at once, the worst case for the lock:
+// every merge lands at the same moment instead of one after another.
 func TestConcurrentWorktreeMergesAllLand(t *testing.T) {
 	ctx := context.Background()
 	repo := testGitRepo(t)

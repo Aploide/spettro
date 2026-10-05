@@ -77,9 +77,11 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 	// approval decision.
 	s.permission = cfg.Permission
 	history := s.history
+	// The standing ultracode opt-in: the persisted /ultra toggle (suspended
+	// under ask-first by UltraActive) or the session's own toggle.
+	ultracode := cfg.UltraActive() || s.ultracode
 	// Every firing shares the session's workflow state: a workflow paused at
 	// a checkpoint in one iteration can be continued in the next.
-	ultracode := s.ultracode
 	workflowRuns := s.liveWorkflowRunsLocked()
 	b.mu.Unlock()
 
@@ -148,7 +150,6 @@ func (b *bridge) runLoopCommand(ctx context.Context, s *acpSession, cfg *config.
 			MaxTokens:       cfg.TokenBudget,
 			MaxOutputTokens: cfg.MaxOutputTokens,
 			Thinking:        thinking,
-			Ultra:           cfg.UltraActive(),
 			Ultracode:       ultracode,
 			WorkflowSize:    cfg.WorkflowSizeTier(),
 			WorkflowRuns:    workflowRuns,

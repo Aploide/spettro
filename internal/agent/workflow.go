@@ -21,11 +21,13 @@ import (
 	"spettro/internal/workflow"
 )
 
-// Workflows: deterministic multi-agent orchestration. Where Ultra fans one
-// prompt template over a list of items, a workflow is a script that decides in
-// ordinary control flow — loops, conditionals, staged pipelines — which
-// sub-agents run and how their results combine. The model writes the script;
-// Spettro executes it exactly as written.
+// Workflows: deterministic multi-agent orchestration. A workflow is a script
+// that decides in ordinary control flow — loops, conditionals, staged
+// pipelines — which sub-agents run and how their results combine. The model
+// writes the script; Spettro executes it exactly as written. A flat fan-out of
+// one prompt over N items is just its simplest shape (parallel or pipeline).
+// Ultracode — the "ultracode" keyword in a message, or the host's /ultra
+// toggle — makes a workflow the default for every substantive task.
 
 const (
 	workflowToolID = "workflow"
@@ -33,7 +35,7 @@ const (
 	// standing-mode guidance included. It is a one-shot switch by default:
 	// injecting the tool and its guidance changes the system prompt, and
 	// paying that on every turn is only right for a user who asked for it,
-	// which is what the host's session toggle (LLMAgent.Ultracode) is for.
+	// which is what the host's /ultra toggle (LLMAgent.Ultracode) is for.
 	workflowKeyword = "ultracode"
 	// workflowMaxItems caps one parallel()/pipeline() call.
 	workflowMaxItems = 4096
@@ -157,8 +159,8 @@ func WorkflowActivationSpans(task string) [][2]int {
 }
 
 // The workflow guidance is appended to the system prompt when workflows are
-// active. Like the Ultra section it is fixed for the whole run, which keeps
-// the prompt-cache prefix byte-stable: workflowGuidance.prompt composes it
+// active. It is fixed for the whole run, which keeps the prompt-cache prefix
+// byte-stable: workflowGuidance.prompt composes it
 // once, in Run, from the consts below and the run's size tier, budget, paused
 // runs and the kind of agent it is for.
 //
@@ -193,7 +195,7 @@ const workflowJudgePolicy = `
 
 Availability is not an instruction to use it. Judge the task: if it is a single edit, a question, a quick fix, or anything you would finish in a few tool calls, just do the work and do not mention the tool. A workflow multiplies token usage — every agent() call is a full agent run — so it has to earn that.
 
-Use it when the work has structure worth encoding — fan out and verify, several independent attempts judged against each other, a sweep that loops until it stops finding things, a migration over a discovered work-list. For a single delegation use the agent tool; for a flat fan-out of one template over N items, ultra is still the simpler choice.
+Use it when the work has structure worth encoding — fan out and verify, several independent attempts judged against each other, a sweep that loops until it stops finding things, a migration over a discovered work-list. For a single delegation use the agent tool; a flat fan-out of one prompt over N items is just parallel() or pipeline() in a short script.
 
 If the user explicitly asked for a workflow and the task genuinely does not warrant one, do the work directly and say in one line why a script would not have helped. Do not manufacture phases to look busy.
 
@@ -438,8 +440,10 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 	if r.manifest == nil || r.providerMgr == nil {
 		return "", fmt.Errorf("workflow: sub-agent execution not configured")
 	}
-	// Same rule as Ultra: a workflow runs many sub-agents concurrently, and
-	// ask-first would turn that into a wall of approval prompts.
+	// A workflow runs many sub-agents concurrently, and ask-first would turn
+	// that into a wall of approval prompts. Hosts suspend the /ultra toggle
+	// under ask-first for the same reason; this is the backstop for a
+	// keyword turn, or a permission changed mid-run.
 	if r.perm() == config.PermissionAskFirst {
 		id := strings.TrimSpace(args.ContinueRunID)
 		if id != "" && args.Stop {
@@ -1313,13 +1317,14 @@ func (r *toolRuntime) emitWorkflowMergeNote(req workflow.Request, note string) {
 	})
 }
 
-// runWithRetries retries transient provider failures per agent, matching the
-// Ultra backoff so a rate-limited swarm behaves the same either way.
+// runWithRetries retries transient provider failures per agent with
+// exponential backoff, so one rate-limited member does not fail the stage
+// it belongs to.
 func (w *workflowRunner) runWithRetries(ctx context.Context, sub LLMAgent, prompt string) (workflow.Response, error) {
 	var lastErr error
 	for attempt := range workflowMaxAttempts {
 		if attempt > 0 {
-			if !ultraSleep(ctx, workflowRetryBase<<(attempt-1)) {
+			if !sleepCtx(ctx, workflowRetryBase<<(attempt-1)) {
 				return workflow.Response{}, ctx.Err()
 			}
 		}
@@ -1335,14 +1340,14 @@ func (w *workflowRunner) runWithRetries(ctx context.Context, sub LLMAgent, promp
 	return workflow.Response{}, lastErr
 }
 
-// resolveWorkflowTarget picks the manifest agent an agent() call runs as. It
-// mirrors the ultra rule — workers and subagents only, never an orchestrator —
-// so a script cannot smuggle a nested swarm in through a phase.
+// resolveWorkflowTarget picks the manifest agent an agent() call runs as:
+// workers and subagents only, never an orchestrator (resolveFanOutTarget), so
+// a script cannot smuggle a nested fan-out in through a phase.
 //
 // The default is the general-purpose subagent rather than the code worker:
 // workflow stages are usually "read this and judge it", and a specialist would
 // be the wrong shape for most of them. Manifests predating that agent fall
-// back to whatever ultra would have picked.
+// back to resolveFanOutTarget's default, the code worker.
 func resolveWorkflowTarget(manifest *config.AgentManifest, agentType string) (config.AgentSpec, error) {
 	target := strings.TrimSpace(agentType)
 	if target == "" {
@@ -1351,9 +1356,9 @@ func resolveWorkflowTarget(manifest *config.AgentManifest, agentType string) (co
 			target = ""
 		}
 	}
-	spec, err := resolveUltraTarget(manifest, target)
+	spec, err := resolveFanOutTarget(manifest, target)
 	if err != nil {
-		return spec, fmt.Errorf("workflow: %s", strings.TrimPrefix(err.Error(), "ultra: "))
+		return spec, fmt.Errorf("workflow: %w", err)
 	}
 	return spec, nil
 }

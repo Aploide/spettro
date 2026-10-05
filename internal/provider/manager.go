@@ -776,7 +776,7 @@ var (
 
 // ErrRateLimitRetriesExhausted wraps the 429 Manager.Send returns once it
 // has stopped waiting out a rate limit. Neither the agent loop nor the
-// ultra and workflow sub-agent runners retry it again (see ClassifyRetry):
+// workflow sub-agent runner retries it again (see ClassifyRetry):
 // the waiting already happened here.
 var ErrRateLimitRetriesExhausted = errors.New("rate limited: gave up retrying")
 

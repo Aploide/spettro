@@ -678,7 +678,9 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	// running agent picks it up on its next approval decision.
 	s.permission = cfg.Permission
 	history := s.history
-	ultracode := s.ultracode
+	// The standing ultracode opt-in: the persisted /ultra toggle (suspended
+	// under ask-first by UltraActive) or the session's own toggle.
+	ultracode := cfg.UltraActive() || s.ultracode
 	workflowRuns := s.liveWorkflowRunsLocked()
 	// First turn after session/load: no structured history exists yet, so
 	// fall back to the flattened stored transcript (mirrors the TUI's resume).
@@ -717,7 +719,6 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		MaxTokens:       cfg.TokenBudget,
 		MaxOutputTokens: cfg.MaxOutputTokens,
 		Thinking:        thinking,
-		Ultra:           cfg.UltraActive(),
 		Ultracode:       ultracode,
 		WorkflowSize:    cfg.WorkflowSizeTier(),
 		WorkflowRuns:    workflowRuns,

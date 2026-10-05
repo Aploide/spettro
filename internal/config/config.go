@@ -67,10 +67,14 @@ type UserConfig struct {
 	// environment variable overrides it for one process. Anthropic and the
 	// official OpenAI provider always use fantasy.
 	ProviderWire string `json:"provider_wire,omitempty"`
-	// Ultra, when true, injects the ultra fan-out tool and swarm guidance into
-	// the top-level agent so it decomposes hard tasks across many parallel
-	// sub-agents. Works with any model (sub-agents inherit the active model).
-	// Toggleable at runtime via /ultra (TUI) or the "ultra" ACP config option.
+	// Ultra is the standing ultracode switch: while on, every turn behaves
+	// as if the message said "ultracode" — the top-level agent gets the
+	// workflow tool and is told to orchestrate substantive work through
+	// dynamic workflows by default, with runs pre-approved. Hosts pass
+	// UltraActive() as agent.LLMAgent.Ultracode. Toggleable at runtime via
+	// /ultra (TUI) or the "ultra" ACP config option. The field and its json
+	// key predate workflows (it once enabled a swarm tool, since removed) and
+	// stay as they were so existing configs keep their setting.
 	Ultra bool `json:"ultra,omitempty"`
 	// WorkflowSize is the size guideline for workflow runs: "small",
 	// "medium", "large" or "unbounded" (empty means medium). It scales how
@@ -130,9 +134,11 @@ type UserConfig struct {
 	GoalIterationSteps  int `json:"goal_iteration_steps,omitempty"`   // LLM steps per goal iteration before yielding to the outer loop; 0 → default (25)
 }
 
-// UltraActive reports whether Ultra mode should actually engage: the toggle is
-// on AND the permission level allows unattended sub-agents. A swarm under
-// ask-first would flood the user with per-action approval prompts, so Ultra is
+// UltraActive reports whether the /ultra toggle should actually engage: it
+// is on AND the permission level allows unattended sub-agents. The workflow
+// tool refuses to run under ask-first (its sub-agents would flood the user
+// with per-action approval prompts), so standing guidance to run a workflow
+// for every task would only cost a failed call per turn; the toggle is
 // suspended (not cleared) while ask-first is selected.
 func (c UserConfig) UltraActive() bool {
 	return c.Ultra && c.Permission != PermissionAskFirst

@@ -165,19 +165,17 @@ type LLMAgent struct {
 	// provider manager's per-model default.
 	MaxOutputTokens int
 	Thinking        provider.ThinkingLevel
-	// Ultra, when true on a top-level run, injects the ultra fan-out tool and
-	// swarm guidance so the agent decomposes hard tasks across many parallel
-	// sub-agents. Read once at run construction (the system prompt must stay
-	// byte-stable per run); ignored on sub-agents.
-	Ultra bool
 	// Workflows forces the workflow tool on for this run. Hosts normally leave
 	// it false and let the "ultracode" keyword in the task turn it on;
 	// ignored on sub-agents, which never orchestrate.
 	Workflows bool
-	// Ultracode is the host's session-wide ultracode toggle: every turn
-	// behaves as if the user had written the keyword — the workflow tool is
-	// granted, runs are pre-approved, and the agent is told to orchestrate
-	// substantive work through workflows by default. Ignored on sub-agents.
+	// Ultracode is the host's standing ultracode toggle — /ultra, persisted
+	// as config.UserConfig.Ultra, which hosts pass as cfg.UltraActive() so
+	// it stays suspended under ask-first. Every turn then behaves as if the
+	// user had written the keyword: the workflow tool is granted, runs are
+	// pre-approved, and the agent is told to orchestrate substantive work
+	// through workflows by default. Read once at run construction (the
+	// system prompt must stay byte-stable per run); ignored on sub-agents.
 	Ultracode bool
 	// WorkflowSize is the configured size tier for workflow runs
 	// (config.WorkflowSizeTier); empty means medium.
@@ -234,7 +232,7 @@ type LLMAgent struct {
 	DelegationDepth int
 	ParentAgentID   string
 	// InstanceID, when set, replaces Spec.ID as the agent identity on emitted
-	// ToolTraces (e.g. "code#3" for the third member of an Ultra swarm) so
+	// ToolTraces (e.g. "general-purpose#3" for a workflow's third member) so
 	// hosts can tell concurrent same-type sub-agents apart. Prompt, tool, and
 	// handoff resolution still use Spec.ID.
 	InstanceID string
@@ -264,32 +262,24 @@ type LLMAgent struct {
 	Steering *SteeringQueue
 }
 
-// fanOutTools grants the orchestration tools a run is entitled to and returns
-// the guidance to append to its system prompt.
+// fanOutTools grants the orchestration tool a run is entitled to — the
+// workflow tool, when workflows apply to the turn — and returns the guidance
+// to append to its system prompt.
 //
-// Both tools bypass the manifest's PrimaryOnly/handoff gating by design — any
-// top-level agent on any model may fan out — and neither is ever granted to a
-// sub-agent, which is what stops a swarm from spawning swarms. The same rule
-// keeps the ultracode guidance off sub-agents: a workflow member told to run
-// a workflow for every task would only be told to do something it cannot.
-func fanOutTools(allowed []string, ultra bool, workflows workflowGuidance, depth int) ([]string, string) {
-	if depth != 0 {
+// The tool bypasses the manifest's PrimaryOnly/handoff gating by design — any
+// top-level agent on any model may fan out — and is never granted to a
+// sub-agent, which is what stops a workflow member from starting workflows
+// of its own. The same rule keeps the ultracode guidance off sub-agents: a
+// member told to run a workflow for every task would only be told to do
+// something it cannot.
+func fanOutTools(allowed []string, workflows workflowGuidance, depth int) ([]string, string) {
+	if depth != 0 || !workflows.Enabled {
 		return allowed, ""
 	}
-	prompt := ""
-	if ultra {
-		if !slices.Contains(allowed, ultraToolID) {
-			allowed = append(allowed, ultraToolID)
-		}
-		prompt += ultraPromptSection
+	if !slices.Contains(allowed, workflowToolID) {
+		allowed = append(allowed, workflowToolID)
 	}
-	if workflows.Enabled {
-		if !slices.Contains(allowed, workflowToolID) {
-			allowed = append(allowed, workflowToolID)
-		}
-		prompt += workflows.prompt()
-	}
-	return allowed, prompt
+	return allowed, workflows.prompt()
 }
 
 // workflowGuidanceFor decides, once per run, how workflows apply to task:
@@ -297,7 +287,7 @@ func fanOutTools(allowed []string, ultra bool, workflows workflowGuidance, depth
 // and the size and budget it states. allowed is the run's resolved tool list,
 // which says what kind of agent the guidance is for.
 //
-// Ultracode — the keyword in the message, or the host's session toggle —
+// Ultracode — the keyword in the message, or the host's /ultra toggle —
 // selects the standing-mode guidance; a plain-English request ("use a
 // workflow") gets the judge-it guidance. A "+500k" budget directive is only
 // honoured on a turn that has workflows at all: elsewhere "+500k" is just
@@ -369,7 +359,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	var fanOutPrompt string
 	// Workflows are a per-turn opt-in: the user writes the keyword or asks in
-	// their own words, or the host's ultracode toggle stands in for the
+	// their own words, or the host's /ultra toggle stands in for the
 	// keyword on every turn; a run paused at a checkpoint also keeps the tool
 	// for as long as it waits. Detection lives in the runner so every surface
 	// (TUI, ACP, goal, Telegram, headless) honours it without each one
@@ -378,7 +368,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	if a.DelegationDepth != 0 {
 		workflows = workflowGuidance{}
 	}
-	allowedTools, fanOutPrompt = fanOutTools(allowedTools, a.Ultra, workflows, a.DelegationDepth)
+	allowedTools, fanOutPrompt = fanOutTools(allowedTools, workflows, a.DelegationDepth)
 	systemPrompt += fanOutPrompt
 	logToolCalls := true
 	maxWorkers := 4
@@ -399,7 +389,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt: systemPrompt,
 		UserTask:     task,
-		// The keyword (or the ultracode toggle) is a standing yes; a
+		// The keyword (or the /ultra toggle) is a standing yes; a
 		// plain-English request is not, and the workflow tool confirms before
 		// spending on the latter.
 		WorkflowPreapproved: a.Workflows || workflows.Ultracode,

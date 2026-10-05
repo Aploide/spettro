@@ -54,7 +54,7 @@ func TestResolveWorkflowTarget(t *testing.T) {
 	if spec, err = resolveWorkflowTarget(&manifest, "review"); err != nil || spec.ID != "review" {
 		t.Fatalf("explicit target = %q, %v", spec.ID, err)
 	}
-	// An orchestrator would let a script nest a swarm inside a phase.
+	// An orchestrator would let a script nest a fan-out inside a phase.
 	if _, err := resolveWorkflowTarget(&manifest, "coding"); err == nil {
 		t.Fatal("want an error for an orchestrator target")
 	}
@@ -217,36 +217,30 @@ func TestWorkflowToolHasDescriptionAndSchema(t *testing.T) {
 func TestFanOutToolsGrantsByModeAndDepth(t *testing.T) {
 	base := []string{"file-read", "bash"}
 
-	on := workflowGuidance{Enabled: true}
-	tools, prompt := fanOutTools(base, false, workflowGuidance{}, 0)
+	tools, prompt := fanOutTools(base, workflowGuidance{}, 0)
 	if len(tools) != 2 || prompt != "" {
-		t.Fatalf("no mode on should grant nothing: %v %q", tools, prompt)
+		t.Fatalf("workflows off should grant nothing: %v %q", tools, prompt)
 	}
 
-	tools, prompt = fanOutTools(base, false, on, 0)
-	if !contains(tools, workflowToolID) || contains(tools, ultraToolID) {
-		t.Fatalf("workflows alone should grant only the workflow tool: %v", tools)
-	}
-	if !strings.Contains(prompt, "WORKFLOWS are available") || strings.Contains(prompt, "ULTRA MODE") {
-		t.Fatalf("wrong guidance: %q", prompt)
-	}
-
-	tools, prompt = fanOutTools(base, true, on, 0)
-	if !contains(tools, workflowToolID) || !contains(tools, ultraToolID) {
-		t.Fatalf("both modes should grant both tools: %v", tools)
-	}
-	if !strings.Contains(prompt, "ULTRA MODE") || !strings.Contains(prompt, "WORKFLOWS are available") {
-		t.Fatalf("both guidance sections expected: %q", prompt)
+	for _, g := range []workflowGuidance{{Enabled: true}, {Enabled: true, Ultracode: true}} {
+		tools, prompt = fanOutTools(base, g, 0)
+		if !contains(tools, workflowToolID) || len(tools) != 3 {
+			t.Fatalf("workflows should grant the workflow tool and nothing else: %v", tools)
+		}
+		if !strings.Contains(prompt, "WORKFLOWS are available") {
+			t.Fatalf("wrong guidance: %q", prompt)
+		}
 	}
 
-	// A sub-agent never orchestrates: that is what stops swarms of swarms.
-	tools, prompt = fanOutTools(base, true, workflowGuidance{Enabled: true, Ultracode: true}, 1)
+	// A sub-agent never orchestrates: that is what stops a workflow member
+	// from starting workflows of its own.
+	tools, prompt = fanOutTools(base, workflowGuidance{Enabled: true, Ultracode: true}, 1)
 	if len(tools) != 2 || prompt != "" {
-		t.Fatalf("sub-agents must get neither tool: %v %q", tools, prompt)
+		t.Fatalf("sub-agents must get neither the tool nor the guidance: %v %q", tools, prompt)
 	}
 
 	// Granting twice must not duplicate an already allow-listed tool.
-	tools, _ = fanOutTools([]string{"workflow"}, false, on, 0)
+	tools, _ = fanOutTools([]string{"workflow"}, workflowGuidance{Enabled: true}, 0)
 	if len(tools) != 1 {
 		t.Fatalf("duplicate grant: %v", tools)
 	}

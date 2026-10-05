@@ -196,7 +196,7 @@ func runHeadless(cwd, bindHost string, port int, sandboxOverrides sandbox.Overri
 					MaxTokens:       cfg.TokenBudget,
 					MaxOutputTokens: cfg.MaxOutputTokens,
 					Thinking:        configuredThinking(pm, cfg),
-					Ultra:           cfg.UltraActive(),
+					Ultracode:       cfg.UltraActive(),
 					WorkflowSize:    cfg.WorkflowSizeTier(),
 					Manifest:        &manifest,
 					SandboxState:    sb,

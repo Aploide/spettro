@@ -22,10 +22,11 @@ const defaultToolSchema = `{"additionalProperties":true,"type":"object"}`
 const (
 	// maxEncoderLanes bounds the conversations cached at once. The main
 	// agent and all of its sub-agents share one Manager, so one encoder:
-	// ultra runs up to 32 sub-agents and workflow up to 16 next to the main
-	// agent. With fewer lanes than conversations taking turns, every lane
-	// is recycled before its conversation's next step and every step
-	// encodes the whole history again.
+	// a workflow runs up to 16 sub-agents at a time next to the main agent
+	// (and its delegations); 48 leaves headroom above that. With fewer
+	// lanes than conversations taking turns, every lane is recycled before
+	// its conversation's next step and every step encodes the whole history
+	// again.
 	maxEncoderLanes = 48
 	// encoderCacheLimit bounds the cached encodings of all lanes together
 	// (a lane holds about its conversation's size in JSON). Past it, lanes

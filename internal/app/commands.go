@@ -87,7 +87,7 @@ func (a *App) handleCommand(line string) error {
 			ProviderName:    func() string { return a.cfg.ActiveProvider },
 			ModelName:       func() string { return a.cfg.ActiveModel },
 			CWD:             a.cwd,
-			Ultra:           a.cfg.UltraActive(),
+			Ultracode:       a.cfg.UltraActive(),
 			WorkflowSize:    a.cfg.WorkflowSizeTier(),
 			ToolCallback:    a.printToolProgress,
 			ShellApproval:   a.promptShellApproval,

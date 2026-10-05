@@ -215,12 +215,12 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		MaxTokens:       m.cfg.TokenBudget,
 		MaxOutputTokens: m.cfg.MaxOutputTokens,
 		Thinking:        pm.ConfiguredThinking(providerName, modelName, m.cfg.ThinkingLevel),
-		Ultra:           m.cfg.UltraActive(),
-		// Workflows: the session's standing ultracode opt-in (suspended
-		// while the run would be ask-first, where workflows cannot run), the
-		// configured size tier, and the registry paused runs live in between
-		// turns.
-		Ultracode:       m.ultracodeActiveFor(spec),
+		// Workflows: the standing ultracode opt-in — /ultra, persisted and
+		// suspended under ask-first by UltraActive, or the session's own
+		// toggle (suspended while the run would be ask-first, where
+		// workflows cannot run) — the configured size tier, and the
+		// registry paused runs live in between turns.
+		Ultracode:       m.cfg.UltraActive() || m.ultracodeActiveFor(spec),
 		WorkflowSize:    m.cfg.WorkflowSizeTier(),
 		WorkflowRuns:    m.workflowRuns,
 		RequiredReads:   mentionedFiles,

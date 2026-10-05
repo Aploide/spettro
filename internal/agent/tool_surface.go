@@ -54,11 +54,10 @@ var coreTools = map[string]bool{
 	"tool-search":   true,
 	"comment":       true,
 	"goal-complete": true,
-	// Plan mode and the fan-out tools come with prompt sections of their own
+	// Plan mode and the workflow tool come with prompt sections of their own
 	// that tell the model to use them.
 	"enter-plan-mode": true,
 	"exit-plan-mode":  true,
-	ultraToolID:       true,
 	workflowToolID:    true,
 	// The MCP resource tools are how an agent granted them reaches the
 	// configured servers at all; mcp-auth is rare and stays deferred.

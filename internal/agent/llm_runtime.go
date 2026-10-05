@@ -67,7 +67,7 @@ type ShellApprovalRequest struct {
 	// Diff. Its texts are dropped for very large files (see FileChange).
 	Change *FileChange
 	// AgentID is the agent asking, under the same name its ToolTraces carry
-	// (the per-instance name such as "code#3" for swarm members, else the
+	// (the per-instance name such as "code#3" for workflow members, else the
 	// agent's ID). Sub-agents run in parallel with the main agent and with
 	// each other, so a host that shows the request on a tool call card uses
 	// it to pick a card of the asking agent. Set by toolRuntime.askApproval.
@@ -249,7 +249,7 @@ type toolLoopConfig struct {
 }
 
 // traceID is the agent identity stamped on emitted ToolTraces: the unique
-// per-instance name when one was assigned (swarm members), else the spec ID.
+// per-instance name when one was assigned (workflow members), else the spec ID.
 func (r *toolRuntime) traceID() string {
 	if r.instanceID != "" {
 		return r.instanceID
@@ -1318,8 +1318,8 @@ func formatTokens(n int) string {
 // tools that only read (files, the index, the web, job/spool output) plus
 // `agent`, whose sub-agent spawns are Spettro's parallelism feature and were
 // always fanned out together (see agentBudget in parallelExec). Everything
-// else — file writes and edits, shell and pty commands, worktree and swarm
-// tools, and any tool not listed here (MCP included) — runs alone, in the
+// else — file writes and edits, shell and pty commands, worktree and
+// workflow tools, and any tool not listed here (MCP included) — runs alone, in the
 // model's order. The lsp tool's lookups are concurrent too, but not its
 // restart (see concurrentCall).
 var concurrentTools = map[string]bool{
@@ -1626,7 +1626,7 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 
 // defaultToolTimeoutSec is a tool's execution limit in seconds when the call
 // does not ask for its own: the manifest's timeout_sec, else 45s, with longer
-// floors for swarms/workflows and for shell tools in goal mode. tool is the
+// floors for workflows and for shell tools in goal mode. tool is the
 // call's identity, whose manifest entry sets the limit; the floors follow the
 // built-in that carries the call out (toolRuntime.builtinFor), so an
 // unfolded shell-exec gets the shell's and a tool of the operator's own
@@ -1637,10 +1637,10 @@ func (r *toolRuntime) defaultToolTimeoutSec(tool string) int {
 		timeoutSec = spec.TimeoutSec
 	}
 	builtin := r.builtinFor(tool)
-	if builtin == "ultra" || builtin == "workflow" {
-		// A swarm — or a workflow script, which may run several rounds of them
-		// — is many full sub-agent turns; the per-tool default (and any
-		// manifest value tuned for single tools) would kill it mid-flight.
+	if builtin == "workflow" {
+		// A workflow script is many full sub-agent turns, often in several
+		// rounds; the per-tool default (and any manifest value tuned for
+		// single tools) would kill it mid-flight.
 		timeoutSec = 7200
 	}
 	if r.goalMode {
@@ -2081,8 +2081,6 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			merge = &m
 		}
 		return marshalSubagentResult(target, result, merge), nil
-	case "ultra":
-		return r.runUltra(ctx, call.Args)
 	case "workflow":
 		return r.runWorkflow(ctx, call.Args)
 	default:

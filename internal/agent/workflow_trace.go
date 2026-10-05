@@ -197,7 +197,7 @@ func (o *workflowObserver) handle(ev workflow.Event) {
 }
 
 // emitAgent publishes a workflow member's lifecycle as an "agent" trace — the
-// same shape delegation and Ultra produce — with the workflow fields hosts use
+// same shape delegation produces — with the workflow fields hosts use
 // to group it under its phase.
 func (o *workflowObserver) emitAgent(ev workflow.Event, status, output string) {
 	o.mu.RLock()

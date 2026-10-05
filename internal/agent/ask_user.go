@@ -137,8 +137,8 @@ var ErrNoUserAvailable = errors.New("no user is available to answer")
 const noUserAvailableResult = "No user is available to answer. Proceed using your best judgment and state your assumptions."
 
 // askUserReachable reports whether a question from this runtime can reach a
-// person at all. Goal mode is autonomous by contract, and a sub-agent (swarm
-// member, workflow worker, delegated agent) must not stall its parent — or
+// person at all. Goal mode is autonomous by contract, and a sub-agent
+// (workflow member, delegated agent) must not stall its parent — or
 // dozens of siblings — on a prompt the user never asked for.
 func (r *toolRuntime) askUserReachable() bool {
 	return r.askUser != nil && !r.goalMode && r.delegationDepth == 0

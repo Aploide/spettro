@@ -108,7 +108,7 @@ func (r *toolRuntime) canonicalName(name string) string {
 // name itself for a built-in, the canonical tool for a retired name (alias
 // or unfolded), and "" for a tool of the operator's own, which no built-in
 // carries out. Behaviour keyed on a tool's name (the goal-mode shell timeout,
-// the long timeout of ultra and workflow) goes by this, not by the identity.
+// the long timeout of workflow) goes by this, not by the identity.
 func (r *toolRuntime) builtinFor(name string) string {
 	if r.userToolNamed(name) {
 		return ""

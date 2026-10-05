@@ -172,7 +172,7 @@ func tailTrimHistory(history string, maxBytes int) string {
 
 func isMajorOperationTool(name string) bool {
 	switch name {
-	case "file-write", "file-edit", "bash", "agent", "ultra", "enter-worktree", "exit-worktree":
+	case "file-write", "file-edit", "bash", "agent", "enter-worktree", "exit-worktree":
 		return true
 	default:
 		return false

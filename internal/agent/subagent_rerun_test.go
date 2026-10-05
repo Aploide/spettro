@@ -11,7 +11,7 @@ import (
 	"spettro/internal/provider"
 )
 
-// ultra and workflow re-run a sub-agent after a transient provider failure,
+// A workflow re-runs a sub-agent after a transient provider failure,
 // but not after a rate limit the provider manager already waited out: that
 // would restart the work from scratch only to queue on the same bucket.
 func TestRerunSubagentAfter(t *testing.T) {
