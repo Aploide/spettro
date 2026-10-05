@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,7 +172,48 @@ func Validate(script string) (Meta, error) {
 // script's first line, so reported error line numbers match what the author
 // wrote.
 func compileScript(name, script string) (*goja.Program, error) {
-	return goja.Compile(name+".workflow.js", "(async function(){"+stripMetaExport(script)+"\n})()", true)
+	prog, err := goja.Compile(name+".workflow.js", "(async function(){"+stripMetaExport(script)+"\n})()", true)
+	if err != nil {
+		return nil, fmt.Errorf("%w%s", err, syntaxContext(script, err))
+	}
+	return prog, nil
+}
+
+// syntaxErrLineRe pulls the position out of goja's "Line 99:215 …" message.
+var syntaxErrLineRe = regexp.MustCompile(`Line (\d+):(\d+)`)
+
+// syntaxContext quotes the line a syntax error points at, and names the
+// commonest cause when it fits.
+//
+// A position alone is not enough for the model that wrote the script: a live
+// run spent several turns counting columns on a 300-character prompt line to
+// find that a backtick quoted inside a template literal had closed it. Seeing
+// the line, with a marker at the column, makes that a one-step fix.
+func syntaxContext(script string, err error) string {
+	m := syntaxErrLineRe.FindStringSubmatch(err.Error())
+	if m == nil {
+		return ""
+	}
+	lineNo, _ := strconv.Atoi(m[1])
+	col, _ := strconv.Atoi(m[2])
+	lines := strings.Split(script, "\n")
+	if lineNo < 1 || lineNo > len(lines) {
+		return ""
+	}
+	line := lines[lineNo-1]
+	if lineNo == 1 {
+		col -= len("(async function(){")
+	}
+	// Show a window around the column so a long prompt line stays readable.
+	start := max(0, min(col-1, len(line))-60)
+	end := min(len(line), start+120)
+	snippet := line[start:end]
+	caret := max(0, min(col-1, len(line))-start)
+	out := fmt.Sprintf("\n  line %d: %s\n  %s^", lineNo, snippet, strings.Repeat(" ", len(fmt.Sprintf("line %d: ", lineNo))+caret))
+	if strings.Count(line, "`") > 2 {
+		out += "\n  hint: this line has more than two backticks — a backtick inside a template literal ends it; escape it as \\` or quote with ' instead"
+	}
+	return out
 }
 
 // Run executes a workflow script to completion.

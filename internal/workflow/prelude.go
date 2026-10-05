@@ -58,12 +58,39 @@ const prelude = `
     return Promise.all(thunks.map(function (thunk, i) {
       try {
         var value = typeof thunk === 'function' ? thunk(i) : thunk;
-        return Promise.resolve(value).catch(function () { return null; });
+        return Promise.resolve(value).catch(function (err) {
+          dropped('parallel(): item ' + i, err);
+          return null;
+        });
       } catch (err) {
+        dropped('parallel(): item ' + i, err);
         return Promise.resolve(null);
       }
     }));
   };
+
+  // dropped reports a branch that threw and was turned into null. Dropping
+  // it keeps the other results, which is the point — but doing it silently
+  // left the orchestrating model staring at a null with no idea which line of
+  // its script threw, and live runs rewrote whole scripts to find out. A
+  // failed agent() resolves to null without throwing, so only script errors
+  // land here.
+  function dropped(where, err) {
+    var msg = err && err.message ? String(err.message) : String(err);
+    if (err && err.name && msg.indexOf(err.name) !== 0) {
+      msg = err.name + ': ' + msg;
+    }
+    var at = err && err.stack ? String(err.stack).split('\n').filter(function (l) {
+      return l.indexOf('.workflow.js:') >= 0;
+    })[0] : '';
+    if (at) {
+      msg += ' (' + at.trim().replace(/^at\s+/, '') + ')';
+    }
+    if (msg.length > 300) {
+      msg = msg.slice(0, 300) + '…';
+    }
+    log(where + ' dropped to null: ' + msg);
+  }
 
   // pipeline(items, ...stages) — push each item through every stage
   // independently. There is no barrier between stages: item A can be in stage
@@ -76,10 +103,14 @@ const prelude = `
     var stages = Array.prototype.slice.call(arguments, 1);
     return Promise.all(items.map(function (item, i) {
       var chain = Promise.resolve(item);
-      stages.forEach(function (stage) {
-        chain = chain.then(function (prev) { return stage(prev, item, i); });
+      var at = 0;
+      stages.forEach(function (stage, s) {
+        chain = chain.then(function (prev) { at = s; return stage(prev, item, i); });
       });
-      return chain.catch(function () { return null; });
+      return chain.catch(function (err) {
+        dropped('pipeline(): item ' + i + ' at stage ' + (at + 1), err);
+        return null;
+      });
     }));
   };
 

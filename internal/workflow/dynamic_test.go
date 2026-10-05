@@ -464,3 +464,49 @@ func TestParseMetaStillAcceptsLiterals(t *testing.T) {
 		t.Fatalf("meta = %+v, err = %v", m, err)
 	}
 }
+
+// TestDroppedBranchesAreLogged: parallel() and pipeline() keep turning a
+// throwing branch into null, but say so — with the error and the script line —
+// instead of leaving the orchestrator to guess why a result is missing.
+func TestDroppedBranchesAreLogged(t *testing.T) {
+	runner := &fakeRunner{fn: func(req Request) (Response, error) { return Response{Text: "ok"}, nil }}
+	script := "export const meta = {name:'d', description:'d'}\n" + `
+const a = await parallel([() => agent('x'), () => { throw new Error('boom') }])
+const b = await pipeline([1, 2], v => v, (v) => { if (v === 2) { return undefined.findings } return v })
+return [a[1], b[0], b[1]]
+`
+	res, err := Run(context.Background(), script, Options{Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := strings.Join(res.Logs, "\n")
+	for _, want := range []string{"parallel(): item 1 dropped to null: Error: boom", "pipeline(): item 1 at stage 2 dropped to null: TypeError", "d.workflow.js:"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs missing %q:\n%s", want, logs)
+		}
+	}
+	got, _ := res.Value.([]any)
+	if len(got) != 3 || got[0] != nil || got[1] != int64(1) || got[2] != nil {
+		t.Errorf("value = %#v, want [nil 1 nil]", res.Value)
+	}
+}
+
+// TestSyntaxErrorQuotesTheLine: a script that does not parse reports the
+// offending line with a marker, and the nested-backtick hint when the line
+// has the tell-tale extra backticks.
+func TestSyntaxErrorQuotesTheLine(t *testing.T) {
+	script := "export const meta = {name:'s', description:'d'}\n" +
+		"const x = 1\n" +
+		"const p = await agent(`run ` + \"`go run`\" + ` now`)\n" +
+		"const q = agent(`then `go vet` please`)\n"
+	_, err := Validate(script)
+	if err == nil {
+		t.Fatal("expected a syntax error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"line 4:", "go vet", "^", "hint: this line has more than two backticks"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q:\n%s", want, msg)
+		}
+	}
+}
