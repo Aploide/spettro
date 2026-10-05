@@ -671,6 +671,7 @@ func (r *toolRuntime) driveWorkflow(ctx context.Context, live *liveWorkflow) (st
 			return "", fmt.Errorf("%w (run %s; transcript at %s)", step.Err, live.runID, live.dir)
 		}
 		out := renderWorkflowResult(live.runID, live.dir, live.origin, live.meta, *step.Result, live.runner.mergeNotes())
+		out += workflowSizeNote(live.observer.sizeTier, live.observer.sizeAgents, step.Result.Agents-step.Result.Cached)
 		if live.savedAt != "" {
 			out += fmt.Sprintf("\nSaved as a reusable workflow at %s — it can be re-run with /workflows run %s.", live.savedAt, live.saveName)
 			out += workflowSaveLint(live.meta, live.script)
@@ -685,7 +686,24 @@ func (r *toolRuntime) driveWorkflow(ctx context.Context, live *liveWorkflow) (st
 	// through the run once the call is over, and nothing runs while paused.
 	live.bind(nil)
 	live.release()
-	return renderWorkflowCheckpoint(live.runID, live.meta, cp, live.handle.Snapshot(), live.registry.isTurnLocal()), nil
+	snap := live.handle.Snapshot()
+	return renderWorkflowCheckpoint(live.runID, live.meta, cp, snap, live.registry.isTurnLocal()) +
+		workflowSizeNote(live.observer.sizeTier, live.observer.sizeAgents, snap.Agents-snap.Cached), nil
+}
+
+// workflowSizeNote tells the model, in the result it is about to read, that a
+// run went past the size guideline and by how much.
+//
+// The guideline is in the system prompt, but a prompt line read once before
+// the script is written is easy to lose: a live run on the small tier (~5
+// agents) started fifteen, and the engine's one-off log line about it sat
+// among a dozen others. Feedback on the run itself is what changes the next
+// script. Replayed agents cost nothing, so only the ones that ran count.
+func workflowSizeNote(tier string, guideline, ran int) string {
+	if guideline <= 0 || ran <= guideline {
+		return ""
+	}
+	return fmt.Sprintf("\nSize: this run started %d agents against the %s guideline of ~%d. Size the next workflow within it — fewer, broader agents, or plan(…, {max}) — unless the task plainly needs more.", ran, tier, guideline)
 }
 
 // continueWorkflow answers (or stops) a run paused at a checkpoint. There is

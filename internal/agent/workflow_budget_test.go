@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseBudgetDirective(t *testing.T) {
 	cases := []struct {
@@ -41,5 +44,20 @@ func TestBudgetDirectiveSpans(t *testing.T) {
 	}
 	if BudgetDirectiveSpans("no directive here") != nil {
 		t.Fatal("expected no spans")
+	}
+}
+
+func TestWorkflowSizeNote(t *testing.T) {
+	if got := workflowSizeNote("small", 5, 5); got != "" {
+		t.Errorf("at the guideline: %q, want no note", got)
+	}
+	if got := workflowSizeNote("unbounded", 0, 400); got != "" {
+		t.Errorf("unbounded tier: %q, want no note", got)
+	}
+	got := workflowSizeNote("small", 5, 15)
+	for _, want := range []string{"started 15 agents", "small guideline of ~5", "plan("} {
+		if !strings.Contains(got, want) {
+			t.Errorf("note %q missing %q", got, want)
+		}
 	}
 }
