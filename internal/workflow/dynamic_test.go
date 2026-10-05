@@ -428,15 +428,19 @@ func TestParseMetaHasNoBuiltins(t *testing.T) {
 	}
 }
 
+// Headers that would loop, or backtrack for ever inside a regular expression
+// (which the watchdog's interrupt cannot stop: regexp2 runs in native Go), are
+// rejected by the literal check before anything is evaluated.
 func TestParseMetaStopsLoopingHeaders(t *testing.T) {
 	cases := map[string]string{
-		"loop in an IIFE":  `export const meta = {name: (()=>{for(;;);})(), description: 'y'}`,
-		"loop in a getter": `export const meta = {name: 'x', description: 'y', get trap() { for(;;); }}`,
-		"getter in params": `export const meta = {name: 'x', description: 'y', params: {get p() { for(;;); }}}`,
+		"loop in an IIFE":    `export const meta = {name: (()=>{for(;;);})(), description: 'y'}`,
+		"loop in a getter":   `export const meta = {name: 'x', description: 'y', get trap() { for(;;); }}`,
+		"getter in params":   `export const meta = {name: 'x', description: 'y', params: {get p() { for(;;); }}}`,
+		"backtracking regex": `export const meta = {name: /^(a+)+(?=b)/.test('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac') ? 'x' : 'y', description: 'y'}`,
+		"regex in an array":  `export const meta = {name: 'x', description: 'y', p: [/^(a+)+(?=b)/]}`,
 	}
 	for label, script := range cases {
 		t.Run(label, func(t *testing.T) {
-			start := time.Now()
 			done := make(chan error, 1)
 			go func() {
 				_, err := ParseMeta(script)
@@ -444,16 +448,41 @@ func TestParseMetaStopsLoopingHeaders(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if err == nil || !strings.Contains(err.Error(), "longer than 1s") {
+				if err == nil || !strings.Contains(err.Error(), "pure object literal") {
 					t.Fatalf("err = %v", err)
 				}
-				if elapsed := time.Since(start); elapsed > 3*time.Second {
-					t.Fatalf("took %v", elapsed)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("ParseMeta hung on a looping header")
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("ParseMeta evaluated a header that is not a literal")
 			}
 		})
+	}
+}
+
+// Every form of code is turned away by the literal check, before evaluation.
+func TestParseMetaRejectsCode(t *testing.T) {
+	cases := map[string]string{
+		"shorthand":         `{name: 'x', description: 'y', z}`,
+		"spread":            `{name: 'x', description: 'y', ...{a: 1}}`,
+		"computed key":      `{name: 'x', description: 'y', ['k']: 1}`,
+		"method":            `{name: 'x', description: 'y', m() {}}`,
+		"setter":            `{name: 'x', description: 'y', set s(v) {}}`,
+		"member access":     `{name: 'x'.constructor.name, description: 'y'}`,
+		"conditional":       `{name: true ? 'x' : 'y', description: 'y'}`,
+		"tagged template":   "{name: String.raw`x`, description: 'y'}",
+		"other operator":    `{name: 'x', description: 'y', n: 2 * 3}`,
+		"typeof":            `{name: 'x', description: 'y', n: typeof 1}`,
+		"negated string":    `{name: 'x', description: 'y', n: -'1'}`,
+		"new":               `{name: 'x', description: 'y', n: new Array(3)}`,
+		"sequence":          `{name: ('a', 'x'), description: 'y'}`,
+		"assignment":        `{name: x = 'x', description: 'y'}`,
+		"function value":    `{name: 'x', description: 'y', f: function () {}}`,
+		"concat with a var": `{name: 'x' + suffix, description: 'y'}`,
+	}
+	for label, literal := range cases {
+		_, err := ParseMeta("export const meta = " + literal)
+		if err == nil || !strings.Contains(err.Error(), "pure object literal") {
+			t.Fatalf("%s: err = %v, want a pure-literal rejection", label, err)
+		}
 	}
 }
 
@@ -461,6 +490,11 @@ func TestParseMetaStopsLoopingHeaders(t *testing.T) {
 func TestParseMetaStillAcceptsLiterals(t *testing.T) {
 	m, err := ParseMeta("export const meta = {name: 'x', description: 'multi ' + 'line', n: -1, t: `plain`, u: undefined, f: NaN}")
 	if err != nil || m.Description != "multi line" {
+		t.Fatalf("meta = %+v, err = %v", m, err)
+	}
+	m, err = ParseMeta("export const meta = {'name': \"x\", 3: +2.5, description: `a` + 'b' + \"c\", i: -Infinity, z: null, b: [true, false, , {}], " +
+		"params: {n: {type: 'number', default: -1}, s: 'a string'}}")
+	if err != nil || m.Name != "x" || m.Description != "abc" || len(m.Params) != 2 || m.Params[0].Default != int64(-1) {
 		t.Fatalf("meta = %+v, err = %v", m, err)
 	}
 }

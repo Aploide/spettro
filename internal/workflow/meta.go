@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja/ast"
+	"github.com/dop251/goja/parser"
+	"github.com/dop251/goja/token"
 )
 
 // Meta is the header every workflow script must declare:
@@ -109,17 +112,18 @@ var errMetaTimeout = errors.New("evaluating it took longer than 1s — it is cod
 
 // ParseMeta extracts and evaluates the meta header without running the script.
 //
-// The object literal is evaluated in a throwaway runtime stripped of every
-// global a script could reach through, so a header that calls a function or
-// reads a variable fails here rather than silently doing work before the user
-// has seen what the workflow is.
+// The header is first parsed and checked node by node (checkLiteral): only
+// literals get through, so a header that calls a function, reads a variable,
+// or carries a getter or a regular expression fails here rather than silently
+// doing work before the user has seen what the workflow is.
 //
-// Stripping the globals cannot close every door: a literal's own prototype
-// chain still leads somewhere ('x'.constructor is String), and an arrow
-// function in a header is code no matter what it can reach. None of that
-// reaches anything outside this throwaway runtime, so what is left to bound is
-// time — hence the watchdog, which also covers getters run while the result is
-// read back.
+// The check is what actually holds the line. Evaluating the literal afterwards
+// happens in a throwaway runtime stripped of every global, under a watchdog,
+// but neither is a defence on its own: a literal's own prototype chain still
+// leads somewhere ('x'.constructor is String), and the watchdog's interrupt
+// cannot stop a regular expression backtracking inside native Go code — a
+// header like /^(a+)+(?=b)/.test('aaaa…c') ran for as long as it liked. They
+// stay as a backstop.
 func ParseMeta(script string) (m Meta, err error) {
 	decl := indexMetaDecl(script)
 	if decl < 0 {
@@ -133,6 +137,9 @@ func ParseMeta(script string) (m Meta, err error) {
 	literal, err := objectLiteral(body)
 	if err != nil {
 		return Meta{}, fmt.Errorf("malformed meta declaration: %w", err)
+	}
+	if err := checkLiteral(literal); err != nil {
+		return Meta{}, fmt.Errorf("meta must be a pure object literal (no variables, calls, or spreads): %w", err)
 	}
 
 	vm := goja.New()
@@ -410,6 +417,120 @@ func paramNames(params []ParamMeta) string {
 func stringField(m map[string]any, key string) string {
 	s, _ := m[key].(string)
 	return strings.TrimSpace(s)
+}
+
+// checkLiteral parses a header's object literal and walks it, accepting only
+// what a static description needs: object and array literals with plain keys,
+// strings, numbers, booleans, null, the value identifiers undefined, NaN and
+// Infinity, template literals without substitutions, a unary sign on a
+// number, and + between accepted values (long descriptions are written as
+// concatenated strings).
+//
+// Everything else is code — calls, identifiers, getters and methods, computed
+// keys, spreads, regular expressions, functions — and is rejected before
+// anything is evaluated, which is what lets ParseMeta run on untrusted files
+// (a cloned repository's saved workflows) without a hostile header being able
+// to hang it.
+func checkLiteral(literal string) error {
+	prog, err := parser.ParseFile(nil, "", "("+literal+")", 0)
+	if err != nil {
+		return err
+	}
+	if len(prog.Body) != 1 {
+		return fmt.Errorf("expected a single object literal")
+	}
+	stmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		return fmt.Errorf("expected a single object literal")
+	}
+	return checkLiteralNode(stmt.Expression, 0)
+}
+
+// maxLiteralDepth bounds nesting so a pathological header cannot exhaust the
+// stack of the walk itself.
+const maxLiteralDepth = 64
+
+func checkLiteralNode(e ast.Expression, depth int) error {
+	if depth > maxLiteralDepth {
+		return fmt.Errorf("nested more than %d levels deep", maxLiteralDepth)
+	}
+	switch n := e.(type) {
+	case *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral:
+		return nil
+	case *ast.Identifier:
+		// The three non-configurable global values: names, but not variables.
+		switch n.Name {
+		case "undefined", "NaN", "Infinity":
+			return nil
+		}
+		return fmt.Errorf("%q is a variable", n.Name)
+	case *ast.TemplateLiteral:
+		if n.Tag != nil || len(n.Expressions) > 0 {
+			return fmt.Errorf("a template literal with ${…} substitutions is code")
+		}
+		return nil
+	case *ast.UnaryExpression:
+		if n.Postfix || (n.Operator != token.MINUS && n.Operator != token.PLUS) {
+			return fmt.Errorf("operator %s is code", n.Operator)
+		}
+		switch operand := n.Operand.(type) {
+		case *ast.NumberLiteral:
+			return nil
+		case *ast.Identifier:
+			if operand.Name == "Infinity" {
+				return nil
+			}
+		}
+		return fmt.Errorf("a sign applies only to a number")
+	case *ast.BinaryExpression:
+		if n.Operator != token.PLUS {
+			return fmt.Errorf("operator %s is code", n.Operator)
+		}
+		if err := checkLiteralNode(n.Left, depth+1); err != nil {
+			return err
+		}
+		return checkLiteralNode(n.Right, depth+1)
+	case *ast.ArrayLiteral:
+		for _, v := range n.Value {
+			if v == nil { // a hole: [1, , 2]
+				continue
+			}
+			if err := checkLiteralNode(v, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.ObjectLiteral:
+		for _, prop := range n.Value {
+			keyed, ok := prop.(*ast.PropertyKeyed)
+			if !ok {
+				// A shorthand {name} reads a variable; a spread runs code.
+				return fmt.Errorf("only `key: value` properties are allowed")
+			}
+			if keyed.Kind != ast.PropertyKindValue {
+				return fmt.Errorf("a %s property is code", keyed.Kind)
+			}
+			if keyed.Computed {
+				return fmt.Errorf("a computed [key] is code")
+			}
+			switch keyed.Key.(type) {
+			case *ast.StringLiteral, *ast.NumberLiteral:
+			default:
+				return fmt.Errorf("a property key must be a name, string or number")
+			}
+			if err := checkLiteralNode(keyed.Value, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.RegExpLiteral:
+		return fmt.Errorf("a regular expression is code")
+	case *ast.CallExpression, *ast.NewExpression:
+		return fmt.Errorf("a call is code")
+	case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral, *ast.ClassLiteral:
+		return fmt.Errorf("a function is code")
+	}
+	return fmt.Errorf("a %s is not a literal", strings.TrimPrefix(fmt.Sprintf("%T", e), "*ast."))
 }
 
 // objectLiteral returns the `{...}` starting the given text, brace-matched
