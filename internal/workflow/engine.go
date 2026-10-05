@@ -869,7 +869,7 @@ func (r *vmRun) jsAgent(ctx context.Context) func(goja.FunctionCall) goja.Value 
 				case err != nil:
 					resolve(goja.Null())
 				case req.Schema != nil:
-					resolve(vm.ToValue(value))
+					resolve(r.plainValue(value))
 				default:
 					resolve(vm.ToValue(text))
 				}
@@ -1051,7 +1051,7 @@ func (r *vmRun) jsWorkflow(ctx context.Context) func(goja.FunctionCall) goja.Val
 					reject(vm.NewGoError(err))
 					return
 				}
-				resolve(vm.ToValue(value))
+				resolve(r.plainValue(value))
 			})
 		}()
 		return vm.ToValue(promise)

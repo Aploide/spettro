@@ -40,6 +40,24 @@ const prelude = `
     }
   });
 
+  // canonicalKey is untilDry's default dedupe key: JSON with every object's
+  // keys sorted, recursively. Plain JSON.stringify follows insertion order, so
+  // two copies of one finding built in a different order — two agents
+  // answering the same schema — would count as two findings and the loop
+  // would never go dry. The builtins are captured here so a script that
+  // reassigns JSON or Object cannot change how items are keyed.
+  var stringify = JSON.stringify;
+  var objectKeys = Object.keys;
+  var isArray = Array.isArray;
+  function canonicalKey(item) {
+    return stringify(item, function (k, v) {
+      if (v === null || typeof v !== 'object' || isArray(v)) return v;
+      var sorted = {};
+      objectKeys(v).sort().forEach(function (key) { sorted[key] = v[key]; });
+      return sorted;
+    });
+  }
+
   function checkItems(kind, items) {
     if (!Array.isArray(items)) {
       throw new TypeError(kind + '() takes an array as its first argument');
@@ -170,7 +188,7 @@ const prelude = `
 
   // untilDry(round, opts?) — loop-until-dry. round(roundIndex, seen) returns
   // (a promise of) an array of items; items are deduped with opts.key
-  // (default JSON.stringify) against everything seen so far. The loop stops
+  // (default: JSON with sorted keys) against everything seen so far. The loop stops
   // after opts.dry (default 2) consecutive rounds that found nothing new,
   // after opts.maxRounds (default 8) rounds, or once the token budget is
   // spent, and returns every fresh item in discovery order. Each round, and
@@ -180,7 +198,7 @@ const prelude = `
       throw new TypeError('untilDry() takes a round function: (roundIndex, seen) => items');
     }
     opts = opts || {};
-    var keyOf = typeof opts.key === 'function' ? opts.key : function (item) { return JSON.stringify(item); };
+    var keyOf = typeof opts.key === 'function' ? opts.key : canonicalKey;
     var dry = typeof opts.dry === 'number' && opts.dry > 0 ? Math.floor(opts.dry) : 2;
     var maxRounds = typeof opts.maxRounds === 'number' && opts.maxRounds > 0 ? Math.floor(opts.maxRounds) : 8;
     var seen = new Set();
@@ -200,7 +218,7 @@ const prelude = `
       items.forEach(function (item) {
         if (item === undefined || item === null) return;
         var key = keyOf(item);
-        if (typeof key !== 'string') key = JSON.stringify(key);
+        if (typeof key !== 'string') key = canonicalKey(key);
         if (seen.has(key)) return;
         seen.add(key);
         fresh.push(item);

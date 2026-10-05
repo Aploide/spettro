@@ -544,3 +544,70 @@ func TestSyntaxErrorQuotesTheLine(t *testing.T) {
 		}
 	}
 }
+
+// structuredRunner answers every prompt with the same many-keyed finding, so a
+// key order that follows Go's map iteration shows up as differing strings.
+func structuredRunner() *fakeRunner {
+	return &fakeRunner{fn: func(req Request) (Response, error) {
+		return Response{Text: `{"findings":[{"file":"a.go","line":3,"kind":"bug","note":"n","sev":"high","id":"f1","rule":"r","col":7}]}`, Tokens: 1}, nil
+	}}
+}
+
+const findingsSchema = `{type: 'object', properties: {findings: {type: 'array'}}, required: ['findings']}`
+
+// A schema-carrying agent() resolves to plain JS values whose keys come out in
+// one order every time, so anything order-sensitive — a stringified key, a
+// prompt built from the value — is reproducible.
+func TestStructuredResultsHaveAStableKeyOrder(t *testing.T) {
+	res := run(t, `
+		const seen = new Set()
+		for (let i = 0; i < 30; i++) {
+			const out = await agent('find ' + i, {schema: `+findingsSchema+`})
+			seen.add(JSON.stringify(out.findings[0]))
+		}
+		return seen.size
+	`, Options{Runner: structuredRunner()})
+	if res.Value != int64(1) {
+		t.Fatalf("one finding stringified %v different ways", res.Value)
+	}
+}
+
+// A workflow() child's result reaches the parent the same way.
+func TestSubWorkflowResultsHaveAStableKeyOrder(t *testing.T) {
+	child := "export const meta = {name: 'child', description: 'c'}\n" +
+		"return {file: 'a.go', line: 3, kind: 'bug', note: 'n', sev: 'high', id: 'f1', rule: 'r', col: 7}"
+	res := run(t, `
+		const seen = new Set()
+		for (let i = 0; i < 30; i++) {
+			const out = await workflow({script: args.child})
+			seen.add(JSON.stringify(out))
+		}
+		return seen.size
+	`, Options{Args: map[string]any{"child": child}})
+	if res.Value != int64(1) {
+		t.Fatalf("one child result stringified %v different ways", res.Value)
+	}
+}
+
+// untilDry's main use — rounds of schema-carrying finder agents that keep
+// re-reporting the same finding — dedupes, and goes dry after two empty rounds
+// rather than running to the cap with duplicates.
+func TestUntilDryDedupesStructuredFindings(t *testing.T) {
+	for attempt := 0; attempt < 5; attempt++ {
+		res := run(t, `
+			const found = await untilDry(async i => (await agent('find round ' + i, {schema: `+findingsSchema+`})).findings, {maxRounds: 6})
+			return found.length
+		`, Options{Runner: structuredRunner()})
+		if res.Value != int64(1) || !strings.Contains(res.Logs[len(res.Logs)-1], "dry after 3 rounds") {
+			t.Fatalf("value = %#v, logs = %v", res.Value, res.Logs)
+		}
+	}
+	// The default key ignores the order a script built an object in.
+	res := run(t, `
+		const rounds = [[{a: 1, b: {c: 2, d: [{e: 1, f: 2}]}}], [{b: {d: [{f: 2, e: 1}], c: 2}, a: 1}], [{a: 1, b: {c: 2, d: [{e: 1, f: 3}]}}]]
+		return (await untilDry(i => rounds[i] || [], {dry: 2})).length
+	`, Options{})
+	if res.Value != int64(2) {
+		t.Fatalf("value = %#v, want the reordered copy deduped and the changed one kept", res.Value)
+	}
+}

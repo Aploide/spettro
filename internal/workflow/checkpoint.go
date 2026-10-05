@@ -328,6 +328,29 @@ func encodeJSON(v any) string {
 	return string(encoded)
 }
 
+// plainValue hands a Go value — a structured agent answer, a workflow()
+// child's result — to the script as plain JS objects and arrays, through its
+// canonical JSON.
+//
+// vm.ToValue would wrap a Go map as a map-backed object whose keys enumerate
+// in Go's randomised map order, so the same answer stringified differently
+// from one call to the next: untilDry's dedupe key, a prompt built from the
+// value, a journal key derived from it — anything order-sensitive — stopped
+// being reproducible. json.Marshal sorts object keys, so the script sees one
+// order, every time, on a live answer and on a replayed one alike. A value
+// that has no JSON form (a child returning NaN or a function) keeps the old
+// wrapping rather than being lost.
+func (r *vmRun) plainValue(v any) goja.Value {
+	if v == nil {
+		return goja.Null()
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return r.vm.ToValue(v)
+	}
+	return r.decodeJSON(string(encoded))
+}
+
 // decodeJSON turns a reply into a script value with the runtime's own
 // JSON.parse, captured before the script ran, so the script gets real JS
 // objects and arrays — the same thing on a live answer and on a replayed one.
