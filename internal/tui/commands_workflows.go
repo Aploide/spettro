@@ -352,12 +352,54 @@ func (m Model) handleUltracodeCommand(fields []string) (tea.Model, tea.Cmd) {
 	if m.thinking {
 		suffix = " (applies from the next message)"
 	}
-	if next {
+	switch {
+	case next && !m.ultracodeActive():
+		// Like /ultra's toggle, the opt-in is kept but suspended: the
+		// workflow tool refuses to run under ask-first, so standing guidance
+		// to run a workflow for every task would cost a failed call per turn.
+		m.showBanner("ultracode on but suspended — workflows need restricted or yolo permission (the "+
+			m.mode+" agent runs ask-first); switch with /permission", "warn")
+	case next:
 		m.showBanner("ultracode on — substantive tasks run as workflows by default, for this session"+suffix, "success")
-	} else {
+	default:
 		m.showBanner("ultracode off"+suffix, "success")
 	}
 	return m, nil
+}
+
+// effectiveRunPermission is the permission a run of spec executes under, by
+// the rule runAgent applies: a user level other than ask-first overrides the
+// agent's own, ask-first defers to it. An agent that names none is treated as
+// ask-first — the cautious reading, since this only decides whether a mode
+// that needs unattended sub-agents may engage.
+func effectiveRunPermission(user config.PermissionLevel, spec config.AgentSpec) config.PermissionLevel {
+	if user != "" && user != config.PermissionAskFirst {
+		return user
+	}
+	if spec.Permission == "" {
+		return config.PermissionAskFirst
+	}
+	return spec.Permission
+}
+
+// ultracodeActiveFor reports whether the session's ultracode opt-in engages
+// for a run of spec: the toggle is on AND the run's permission lets the
+// workflow tool run. Under ask-first every workflow call is refused, so the
+// opt-in is suspended (not cleared) there, as UltraActive suspends /ultra.
+// The effective permission matters, not the user level alone: under the
+// default ask-first a "coding" run is still restricted by its own spec, and
+// its workflows work.
+func (m Model) ultracodeActiveFor(spec config.AgentSpec) bool {
+	return m.ultracode && effectiveRunPermission(m.cfg.Permission, spec) != config.PermissionAskFirst
+}
+
+// ultracodeActive is ultracodeActiveFor the agent the next message goes to.
+func (m Model) ultracodeActive() bool {
+	if !m.ultracode {
+		return false
+	}
+	spec, _ := m.manifest.AgentByID(m.mode)
+	return m.ultracodeActiveFor(spec)
 }
 
 func jsonQuote(s string) string {

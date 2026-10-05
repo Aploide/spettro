@@ -148,7 +148,7 @@ func inputMayGlow(input string, ultracode bool) bool {
 // the session's ultracode toggle. The "+" check keeps the regex pass off the
 // common path, since the input is rendered on every frame.
 func (m Model) budgetDirectivesLive() bool {
-	if m.ultracode {
+	if m.ultracodeActive() {
 		return true
 	}
 	value := m.ta.Value()

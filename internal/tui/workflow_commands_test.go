@@ -83,6 +83,62 @@ func TestUltracodeCommandToggles(t *testing.T) {
 	}
 }
 
+// The workflow tool refuses to run under ask-first, so /ultracode there is
+// kept but suspended — like /ultra — rather than injecting guidance whose
+// every workflow call fails. The effective permission decides: under the
+// default ask-first the "coding" agent still runs restricted by its spec.
+func TestUltracodeSuspendedUnderAskFirst(t *testing.T) {
+	m := NewModelForTesting()
+	m.width, m.height = 160, 40
+	m.manifest = config.DefaultAgentManifest()
+	m.mode = "plan"
+	m.cfg.Permission = config.PermissionAskFirst
+
+	nm, _ := m.handleCommand("/ultracode on")
+	m = nm.(Model)
+	if !m.ultracode {
+		t.Fatal("the toggle is kept under ask-first, only suspended")
+	}
+	if m.bannerKind != "warn" || !strings.Contains(m.banner, "restricted or yolo") || !strings.Contains(m.banner, "suspended") {
+		t.Fatalf("banner = %q (%s)", m.banner, m.bannerKind)
+	}
+	if header := stripANSIForTest(m.viewHeader()); !strings.Contains(header, "ultracode:suspended") {
+		t.Fatalf("the tag should say ultracode is suspended: %q", header)
+	}
+	plan, _ := m.manifest.AgentByID("plan")
+	coding, _ := m.manifest.AgentByID("coding")
+	if m.ultracodeActive() || m.ultracodeActiveFor(plan) {
+		t.Fatal("an ask-first plan run must not get Ultracode")
+	}
+	if !m.ultracodeActiveFor(coding) {
+		t.Fatal("the coding agent runs restricted by its own spec: ultracode engages there")
+	}
+	if m.budgetDirectivesLive() {
+		t.Fatal("a suspended toggle does not make budget directives live")
+	}
+
+	m.mode = "coding"
+	if header := stripANSIForTest(m.viewHeader()); strings.Contains(header, "suspended") || !strings.Contains(header, "ultracode") {
+		t.Fatalf("on the coding agent the tag is plain: %q", header)
+	}
+	m.mode = "plan"
+	m.cfg.Permission = config.PermissionYOLO
+	if !m.ultracodeActive() || !m.ultracodeActiveFor(plan) {
+		t.Fatal("a user level other than ask-first overrides the agent's own")
+	}
+	nm, _ = m.handleCommand("/ultracode on")
+	if got := nm.(Model); got.bannerKind != "success" {
+		t.Fatalf("under yolo the toggle engages: %q (%s)", got.banner, got.bannerKind)
+	}
+	m.ultracode = false
+	if m.ultracodeActiveFor(coding) {
+		t.Fatal("ultracode off is off everywhere")
+	}
+	if got := effectiveRunPermission(config.PermissionAskFirst, config.AgentSpec{}); got != config.PermissionAskFirst {
+		t.Fatalf("an agent naming no permission reads as ask-first, got %q", got)
+	}
+}
+
 func TestWorkflowCommandsAreInstantAndListed(t *testing.T) {
 	for input, want := range map[string]bool{
 		"/ultracode":                 true,

@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"spettro/internal/config"
 	"spettro/internal/theme"
 )
 
@@ -300,20 +301,26 @@ func TestBudgetDirectivesLiveOnlyWithWorkflows(t *testing.T) {
 	cases := []struct {
 		input     string
 		ultracode bool
+		perm      config.PermissionLevel
 		want      bool
 	}{
-		{"audit this +500k", false, false},
-		{"ultracode: audit this +500k", false, true},
-		{"use a workflow for this +2M", false, true},
-		{"audit this +500k", true, true},
-		{"audit this", false, false},
+		{"audit this +500k", false, config.PermissionRestricted, false},
+		{"ultracode: audit this +500k", false, config.PermissionRestricted, true},
+		{"use a workflow for this +2M", false, config.PermissionRestricted, true},
+		{"audit this +500k", true, config.PermissionRestricted, true},
+		{"audit this", false, config.PermissionRestricted, false},
+		// Suspended ultracode (ask-first, where workflows cannot run) does
+		// not make a bare directive live; the keyword still does.
+		{"audit this +500k", true, config.PermissionAskFirst, false},
+		{"ultracode: audit this +500k", true, config.PermissionAskFirst, true},
 	}
 	for _, c := range cases {
 		m := NewModelForTesting()
 		m.ultracode = c.ultracode
+		m.cfg.Permission = c.perm
 		m.SetTextareaValueForTesting(c.input)
 		if got := m.budgetDirectivesLive(); got != c.want {
-			t.Errorf("budgetDirectivesLive(%q, ultracode=%v) = %v, want %v", c.input, c.ultracode, got, c.want)
+			t.Errorf("budgetDirectivesLive(%q, ultracode=%v, %s) = %v, want %v", c.input, c.ultracode, c.perm, got, c.want)
 		}
 	}
 	// The animation gate agrees: with ultracode on, a directive alone needs

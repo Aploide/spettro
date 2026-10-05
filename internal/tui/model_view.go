@@ -190,10 +190,14 @@ func (m Model) viewHeader() string {
 		ultraTag = "ultra"
 	}
 	// The standing ultracode opt-in changes what every message does, so it
-	// stays on screen for as long as it is on.
-	ultracodeTag := ""
+	// stays on screen for as long as it is on — dimmed and marked suspended
+	// while the agent would run ask-first, where workflows cannot run.
+	ultracodeTag, ultracodeSuspended := "", false
 	if m.ultracode {
 		ultracodeTag = "ultracode"
+		if !m.ultracodeActive() {
+			ultracodeTag, ultracodeSuspended = "ultracode:suspended", true
+		}
 	}
 	sandboxTag := ""
 	if m.sandboxState != nil {
@@ -215,7 +219,9 @@ func (m Model) viewHeader() string {
 	if ultraTag != "" {
 		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
 	}
-	if ultracodeTag != "" {
+	if ultracodeSuspended {
+		right = styleMuted.Render(ultracodeTag) + "  " + right
+	} else if ultracodeTag != "" {
 		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultracodeTag) + "  " + right
 	}
 	if sandboxTag != "" {
