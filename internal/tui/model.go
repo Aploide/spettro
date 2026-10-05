@@ -198,7 +198,7 @@ type toolDiffMsg struct {
 type parallelAgentEntry struct {
 	ID       string
 	Label    string
-	Kind     string // "worker", "microagent", or "swarm" (Ultra fan-out member)
+	Kind     string // "worker" or "microagent"
 	Instance int
 	Task     string
 	Status   string
@@ -523,12 +523,7 @@ type Model struct {
 	workflowRuns *agent.WorkflowRuns
 	// workflowStops carries the registry's reports of detached runs it
 	// stopped (idle reaper, StopAll) to Update; see watchWorkflowRuns.
-	workflowStops chan workflowStoppedMsg
-	// ultracode is the session's standing ultracode opt-in (/ultracode):
-	// every turn behaves as if the message said "ultracode". Deliberately
-	// not persisted — it changes how much work every turn does, so a new
-	// session starts without it.
-	ultracode        bool
+	workflowStops    chan workflowStoppedMsg
 	tickCount        int
 	sideCursor       int
 	sideDetailScroll int

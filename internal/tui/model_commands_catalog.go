@@ -49,8 +49,7 @@ var allCommands = []commandDef{
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
-	{"/ultra", "toggle Ultra: fan hard tasks out across a swarm of parallel sub-agents"},
-	{"/ultracode", "toggle ultracode for this session: substantive tasks run as multi-agent workflows by default"},
+	{"/ultra", "toggle ultra (saved) — ultracode: substantive tasks run as dynamic workflows"},
 	{"/workflows", "list, show, and run saved multi-agent workflow templates"},
 	{"/workflows run", "adapt and run a saved workflow template (JSON args or a task in plain words)"},
 	{"/workflows size", "show or set the workflow size guideline (small/medium/large/unbounded)"},
@@ -83,6 +82,13 @@ var permissionCommands = []commandDef{
 	{"/permission yolo", "no approval required for any action"},
 	{"/permission restricted", "ask once, remember for session"},
 	{"/permission ask-first", "always ask before executing"},
+}
+
+// ultraCommands is the /ultra picker. A bare /ultra flips the mode, which is
+// easy to do by accident; the picker lets the user say which way they mean.
+var ultraCommands = []commandDef{
+	{"/ultra on", "ultracode: substantive tasks run as dynamic workflows (saved)"},
+	{"/ultra off", "back to ordinary turns; \"ultracode\" in a message still opts in"},
 }
 
 var thinkingCommands = []commandDef{
@@ -297,7 +303,6 @@ func isInstantCommand(input string) bool {
 		"/budget",
 		"/thinking", "/think",
 		"/ultra",
-		"/ultracode",
 		"/login",
 		"/logout",
 		"/connect",
@@ -373,9 +378,8 @@ const helpText = `commands:
   /budget [n|0]  set token budget per request (0 = unlimited)
   /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
   /thinking <l>  alias of /think
-  /ultra [on|off] toggle Ultra: swarm of parallel sub-agents for hard tasks (any model)
-  /ultracode [on|off] toggle ultracode for this session: substantive tasks
-                 run as multi-agent workflows by default (not saved)
+  /ultra [on|off] toggle ultra (saved) — ultracode: substantive tasks run as
+                 dynamic workflows by default (needs restricted or yolo)
   /workflows     list, show, or run saved workflow templates ("ultracode" in a
                  message gives the agent the workflow tool for that turn;
                  with it, "+500k" sets the turn's workflow token budget)

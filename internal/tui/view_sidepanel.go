@@ -283,10 +283,10 @@ func (m Model) sidePanelItemRow(it sidePanelItem, selected bool, rowBudget int) 
 	return row
 }
 
-// swarmSpecID strips the per-instance suffix from a swarm member name
-// ("code#3" → "code") so manifest lookups (color, spec) keep working for
-// uniquely-named Ultra sub-agents.
-func swarmSpecID(id string) string {
+// instanceSpecID strips the per-instance suffix from an agent instance name
+// ("code#3" → "code", as a workflow names its members) so manifest lookups
+// (color, spec) keep working for uniquely-named sub-agents.
+func instanceSpecID(id string) string {
 	if i := strings.IndexByte(id, '#'); i > 0 {
 		return id[:i]
 	}
@@ -305,27 +305,6 @@ func (m Model) latestAgentActivity(agentID string) string {
 	return ""
 }
 
-// sidePanelSwarmLines renders the swarm section of the side panel: a header
-// with the fan-out's progress meter and one row per Ultra sub-agent showing
-// what it is doing right now. Finished members stay listed so the panel shows
-// the whole fan-out, not a list that shrinks as the swarm succeeds.
-func (m Model) sidePanelSwarmLines(width int) []string {
-	s := m.swarmSummary()
-	if len(s.members) == 0 {
-		return nil
-	}
-	budget := max(12, width-2)
-	lines := []string{
-		s.titleLine(budget),
-		progressBar(min(20, max(8, budget-12)), s.done, s.failed, len(s.members)) + " " +
-			styleMuted.Render(fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))),
-	}
-	for _, a := range s.members {
-		lines = append(lines, m.swarmMemberRow(a, budget))
-	}
-	return lines
-}
-
 // sidePanelWorkflowLines renders the workflow phase tree. The side panel has
 // the vertical room the footer block does not, so this is the full tree with
 // no row cap.
@@ -333,16 +312,13 @@ func (m Model) sidePanelWorkflowLines(width int) []string {
 	return m.workflowTreeLines(max(12, width-2), 0)
 }
 
-// sidePanelReservedRows is the vertical space the git summary, workflow tree,
-// swarm and task sections occupy above the activity list (each block includes
+// sidePanelReservedRows is the vertical space the git summary, workflow tree
+// and task sections occupy above the activity list (each block includes
 // its leading separator line). It must count exactly what
 // sidePanelHeaderParts draws after the title and subtitle.
 func (m Model) sidePanelReservedRows(width int) int {
 	_, rows := m.sidePanelGitSummary(width)
 	if lines := m.sidePanelWorkflowLines(width); len(lines) > 0 {
-		rows += len(lines) + 1
-	}
-	if lines := m.sidePanelSwarmLines(width); len(lines) > 0 {
 		rows += len(lines) + 1
 	}
 	if lines := m.sidePanelTodoLines(); len(lines) > 0 {
@@ -506,7 +482,7 @@ func (m Model) sidePanelTodoLines() []string {
 }
 
 // sidePanelHeaderParts is everything above the activity list: title,
-// subtitle, and the git, workflow, swarm and task sections, each preceded by
+// subtitle, and the git, workflow and task sections, each preceded by
 // a blank separator row. sidePanelReservedRows counts the same sections, so
 // the list budget and the mouse hit-testing agree with what is drawn.
 func (m Model) sidePanelHeaderParts(width int) []string {
@@ -516,8 +492,10 @@ func (m Model) sidePanelHeaderParts(width int) []string {
 		subtitle = "Workflow · paused, waiting for the orchestrator"
 	case m.workflow != nil:
 		subtitle = "Workflow · phase-by-phase progress"
-	case m.cfg.UltraActive():
-		subtitle = "Ultra swarm · per-agent activity"
+	case m.ultraActive():
+		// No workflow yet, but with ultra live the next substantive
+		// message starts one; the panel says where its tree will come from.
+		subtitle = "ultra · substantive tasks run as dynamic workflows"
 	}
 	if m.activityDropped > 0 {
 		// The count leads: a narrow panel cuts the end of the subtitle.
@@ -532,7 +510,6 @@ func (m Model) sidePanelHeaderParts(width int) []string {
 	}
 	for _, section := range [][]string{
 		m.sidePanelWorkflowLines(width),
-		m.sidePanelSwarmLines(width),
 		m.sidePanelTodoLines(),
 	} {
 		if len(section) > 0 {

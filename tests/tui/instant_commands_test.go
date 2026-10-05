@@ -39,10 +39,12 @@ func TestIsInstantCommand_Classification(t *testing.T) {
 		{"/remote stop", true},
 		{"/exit", true},
 		{"/quit", true},
-		// Workflow toggles only touch session or config state; running a
+		// /ultra and /workflows size only touch saved config; running a
 		// saved template starts a turn.
-		{"/ultracode", true},
-		{"/ultracode on", true},
+		{"/ultra", true},
+		{"/ultra on", true},
+		// There is no /ultracode command: it is unknown, so not instant.
+		{"/ultracode", false},
 		{"/workflows size", true},
 		{"/workflows size large", true},
 		{"/workflows run audit check the auth package", false},

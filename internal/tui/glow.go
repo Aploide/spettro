@@ -210,8 +210,9 @@ func highlightUltracode(rendered string, frame int) string {
 // ("+500k", "+1.5m"). A directive only does something when workflows are on
 // for the message, so it lights up only then: budgets is that verdict, made
 // by the caller from the whole input — the keyword may have scrolled out of
-// the rendered view — or from the session's ultracode toggle. Lighting a
-// "+500k" the run will ignore would promise a budget nobody enforces.
+// the rendered view — or from ultra, the standing mode /ultra switches on.
+// Lighting a "+500k" the run will ignore would promise a budget nobody
+// enforces.
 func highlightWorkflowInput(rendered string, frame int, budgets bool) string {
 	if rendered == "" {
 		return rendered

@@ -564,7 +564,7 @@ type workflowAgentArgs struct {
 
 // applyWorkflowAgentTrace records a workflow member's lifecycle. Returns false
 // for agent traces that are not part of a workflow, which keeps ordinary
-// delegation and Ultra swarms on their existing path.
+// delegation on its existing path.
 func (m *Model) applyWorkflowAgentTrace(argsJSON, output, status string) bool {
 	var args workflowAgentArgs
 	if json.Unmarshal([]byte(argsJSON), &args) != nil || args.Workflow == "" || args.Agent == "" {

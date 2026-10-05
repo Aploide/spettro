@@ -32,9 +32,10 @@ pause at a checkpoint() so the agent reads the interim results and decides
 the next step before the run continues.
 
 Write "ultracode" in a message to give the agent the workflow tool for that
-turn, or run /ultracode to make orchestrating through workflows its standing
-default for the session. With workflows on, "+500k" (or "+1.5m") in a message
-sets the token budget the turn's workflows share.
+turn, or run /ultra to make orchestrating through workflows its standing
+default (saved; it needs restricted or yolo permission to engage). With
+workflows on, "+500k" (or "+1.5m") in a message sets the token budget the
+turn's workflows share.
 
 Saved scripts are templates: the agent reads one, adapts it to the task —
 filling its declared params and discovering work-lists at runtime — and runs
@@ -330,15 +331,19 @@ func workflowSizeDescription(tier string) string {
 	return out
 }
 
-// handleUltracodeCommand toggles the session's standing ultracode opt-in:
-// /ultracode [on|off], no argument flips it. While it is on every turn
-// behaves as if the message said "ultracode" — the agent orchestrates
-// substantive work through workflows by default and its runs need no
-// consent prompt. It lasts for this session only, on purpose: a mode that
-// multiplies the work every message does should not survive a restart
-// unnoticed.
-func (m Model) handleUltracodeCommand(fields []string) (tea.Model, tea.Cmd) {
-	next := !m.ultracode
+// handleUltraCommand toggles ultra, the standing ultracode mode: /ultra
+// [on|off], no argument flips it. While it is on every turn behaves as if the
+// message said "ultracode" — the agent orchestrates substantive work through
+// dynamic workflows by default and its runs need no consent prompt. It is
+// saved in the user config (cfg.Ultra) like the other mode switches, so the
+// header tag is what keeps a mode that multiplies every turn's work from
+// going unnoticed after a restart.
+//
+// It is not refused under ask-first: the user may well switch permission
+// next, and refusing would make them do it in a fixed order. The setting is
+// saved either way and the banner says when it is suspended.
+func (m Model) handleUltraCommand(fields []string) (tea.Model, tea.Cmd) {
+	next := !m.cfg.Ultra
 	if len(fields) >= 2 {
 		switch strings.ToLower(strings.TrimSpace(fields[1])) {
 		case "on":
@@ -346,26 +351,33 @@ func (m Model) handleUltracodeCommand(fields []string) (tea.Model, tea.Cmd) {
 		case "off":
 			next = false
 		default:
-			m.showBanner("usage: /ultracode [on|off]", "error")
+			m.showBanner("usage: /ultra [on|off]", "error")
 			return m, nil
 		}
 	}
-	m.ultracode = next
+	if err := m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.Ultra = next
+		return nil
+	}); err != nil {
+		m.showBanner("could not save ultra: "+err.Error(), "error")
+		return m, nil
+	}
 	suffix := ""
 	if m.thinking {
+		// The agent's Ultracode is fixed when a run starts.
 		suffix = " (applies from the next message)"
 	}
 	switch {
-	case next && !m.ultracodeActive():
-		// Like /ultra's toggle, the opt-in is kept but suspended: the
-		// workflow tool refuses to run under ask-first, so standing guidance
-		// to run a workflow for every task would cost a failed call per turn.
-		m.showBanner("ultracode on but suspended — workflows need restricted or yolo permission (the "+
+	case next && !m.ultraActive():
+		// Kept but suspended: the workflow tool refuses to run under
+		// ask-first, so standing guidance to run a workflow for every task
+		// would cost a failed call per turn.
+		m.showBanner("ultra saved but suspended — workflows need restricted or yolo permission (the "+
 			m.mode+" agent runs ask-first); switch with /permission", "warn")
 	case next:
-		m.showBanner("ultracode on — substantive tasks run as workflows by default, for this session"+suffix, "success")
+		m.showBanner("ultra on — ultracode: substantive tasks run as dynamic workflows"+suffix, "success")
 	default:
-		m.showBanner("ultracode off"+suffix, "success")
+		m.showBanner("ultra off"+suffix, "success")
 	}
 	return m, nil
 }
@@ -385,24 +397,25 @@ func effectiveRunPermission(user config.PermissionLevel, spec config.AgentSpec) 
 	return spec.Permission
 }
 
-// ultracodeActiveFor reports whether the session's ultracode opt-in engages
-// for a run of spec: the toggle is on AND the run's permission lets the
-// workflow tool run. Under ask-first every workflow call is refused, so the
-// opt-in is suspended (not cleared) there, as UltraActive suspends /ultra.
-// The effective permission matters, not the user level alone: under the
+// ultraActiveFor reports whether ultra (the standing ultracode mode) engages
+// for a run of spec: /ultra is on AND the run's permission lets the workflow
+// tool run. Under ask-first every workflow call is refused, so the mode is
+// suspended (not cleared) there. The effective permission matters, not the
+// user level alone — which is why this is not cfg.UltraActive(): under the
 // default ask-first a "coding" run is still restricted by its own spec, and
-// its workflows work.
-func (m Model) ultracodeActiveFor(spec config.AgentSpec) bool {
-	return m.ultracode && effectiveRunPermission(m.cfg.Permission, spec) != config.PermissionAskFirst
+// its workflows work. The run's Ultracode, the header tag and the input glow
+// all ask this, so they cannot disagree about whether the mode is live.
+func (m Model) ultraActiveFor(spec config.AgentSpec) bool {
+	return m.cfg.Ultra && effectiveRunPermission(m.cfg.Permission, spec) != config.PermissionAskFirst
 }
 
-// ultracodeActive is ultracodeActiveFor the agent the next message goes to.
-func (m Model) ultracodeActive() bool {
-	if !m.ultracode {
+// ultraActive is ultraActiveFor the agent the next message goes to.
+func (m Model) ultraActive() bool {
+	if !m.cfg.Ultra {
 		return false
 	}
 	spec, _ := m.manifest.AgentByID(m.mode)
-	return m.ultracodeActiveFor(spec)
+	return m.ultraActiveFor(spec)
 }
 
 func jsonQuote(s string) string {

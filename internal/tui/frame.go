@@ -205,7 +205,7 @@ func (m Model) chromeKey(partWidth int) chromeKey {
 // a second, and re-rendering the whole chrome on each was a fifth of a
 // 200-turn session's UI CPU (mem harness).
 func (m Model) chromeAnimates() bool {
-	return m.spettroPlanName() == "max" || inputMayGlow(m.ta.Value(), m.ultracode) ||
+	return m.spettroPlanName() == "max" || inputMayGlow(m.ta.Value(), m.ultraActive()) ||
 		m.hasRunningDelegation() || m.hasInProgressTodo() ||
 		m.activeGoal != nil || m.activeLoop != nil ||
 		jobs.Default().RunningCount() > 0 || pty.Default().RunningCount() > 0

@@ -50,99 +50,211 @@ func TestWorkflowsSizeCommand(t *testing.T) {
 	}
 }
 
-func TestUltracodeCommandToggles(t *testing.T) {
+// setPermissionForTest sets the user permission the way /permission does:
+// through the saved config, which /ultra reloads when it saves its own
+// setting (an in-memory edit would be lost there).
+func setPermissionForTest(t *testing.T, m *Model, level config.PermissionLevel) {
+	t.Helper()
+	if err := m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.Permission = level
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// headerTagForTest is the ultra tag the header shows: "", "ultra" or
+// "ultra:suspended".
+func headerTagForTest(m Model) string {
+	header := stripANSIForTest(m.viewHeader())
+	switch {
+	case strings.Contains(header, "ultra:suspended"):
+		return "ultra:suspended"
+	case strings.Contains(header, "ultra"):
+		return "ultra"
+	}
+	return ""
+}
+
+// /ultra is the one switch for the standing ultracode mode: it flips or sets
+// cfg.Ultra, saves it, and the header carries a single "ultra" tag while it
+// is on.
+func TestUltraCommandToggles(t *testing.T) {
+	// /ultra persists through config.Update: keep it off the real
+	// ~/.spettro/config.json.
+	t.Setenv("HOME", t.TempDir())
 	m := NewModelForTesting()
 	m.width, m.height = 160, 40
-	if strings.Contains(stripANSIForTest(m.viewHeader()), "ultracode") {
-		t.Fatal("ultracode starts off")
+	setPermissionForTest(t, &m, config.PermissionRestricted)
+	if tag := headerTagForTest(m); tag != "" {
+		t.Fatalf("ultra starts off, header tag %q", tag)
 	}
 	cases := []struct {
 		input string
 		want  bool
 	}{
-		{"/ultracode", true},
-		{"/ultracode", false},
-		{"/ultracode on", true},
-		{"/ultracode ON", true},
-		{"/ultracode off", false},
+		{"/ultra", true},
+		{"/ultra", false},
+		{"/ultra on", true},
+		{"/ultra ON", true},
+		{"/ultra off", false},
+		{"/ultra on", true},
 	}
 	for _, c := range cases {
 		nm, _ := m.handleCommand(c.input)
 		m = nm.(Model)
-		if m.ultracode != c.want {
-			t.Fatalf("%s: ultracode = %v, want %v", c.input, m.ultracode, c.want)
+		if m.cfg.Ultra != c.want || m.ultraActive() != c.want {
+			t.Fatalf("%s: Ultra = %v, active = %v, want %v", c.input, m.cfg.Ultra, m.ultraActive(), c.want)
 		}
-		if tagged := strings.Contains(stripANSIForTest(m.viewHeader()), "ultracode"); tagged != c.want {
-			t.Fatalf("%s: status tag shown = %v, want %v", c.input, tagged, c.want)
+		if saved, err := config.Load(); err != nil || saved.Ultra != c.want {
+			t.Fatalf("%s: not saved: %v (%v)", c.input, saved.Ultra, err)
+		}
+		wantTag := ""
+		if c.want {
+			wantTag = "ultra"
+		}
+		if tag := headerTagForTest(m); tag != wantTag {
+			t.Fatalf("%s: header tag %q, want %q", c.input, tag, wantTag)
+		}
+		if m.bannerKind != "success" {
+			t.Fatalf("%s: banner %q (%s)", c.input, m.banner, m.bannerKind)
+		}
+		for _, banned := range []string{"swarm", "Swarm"} {
+			if strings.Contains(m.banner, banned) {
+				t.Fatalf("%s: banner still talks about the swarm: %q", c.input, m.banner)
+			}
 		}
 	}
-	nm, _ := m.handleCommand("/ultracode maybe")
+	if !strings.Contains(m.banner, "dynamic workflows") {
+		t.Fatalf("the on banner should say what ultra does: %q", m.banner)
+	}
+	nm, _ := m.handleCommand("/ultra maybe")
 	m = nm.(Model)
-	if m.ultracode || m.bannerKind != "error" {
-		t.Fatalf("a bad argument must be refused: ultracode=%v banner=%q", m.ultracode, m.banner)
+	if !m.cfg.Ultra || m.bannerKind != "error" {
+		t.Fatalf("a bad argument must be refused and change nothing: Ultra=%v banner=%q", m.cfg.Ultra, m.banner)
 	}
 }
 
-// The workflow tool refuses to run under ask-first, so /ultracode there is
-// kept but suspended — like /ultra — rather than injecting guidance whose
-// every workflow call fails. The effective permission decides: under the
-// default ask-first the "coding" agent still runs restricted by its spec.
-func TestUltracodeSuspendedUnderAskFirst(t *testing.T) {
+// There is no /ultracode command, not even as an alias: /ultra is the switch
+// and the keyword covers a single turn.
+func TestUltracodeIsNotACommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewModelForTesting()
+	nm, _ := m.handleCommand("/ultracode on")
+	m = nm.(Model)
+	if m.cfg.Ultra || !strings.Contains(m.banner, "unknown command") {
+		t.Fatalf("/ultracode must be unknown: Ultra=%v banner=%q", m.cfg.Ultra, m.banner)
+	}
+	for _, c := range allCommands {
+		if strings.HasPrefix(c.name, "/ultracode") {
+			t.Fatalf("%s is still in the command catalog", c.name)
+		}
+	}
+	if strings.Contains(helpText, "/ultracode") || strings.Contains(workflowsHelp, "/ultracode") {
+		t.Fatal("/help or /workflows help still mentions /ultracode")
+	}
+	if isInstantCommand("/ultracode") {
+		t.Fatal("/ultracode is no instant command any more")
+	}
+}
+
+// The workflow tool refuses to run under ask-first, so /ultra there is
+// saved but suspended rather than refused — the user can switch permission
+// afterwards — and it injects no guidance whose every workflow call fails.
+// The effective permission decides: under the default ask-first the
+// "coding" agent still runs restricted by its spec, so ultra engages there.
+func TestUltraSuspendedUnderAskFirst(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	m := NewModelForTesting()
 	m.width, m.height = 160, 40
 	m.manifest = config.DefaultAgentManifest()
 	m.mode = "plan"
-	m.cfg.Permission = config.PermissionAskFirst
+	setPermissionForTest(t, &m, config.PermissionAskFirst)
 
-	nm, _ := m.handleCommand("/ultracode on")
+	nm, _ := m.handleCommand("/ultra on")
 	m = nm.(Model)
-	if !m.ultracode {
+	if !m.cfg.Ultra {
 		t.Fatal("the toggle is kept under ask-first, only suspended")
+	}
+	if saved, err := config.Load(); err != nil || !saved.Ultra {
+		t.Fatalf("a suspended ultra is still saved: %v (%v)", saved.Ultra, err)
 	}
 	if m.bannerKind != "warn" || !strings.Contains(m.banner, "restricted or yolo") || !strings.Contains(m.banner, "suspended") {
 		t.Fatalf("banner = %q (%s)", m.banner, m.bannerKind)
 	}
-	if header := stripANSIForTest(m.viewHeader()); !strings.Contains(header, "ultracode:suspended") {
-		t.Fatalf("the tag should say ultracode is suspended: %q", header)
+	if tag := headerTagForTest(m); tag != "ultra:suspended" {
+		t.Fatalf("the tag should say ultra is suspended, got %q", tag)
 	}
 	plan, _ := m.manifest.AgentByID("plan")
 	coding, _ := m.manifest.AgentByID("coding")
-	if m.ultracodeActive() || m.ultracodeActiveFor(plan) {
+	if m.ultraActive() || m.ultraActiveFor(plan) {
 		t.Fatal("an ask-first plan run must not get Ultracode")
 	}
-	if !m.ultracodeActiveFor(coding) {
-		t.Fatal("the coding agent runs restricted by its own spec: ultracode engages there")
+	if !m.ultraActiveFor(coding) {
+		t.Fatal("the coding agent runs restricted by its own spec: ultra engages there")
 	}
-	if m.budgetDirectivesLive() {
-		t.Fatal("a suspended toggle does not make budget directives live")
+	m.SetTextareaValueForTesting("audit this +500k")
+	if m.budgetDirectivesLive() || inputMayGlow(m.ta.Value(), m.ultraActive()) {
+		t.Fatal("a suspended ultra does not make budget directives live")
 	}
 
+	// The tag, the glow and the run all follow the agent the next message
+	// goes to.
 	m.mode = "coding"
-	if header := stripANSIForTest(m.viewHeader()); strings.Contains(header, "suspended") || !strings.Contains(header, "ultracode") {
-		t.Fatalf("on the coding agent the tag is plain: %q", header)
+	if tag := headerTagForTest(m); tag != "ultra" {
+		t.Fatalf("on the coding agent the tag is plain, got %q", tag)
 	}
+	if !m.budgetDirectivesLive() || !inputMayGlow(m.ta.Value(), m.ultraActive()) {
+		t.Fatal("with ultra live, a bare budget directive is live and may glow")
+	}
+
 	m.mode = "plan"
-	m.cfg.Permission = config.PermissionYOLO
-	if !m.ultracodeActive() || !m.ultracodeActiveFor(plan) {
+	setPermissionForTest(t, &m, config.PermissionYOLO)
+	if !m.ultraActive() || !m.ultraActiveFor(plan) {
 		t.Fatal("a user level other than ask-first overrides the agent's own")
 	}
-	nm, _ = m.handleCommand("/ultracode on")
+	if tag := headerTagForTest(m); tag != "ultra" {
+		t.Fatalf("under yolo the tag is plain, got %q", tag)
+	}
+	nm, _ = m.handleCommand("/ultra on")
 	if got := nm.(Model); got.bannerKind != "success" {
 		t.Fatalf("under yolo the toggle engages: %q (%s)", got.banner, got.bannerKind)
 	}
-	m.ultracode = false
-	if m.ultracodeActiveFor(coding) {
-		t.Fatal("ultracode off is off everywhere")
+	nm, _ = m.handleCommand("/ultra off")
+	m = nm.(Model)
+	if m.ultraActiveFor(coding) || headerTagForTest(m) != "" {
+		t.Fatal("ultra off is off everywhere")
 	}
 	if got := effectiveRunPermission(config.PermissionAskFirst, config.AgentSpec{}); got != config.PermissionAskFirst {
 		t.Fatalf("an agent naming no permission reads as ask-first, got %q", got)
 	}
 }
 
+// The /ultra picker offers both directions, so nobody has to remember that a
+// bare /ultra flips.
+func TestUltraSubMenu(t *testing.T) {
+	m := NewModelForTesting()
+	items, ok := m.slashSubMenu("/ultra ")
+	if !ok || len(items) != 2 || items[0].name != "/ultra on" || items[1].name != "/ultra off" {
+		t.Fatalf("/ultra sub-menu = %v (ok=%v)", items, ok)
+	}
+	if items, _ := m.slashSubMenu("/ultra of"); len(items) != 1 || items[0].name != "/ultra off" {
+		t.Fatalf("typing filters the choices: %v", items)
+	}
+	for _, c := range append(append([]commandDef{}, allCommands...), ultraCommands...) {
+		if strings.HasPrefix(c.name, "/ultra") && strings.Contains(strings.ToLower(c.desc), "swarm") {
+			t.Fatalf("%s still describes the swarm: %q", c.name, c.desc)
+		}
+	}
+	if strings.Contains(strings.ToLower(helpText), "swarm") {
+		t.Fatal("/help still describes the swarm")
+	}
+}
+
 func TestWorkflowCommandsAreInstantAndListed(t *testing.T) {
 	for input, want := range map[string]bool{
-		"/ultracode":                 true,
-		"/ultracode off":             true,
+		"/ultra":                     true,
+		"/ultra off":                 true,
 		"/workflows size":            true,
 		"/workflows size large":      true,
 		"/workflows run audit":       false,
@@ -161,7 +273,7 @@ func TestWorkflowCommandsAreInstantAndListed(t *testing.T) {
 	for _, c := range allCommands {
 		names[c.name] = true
 	}
-	for _, want := range []string{"/ultracode", "/workflows size", "/workflows run"} {
+	for _, want := range []string{"/ultra", "/workflows size", "/workflows run"} {
 		if !names[want] {
 			t.Errorf("%s missing from the command catalog", want)
 		}
@@ -186,7 +298,7 @@ func TestWorkflowCommandsAreInstantAndListed(t *testing.T) {
 }
 
 func TestWorkflowsHelpDescribesDynamicWorkflows(t *testing.T) {
-	for _, want := range []string{"/workflows size", "/ultracode", "checkpoint()", "+500k", "templates", "[json | task]"} {
+	for _, want := range []string{"/workflows size", "/ultra", "checkpoint()", "+500k", "templates", "[json | task]"} {
 		if !strings.Contains(workflowsHelp, want) {
 			t.Errorf("workflowsHelp is missing %q", want)
 		}

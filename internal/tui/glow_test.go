@@ -299,32 +299,32 @@ func TestHighlightBudgetDirectives(t *testing.T) {
 
 func TestBudgetDirectivesLiveOnlyWithWorkflows(t *testing.T) {
 	cases := []struct {
-		input     string
-		ultracode bool
-		perm      config.PermissionLevel
-		want      bool
+		input string
+		ultra bool
+		perm  config.PermissionLevel
+		want  bool
 	}{
 		{"audit this +500k", false, config.PermissionRestricted, false},
 		{"ultracode: audit this +500k", false, config.PermissionRestricted, true},
 		{"use a workflow for this +2M", false, config.PermissionRestricted, true},
 		{"audit this +500k", true, config.PermissionRestricted, true},
 		{"audit this", false, config.PermissionRestricted, false},
-		// Suspended ultracode (ask-first, where workflows cannot run) does
+		// A suspended ultra (ask-first, where workflows cannot run) does
 		// not make a bare directive live; the keyword still does.
 		{"audit this +500k", true, config.PermissionAskFirst, false},
 		{"ultracode: audit this +500k", true, config.PermissionAskFirst, true},
 	}
 	for _, c := range cases {
 		m := NewModelForTesting()
-		m.ultracode = c.ultracode
+		m.cfg.Ultra = c.ultra
 		m.cfg.Permission = c.perm
 		m.SetTextareaValueForTesting(c.input)
 		if got := m.budgetDirectivesLive(); got != c.want {
-			t.Errorf("budgetDirectivesLive(%q, ultracode=%v, %s) = %v, want %v", c.input, c.ultracode, c.perm, got, c.want)
+			t.Errorf("budgetDirectivesLive(%q, ultra=%v, %s) = %v, want %v", c.input, c.ultra, c.perm, got, c.want)
 		}
 	}
-	// The animation gate agrees: with ultracode on, a directive alone needs
-	// frames; with it off, a directive without the keyword never glows.
+	// The animation gate agrees: with ultra live, a directive alone needs
+	// frames; without it, a directive without the keyword never glows.
 	if !inputMayGlow("audit +500k", true) || inputMayGlow("audit +500k", false) {
 		t.Fatal("inputMayGlow disagrees with when a directive can glow")
 	}

@@ -185,18 +185,15 @@ func (m Model) viewHeader() string {
 		m.activeModelSupportsReasoning() {
 		thinkingTag = "thinking:" + level
 	}
-	ultraTag := ""
-	if m.cfg.UltraActive() {
+	// Ultra (the standing ultracode mode) changes what every message does,
+	// so it stays on screen for as long as it is on — dimmed and marked
+	// suspended while the agent would run ask-first, where workflows cannot
+	// run. One tag: /ultra and the mode it switches are the same thing.
+	ultraTag, ultraSuspended := "", false
+	if m.cfg.Ultra {
 		ultraTag = "ultra"
-	}
-	// The standing ultracode opt-in changes what every message does, so it
-	// stays on screen for as long as it is on — dimmed and marked suspended
-	// while the agent would run ask-first, where workflows cannot run.
-	ultracodeTag, ultracodeSuspended := "", false
-	if m.ultracode {
-		ultracodeTag = "ultracode"
-		if !m.ultracodeActive() {
-			ultracodeTag, ultracodeSuspended = "ultracode:suspended", true
+		if !m.ultraActive() {
+			ultraTag, ultraSuspended = "ultra:suspended", true
 		}
 	}
 	sandboxTag := ""
@@ -216,13 +213,10 @@ func (m Model) viewHeader() string {
 	if thinkingTag != "" {
 		right = styleMuted.Render(thinkingTag) + "  " + right
 	}
-	if ultraTag != "" {
+	if ultraSuspended {
+		right = styleMuted.Render(ultraTag) + "  " + right
+	} else if ultraTag != "" {
 		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
-	}
-	if ultracodeSuspended {
-		right = styleMuted.Render(ultracodeTag) + "  " + right
-	} else if ultracodeTag != "" {
-		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultracodeTag) + "  " + right
 	}
 	if sandboxTag != "" {
 		right = styleMuted.Render(sandboxTag) + "  " + right
@@ -677,7 +671,7 @@ func renderGlare(text string, frame int, agentColor color.Color) string {
 }
 
 // footerBudget is the total number of rows everything between the transcript
-// and the input may occupy: workflow, swarm, delegations and todos combined.
+// and the input may occupy: workflow, delegations and todos combined.
 //
 // Each of those used to size itself independently, so a run with a workflow
 // and a todo list could eat two thirds of a short terminal between them. They
@@ -688,7 +682,7 @@ func footerBudget(height int) int {
 }
 
 // showsParallelFooter reports whether the block drawn by renderParallelAgents
-// (workflow, swarm, delegations, todos) sits between the transcript and the
+// (workflow, delegations, todos) sits between the transcript and the
 // input. The side panel carries the same information while it is open, and
 // the @/$ completion palette takes the block's place while the user is
 // picking a completion: it is short-lived, and on a small terminal it needs
@@ -775,11 +769,10 @@ func (m Model) parallelFooterBudget() int {
 }
 
 // renderParallelAgents draws everything that sits between the transcript and
-// the input: the workflow summary, the Ultra swarm, ordinary delegations, and
-// the todo list. Swarms and workflows get their own bordered blocks — a
-// fan-out of twenty agents mixed into the plain delegation list was
-// unreadable, and the two are different enough that sharing one flat list
-// helped nobody.
+// the input: the workflow summary, ordinary delegations, and the todo list.
+// A workflow gets its own bordered block — a fan-out of twenty agents mixed
+// into the plain delegation list was unreadable, and the two are different
+// enough that sharing one flat list helped nobody.
 //
 // Whatever is here is an annotation on the conversation, never a replacement
 // for it, so the whole region is bounded and each block takes only what the
@@ -800,15 +793,13 @@ func (m Model) renderParallelAgents() string {
 
 	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
 	for _, a := range m.parallelAgents {
-		// Swarm members have their own block above; listing them here too
-		// would double every row of a fan-out.
-		if a.Status == "running" && a.Kind != "swarm" {
+		if a.Status == "running" {
 			active = append(active, a)
 		}
 	}
-	// Delegations and todos are shown nowhere else, so a swarm must not be
-	// able to push them off the screen entirely: one row each is held back,
-	// which is what their one-line forms need.
+	// Delegations and todos are shown nowhere else, so a workflow must not
+	// be able to push them off the screen entirely: one row each is held
+	// back, which is what their one-line forms need.
 	reserved := 0
 	if len(active) > 0 {
 		reserved++
@@ -818,9 +809,6 @@ func (m Model) renderParallelAgents() string {
 	}
 	if rows := remaining - reserved - 2; rows >= 2 {
 		spend(m.renderWorkflowBlock(paneW, rows))
-	}
-	if rows := remaining - reserved - 2; rows >= 2 {
-		spend(m.renderSwarmBlock(paneW, rows))
 	}
 	if remaining <= 0 || (len(active) == 0 && len(m.todos) == 0) {
 		return strings.Join(blocks, "\n")
@@ -891,10 +879,10 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 	return lines
 }
 
-// delegationRow renders one ordinary (non-swarm) sub-agent.
+// delegationRow renders one ordinary (non-workflow) sub-agent.
 func (m Model) delegationRow(a parallelAgentEntry) string {
 	agentColor := modeColor("")
-	if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
+	if spec, ok := m.manifest.AgentByID(instanceSpecID(a.ID)); ok {
 		agentColor = modeColor(spec.Color)
 	}
 	label := a.ID
