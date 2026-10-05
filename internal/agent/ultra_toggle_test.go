@@ -107,3 +107,42 @@ func TestPastUltraCallsInHistoryAreHarmless(t *testing.T) {
 		t.Fatalf("a stray ultra call should come back as a not-allowed error: %s", second)
 	}
 }
+
+// TestUltraToggleRemindsOnTheUserTurn: with /ultra on, the standing opt-in
+// is restated on the user's own turn — a live run did a bug review solo with
+// only the system prompt saying so. The keyword needs no echo, and without
+// the toggle there is nothing to remind of.
+func TestUltraToggleRemindsOnTheUserTurn(t *testing.T) {
+	userText := func(req map[string]any) string {
+		msgs, _ := req["messages"].([]any)
+		var b strings.Builder
+		for _, m := range msgs {
+			if mm, ok := m.(map[string]any); ok && mm["role"] == "user" {
+				enc, _ := json.Marshal(mm["content"])
+				b.Write(enc)
+			}
+		}
+		return b.String()
+	}
+	cases := []struct {
+		name   string
+		agent  LLMAgent
+		task   string
+		remind bool
+	}{
+		{"toggle", LLMAgent{Ultracode: true}, "review calc.go for bugs", true},
+		{"toggle and keyword", LLMAgent{Ultracode: true}, "ultracode: review calc.go for bugs", false},
+		{"keyword only", LLMAgent{}, "ultracode: review calc.go for bugs", false},
+		{"neither", LLMAgent{}, "review calc.go for bugs", false},
+	}
+	for _, tc := range cases {
+		reqs := runAgentTurn(t, tc.agent, "coding", t.TempDir(), tc.task, loopReply{content: "done"})
+		got := strings.Contains(userText(reqs[0]), "ultra is on (the user's /ultra toggle)")
+		if got != tc.remind {
+			t.Errorf("%s: reminder on the user turn = %v, want %v\n%s", tc.name, got, tc.remind, userText(reqs[0]))
+		}
+	}
+	if r := ultraTurnReminder(LLMAgent{Ultracode: true, DelegationDepth: 1}, "x", workflowGuidance{Ultracode: true}); r != "" {
+		t.Fatal("a sub-agent must never get the reminder")
+	}
+}

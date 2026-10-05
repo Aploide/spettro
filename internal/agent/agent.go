@@ -324,6 +324,27 @@ func (a LLMAgent) workflowGuidanceFor(task string, allowed []string) workflowGui
 	return g
 }
 
+// ultraTurnReminder is appended to the user's message when the /ultra toggle,
+// not the message itself, is what turned ultracode on.
+//
+// The system prompt already carries the standing-mode guidance, but a live
+// run showed that is not enough on its own: with /ultra on, "review
+// calc/calc.go for bugs" was done solo, while the same request with the
+// keyword in it ran a workflow. A word in the user's own turn outweighs a
+// paragraph in the system prompt, so the toggle says it there too — the way
+// Claude Code confirms a standing ultracode with a reminder on each turn.
+// It rides on the user message, not the system prompt, so the cached prefix
+// is untouched; and a message that already has the keyword needs no echo.
+func ultraTurnReminder(a LLMAgent, task string, g workflowGuidance) string {
+	if !a.Ultracode || a.DelegationDepth != 0 || !g.Ultracode || WorkflowPreapproved(task) {
+		return ""
+	}
+	if g.Research {
+		return "\n\n<system-reminder>ultra is on (the user's /ultra toggle): the standing ultracode opt-in applies to this message. Investigate it with a workflow — several independent angles, findings verified — unless it is conversational.</system-reminder>"
+	}
+	return "\n\n<system-reminder>ultra is on (the user's /ultra toggle): the standing ultracode opt-in applies to this message. Author and run a workflow for it unless it is conversational or a trivial mechanical edit.</system-reminder>"
+}
+
 // isWorkflowEditTool reports whether tool lets an agent change files itself,
 // which is what separates an implementing agent from a planner or a read-only
 // Q&A agent for the standing-mode guidance. The shell counts: an agent with
@@ -370,6 +391,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	}
 	allowedTools, fanOutPrompt = fanOutTools(allowedTools, workflows, a.DelegationDepth)
 	systemPrompt += fanOutPrompt
+	task += ultraTurnReminder(a, task, workflows)
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
