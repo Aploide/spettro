@@ -173,7 +173,20 @@ type LLMAgent struct {
 	// Workflows forces the workflow tool on for this run. Hosts normally leave
 	// it false and let the "ultracode" keyword in the task turn it on;
 	// ignored on sub-agents, which never orchestrate.
-	Workflows     bool
+	Workflows bool
+	// Ultracode is the host's session-wide ultracode toggle: every turn
+	// behaves as if the user had written the keyword — the workflow tool is
+	// granted, runs are pre-approved, and the agent is told to orchestrate
+	// substantive work through workflows by default. Ignored on sub-agents.
+	Ultracode bool
+	// WorkflowSize is the configured size tier for workflow runs
+	// (config.WorkflowSizeTier); empty means medium.
+	WorkflowSize string
+	// WorkflowRuns holds workflow runs paused at a checkpoint so a later
+	// tool call — in this turn or a later one — can continue them. Hosts own
+	// one per session; nil gives each run a turn-local registry, so a paused
+	// run cannot outlive the turn that started it.
+	WorkflowRuns  *WorkflowRuns
 	RequiredReads []string
 	Images        []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,

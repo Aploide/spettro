@@ -72,6 +72,12 @@ type UserConfig struct {
 	// sub-agents. Works with any model (sub-agents inherit the active model).
 	// Toggleable at runtime via /ultra (TUI) or the "ultra" ACP config option.
 	Ultra bool `json:"ultra,omitempty"`
+	// WorkflowSize is the size guideline for workflow runs: "small",
+	// "medium", "large" or "unbounded" (empty means medium). It scales how
+	// many agents the model plans a workflow around and is exposed to scripts
+	// as the size global; it is a guideline, not a hard cap. Set via
+	// /workflows size (TUI) or the "workflow_size" ACP config option.
+	WorkflowSize string `json:"workflow_size,omitempty"`
 
 	// SkillsCompatDisabled switches off skill discovery in other agents'
 	// directories (.agents/skills, .claude/skills, .codex/skills,
@@ -130,6 +136,26 @@ type UserConfig struct {
 // suspended (not cleared) while ask-first is selected.
 func (c UserConfig) UltraActive() bool {
 	return c.Ultra && c.Permission != PermissionAskFirst
+}
+
+// Workflow size tiers accepted by WorkflowSize.
+const (
+	WorkflowSizeSmall     = "small"
+	WorkflowSizeMedium    = "medium"
+	WorkflowSizeLarge     = "large"
+	WorkflowSizeUnbounded = "unbounded"
+)
+
+// WorkflowSizes lists the tiers in ascending order, for pickers and help text.
+var WorkflowSizes = []string{WorkflowSizeSmall, WorkflowSizeMedium, WorkflowSizeLarge, WorkflowSizeUnbounded}
+
+// WorkflowSizeTier returns the effective size tier: the configured one, or
+// medium when none was chosen.
+func (c UserConfig) WorkflowSizeTier() string {
+	if c.WorkflowSize == "" {
+		return WorkflowSizeMedium
+	}
+	return c.WorkflowSize
 }
 
 // CompactConfig maps the user's auto-compaction settings to the compact
@@ -199,6 +225,13 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 		// valid ("" means auto)
 	default:
 		cfg.Theme = ""
+		changed = true
+	}
+	switch cfg.WorkflowSize {
+	case "", WorkflowSizeSmall, WorkflowSizeMedium, WorkflowSizeLarge, WorkflowSizeUnbounded:
+		// valid ("" means medium)
+	default:
+		cfg.WorkflowSize = ""
 		changed = true
 	}
 	if cfg.NotifyQuietSec <= 0 {
