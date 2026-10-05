@@ -702,22 +702,22 @@ func TestWorkflowStoppedRunIsNotAFailure(t *testing.T) {
 	m.applyToolTraceToObservability(agent.ToolTrace{
 		AgentID: "coding", Name: "workflow", Status: "stopped",
 		Args: `{"run_id":"wf_1","workflow":"review-changes","agents":1,"failed":0,"cached":0,"tokens":10,` +
-			`"reason":"stopped by the orchestrator"}`,
-		Output: "stopped by the orchestrator",
+			`"reason":"at the orchestrator's request"}`,
+		Output: "at the orchestrator's request",
 	})
 	w := m.workflow
-	if w.Status != "stopped" || w.Summary != "stopped: stopped by the orchestrator" || w.FinishedAt.IsZero() {
+	if w.Status != "stopped" || w.Summary != "stopped: at the orchestrator's request" || w.FinishedAt.IsZero() {
 		t.Fatalf("stopped run = %+v", w)
 	}
 	tree := stripANSIForTest(strings.Join(m.workflowTreeLines(70, 0), "\n"))
 	if !strings.Contains(tree, "■ workflow review-changes") || strings.Contains(tree, "✗ workflow") {
 		t.Fatalf("a stopped run should carry the neutral marker, not the failure one:\n%s", tree)
 	}
-	if !strings.Contains(tree, "stopped: stopped by the orchestrator") {
+	if !strings.Contains(tree, "stopped: at the orchestrator's request") {
 		t.Fatalf("the stop reason should show:\n%s", tree)
 	}
 	summary := m.workflowSummaryLines(90, footerBudget(40)-2)
-	if len(summary) != 1 || !strings.Contains(stripANSIForTest(summary[0]), "■ review-changes stopped: stopped by the orchestrator") {
+	if len(summary) != 1 || !strings.Contains(stripANSIForTest(summary[0]), "■ review-changes stopped: at the orchestrator's request") {
 		t.Fatalf("stopped footer = %q", summary)
 	}
 	if style, _ := workflowTitleStyle("stopped"); style.GetForeground() == theme.Current().Error {
@@ -877,12 +877,14 @@ func TestWorkflowObserverTracesStayOutOfTheTranscript(t *testing.T) {
 		{agent.ToolTrace{Name: "workflow-progress", Status: "success", Args: `{"run_id":"wf_1","workflow":"w","kind":"phase","phase":"Find"}`}, true},
 		{agent.ToolTrace{Name: "workflow", Status: "running", Args: `{"run_id":"wf_1","workflow":"w","origin":"inline","phases":[]}`}, true},
 		{agent.ToolTrace{Name: "workflow", Status: "paused", Args: `{"run_id":"wf_1","workflow":"w","checkpoint_id":"cp-1","message":"m"}`}, true},
-		{agent.ToolTrace{Name: "workflow", Status: "stopped", Args: `{"run_id":"wf_1","workflow":"w","reason":"stopped by the orchestrator"}`}, true},
+		{agent.ToolTrace{Name: "workflow", Status: "stopped", Args: `{"run_id":"wf_1","workflow":"w","reason":"at the orchestrator's request"}`}, true},
 		// The tool loop's report of the call itself stays a transcript row.
 		{agent.ToolTrace{Name: "workflow", Status: "running", Args: `{"script":"export const meta = {}"}`}, false},
 		{agent.ToolTrace{Name: "workflow", Status: "success", Args: `{"continue_run_id":"wf_1","reply":"yes"}`}, false},
 		{agent.ToolTrace{Name: "workflow", Status: "success", Args: `{"name":"file-audit","show":true}`}, false},
 		{agent.ToolTrace{Name: "bash", Status: "success", Args: `{"command":"ls"}`}, false},
+		// The worktree merge-failure note must stay visible in the transcript.
+		{agent.ToolTrace{Name: "workflow-progress", Status: "error", Args: `{"kind":"log","phase":"Fix"}`, Output: "branch wf-3 did not merge"}, false},
 	}
 	for _, tc := range cases {
 		if got := isWorkflowObserverTrace(tc.trace); got != tc.want {

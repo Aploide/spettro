@@ -34,7 +34,7 @@ type WorkflowRuns struct {
 // and SetOnStopped. Hosts show them after "stopped: ", so they read as the
 // cause, not as a sentence of their own.
 const (
-	workflowStopOrchestrator = "stopped by the orchestrator"
+	workflowStopOrchestrator = "at the orchestrator's request"
 	workflowStopSessionEnded = "the session ended"
 	workflowStopTurnEnded    = "the turn ended"
 )

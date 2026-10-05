@@ -747,7 +747,7 @@ func TestACPWorkflowStoppedClosesAsCompleted(t *testing.T) {
 	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
 	callID := turn.workflow.callID
 	if !turn.onWorkflowTool(wfTrace("workflow", "stopped",
-		`{"run_id":"wf_1","workflow":"audit","reason":"stopped by the orchestrator"}`, "0 agents")) {
+		`{"run_id":"wf_1","workflow":"audit","reason":"at the orchestrator's request"}`, "0 agents")) {
 		t.Fatal("a stopped trace must be claimed")
 	}
 	if _, ok := cards.runs["wf_1"]; ok || turn.workflow != nil {
@@ -758,7 +758,7 @@ func TestACPWorkflowStoppedClosesAsCompleted(t *testing.T) {
 	if last.ToolCallID != string(callID) || last.Status != "completed" {
 		t.Fatalf("a stopped run's card must close as completed, last update = %+v", last)
 	}
-	if !strings.Contains(last.text(), "■ stopped: stopped by the orchestrator") {
+	if !strings.Contains(last.text(), "■ stopped: at the orchestrator's request") {
 		t.Fatalf("the card must say why the run stopped:\n%s", last.text())
 	}
 }

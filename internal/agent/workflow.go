@@ -359,7 +359,12 @@ func (g workflowGuidance) prompt() string {
 	if g.BudgetTokens > 0 {
 		section += "\n\n" + fmt.Sprintf("The user set a token budget of %d tokens for this turn: one pool shared by every workflow you start this turn without budget_tokens. A new run gets what the earlier ones left, which scripts see as budget.total and budget.remaining(). Once the pool is spent no further agent starts in any of those runs — agent() resolves to null — and a new run is refused. Agents already running when it runs out still finish, so a wide fan-out can overshoot: size each wave to what is left.", g.BudgetTokens)
 	}
-	if len(g.Paused) > 0 {
+	// Only when the paused runs are the reason the tool is here at all. On a
+	// turn that asked for workflows anyway, the checkpoint result with the
+	// same ids is already in the history, and a line that changes with every
+	// pause and continue would cost a prompt-cache miss on the whole
+	// conversation each time.
+	if g.pausedOnly() {
 		section += "\n\n" + workflowPausedLine(g.Paused)
 	}
 	return section
@@ -436,6 +441,16 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 	// Same rule as Ultra: a workflow runs many sub-agents concurrently, and
 	// ask-first would turn that into a wall of approval prompts.
 	if r.perm() == config.PermissionAskFirst {
+		id := strings.TrimSpace(args.ContinueRunID)
+		if id != "" && args.Stop {
+			// Stopping starts nothing. Refusing it left a run paused on a
+			// turn whose agent was ask-first (the user switched to plan or
+			// ask to discuss the findings) stranded until the idle reaper.
+			return r.continueWorkflow(ctx, id, args)
+		}
+		if id != "" {
+			return "", fmt.Errorf("workflow: continuing run %s starts sub-agents again, which needs restricted or yolo permission (current: ask-first); stop it with {\"continue_run_id\": %q, \"stop\": true}, or ask the user to switch permission", id, id)
+		}
 		return "", fmt.Errorf("workflow: requires restricted or yolo permission (current: ask-first)")
 	}
 	if id := strings.TrimSpace(args.ContinueRunID); id != "" {
@@ -595,6 +610,11 @@ func (r *toolRuntime) showWorkflow(args workflowArgs) (string, error) {
 	if strings.TrimSpace(args.Name) == "" && strings.TrimSpace(args.ScriptPath) == "" {
 		return "", fmt.Errorf("workflow: show needs name or script_path (the saved workflow to read)")
 	}
+	if strings.TrimSpace(args.ScriptPath) != "" {
+		if err := r.showablePath(args.ScriptPath); err != nil {
+			return "", err
+		}
+	}
 	script, origin, err := r.resolveWorkflowScript(workflowArgs{Name: args.Name, ScriptPath: args.ScriptPath})
 	if err != nil {
 		return "", err
@@ -618,6 +638,36 @@ func (r *toolRuntime) showWorkflow(args workflowArgs) (string, error) {
 	b.WriteString("\n</source>\n</workflow_template>\n")
 	b.WriteString("Nothing was run. Adapt the script to the task in front of you and run the adapted version inline (script), or run it by name with args when it fits as-is.")
 	return b.String(), nil
+}
+
+// showablePath limits what show will echo back to workflow scripts proper: a
+// file in a saved-workflow folder, or a run's script.js.
+//
+// show runs before the permission check — reading a template spends nothing —
+// and script_path otherwise accepts any file in the workspace or under the
+// sessions root, so without this a {"script_path": ".env", "show": true} call
+// printed the file verbatim to an agent with no file tools, or one whose
+// permission rules deny reading it. Workspace scripts are the file tools' to
+// read, under the policy those tools enforce.
+func (r *toolRuntime) showablePath(p string) error {
+	path, err := r.workflowScriptPath(p)
+	if err != nil {
+		return err
+	}
+	if filepath.Ext(path) != ".js" {
+		return fmt.Errorf("workflow: show reads workflow scripts only (.js), not %s", p)
+	}
+	for _, root := range workflow.SearchPaths(r.cwd) {
+		if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	if filepath.Base(path) == "script.js" {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "journal.jsonl")); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("workflow: show reads saved workflows (pass name) and run transcripts (<run>/script.js); read %s with the file tools instead", p)
 }
 
 // workflowSizeTier picks a run's size tier: the call's size argument, else

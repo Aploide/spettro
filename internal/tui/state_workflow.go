@@ -183,7 +183,11 @@ var workflowToolInputKeys = []string{
 func isWorkflowObserverTrace(t agent.ToolTrace) bool {
 	switch t.Name {
 	case "workflow-progress":
-		return true
+		// Except a progress trace that reports a failure: the note that a
+		// sub-agent's worktree did not merge back names branches the user
+		// has to resolve, and a panel log line — shown only while the panel
+		// is open, only among the last few — is too easy to miss.
+		return t.Status != "error"
 	case "workflow":
 		return isWorkflowLifecycleTrace(t.Args, t.Status)
 	}

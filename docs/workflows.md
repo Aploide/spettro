@@ -83,7 +83,8 @@ Detection lives in the agent runner, keyed off the text of your message,
 so the keyword works identically in the TUI, in ACP editors, in
 `/goal` runs, over the Telegram relay, and in headless mode. There is no
 setting to find: the `/ultracode` session toggle has the same effect as
-writing the keyword every time.
+writing the keyword every time — in the TUI, as long as the run's
+permission allows workflows (see below).
 
 **Permission requirement:** like Ultra, workflows need `restricted` or
 `yolo`. A script runs many sub-agents concurrently, and `ask-first`
@@ -121,14 +122,14 @@ toggle it for the session:
 
 | Surface | Command |
 | --- | --- |
-| TUI | `/ultracode [on\|off]` (no argument toggles). The status bar shows `ultracode` while it is on. |
+| TUI | `/ultracode [on\|off]` (no argument toggles). The status bar shows `ultracode` while it is on, and `ultracode:suspended` (dimmed) while the active agent runs under `ask-first`, where the toggle is held back rather than handing the agent a tool whose every call would be refused. |
 | ACP | `/ultracode [on\|off]`, per session. |
 
 The toggle is a session setting and is not saved to your config. A new
 session starts with it off, because a standing multi-agent default is
 something you choose for a piece of work, not for every project you
-open. With the toggle on, every turn behaves as if the message contained
-the keyword: consent is not asked again, and the prompt section is
+open. With the toggle on (and, in the TUI, not suspended), every turn
+behaves as if the message contained the keyword: consent is not asked again, and the prompt section is
 appended on every turn.
 
 ## Writing a workflow
@@ -181,9 +182,11 @@ The body runs inside an async function, so `await` and a top-level
 `export const meta` must be a **pure object literal**: no variables,
 calls, spreads or template interpolation. Spettro checks that before it
 evaluates anything, on the parsed header alone. Objects, arrays, strings,
-numbers (negative ones included), booleans, `null` and template strings
-with no `${…}` pass. Anything else fails with no code run: a call, a
-variable, a spread, an operator, a regex literal. A header that tries to
+numbers (with an optional sign), booleans, `null`, `undefined`, `NaN`,
+`Infinity`, template strings with no `${…}`, and `+` between those — a
+long description is usually a chain of concatenated strings — pass.
+Anything else fails with no code run: a call, a variable, a spread, any
+other operator, a regex literal. A header that tries to
 compute something fails there instead of quietly doing work before you
 have seen what the workflow is. A regex is refused because some patterns
 take exponential time to compile or match, and a timer cannot interrupt
@@ -356,8 +359,10 @@ up again does not count as new. The loop stops at the first of:
 | `opts.maxRounds` rounds | 8 |
 | `budget.remaining()` reaching 0 | — |
 
-`opts.key(item)` is the identity used for deduplication (default
-`JSON.stringify`). Agents rarely word the same finding the same way
+`opts.key(item)` is the identity used for deduplication (default: the
+item's JSON with object keys sorted at every level, so two agents that
+build the same object in a different key order still match; a plain
+`JSON.stringify` key would not). Agents rarely word the same finding the same way
 twice, so pass a key built from stable fields such as file and line.
 The result is every new item in the order it was found, and each round
 logs how many items it found and how many were new.
@@ -406,7 +411,7 @@ The model reads the data, decides, and calls the tool again with:
 | Arguments | Effect |
 | --- | --- |
 | `{"continue_run_id": "wf_…", "reply": <any JSON>}` | `checkpoint()` resolves to `reply` and the run carries on, until it settles or reaches the next checkpoint. |
-| `{"continue_run_id": "wf_…", "stop": true}` | Stops the run and returns its partial result. |
+| `{"continue_run_id": "wf_…", "stop": true}` | Stops the run and returns its partial result. Allowed even under `ask-first`, since it starts nothing; continuing is not, because it restarts sub-agents. |
 
 `checkpoint_id` may be added to either. If it does not name the pending
 checkpoint, the call is refused, so a reply meant for one question
@@ -514,6 +519,7 @@ instead.
 | `script` | The script source, written for this task. |
 | `script_path` | A script file: in the workspace, a run directory, or a saved-workflow folder. |
 | `name` | A saved workflow, run as it is. |
+| `show` | With `name` (or a `script_path` in a saved-workflow folder or a run's `script.js`): return the script's source and params without running anything. Other files are the file tools' to read. |
 | `args` | Any JSON value; the script's `args`. |
 | `save_as`, `save_scope` | Also save the script under this name, to the project (default) or `global` folder. See [Templates](#templates). |
 | `resume_from_run_id` | Replay unchanged agent calls and answered checkpoints from that run's journal. |
@@ -554,7 +560,9 @@ global:
 
 It is a **guideline, not a limit**. A run that goes past `size.agents`
 keeps going. The run's log says so once, `size guideline (medium: ~10
-agents) exceeded`, so you can see it happened. The hard stop is still
+agents) exceeded`, and the result the model reads ends with how many
+agents ran against the guideline, so the overrun is in front of it when
+it writes the next script. The hard stop is still
 the 1000-agent backstop in [Limits](#limits).
 
 Set the tier:
@@ -699,7 +707,8 @@ plan and goes stale as the code moves. Spettro treats saved workflows as
 **templates**:
 
 - **The agent adapts rather than replays.** It reads the saved script
-  (`script_path`, or `/workflows show`), keeps the shape, and rewrites
+  (the workflow tool with `{"name": …, "show": true}`, which also reaches
+  global templates outside the workspace), keeps the shape, and rewrites
   whatever is specific to the old task. Work-lists are discovered at
   runtime (`plan()`, a scouting agent, a `glob`), never copied from the
   last run. It runs a template by name only when the template fits as it

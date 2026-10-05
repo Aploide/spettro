@@ -450,6 +450,10 @@ func checkLiteral(literal string) error {
 // stack of the walk itself.
 const maxLiteralDepth = 64
 
+// maxConcatTerms bounds one chain of concatenated strings in a header: far
+// past any real description, short of a header built to make the check slow.
+const maxConcatTerms = 4096
+
 func checkLiteralNode(e ast.Expression, depth int) error {
 	if depth > maxLiteralDepth {
 		return fmt.Errorf("nested more than %d levels deep", maxLiteralDepth)
@@ -483,13 +487,29 @@ func checkLiteralNode(e ast.Expression, depth int) error {
 		}
 		return fmt.Errorf("a sign applies only to a number")
 	case *ast.BinaryExpression:
-		if n.Operator != token.PLUS {
-			return fmt.Errorf("operator %s is code", n.Operator)
+		// A long description is a chain of concatenated strings, which
+		// parses left-nested: 'a' + 'b' + 'c' is ('a' + 'b') + 'c'. Walking
+		// the chain iteratively keeps its length from counting as nesting —
+		// recursing put a 65-piece description past the depth cap with an
+		// error about nesting its author never wrote. The term cap bounds
+		// the walk instead.
+		var cur ast.Expression = n
+		for terms := 0; ; terms++ {
+			if terms > maxConcatTerms {
+				return fmt.Errorf("more than %d concatenated pieces", maxConcatTerms)
+			}
+			bin, ok := cur.(*ast.BinaryExpression)
+			if !ok {
+				return checkLiteralNode(cur, depth)
+			}
+			if bin.Operator != token.PLUS {
+				return fmt.Errorf("operator %s is code", bin.Operator)
+			}
+			if err := checkLiteralNode(bin.Right, depth); err != nil {
+				return err
+			}
+			cur = bin.Left
 		}
-		if err := checkLiteralNode(n.Left, depth+1); err != nil {
-			return err
-		}
-		return checkLiteralNode(n.Right, depth+1)
 	case *ast.ArrayLiteral:
 		for _, v := range n.Value {
 			if v == nil { // a hole: [1, , 2]

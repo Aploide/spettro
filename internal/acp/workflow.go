@@ -760,7 +760,9 @@ func (t *turnState) finishWorkflowLocked(cards *acpWorkflowCards, args acpWorkfl
 	}
 	w.status = tr.Status
 	body := w.render()
-	if summary := strings.TrimSpace(tr.Output); summary != "" {
+	// A stopped card's render already ends with its "■ stopped: <reason>"
+	// line; the trace's output says the same thing again.
+	if summary := strings.TrimSpace(tr.Output); summary != "" && tr.Status != "stopped" {
 		body = summary + "\n\n" + body
 	}
 	t.sessionUpdate(acpsdk.UpdateToolCall(

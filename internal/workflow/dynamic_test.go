@@ -611,3 +611,23 @@ func TestUntilDryDedupesStructuredFindings(t *testing.T) {
 		t.Fatalf("value = %#v, want the reordered copy deduped and the changed one kept", res.Value)
 	}
 }
+
+// TestParseMetaLongConcatenation: a long description written as a chain of
+// concatenated strings is a literal however many pieces it has.
+func TestParseMetaLongConcatenation(t *testing.T) {
+	pieces := make([]string, 200)
+	for i := range pieces {
+		pieces[i] = "'line " + fmt.Sprint(i) + " '"
+	}
+	script := "export const meta = {name: 'c', description: " + strings.Join(pieces, " +\n  ") + "}\nreturn 1\n"
+	m, err := ParseMeta(script)
+	if err != nil {
+		t.Fatalf("200-piece description rejected: %v", err)
+	}
+	if !strings.HasPrefix(m.Description, "line 0 line 1") || !strings.Contains(m.Description, "line 199") {
+		t.Fatalf("description = %q", m.Description)
+	}
+	if _, err := ParseMeta("export const meta = {name: 'c', description: 'a' + 'b' - 'c'}\n"); err == nil {
+		t.Fatal("a minus inside a concatenation chain must still be rejected")
+	}
+}

@@ -289,7 +289,7 @@ func TestWorkflowContinueStop(t *testing.T) {
 		t.Fatalf("a stop must not be reported as a failure: %v", got)
 	}
 	fin := log.find(workflowTraceName, "stopped")
-	if len(fin) != 1 || fin[0]["reason"] != "stopped by the orchestrator" || fin[0]["run_id"] != runID || fin[0]["workflow"] != "triage" {
+	if len(fin) != 1 || fin[0]["reason"] != "at the orchestrator's request" || fin[0]["run_id"] != runID || fin[0]["workflow"] != "triage" {
 		t.Fatalf("want one stopped finish trace with the reason, got %v", log.find(workflowTraceName, ""))
 	}
 }
@@ -1204,5 +1204,79 @@ return await agent('audit ' + args.pkg)`
 	}
 	if _, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": script, "show": true}); err == nil {
 		t.Fatal("show needs a saved script to read")
+	}
+
+	// show runs before the permission check, so it must not become a way to
+	// read arbitrary files: only saved workflows and run transcripts.
+	if err := os.WriteFile(filepath.Join(cwd, ".env"), []byte("API_KEY=sekrit123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "tool.js"), []byte("export const meta = {name: 'x', description: 'y'}\n// sekrit123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{".env", "tool.js"} {
+		out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script_path": p, "show": true})
+		if err == nil || strings.Contains(out, "sekrit123") || strings.Contains(err.Error(), "sekrit123") {
+			t.Fatalf("show of workspace file %s: out=%q err=%v, want a refusal", p, out, err)
+		}
+	}
+	runDir := filepath.Join(cwd, ".spettro", "workflow-runs", "wf_1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(runDir, "script.js"), []byte(script), 0o600)
+	_ = os.WriteFile(filepath.Join(runDir, "journal.jsonl"), nil, 0o600)
+	if out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script_path": filepath.Join(runDir, "script.js"), "show": true}); err != nil || !strings.Contains(out, "audits a package") {
+		t.Fatalf("show of a run transcript: out=%q err=%v", out, err)
+	}
+}
+
+// TestWorkflowAskFirstCanStopButNotContinue: a run paused under restricted
+// may be left for a turn whose agent is ask-first (the user switched to plan
+// or ask to discuss the findings). Stopping it starts nothing and must work;
+// continuing restarts sub-agents and is refused with a way out.
+func TestWorkflowAskFirstCanStopButNotContinue(t *testing.T) {
+	srv := newSubagentServer(t, func(string) string { return "bug-1" })
+	runs := NewWorkflowRuns()
+	rt, _ := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": checkpointScript})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := checkpointRunID(t, out)
+
+	askFirst, _ := workflowTestRuntime(t, rt.cwd, srv, runs)
+	askFirst.permission = config.PermissionAskFirst
+	_, err = callWorkflow(t, context.Background(), askFirst, map[string]any{"continue_run_id": runID, "reply": "yes"})
+	if err == nil || !strings.Contains(err.Error(), `"stop": true`) || !strings.Contains(err.Error(), "ask-first") {
+		t.Fatalf("continue under ask-first: err=%v, want a refusal naming the stop call", err)
+	}
+	if len(runs.ids()) != 1 {
+		t.Fatal("a refused continue must leave the run paused")
+	}
+	if _, err := callWorkflow(t, context.Background(), askFirst, map[string]any{"continue_run_id": runID, "stop": true}); err != nil {
+		t.Fatalf("stop under ask-first: %v", err)
+	}
+	if len(runs.ids()) != 0 {
+		t.Fatal("the stopped run must leave the registry")
+	}
+}
+
+// TestWorkflowPausedLineOnlyWhenPausedOnly: the paused-runs line changes with
+// every pause and continue, so it is only worth its prompt-cache cost on a
+// turn where those runs are the sole reason the tool is offered.
+func TestWorkflowPausedLineOnlyWhenPausedOnly(t *testing.T) {
+	paused := []PausedWorkflow{{RunID: "wf_1", Name: "audit", CheckpointID: "cp-1", Message: "go?"}}
+	if p := (workflowGuidance{Enabled: true, Paused: paused}).prompt(); !strings.Contains(p, "wf_1") {
+		t.Fatal("a paused-only turn must list the paused runs")
+	}
+	for _, g := range []workflowGuidance{
+		{Enabled: true, Requested: true, Paused: paused},
+		{Enabled: true, Requested: true, Ultracode: true, Paused: paused},
+	} {
+		with, without := g.prompt(), func() string { g.Paused = nil; return g.prompt() }()
+		if with != without {
+			t.Fatalf("a requested turn's prompt must not depend on paused runs:\n%s", with)
+		}
 	}
 }
