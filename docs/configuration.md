@@ -6,7 +6,7 @@ Spettro uses both project-local and user-global storage.
 
 | Path | Purpose |
 | --- | --- |
-| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md). |
+| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md), [workflow size](#workflows). |
 | `keys.enc` | Encrypted API keys map by provider ID (see [Encrypted API keys](#encrypted-api-keys)). |
 | `keys.enc.v1` | Backup of a pre-v2 `keys.enc`, written when it is migrated; kept for one release. |
 | `master.key` | Random secret `keys.enc` is encrypted under (created on first use). |
@@ -210,6 +210,16 @@ See [Agent Skills](skills.md) for how skills are found and used.
 | --- | --- | --- |
 | `skills_compat_disabled` | `false` | Set `true` to read skills only from `.spettro/skills` and `~/.spettro/skills`, ignoring the Claude Code and Codex folders (`.claude/skills`, `.agents/skills`, `.codex/skills`, `.openai/skills`). |
 | `disabled_skills` | `[]` | Skill names hidden from the agent and the `/` menu; edited by `/skill disable` and `/skill enable`. |
+
+## Workflows
+
+See [Workflows](workflows.md#sizing) for what the tiers mean.
+
+| `config.json` key | Default | Meaning |
+| --- | --- | --- |
+| `workflow_size` | `""` (treated as `medium`) | `small`, `medium`, `large` or `unbounded`: the size guideline workflow runs plan around (about 5, 10 or 30 agents per workflow, or none). Written by `/workflows size` in the TUI and by the `workflow_size` selector or `/workflow-size` in ACP. A single run can override it with the tool's `size` argument. An unrecognised value is cleared to the default on load. |
+
+The `/ultracode` toggle is per session and is not stored here.
 
 ## Checkpointing storage
 

@@ -77,6 +77,10 @@ Then open the Agent Panel and pick *Spettro* as the agent.
     Restricted or YOLO permission level; under Ask-first the change is
     rejected, and dropping back to Ask-first suspends Ultra until the
     level is raised again.
+  - **Workflow size** (`workflow_size`) — the [size tier](workflows.md#sizing)
+    for workflow runs: `small`, `medium`, `large` or `unbounded`. It is
+    stored in your user config like the selectors above; `/workflow-size
+    <tier>` does the same from the prompt.
 
   Changing a selector calls `session/set_config_option`; the equivalent slash
   commands (`/mode`, `/models`, `/permission`, `/thinking`) push a
@@ -124,7 +128,14 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   additionally gets its own tool call, so "follow the agent" navigation
   still works. Phases are deliberately *not* published as ACP plan
   entries — that channel belongs to the session task graph, and a
-  workflow would silently clobber it.
+  workflow would silently clobber it. The card's title carries the
+  [size tier](workflows.md#sizing), and phases a script adds at runtime
+  are marked as added. A run paused at a
+  [checkpoint](workflows.md#orchestrator-in-the-loop) keeps its card
+  `in_progress` with a `⏸ waiting for orchestrator: <message>` line. The
+  session keeps the run's state by run ID, so when a later turn continues
+  it, the new card starts with the phases, agents and log lines the run
+  already had. Closing the session stops its paused runs.
 - **Permissions** — every approval the runtime asks for (shell commands,
   file writes and edits, network access) is routed through
   `session/request_permission` on the tool call's own card, so the editor
@@ -135,7 +146,8 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   below for the transports, the payload, and the answer shape.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
   `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, `/workflows`,
-  `/skills`, and `/clear` are advertised to the client
+  `/workflow-size`, `/ultracode`, `/skills`, and `/clear` are advertised
+  to the client
   (`available_commands_update`), followed by one command per
   [Agent Skill](skills.md) the user can run in the session's workspace
   (description and argument hint from its `SKILL.md`; a skill named like a
@@ -150,8 +162,14 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   — cancel the turn to stop it. `/loop <time> <prompt>` re-runs the prompt on
   the given interval inside the prompt turn the same way; `/loop stop` or the
   editor's cancel ends it. `/workflows` lists, shows, and locates saved
-  [workflow](workflows.md) scripts inline; `/workflows run <name> [json]`
-  is rewritten into an ordinary turn that invokes that script.
+  [workflow](workflows.md) scripts inline;
+  `/workflows run <name> [json | text]` is rewritten into an ordinary turn
+  that hands the agent that script as a [template](workflows.md#templates)
+  to adapt and run. JSON
+  args are passed through as typed, whitespace included; other text
+  becomes the task description. `/workflow-size [tier]` shows or sets the
+  size tier, and `/ultracode [on|off]` toggles
+  [ultracode](workflows.md#ultracode) for this session only.
   `/<skill-name> [args]` runs the turn with that skill's instructions, and
   `$<skill-name>` in a prompt appends the skill's instructions. Both are
   read from the text the user typed only: files the editor attached are
@@ -513,6 +531,36 @@ escalates to an elicitation to collect the text, or fails if the client cannot
 collect it. `declined`, `cancelled`, and a cancelled permission outcome all
 tell the model that nobody answered.
 
+## Workflow files
+
+Core ACP can carry a workflow *run*, which arrives as tool calls like
+any other work. It has no vocabulary for writing a workflow, keeping it
+and running it again later. Spettro serves these extension methods
+(listed in the [handshake](#handshake)) so an editor can manage saved
+[workflows](workflows.md) without a model turn. They work on the same
+`.spettro/workflows` and `~/.spettro/workflows` folders as the TUI's
+`/workflows`.
+
+The file methods (`list`, `read`, `write`, `delete`) also take the
+project they are about, as `sessionId` (the project that session was
+opened on) or an absolute `cwd`; the table leaves these out. With
+neither, the process working directory is used. A `sessionId` this
+connection does not hold is an error, not a silent fall back.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `_spettro/workflow/list` | — | `workflows[]` (`name`, `path`, `scope`, `description`, `whenToUse`, `phases[]`, and `error` for a file that does not compile), `searchPaths`, `cwd` |
+| `_spettro/workflow/read` | `name` | the same fields for one workflow, plus `script`. A script that does not compile is still returned, with `error` set. |
+| `_spettro/workflow/write` | `name` (defaults to `meta.name`), `scope` (`"global"` for `~/.spettro/workflows`, anything else for the project), `script` | the saved workflow's fields. A script that fails validation is refused with the compile error. |
+| `_spettro/workflow/delete` | `name`, `scope` (`project`, `global`, or empty for the first match) | `deleted`, and `path` when a file was removed |
+| `_spettro/workflow/validate` | `script` | `ok`, `error`, and the parsed `name`, `description`, `whenToUse`, `phases[]`. `ok: false` is a normal answer, not a call failure. |
+| `_spettro/workflow/runs` | `limit` (default 50) | `runs[]` (`runId`, `dir`, `modifiedAt` in unix ms), newest first, across every stored session, for [resuming](workflows.md#resuming-a-run) |
+
+Running is not among them. A run needs the model, the manifest, the
+permission level and the sub-agent machinery, which all belong to a
+prompt turn, so a client starts one with an ordinary prompt
+(`/workflows run <name>`) and renders the tool calls it produces.
+
 ## For maintainers
 
 | Piece | Where |
@@ -523,6 +571,7 @@ tell the model that nobody answered.
 | Kinds, titles, locations, size limits, diffs | `internal/acp/tools.go` |
 | Permission requests, which card they attach to, "always allow" labels | `internal/acp/permission.go` (unit tests in `permission_test.go`) |
 | Toolbar selectors | `internal/acp/config_options.go` |
+| Workflow extension methods (`_spettro/workflow/*`) | `internal/acp/ext_workflow.go` |
 | File changes reported by the runtime (`ToolTrace.FileChanges`, `ShellApprovalRequest.Change`) | `internal/agent/file_changes.go` |
 | The asking agent and its directory on every approval request (`ShellApprovalRequest.AgentID`, `CWD`) | `toolRuntime.askApproval` in `internal/agent/llm_runtime_ext.go` |
 

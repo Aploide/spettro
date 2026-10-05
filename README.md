@@ -47,7 +47,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Normalized [thinking/reasoning levels](docs/thinking.md) across providers (`/thinking off|low|medium|high|x-high|max`)
 - [Ultra mode](docs/ultra.md) — fan hard tasks out across a swarm of parallel sub-agents (`/ultra`, any model)
-- [Workflows](docs/workflows.md) — write `ultracode` and the agent orchestrates sub-agents with a script: phases, fan-out, verification loops, resumable runs
+- [Workflows](docs/workflows.md) — write `ultracode` (or turn on `/ultracode`) and the agent orchestrates sub-agents with a script it writes for the task: phases planned at runtime, fan-out, verification loops, checkpoints where it reads interim results before going on, size tiers, `+500k` token budgets, resumable runs
 - [Interactive PTY sessions](docs/pty.md) — the agent drives REPLs, debuggers, and ssh through a real terminal
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
@@ -96,7 +96,8 @@ Spettro commands are entered with a leading `/`.
 - `/budget <n|0>` set request token budget (`0` = unlimited)
 - `/thinking <off|low|medium|high|x-high|max>` set the reasoning level (Anthropic thinking budget, OpenAI-style `reasoning_effort`; hidden for non-reasoning models, auto-falls back if a level is rejected)
 - `/ultra [on|off]` toggle Ultra swarm mode (requires `restricted` or `yolo` permission)
-- `/workflows [list|show|run|where]` list, show, or run saved workflow scripts (write `ultracode` in a message to hand the agent the workflow tool for that turn)
+- `/workflows [list|show|run|size|where]` list, show, or run saved workflow templates, or set the workflow size tier (write `ultracode` in a message to hand the agent the workflow tool for that turn)
+- `/ultracode [on|off]` keep ultracode on for the session: the agent runs a workflow for every substantive task
 - `/plan [prompt]` switch to plan mode or run plan prompt
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks

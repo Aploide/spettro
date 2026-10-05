@@ -30,8 +30,10 @@
 | `/ultra [on\|off]` | Toggle [Ultra mode](ultra.md): the top-level agent fans hard tasks out across a swarm of parallel sub-agents (works with any model; sub-agents inherit the active model). Requires the `restricted` or `yolo` permission level — refused under `ask-first`. |
 | `/workflows` | List saved [workflow](workflows.md) scripts from `.spettro/workflows` and `~/.spettro/workflows`, with their descriptions and phases. |
 | `/workflows show <name>` | Print a saved workflow's header and source. |
-| `/workflows run <name> [json]` | Run a saved workflow, optionally with a JSON `args` value. Dispatches a turn instructing the agent to invoke it, so the model reviews and acts on the result. |
+| `/workflows run <name> [json \| text]` | Run a saved workflow as a [template](workflows.md#templates): dispatches a turn in which the agent reads the script, adapts anything task-specific or stale, and runs it (by name with the JSON `args` when it fits as it is). Text that is not JSON is passed along as the task description. |
+| `/workflows size [small\|medium\|large\|unbounded]` | Show or set the workflow [size tier](workflows.md#sizing), a guideline for how many agents one workflow should use. Saved to `~/.spettro/config.json` as `workflow_size`. |
 | `/workflows where` | Show the directories scanned for saved workflows. |
+| `/ultracode [on\|off]` | Toggle [ultracode](workflows.md#ultracode) for this session (no argument flips it): every turn behaves as if the message contained the `ultracode` keyword, so the agent runs a workflow for every substantive task. Not saved; the status bar shows `ultracode` while it is on. |
 | `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
 | `/approve` | Execute pending plan through `coding` agent. |
 | `/tasks [list\|add\|done\|set\|show\|rm\|clear]` | Manage the session task graph. `list` prints tasks in dependency order with `deps:` and `[blocked]` markers; `set` accepts `pending`, `in_progress`, `completed`, `blocked` or `cancelled`; `rm <id>` deletes a task (stripping references to it from other tasks' dependencies); `clear` prunes all completed/cancelled tasks. |

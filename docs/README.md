@@ -30,7 +30,7 @@
 - [Themes (dark, light, auto)](theme.md) — `/theme`, `SPETTRO_THEME`, light-terminal palette
 - [Extended thinking levels](thinking.md)
 - [Ultra mode (agent swarm)](ultra.md) — `/ultra`, parallel sub-agent fan-out for hard tasks
-- [Workflows](workflows.md) — `ultracode`, deterministic multi-agent orchestration scripts
+- [Workflows](workflows.md) — `ultracode`, multi-agent orchestration scripts: runtime planning, checkpoints, size tiers, templates
 - [Troubleshooting](troubleshooting.md)
 - [Agent Manifest](../AGENTS.md)
 - [Agent Prompts](../agents/README.md)
