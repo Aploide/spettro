@@ -13,7 +13,7 @@ only carries the schemas of the tools that agent may use.
 | Language server | `lsp` (`op`: `diagnostics`, `references`, `definition`, `hover` or `restart`), `rename-symbol` ([lsp](lsp.md)) |
 | Tasks | `todo-write` (read, replace, merge into or prune the session task list; see [session](session.md#task-graph)), `task-stop`, `goal-complete` |
 | Web | `web-search`, `web-fetch`, `download` ([web tools](web-tools.md)) |
-| Delegation | `agent`, `ultra` ([ultra](ultra.md)), `workflow` ([workflows](workflows.md)), `send-message` |
+| Delegation | `agent`, `workflow` ([workflows](workflows.md)), `send-message` |
 | User and session | `ask-user`, `comment`, `save-memory`, `config`, `enter-plan-mode`, `exit-plan-mode`, `enter-worktree`, `exit-worktree` |
 | Skills and tools | `skill` (load a skill by `name`, or list them; see [skills](skills.md)), `tool-search` |
 | MCP | `mcp-list-resources`, `mcp-read-resource`, `mcp-auth` |
@@ -83,7 +83,7 @@ An agent holding `tool-search` gets only its core tools advertised up front:
 `agent`, `glob`, `grep`, `file-read`, `file-write`, `file-edit`, `bash`,
 `job-output`, `job-kill`, `tool-output`, `todo-write`, `web-fetch`, `lsp`,
 `ask-user`, `comment`, `tool-search`, `goal-complete`, the plan-mode tools,
-`ultra`, `workflow` and the MCP resource tools (plus `skill` when the model
+`workflow` and the MCP resource tools (plus `skill` when the model
 may load any skill), and any tool it holds that its prompt names in backticks (the
 coding agent's prompt names `view-image`, the ask agent's `web-search`).
 Its other tools (`send-message`, `save-memory`, `config`, `download`,

@@ -6,7 +6,7 @@ Spettro uses both project-local and user-global storage.
 
 | Path | Purpose |
 | --- | --- |
-| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md), [workflow size](#workflows). |
+| `config.json` | Active provider/model, permission, token budget, auto-compact, favorites, UI state, local endpoints, [thinking level](thinking.md), [theme](theme.md), [workflow size and `/ultra`](#workflows). |
 | `keys.enc` | Encrypted API keys map by provider ID (see [Encrypted API keys](#encrypted-api-keys)). |
 | `keys.enc.v1` | Backup of a pre-v2 `keys.enc`, written when it is migrated; kept for one release. |
 | `master.key` | Random secret `keys.enc` is encrypted under (created on first use). |
@@ -213,13 +213,13 @@ See [Agent Skills](skills.md) for how skills are found and used.
 
 ## Workflows
 
-See [Workflows](workflows.md#sizing) for what the tiers mean.
+See [Workflows](workflows.md#sizing) for what the tiers mean, and
+[/ultra and ultracode](workflows.md#ultra-and-ultracode) for the `ultra` switch.
 
 | `config.json` key | Default | Meaning |
 | --- | --- | --- |
 | `workflow_size` | `""` (treated as `medium`) | `small`, `medium`, `large` or `unbounded`: the size guideline workflow runs plan around (about 5, 10 or 30 agents per workflow, or none). Written by `/workflows size` in the TUI and by the `workflow_size` selector or `/workflow-size` in ACP. A single run can override it with the tool's `size` argument. An unrecognised value is cleared to the default on load. |
-
-The `/ultracode` toggle is per session and is not stored here.
+| `ultra` | `false` | The [ultra](workflows.md#ultra-and-ultracode) switch, written by `/ultra` in the TUI and ACP and by the ACP **Ultra** toggle. While `true`, every turn runs in ultracode mode: substantive tasks run as dynamic workflows, as if the message contained the `ultracode` keyword. Ignored (suspended, not cleared) while `permission` is `ask-first`, because the workflow tool does not run there. |
 
 ## Checkpointing storage
 

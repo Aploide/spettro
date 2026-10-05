@@ -57,7 +57,7 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   when the conversation started, then carried with its history), so a file
   created while session A is open shows up in a session started later but
   never changes A's system prompt. The mode is per session; the model,
-  permission, thinking level and Ultra live in your user config and are
+  permission, thinking level and the `/ultra` switch live in your user config and are
   shared, so changing one from any session sends a `config_option_update`
   to every other open session and a run in progress there applies a new
   permission level at its next approval.
@@ -72,11 +72,12 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   - **Thinking** — the reasoning/thinking level. Always shown (as `Off`
     when disabled) so the control never disappears from the toolbar;
     non-reasoning models simply ignore the setting.
-  - **Ultra** — On/Off toggle for [Ultra mode](ultra.md) (swarm of
-    parallel sub-agents for hard tasks). Turning it on requires the
-    Restricted or YOLO permission level; under Ask-first the change is
-    rejected, and dropping back to Ask-first suspends Ultra until the
-    level is raised again.
+  - **Ultra** — On/Off toggle for [ultra](workflows.md#ultra-and-ultracode)
+    (ultracode: substantive tasks run as dynamic workflows), the same
+    setting `/ultra` changes. It can be turned on under Ask-first, but it
+    is then saved and suspended until the level is Restricted or YOLO,
+    which workflows need; dropping back to Ask-first suspends it the same
+    way.
   - **Workflow size** (`workflow_size`) — the [size tier](workflows.md#sizing)
     for workflow runs: `small`, `medium`, `large` or `unbounded`. It is
     stored in your user config like the selectors above; `/workflow-size
@@ -152,7 +153,7 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   below for the transports, the payload, and the answer shape.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
   `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, `/workflows`,
-  `/workflow-size`, `/ultracode`, `/skills`, and `/clear` are advertised
+  `/workflow-size`, `/ultra`, `/skills`, and `/clear` are advertised
   to the client
   (`available_commands_update`), followed by one command per
   [Agent Skill](skills.md) the user can run in the session's workspace
@@ -174,8 +175,10 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   to adapt and run. JSON
   args are passed through as typed, whitespace included; other text
   becomes the task description. `/workflow-size [tier]` shows or sets the
-  size tier, and `/ultracode [on|off]` toggles
-  [ultracode](workflows.md#ultracode) for this session only.
+  size tier, and `/ultra [on|off]` toggles
+  [ultra](workflows.md#ultra-and-ultracode) (no argument flips it), the
+  same saved setting as the **Ultra** selector; under Ask-first the
+  reply says it is saved but suspended.
   `/<skill-name> [args]` runs the turn with that skill's instructions, and
   `$<skill-name>` in a prompt appends the skill's instructions. Both are
   read from the text the user typed only: files the editor attached are
@@ -270,8 +273,8 @@ tool name that do not convert) arrives as a single, already finished
 
 | Field | What Spettro sends |
 |---|---|
-| `kind` | From the tool's canonical name, so a retired name gets its canonical tool's kind: `read` for `file-read`, `view-image`, `skill`, `job-output`, `tool-output` and the MCP resource tools; `edit` for `file-write`, `file-edit`, `rename-symbol`; `search` for `grep`, `glob`, `lsp`, `tool-search`; `execute` for `bash`, `job-kill` and the `pty-*` tools; `fetch` for `web-fetch`, `web-search`, `download`; `think` for `todo-write`, `agent`, `ultra`, `workflow`, `goal-complete`; `switch_mode` for `enter-plan-mode` and `exit-plan-mode`; `other` for the rest. A tool that is not a built-in (MCP, or a tool of your own in the manifest, even one with a built-in's name) is classified from the words in its name. |
-| `title` | A sentence for the built-ins (`Run go test ./...`, `Edit internal/app.go`, `Search TODO in internal`, `Load skill greet`), read from the argument names the runtime accepts (`command` or `cmd`; `path` or `file_path`), `<name> <arguments>` for other tools (a tool of your own in the manifest included, even when it has a built-in's name), with the arguments clipped and redacted as in `rawInput`, `agent <id>: <task>` for a sub-agent. Swarm members are prefixed with their instance (`[code#3] Read a.go`). One line, at most 120 characters. |
+| `kind` | From the tool's canonical name, so a retired name gets its canonical tool's kind: `read` for `file-read`, `view-image`, `skill`, `job-output`, `tool-output` and the MCP resource tools; `edit` for `file-write`, `file-edit`, `rename-symbol`; `search` for `grep`, `glob`, `lsp`, `tool-search`; `execute` for `bash`, `job-kill` and the `pty-*` tools; `fetch` for `web-fetch`, `web-search`, `download`; `think` for `todo-write`, `agent`, `workflow`, `goal-complete`; `switch_mode` for `enter-plan-mode` and `exit-plan-mode`; `other` for the rest. A tool that is not a built-in (MCP, or a tool of your own in the manifest, even one with a built-in's name) is classified from the words in its name. |
+| `title` | A sentence for the built-ins (`Run go test ./...`, `Edit internal/app.go`, `Search TODO in internal`, `Load skill greet`), read from the argument names the runtime accepts (`command` or `cmd`; `path` or `file_path`), `<name> <arguments>` for other tools (a tool of your own in the manifest included, even when it has a built-in's name), with the arguments clipped and redacted as in `rawInput`, `agent <id>: <task>` for a sub-agent. A workflow member's calls are prefixed with its instance (`[code#3] Read a.go`). One line, at most 120 characters. |
 | `locations` | The file named by the call's `path` argument, resolved against the session's working directory (ACP paths are absolute), with the start line when the call gives one. The completion replaces it with the absolute paths of the files the call actually changed. |
 | `rawInput` | The call's arguments, with each string cut to 2 KiB, the whole object to 16 KiB, and values named `token`, `api_key`, `password`, `secret` (and similar) redacted. |
 | `content` | On completion: a `diff` block (`path`, `oldText`, `newText`; no `oldText` for a created file) for every file `file-write`, `file-edit` or `rename-symbol` changed, then a short excerpt of the text output (the runtime cuts it to a few hundred bytes for every front-end; the model itself sees the full output) and any image the tool attached. |

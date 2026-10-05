@@ -13,13 +13,13 @@ to hand the orchestrating model a decision. The model reads the interim
 result there and replies before the run goes on. See
 [Dynamic workflows](#dynamic-workflows).
 
-[Ultra](ultra.md) fans one prompt template over a list of items: one
-shape, one round. That covers a lot of work, but not "verify each
-finding as it lands", "generate three designs and score them against
-each other", or "keep sweeping until two rounds turn up nothing new".
-Those need a loop, a condition, or a second stage, and without a script
-the model has to re-derive them on every turn — which is where
-orchestration drifts.
+Fanning one prompt over a list of items is one shape, one round: in a
+script it is a single `parallel()` call. Plenty of work needs more than
+that — "verify each finding as it lands", "generate three designs and
+score them against each other", "keep sweeping until two rounds turn up
+nothing new". Those need a loop, a condition, or a second stage, and
+without a script the model has to re-derive them on every turn — which
+is where orchestration drifts.
 
 Workflows work with **any model** — sub-agents inherit the session's
 provider, model, thinking level and permissions — and are available in
@@ -55,7 +55,7 @@ The difference between the two forms is **consent**, not capability:
 
 | You wrote | What happens |
 | --- | --- |
-| `ultracode` (or `/ultracode on`) | A standing yes. The agent writes the script and runs it, and treats a workflow as the default way to do the task (see [Ultracode](#ultracode)). |
+| `ultracode` (or `/ultra` is on) | A standing yes. The agent writes the script and runs it, and treats a workflow as the default way to do the task (see [/ultra and ultracode](#ultra-and-ultracode)). |
 | "use a workflow …", or the agent proposing one itself | The agent judges whether a workflow fits. If it writes one, you are asked first: **Run it** / **Save it, don't run** / **Don't run it**. |
 
 Declining is final — the agent is told not to run it anyway and not to
@@ -76,21 +76,21 @@ plain.
 The keyword is one-shot on purpose: the guidance is a couple of kilobytes
 of system prompt, and the prompt has to stay byte-stable within a run for
 caching to hit, so a standing toggle charges every turn for it. When that
-is what you want, `/ultracode on` makes it standing for the session (see
-[Ultracode](#ultracode)).
+is what you want, `/ultra on` makes it standing (see
+[/ultra and ultracode](#ultra-and-ultracode)).
 
 Detection lives in the agent runner, keyed off the text of your message,
 so the keyword works identically in the TUI, in ACP editors, in
-`/goal` runs, over the Telegram relay, and in headless mode. There is no
-setting to find: the `/ultracode` session toggle has the same effect as
-writing the keyword every time — in the TUI, as long as the run's
-permission allows workflows (see below).
+`/goal` runs, over the Telegram relay, and in headless mode. The only
+setting is `/ultra`, which has the same effect as writing the keyword
+every time, as long as the run's permission allows workflows (see
+below).
 
-**Permission requirement:** like Ultra, workflows need `restricted` or
+**Permission requirement:** workflows need `restricted` or
 `yolo`. A script runs many sub-agents concurrently, and `ask-first`
 would turn that into a wall of approval prompts.
 
-## Ultracode
+## /ultra and ultracode
 
 `ultracode` is more than a shortcut for "use a workflow". A plain-English
 request offers the tool and leaves it to the model to judge whether a
@@ -117,20 +117,31 @@ Token cost is not the constraint under ultracode, but the
 [size guideline](#sizing) still applies. It is part of the same prompt
 section.
 
-The keyword covers one message. To keep ultracode on for every turn,
-toggle it for the session:
+The keyword covers one message. `/ultra` keeps ultracode on for every
+turn:
 
-| Surface | Command |
+| Surface | How |
 | --- | --- |
-| TUI | `/ultracode [on\|off]` (no argument toggles). The status bar shows `ultracode` while it is on, and `ultracode:suspended` (dimmed) while the active agent runs under `ask-first`, where the toggle is held back rather than handing the agent a tool whose every call would be refused. |
-| ACP | `/ultracode [on\|off]`, per session. |
+| TUI | `/ultra [on\|off]` (no argument flips it). The status bar shows `ultra` while it is on, and `ultra:suspended` (dimmed) while the active agent runs under `ask-first`. |
+| ACP editors | The **Ultra** toggle in the session config toolbar, or `/ultra [on\|off]`. |
+| Config file | `"ultra": true` in `~/.spettro/config.json`. |
 
-The toggle is a session setting and is not saved to your config. A new
-session starts with it off, because a standing multi-agent default is
-something you choose for a piece of work, not for every project you
-open. With the toggle on (and, in the TUI, not suspended), every turn
-behaves as if the message contained the keyword: consent is not asked again, and the prompt section is
-appended on every turn.
+The setting is saved to your user config, so it carries over to new
+sessions and applies wherever Spettro runs: the TUI, ACP editors, `/goal`
+loops and headless mode. It takes effect from the next turn, because the
+system prompt is fixed for the length of a run to keep prompt caching
+hitting. While it is on, every turn behaves as if the message contained
+the keyword: consent is not asked again, and the prompt section is
+appended on every turn. That is the cost of a standing mode, and the
+reason the keyword exists for the turns where you want it once.
+
+Under `ask-first`, `/ultra` is **suspended** rather than refused. You can
+turn it on, and the choice is saved, but it does not engage until the
+permission is `restricted` or `yolo`: the workflow tool refuses to run
+under `ask-first`, so the standing guidance would only steer the agent at
+a tool whose every call is refused. Dropping back to `ask-first` later
+suspends it the same way, and raising the level again resumes it without
+another `/ultra`.
 
 ## Writing a workflow
 
@@ -233,7 +244,7 @@ keeps a header from running code.
 | `agentType` | Manifest agent to run as (default `general-purpose`). Orchestrators are rejected. |
 | `model` | Pin this call to a different model than the session's. |
 | `effort` | `off`/`low`/`medium`/`high`/`x-high`/`max` thinking level for this call. |
-| `isolation` | `"worktree"` gives the sub-agent its own git worktree and branch, merged back when it finishes (see [Ultra's worktree section](ultra.md#workspace-isolation-worktrees)). |
+| `isolation` | `"worktree"` gives the sub-agent its own git worktree and branch, merged back when it finishes (see [Workspace isolation](#workspace-isolation-worktrees)). |
 
 ### `pipeline` vs `parallel`
 
@@ -277,7 +288,60 @@ than two backticks, the error also points out the usual cause: a
 backtick quoted inside a template literal ends that literal.
 
 Transient provider failures (rate limits, availability) are retried per
-agent with the same backoff Ultra uses: 3 s, 6 s, 12 s.
+agent with exponential backoff: 3 s, 6 s, 12 s.
+
+### Workspace isolation (worktrees)
+
+Agents that *edit* files crowd a shared checkout: many of them writing
+into one working tree, one `git status` full of everyone's changes, and
+an edit by one landing under another's feet. Setting
+`isolation: "worktree"` on an `agent()` call (or on a single `agent`
+tool delegation) gives that sub-agent a workspace of its own instead:
+
+1. Spettro creates a git **worktree** under
+   `.spettro/worktrees/<instance>-<id>/` in the project root, on a fresh
+   **branch named after the sub-agent** (`spettro/code-3-a1b2c3`), forked
+   from the current `HEAD`.
+2. The sub-agent runs with its cwd inside that worktree (at the same
+   relative directory the session is in), so concurrent edits never
+   collide and the main checkout stays clean (`.spettro/` is auto-added to
+   `.git/info/exclude`). Because `.spettro/` is never checked out into a
+   worktree, a sub-agent there reads the project's operator state from the
+   main checkout: hooks (`.spettro/hooks.json`), the allow-always command
+   and network lists, prompt overrides, instruction files and project
+   skills. An allow-always choice made while it runs is saved to the main
+   checkout too, so it outlives the worktree.
+3. When the call finishes, its branch is **merged back** into the main
+   checkout, one merge at a time. Leftover uncommitted work is committed
+   first, with a Conventional Commits message written by the LLM from the
+   diff (the same machinery as auto-commit; a stock
+   `spettro: subagent … work` message is the fallback if that fails).
+   After a clean merge the branch and its worktree are **deleted**.
+
+The merge happens once per call, after the last attempt, so a
+[schema](#globals) retry reuses the same worktree. Outcomes:
+
+| Status | Meaning |
+| --- | --- |
+| `merged` | Branch merged into the main checkout, then deleted. |
+| `no_changes` | The agent changed nothing; worktree and branch deleted. |
+| `conflict` | The merge conflicted: it was aborted and the **branch and worktree are kept** for manual resolution. |
+| `preserved` | The agent failed but left work behind; branch and worktree are kept so nothing is lost. A failed agent with nothing to keep has its worktree deleted. |
+| `error` | A git step failed; the branch and worktree are kept. |
+
+A conflict or error in a workflow is listed in an `<unmerged>` block of
+the run's result, with the branch and worktree path, and the
+orchestrating agent is told to resolve it; the same note appears as a
+log line in the live view (the TUI panel, the ACP tool card) as it
+happens. A single `agent` delegation reports the
+outcome in its JSON result (`workspace.merge_status`). Resolve a kept
+branch by merging it by hand, then `git worktree remove <path>` and
+`git branch -D <branch>`; leftovers also show up in
+[`/storage`](storage.md).
+
+Worktree isolation requires the project to be a git repository with at
+least one commit. Leave `isolation` unset for read-only fan-outs
+(research, review, search): a worktree would only add overhead there.
 
 ### What is missing on purpose
 
@@ -602,7 +666,7 @@ ultracode: find every unchecked error in internal/ +500k
 ```
 
 `+500k`, `+750K`, `+1.5m` and `+2M` all work. The directive counts only
-in a message that turns workflows on (or while `/ultracode` is on), and
+in a message that turns workflows on (or while `/ultra` is on), and
 lights up in the input box with the keyword. It is **one pool for the
 whole turn**, not a budget per run: each workflow started in that turn
 gets what earlier runs left over as its default `budget_tokens`. Once the
@@ -622,8 +686,8 @@ terminal and never takes more than a few rows, because a running workflow
 must not be the reason you cannot read what the agent just said. Once the
 run ends it collapses to a single line and gives the rows back.
 
-It shares one budget — about a quarter of the terminal height — with an
-ultra swarm, ordinary delegations and the todo list, so the four of them
+It shares one budget — about a quarter of the terminal height — with
+ordinary delegations and the todo list, so the three of them
 together stay bounded no matter how much is in flight. Each block says
 how many entries it left out; nothing is hidden silently.
 
@@ -836,8 +900,7 @@ becomes the next round.
 ## When *not* to use one
 
 - A single delegation → the `agent` tool.
-- One template over N items, one round → [Ultra](ultra.md).
 - A trivial single-step task → just do it.
 
-A workflow multiplies token usage the same way a swarm does: every
+A workflow multiplies token usage: every
 `agent()` call is a full agent run on the active model.
