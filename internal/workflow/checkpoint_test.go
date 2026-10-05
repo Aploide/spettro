@@ -614,3 +614,108 @@ func TestChainedResumesReplayEverything(t *testing.T) {
 		t.Fatalf("run-2's journal does not carry what it replayed:\n%s", raw)
 	}
 }
+
+// A checkpoint queued by the same stretch of script that then returns is not
+// one the run stops at, so it must never be handed to the host: the host would
+// report "paused" and detach while the run finished on its own, its result
+// going nowhere and the orchestrator's continue finding no paused run.
+func TestACheckpointTheRunOutlivesNeverSurfaces(t *testing.T) {
+	child := "export const meta = {name: 'child', description: 'c'}\ncheckpoint('fyi from the child'); return 1"
+	cases := map[string]struct {
+		body string
+		auto bool
+	}{
+		"auto checkpoint on a final phase with no agents": {`await agent('a'); phase('Report'); return 'done'`, true},
+		"unawaited checkpoint before returning":           {`checkpoint('fyi', {n: 1}); return 'done'`, false},
+		"unawaited checkpoint after an agent":             {`await agent('a'); checkpoint('fyi'); return 'done'`, false},
+		"unawaited checkpoint in a child":                 {`await workflow({script: args.child}); return 'done'`, false},
+	}
+	for label, tc := range cases {
+		t.Run(label, func(t *testing.T) {
+			for i := 0; i < 200; i++ {
+				h, err := Start(context.Background(), header(tc.body), Options{
+					Runner: echoRunner(0), Checkpoints: true, AutoCheckpoint: tc.auto,
+					Args: map[string]any{"child": child},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				step := nextStep(t, h)
+				if step.Checkpoint != nil {
+					h.Stop()
+					<-h.Done()
+					t.Fatalf("run %d: surfaced %+v for a run that settles by itself", i, *step.Checkpoint)
+				}
+				if res := wantResult(t, step); res.Value != "done" {
+					t.Fatalf("value = %#v", res.Value)
+				}
+			}
+		})
+	}
+}
+
+// A checkpoint queued behind the one being answered surfaces only once the
+// script has run on with the reply — the reply may be what settles the run.
+func TestAQueuedCheckpointWaitsForTheReplyToRun(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		h := startRun(t, header(`
+			const first = checkpoint('one')
+			checkpoint('two')
+			return await first
+		`), Options{Checkpoints: true})
+		cp := wantCheckpoint(t, nextStep(t, h))
+		if cp.Message != "one" {
+			t.Fatalf("first checkpoint = %+v", cp)
+		}
+		if err := h.Resume(cp.ID, "answered"); err != nil {
+			t.Fatal(err)
+		}
+		step := nextStep(t, h)
+		if step.Checkpoint != nil {
+			t.Fatalf("run %d: surfaced %+v while the reply that settles the run was on its way", i, *step.Checkpoint)
+		}
+		if res := wantResult(t, step); res.Value != "answered" {
+			t.Fatalf("value = %#v", res.Value)
+		}
+	}
+}
+
+// An agent() held at the pause gate when the run settles never starts: no
+// start event after the run's finish, and no Runner call on a dead context.
+func TestGatedAgentDoesNotStartAfterTheRunSettles(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		var mu sync.Mutex
+		var events []Event
+		runner := echoRunner(0)
+		h, err := Start(context.Background(), header(`checkpoint('x'); agent('late'); return 1`), Options{
+			Runner: runner, Checkpoints: true,
+			Observer: func(ev Event) {
+				mu.Lock()
+				events = append(events, ev)
+				mu.Unlock()
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantResult(t, nextStep(t, h))
+		<-h.Done()
+		// Give a straggling dispatch goroutine the time to misbehave.
+		time.Sleep(5 * time.Millisecond)
+		if n := runner.count(); n != 0 {
+			t.Fatalf("run %d: the Runner was called %d times after the run settled", i, n)
+		}
+		mu.Lock()
+		finished := false
+		for _, ev := range events {
+			if ev.Kind == EventFinish && !ev.Nested {
+				finished = true
+			}
+			if finished && ev.Kind == EventAgentStart {
+				mu.Unlock()
+				t.Fatalf("run %d: an agent started after the run finished: %+v", i, ev)
+			}
+		}
+		mu.Unlock()
+	}
+}

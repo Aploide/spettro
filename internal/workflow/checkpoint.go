@@ -31,17 +31,44 @@ type pendingCheckpoint struct {
 //     branches that both ask get two separate answers, in the order they
 //     asked.
 //   - active counts agent dispatches past the pause gate (admitted when
-//     agent() was called, running, or waiting for a concurrency slot). While the queue is non-empty no new dispatch
-//     passes the gate, so active can only drain — which is what lets a pause
-//     surface at all on a script that keeps fanning out.
+//     agent() was called, running, or waiting for a concurrency slot, until
+//     the answer is queued for the script). While the queue is non-empty no
+//     new dispatch passes the gate, so active can only drain — which is what
+//     lets a pause surface at all on a script that keeps fanning out.
+//   - busy counts what could still run script code without anything new
+//     being dispatched: every script loop (the top-level one and each
+//     workflow() child) that is not blocked waiting for work with its promise
+//     pending, plus every job queued for a loop — an agent's answer, a
+//     child's result, a checkpoint reply — from before it is queued until it
+//     has run. While busy is non-zero the script may still settle by itself,
+//     or raise more, or start agents, so nothing surfaces.
 //   - surfaced is the head once Next has handed it to the host. From then
 //     until Resume the run is frozen: no script code runs, no agent runs.
+//   - settled is set once the run has ended; nothing surfaces after it.
 //   - wake is closed and replaced on every change, so waiters (Next, gated
 //     dispatches, frozen script loops) re-check without polling.
 
 func (s *shared) signalLocked() {
 	close(s.wake)
 	s.wake = make(chan struct{})
+}
+
+// hold takes a busy token. It is always taken by something that is itself
+// busy or in flight (a running loop, an admitted dispatch, Resume under the
+// lock), before that gives its own up, so busy and active never both read
+// zero while work is on its way to a script.
+func (s *shared) hold() {
+	s.mu.Lock()
+	s.busy++
+	s.mu.Unlock()
+}
+
+// release gives a busy token back and wakes a Next that may now surface.
+func (s *shared) release() {
+	s.mu.Lock()
+	s.busy--
+	s.signalLocked()
+	s.mu.Unlock()
 }
 
 // enqueue adds a raised checkpoint to the queue.
@@ -53,7 +80,8 @@ func (s *shared) enqueue(p *pendingCheckpoint) {
 }
 
 // surface implements the quiescence rule: it hands out the head of the queue
-// only when no agent dispatch is in flight anywhere in the run.
+// only when no agent dispatch is in flight anywhere in the run, and every
+// script loop is parked on a pending promise with nothing queued for it.
 //
 // The rule exists because of what the host does with a pause. The tool call
 // that was waiting returns the checkpoint to the model, and the turn may end
@@ -61,6 +89,14 @@ func (s *shared) enqueue(p *pendingCheckpoint) {
 // gone — its tool callbacks, approvals and questions all belong to it. Waiting
 // for the in-flight agents (new ones are held at the gate) makes "paused"
 // mean that nothing is running on anyone's behalf.
+//
+// Waiting for the script loops is what makes a surfaced checkpoint one the
+// run actually stops at. A checkpoint can be queued by the same stretch of
+// script that then returns — phase() raising an automatic checkpoint as the
+// last phase begins, or a checkpoint() nobody awaits — and handing that one to
+// the host would report "paused" for a run that was in fact about to finish
+// on its own: the host detaches, the result goes nowhere, and the
+// orchestrator's continue finds no paused run.
 //
 // When there is nothing to surface it returns the channel to wait on.
 func (s *shared) surface() (*Checkpoint, <-chan struct{}) {
@@ -70,7 +106,7 @@ func (s *shared) surface() (*Checkpoint, <-chan struct{}) {
 		s.mu.Unlock()
 		return &cp, nil
 	}
-	if len(s.queue) == 0 || s.active > 0 {
+	if len(s.queue) == 0 || s.active > 0 || s.busy > 0 || s.settled {
 		wake := s.wake
 		s.mu.Unlock()
 		return nil, wake
@@ -91,6 +127,7 @@ func (s *shared) settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queue, s.surfaced = nil, nil
+	s.settled = true
 	s.signalLocked()
 }
 
@@ -120,6 +157,11 @@ func (s *shared) resume(id string, value any) error {
 	}
 	s.surfaced = nil
 	s.queue = s.queue[1:]
+	// The reply's job is busy from this instant (p.answer queues it with
+	// this token): a checkpoint queued behind this one must not surface
+	// before the script has run on with the reply — the reply may be what
+	// settles the run.
+	s.busy++
 	s.signalLocked()
 	s.mu.Unlock()
 
@@ -154,8 +196,15 @@ func (s *shared) admit() bool {
 // the concurrency slot, before the Runner — until no checkpoint is queued. A
 // pause therefore cannot be starved by a script that keeps starting agents,
 // and nothing new runs while the orchestrator is deciding.
+//
+// A run that settles empties the queue after cancelling its context, so a
+// gated dispatch woken by that must see the cancellation rather than the empty
+// queue: it reports the context's error instead of taking a slot.
 func (s *shared) enterDispatch(ctx context.Context) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		s.mu.Lock()
 		if len(s.queue) == 0 {
 			s.active++
@@ -285,7 +334,8 @@ func (r *vmRun) raiseCheckpoint(ctx context.Context, msg string, data any, key s
 		answer: func(encoded string) {
 			go func() {
 				defer r.inflight.Add(-1)
-				r.post(ctx, func() { settle(r.decodeJSON(encoded)) })
+				// resume already holds this job's busy token.
+				r.send(ctx, func() { settle(r.decodeJSON(encoded)) })
 			}()
 		},
 	})

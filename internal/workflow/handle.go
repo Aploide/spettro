@@ -93,8 +93,12 @@ func (h *Handle) Stop() { h.cancel() }
 // returns the same result.
 //
 // A pause is surfaced only once no agent dispatch is in flight anywhere in the
-// run (see shared.surface), so when Next returns a checkpoint nothing is
-// executing on the host's behalf until Resume.
+// run and every script is parked waiting on a pending promise (see
+// shared.surface), so when Next returns a checkpoint nothing is executing on
+// the host's behalf until Resume, and the run cannot settle by itself in the
+// meantime: a checkpoint the script raised and then outran (one it never
+// awaited, or the automatic one of a final phase that starts no agent) is
+// dropped when the run settles instead of being reported as a pause.
 func (h *Handle) Next(ctx context.Context) (Step, error) {
 	for {
 		select {

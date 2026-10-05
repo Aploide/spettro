@@ -266,6 +266,8 @@ type shared struct {
 	queue    []*pendingCheckpoint
 	surfaced *pendingCheckpoint
 	active   int
+	busy     int
+	settled  bool
 	wake     chan struct{}
 }
 
@@ -279,6 +281,11 @@ func newShared(opts Options) *shared {
 		size: size,
 		sem:  make(chan struct{}, opts.MaxConcurrency),
 		wake: make(chan struct{}),
+		// The top-level script's loop is busy from before it runs, and its
+		// token is never given back: when its promise settles the loop exits
+		// without parking, so the run never looks quiet between the script
+		// returning and Start settling the run.
+		busy: 1,
 	}
 }
 
@@ -371,17 +378,59 @@ type vmRun struct {
 	mu       sync.Mutex
 	phase    string
 	inflight atomic.Int64
+
+	// jobMu orders senders against the loop's exit: once exited is set no job
+	// is queued any more, so the exit can drain what is queued and give back
+	// its busy tokens (see shared.busy) without a late sender leaking one.
+	jobMu  sync.Mutex
+	exited bool
 }
 
 // post hands a closure to the script goroutine. Everything that touches the
 // goja runtime — resolving a promise, most of all — must go through here:
 // a goja.Runtime is not safe to touch from two goroutines, and the loop below
 // is the single one allowed to.
+//
+// A queued job counts as busy (see shared.busy) from before it is queued
+// until the loop has run it, so the run cannot look quiet while a resolution
+// is on its way to the script.
 func (r *vmRun) post(ctx context.Context, fn func()) {
+	r.sh.hold()
+	r.send(ctx, fn)
+}
+
+// send queues a job whose busy token the caller already holds, giving the
+// token back if the job can no longer run.
+func (r *vmRun) send(ctx context.Context, fn func()) {
+	r.jobMu.Lock()
+	defer r.jobMu.Unlock()
+	if r.exited {
+		r.sh.release()
+		return
+	}
 	select {
 	case r.jobs <- fn:
 	case <-r.done:
+		r.sh.release()
 	case <-ctx.Done():
+		r.sh.release()
+	}
+}
+
+// exit ends the script loop: senders stop queueing, and the tokens of jobs
+// that will never run now are given back.
+func (r *vmRun) exit() {
+	close(r.done)
+	r.jobMu.Lock()
+	defer r.jobMu.Unlock()
+	r.exited = true
+	for {
+		select {
+		case <-r.jobs:
+			r.sh.release()
+		default:
+			return
+		}
 	}
 }
 
@@ -424,7 +473,7 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 		nested: depth > 0,
 		meta:   meta,
 	}
-	defer close(r.done)
+	defer r.exit()
 
 	if err := r.bindGlobals(ctx, args); err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, err)
@@ -488,6 +537,11 @@ const idlePoll = 50 * time.Millisecond
 
 // pump drives the script's event loop: run queued resolutions until the
 // script's promise settles. Nothing else touches the runtime while this runs.
+//
+// The loop holds a busy token (see shared.busy) whenever it is not blocked
+// waiting for work: it gives it back only right before it blocks with the
+// promise still pending, and takes one again — a queued job's own, or a fresh
+// one — as soon as it wakes. A loop that exits therefore exits holding it.
 func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 	timer := time.NewTimer(idlePoll)
 	defer timer.Stop()
@@ -510,14 +564,18 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 			}
 		}
 		timer.Reset(idlePoll)
+		r.sh.release()
 		select {
 		case job := <-r.jobs:
+			// The job's busy token becomes the loop's while it runs.
 			if err := r.runJob(job); err != nil {
 				return nil, err
 			}
 		case <-ctx.Done():
+			r.sh.hold()
 			return nil, ctx.Err()
 		case <-timer.C:
+			r.sh.hold()
 			// No work arrived. If nothing is in flight and no resolution is
 			// queued, the script is awaiting something that can never settle
 			// (a bare `new Promise(() => {})`, say) — report that instead of
@@ -863,7 +921,18 @@ func (r *vmRun) jsAgent(ctx context.Context) func(goja.FunctionCall) goja.Value 
 		admitted := r.sh.admit()
 		go func() {
 			defer r.inflight.Add(-1)
-			text, value, err := r.sh.dispatch(ctx, req, r.nested, admitted)
+			if !admitted {
+				if err := r.sh.enterDispatch(ctx); err != nil {
+					r.sh.failed.Add(1)
+					r.post(ctx, func() { resolve(goja.Null()) })
+					return
+				}
+			}
+			text, value, err := r.sh.dispatch(ctx, req, r.nested)
+			// The answer is queued for the script before the dispatch stops
+			// counting as in flight, so there is no instant at which the run
+			// looks quiet with an answer on its way — a checkpoint surfacing
+			// then would be handed to the host just before the script ran on.
 			r.post(ctx, func() {
 				switch {
 				case err != nil:
@@ -874,6 +943,7 @@ func (r *vmRun) jsAgent(ctx context.Context) func(goja.FunctionCall) goja.Value 
 					resolve(vm.ToValue(text))
 				}
 			})
+			r.sh.leaveDispatch()
 		}()
 		return vm.ToValue(promise)
 	}
@@ -891,18 +961,18 @@ func labelFor(label, prompt string) string {
 }
 
 // dispatch runs one request against the Runner: journal replay first, then a
-// concurrency slot, then the call itself with schema retries.
+// concurrency slot, then the call itself with schema retries. The caller has
+// already passed the pause gate and leaves it once the answer is queued.
 //
-// admitted says whether the call already passed the pause gate when agent()
-// was called (see shared.admit); if not, it waits at the gate first.
-func (s *shared) dispatch(ctx context.Context, req Request, nested, admitted bool) (string, any, error) {
-	if !admitted {
-		if err := s.enterDispatch(ctx); err != nil {
-			s.failed.Add(1)
-			return "", nil, err
-		}
+// Nothing starts on a cancelled context. A run that has settled cancels its
+// context first, and a dispatch still on its way (scheduled late, or released
+// from the gate by the settle) would otherwise report an agent starting after
+// the run finished, or hand the Runner a context that is already dead.
+func (s *shared) dispatch(ctx context.Context, req Request, nested bool) (string, any, error) {
+	if err := ctx.Err(); err != nil {
+		s.failed.Add(1)
+		return "", nil, err
 	}
-	defer s.leaveDispatch()
 	key := callKey(req)
 	if entry, ok := s.opts.Journal.Take(key); ok {
 		req.Instance = entry.Instance
@@ -935,6 +1005,11 @@ func (s *shared) dispatch(ctx context.Context, req Request, nested, admitted boo
 	case <-ctx.Done():
 		s.failed.Add(1)
 		return "", nil, ctx.Err()
+	}
+	// With a slot free and the context done, select picks either at random.
+	if err := ctx.Err(); err != nil {
+		s.failed.Add(1)
+		return "", nil, err
 	}
 
 	text, value, err := s.callScoped(ctx, req)
@@ -1050,6 +1125,12 @@ func (r *vmRun) jsWorkflow(ctx context.Context) func(goja.FunctionCall) goja.Val
 			}
 		}
 		r.inflight.Add(1)
+		// The child's script loop is busy from now (see shared.busy): taken
+		// here, on the parent's loop, which is itself busy, so the run never
+		// looks quiet while the child is still to be scheduled. The child's
+		// pump parks and wakes on this token; once the child is done it is
+		// given back only after the parent's resolution is queued.
+		r.sh.hold()
 		go func() {
 			defer r.inflight.Add(-1)
 			value, _, err := r.sh.execute(ctx, sub.script, subArgs, r.depth+1)
@@ -1060,6 +1141,7 @@ func (r *vmRun) jsWorkflow(ctx context.Context) func(goja.FunctionCall) goja.Val
 				}
 				resolve(r.plainValue(value))
 			})
+			r.sh.release()
 		}()
 		return vm.ToValue(promise)
 	}
