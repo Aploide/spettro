@@ -122,8 +122,8 @@ turn:
 
 | Surface | How |
 | --- | --- |
-| TUI | `/ultra [on\|off]` (no argument flips it). The status bar shows `ultra` while it is on, and `ultra:suspended` (dimmed) while the active agent runs under `ask-first`. |
-| ACP editors | The **Ultra** toggle in the session config toolbar, or `/ultra [on\|off]`. |
+| TUI | `/ultra [on\|off]` (no argument flips it). The status bar shows `ultra` while it is on, and `ultra:suspended` (dimmed) while the active agent runs under `ask-first`. An agent's own permission counts here: with the user level at `ask-first`, `coding` (its own level `restricted`) still engages, while `plan` and `ask` are suspended. |
+| ACP editors | The **Ultra** toggle in the session config toolbar, or `/ultra [on\|off]`. Suspended while the session's permission is `ask-first`. `/ultracode` is not a command: it is answered with a pointer to `/ultra`. |
 | Config file | `"ultra": true` in `~/.spettro/config.json`. |
 
 The setting is saved to your user config, so it carries over to new

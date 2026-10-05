@@ -56,6 +56,13 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 	case "/ultra":
 		return acpUltraText(cfg, fields), false, true
 
+	case "/ultracode":
+		// Not a command — /ultra is the switch. Falling through sent
+		// "/ultracode off" to the model as a task, and the keyword in it
+		// switched the standing mode ON for that turn: the opposite of what
+		// was asked. Answer it here instead, as the TUI does.
+		return "unknown command: /ultracode — use /ultra [on|off], or write ultracode in a message to use workflows for that one turn", false, true
+
 	case "/workflow-size":
 		return acpWorkflowSizeText(cfg, fields[1:]), false, true
 

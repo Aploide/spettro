@@ -71,8 +71,11 @@ func TestUltracodeCommandRemoved(t *testing.T) {
 		if _, _, handled := handleSlashCommand(s, &cfg, pm, in); handled {
 			t.Fatalf("%q handled by the core commands", in)
 		}
-		if _, _, handled := handleExtendedSlashCommand(nil, s, &cfg, pm, in); handled {
-			t.Fatalf("%q handled by the extended commands", in)
+		// It is answered, never sent to the model: the keyword in it would
+		// switch the standing mode on for that turn.
+		text, _, handled := handleExtendedSlashCommand(nil, s, &cfg, pm, in)
+		if !handled || !strings.Contains(text, "unknown command") || !strings.Contains(text, "/ultra") {
+			t.Fatalf("%q: handled=%v text=%q, want an unknown-command reply pointing at /ultra", in, handled, text)
 		}
 	}
 	for _, c := range acpAvailableCommands {

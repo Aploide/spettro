@@ -1197,8 +1197,12 @@ func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runE
 	rt := w.runtime()
 	if rt == nil {
 		// Nobody to snapshot for or report to: keep the work on its branch
-		// rather than merging it into a checkout no turn is watching.
-		w.notePreserved(req, ws.abandon(mergeCtx))
+		// rather than merging it into a checkout no turn is watching. The
+		// call succeeded, so abandon's "subagent failed" would mislead.
+		if m := ws.abandon(mergeCtx); m != nil {
+			m.Detail = "the call finished with no turn to merge into; its work is kept on the branch and worktree"
+			w.notePreserved(req, m)
+		}
 		return
 	}
 	// The merge writes into the main checkout, which the call's own
@@ -1227,14 +1231,25 @@ func (w *workflowRunner) notePreserved(req workflow.Request, m *workspaceMerge) 
 	if m == nil {
 		return // nothing was changed; the worktree is already gone
 	}
-	note := fmt.Sprintf("%s: workspace %s — branch %q kept at %s%s",
-		req.Instance, m.Status, m.Branch, m.Path, mergeDetail(*m))
+	note := fmt.Sprintf("%s: %s — branch %q kept at %s%s",
+		req.Instance, preservedNoteMarker, m.Branch, m.Path, mergeDetail(*m))
 	w.mu.Lock()
 	w.notes = append(w.notes, note)
 	w.mu.Unlock()
 	if rt := w.runtime(); rt != nil {
 		rt.emitWorkflowMergeNote(req, note)
 	}
+}
+
+// preservedNoteMarker tags a note about unfinished work kept on a branch, as
+// opposed to finished work that failed to merge. The two need different
+// advice: a conflict is good work to merge by hand, while a failed member's
+// branch is half-done work — often redone by a retry that merged cleanly —
+// to inspect before merging, or delete.
+const preservedNoteMarker = "unfinished work preserved"
+
+func isPreservedNote(note string) bool {
+	return strings.Contains(note, ": "+preservedNoteMarker+" — ")
 }
 
 func (w *workflowRunner) takeWorkspace(index int) *agentWorkspace {

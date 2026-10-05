@@ -89,7 +89,7 @@ func TestWorkflowRunnerReportsPreservedWorktree(t *testing.T) {
 	}
 	runner.EndCall(ctx, failed, errors.New("provider unavailable"))
 	notes := runner.mergeNotes()
-	if len(notes) != 1 || !strings.Contains(notes[0], "general-purpose#1") || !strings.Contains(notes[0], "preserved") {
+	if len(notes) != 1 || !strings.Contains(notes[0], "general-purpose#1") || !isPreservedNote(notes[0]) {
 		t.Fatalf("a failed member's kept worktree must be reported, got %v", notes)
 	}
 	if _, err := os.Stat(filepath.Join(repo, "half.txt")); !os.IsNotExist(err) {
@@ -103,5 +103,21 @@ func TestWorkflowRunnerReportsPreservedWorktree(t *testing.T) {
 	runner.EndCall(ctx, clean, errors.New("provider unavailable"))
 	if got := runner.mergeNotes(); len(got) != 1 {
 		t.Fatalf("a failed member that changed nothing must add no note, got %v", got)
+	}
+}
+
+// TestRenderSeparatesPreservedFromConflicts: a conflict is finished work to
+// merge by hand; a failed member's branch is unfinished work to inspect. The
+// result must not tell the model to merge the latter.
+func TestRenderSeparatesPreservedFromConflicts(t *testing.T) {
+	preserved := "general-purpose#3: " + preservedNoteMarker + ` — branch "spettro/x" kept at /tmp/x — subagent failed`
+	conflict := `general-purpose#4: workspace merge conflict — branch "spettro/y" kept at /tmp/y`
+	out := renderWorkflowResult("wf_1", "/tmp/run", "inline", workflow.Meta{Name: "m"}, workflow.Result{}, []string{preserved})
+	if strings.Contains(out, "merge it, fix conflicts") || !strings.Contains(out, "Do not merge it blindly") {
+		t.Fatalf("preserved only:\n%s", out)
+	}
+	out = renderWorkflowResult("wf_1", "/tmp/run", "inline", workflow.Meta{Name: "m"}, workflow.Result{}, []string{conflict})
+	if !strings.Contains(out, "merge it, fix conflicts") || strings.Contains(out, "Do not merge it blindly") {
+		t.Fatalf("conflict only:\n%s", out)
 	}
 }

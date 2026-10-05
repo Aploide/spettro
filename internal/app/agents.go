@@ -23,7 +23,7 @@ func (a *App) handlePlanning(ctx context.Context, prompt string) error {
 		ProviderName:    func() string { return a.cfg.ActiveProvider },
 		ModelName:       func() string { return a.cfg.ActiveModel },
 		CWD:             a.cwd,
-		Ultracode:       a.cfg.UltraActive(),
+		Ultracode:       ultraFor(a.cfg, spec),
 		WorkflowSize:    a.cfg.WorkflowSizeTier(),
 		ToolCallback:    a.printToolProgress,
 		Manifest:        &a.manifest,
@@ -85,7 +85,7 @@ func (a *App) handleChat(ctx context.Context, prompt string) error {
 		ProviderName:    func() string { return a.cfg.ActiveProvider },
 		ModelName:       func() string { return a.cfg.ActiveModel },
 		CWD:             a.cwd,
-		Ultracode:       a.cfg.UltraActive(),
+		Ultracode:       ultraFor(a.cfg, spec),
 		WorkflowSize:    a.cfg.WorkflowSizeTier(),
 		ToolCallback:    a.printToolProgress,
 		Manifest:        &a.manifest,
@@ -199,4 +199,13 @@ func commentMessage(args, output string) string {
 func (a *App) cliSessionDir() string {
 	id := "cli-" + session.ProjectHash(a.cwd)
 	return session.SessionDir(a.store.GlobalDir, id)
+}
+
+// ultraFor reports whether /ultra engages for a run of spec. The plan and ask
+// runs keep their spec's own permission — ask-first by default — and under
+// ask-first every workflow call is refused, so turning ultracode on there
+// would only hand the model a tool it cannot use. The coding run takes the
+// user's level, which UltraActive already checks.
+func ultraFor(cfg config.UserConfig, spec config.AgentSpec) bool {
+	return cfg.UltraActive() && spec.Permission != config.PermissionAskFirst
 }

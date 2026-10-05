@@ -170,8 +170,10 @@ type LLMAgent struct {
 	// ignored on sub-agents, which never orchestrate.
 	Workflows bool
 	// Ultracode is the host's standing ultracode toggle — /ultra, persisted
-	// as config.UserConfig.Ultra, which hosts pass as cfg.UltraActive() so
-	// it stays suspended under ask-first. Every turn then behaves as if the
+	// as config.UserConfig.Ultra. Hosts pass it only when the run's
+	// effective permission is not ask-first (where every workflow call is
+	// refused): cfg.UltraActive() where the run takes the user's level, the
+	// TUI's per-agent rule where a spec's own level applies. Every turn then behaves as if the
 	// user had written the keyword: the workflow tool is granted, runs are
 	// pre-approved, and the agent is told to orchestrate substantive work
 	// through workflows by default. Read once at run construction (the

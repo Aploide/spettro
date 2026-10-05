@@ -257,8 +257,19 @@ func renderWorkflowResult(runID, dir, origin string, meta workflow.Meta, res wor
 	b.WriteString("</workflow_result>")
 	fmt.Fprintf(&b, "\nScript: %s · transcript: %s", origin, dir)
 	b.WriteString(fmt.Sprintf("\nTo resume after an edit, re-run with script_path and resume_from_run_id=%q: unchanged calls replay from the journal instead of re-running.", runID))
-	if len(mergeNotes) > 0 {
+	conflicts, preserved := 0, 0
+	for _, n := range mergeNotes {
+		if isPreservedNote(n) {
+			preserved++
+		} else {
+			conflicts++
+		}
+	}
+	if conflicts > 0 {
 		b.WriteString("\nSome sub-agent workspaces did not merge back. Their work is on the branches listed above: resolve each one yourself (merge it, fix conflicts, commit), then delete the branch and its worktree.")
+	}
+	if preserved > 0 {
+		b.WriteString("\nSome members failed or were cut off after editing; their unfinished work is on the branches marked preserved above. Do not merge it blindly — a retry may already have done the work: inspect each branch, keep what is useful, then delete the branch and its worktree.")
 	}
 	if res.Failed > 0 {
 		b.WriteString("\nSome agents failed and resolved to null in the script. Check the returned value for gaps before trusting it, and re-dispatch what is missing.")
