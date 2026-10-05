@@ -268,3 +268,57 @@ func TestHighlightUltracodeLightsPlainEnglishRequests(t *testing.T) {
 		}
 	}
 }
+
+// A "+500k" budget directive glows only when it will be honoured — when
+// workflows are on for the message — and then exactly the directive does.
+func TestHighlightBudgetDirectives(t *testing.T) {
+	const in = "audit the parser +500k please"
+	if got := highlightWorkflowInput(in, 0, false); got != in {
+		t.Fatalf("a directive must stay plain while workflows are off: %q", got)
+	}
+	lit := highlightWorkflowInput(in, 0, true)
+	if lit == in || stripANSIForTest(lit) != in {
+		t.Fatalf("the directive should glow without changing the text: %q", lit)
+	}
+	if !strings.HasPrefix(lit, "audit the parser ") || !strings.HasSuffix(lit, " please") {
+		t.Fatalf("only the directive may be styled: %q", lit)
+	}
+	// Not directives: arithmetic, a glued "+", a bare number.
+	for _, plain := range []string{"x = a+500k", "add +5 to it", "C++ code"} {
+		if got := highlightWorkflowInput(plain, 0, true); got != plain {
+			t.Fatalf("%q is not a directive and must stay plain: %q", plain, got)
+		}
+	}
+	// With the keyword in the message, both light up.
+	both := highlightWorkflowInput("ultracode +1.5m", 0, true)
+	if both == "ultracode +1.5m" || stripANSIForTest(both) != "ultracode +1.5m" {
+		t.Fatalf("keyword and directive should both glow: %q", both)
+	}
+}
+
+func TestBudgetDirectivesLiveOnlyWithWorkflows(t *testing.T) {
+	cases := []struct {
+		input     string
+		ultracode bool
+		want      bool
+	}{
+		{"audit this +500k", false, false},
+		{"ultracode: audit this +500k", false, true},
+		{"use a workflow for this +2M", false, true},
+		{"audit this +500k", true, true},
+		{"audit this", false, false},
+	}
+	for _, c := range cases {
+		m := NewModelForTesting()
+		m.ultracode = c.ultracode
+		m.SetTextareaValueForTesting(c.input)
+		if got := m.budgetDirectivesLive(); got != c.want {
+			t.Errorf("budgetDirectivesLive(%q, ultracode=%v) = %v, want %v", c.input, c.ultracode, got, c.want)
+		}
+	}
+	// The animation gate agrees: with ultracode on, a directive alone needs
+	// frames; with it off, a directive without the keyword never glows.
+	if !inputMayGlow("audit +500k", true) || inputMayGlow("audit +500k", false) {
+		t.Fatal("inputMayGlow disagrees with when a directive can glow")
+	}
+}

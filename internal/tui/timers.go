@@ -61,7 +61,7 @@ func (m Model) needsAnimation() bool {
 		return true
 	case m.hasInProgressTodo():
 		return true
-	case inputMayGlow(m.ta.Value()):
+	case inputMayGlow(m.ta.Value(), m.ultracode):
 		return true
 	}
 	return false
@@ -129,12 +129,28 @@ func (m Model) hasInProgressTodo() bool {
 	return false
 }
 
-// inputMayGlow mirrors highlightUltracode's gate: input holding none of
-// these words cannot light up the keyword, so it needs no frames.
-func inputMayGlow(input string) bool {
+// inputMayGlow mirrors highlightWorkflowInput's gate: input holding none of
+// these words cannot light up the keyword, so it needs no frames. With the
+// ultracode toggle on, a "+" may also be a budget directive about to glow.
+func inputMayGlow(input string, ultracode bool) bool {
 	if input == "" {
 		return false
 	}
+	if ultracode && strings.Contains(input, "+") {
+		return true
+	}
 	lower := strings.ToLower(input)
 	return strings.Contains(lower, agent.WorkflowKeyword) || strings.Contains(lower, "workflow") || strings.Contains(lower, "agent")
+}
+
+// budgetDirectivesLive reports whether a "+500k" in the input would be
+// honoured: workflows have to be on for the message, by its own words or by
+// the session's ultracode toggle. The "+" check keeps the regex pass off the
+// common path, since the input is rendered on every frame.
+func (m Model) budgetDirectivesLive() bool {
+	if m.ultracode {
+		return true
+	}
+	value := m.ta.Value()
+	return strings.Contains(value, "+") && agent.WorkflowRequested(value)
 }

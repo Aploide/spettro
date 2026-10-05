@@ -508,7 +508,19 @@ type Model struct {
 	parallelAgents []parallelAgentEntry
 	// workflow is the most recent workflow run, kept after it finishes so the
 	// panel still shows the whole tree until the next turn clears it.
-	workflow         *workflowRun
+	workflow *workflowRun
+	// workflowRuns holds the session's workflow runs paused at a checkpoint,
+	// so the orchestrating model can continue one in a later turn. A paused
+	// run is a goroutine mid-script and outlives the turn that started it;
+	// the Model owns it like the steering queue, and stops every one when
+	// the conversation goes away (/clear, /resume, quit). Pointer: survives
+	// Bubble Tea's value copies.
+	workflowRuns *agent.WorkflowRuns
+	// ultracode is the session's standing ultracode opt-in (/ultracode):
+	// every turn behaves as if the message said "ultracode". Deliberately
+	// not persisted — it changes how much work every turn does, so a new
+	// session starts without it.
+	ultracode        bool
 	tickCount        int
 	sideCursor       int
 	sideDetailScroll int
@@ -783,6 +795,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		tickArmed:    true, // Init sends the first tick
 		themeAuto:    wanted == theme.AutoKind,
 		livePerm:     &livePermission{},
+		workflowRuns: agent.NewWorkflowRuns(),
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
 	m.livePerm.set(cfg.Permission)

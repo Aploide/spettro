@@ -89,6 +89,7 @@ func (m *Model) slashSubMenu(val string) ([]commandDef, bool) {
 		{"/thinking", thinkingCommands, reasoning},
 		{"/think", thinkCommands, reasoning},
 		{"/skill", skillCommands, true},
+		{"/workflows size", workflowSizeCommands, true},
 	}
 	for _, sub := range subMenus {
 		filter, ok := strings.CutPrefix(val, sub.command+" ")

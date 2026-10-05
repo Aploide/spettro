@@ -189,6 +189,12 @@ func (m Model) viewHeader() string {
 	if m.cfg.UltraActive() {
 		ultraTag = "ultra"
 	}
+	// The standing ultracode opt-in changes what every message does, so it
+	// stays on screen for as long as it is on.
+	ultracodeTag := ""
+	if m.ultracode {
+		ultracodeTag = "ultracode"
+	}
 	sandboxTag := ""
 	if m.sandboxState != nil {
 		if p := m.sandboxState.Policy(); p.Enabled() {
@@ -208,6 +214,9 @@ func (m Model) viewHeader() string {
 	}
 	if ultraTag != "" {
 		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
+	}
+	if ultracodeTag != "" {
+		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultracodeTag) + "  " + right
 	}
 	if sandboxTag != "" {
 		right = styleMuted.Render(sandboxTag) + "  " + right
@@ -546,7 +555,7 @@ func clampTextLines(lines []string, maxLines, width int) []string {
 // place the input is drawn goes through here so the effect cannot appear in
 // one input state and vanish in another.
 func (m Model) inputTextareaView() string {
-	return highlightUltracode(m.ta.View(), m.eyeFrame)
+	return highlightWorkflowInput(m.ta.View(), m.eyeFrame, m.budgetDirectivesLive())
 }
 
 // boxContentWidth is the room inside the input box for a box width cells

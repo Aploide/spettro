@@ -22,6 +22,12 @@ func PrintGoodbye(final tea.Model) {
 	// Persistence safety-net: in-session saves are debounced, so the last
 	// turn before quit may not have been flushed yet. Force a final save.
 	m.flushSave()
+	// Workflow runs paused at a checkpoint are goroutines waiting on an
+	// orchestrator that is gone now. Stopping them lets each settle and close
+	// its journal (so resume_from_run_id works next session) instead of being
+	// cut off mid-write when the process exits. Every quit path — /exit,
+	// ctrl+q, ctrl+c twice, the /update relaunch — ends here.
+	m.workflowRuns.StopAll()
 
 	duration := time.Since(m.startedAt)
 	tokens := m.totalTokensUsed

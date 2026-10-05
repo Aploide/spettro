@@ -70,6 +70,9 @@ func NewModelForTesting() Model {
 		cfg:       cfg,
 		providers: pm,
 		store:     &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
+		// Like New: the panel asks this registry whether a paused run is
+		// still alive.
+		workflowRuns: agent.NewWorkflowRuns(),
 	}
 }
 

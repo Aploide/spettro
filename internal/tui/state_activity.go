@@ -198,8 +198,9 @@ func summarizeAgentToolOutput(output string) string {
 func (m *Model) startAgentActivity(agentID, task string) {
 	// A finished workflow's tree survives the turn that produced it — the run
 	// summary is worth reading after the agent has replied — and is cleared
-	// here, when the next turn begins.
-	m.workflow = nil
+	// here, when the next turn begins — unless it is paused at a checkpoint,
+	// waiting for the turn that is starting to continue it.
+	m.clearSettledWorkflow()
 	m.ensureSession()
 	m.currentRunKey = fmt.Sprintf("run:%s:%d", agentID, time.Now().UnixNano())
 	m.upsertActivity(activityItem{

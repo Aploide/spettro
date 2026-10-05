@@ -358,3 +358,260 @@ func TestCurrentPhaseTracksTheRun(t *testing.T) {
 		t.Fatalf("once Verify starts: title=%q total=%d", title, total)
 	}
 }
+
+// wfPausedTrace is the observer's lifecycle trace for a run that paused at a
+// checkpoint when the tool call returned.
+func wfPausedTrace(runID, cp, message string) agent.ToolTrace {
+	return agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "paused",
+		Args: fmt.Sprintf(`{"run_id":%q,"workflow":"review-changes","checkpoint_id":%q,"message":%q}`,
+			runID, cp, message),
+	}
+}
+
+// The tool loop reports the workflow tool's own call under the name
+// "workflow" too, with the tool input as args. It must not open, rename or
+// settle the run the observer reports.
+func TestWorkflowPanelIgnoresTheToolCallTrace(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: `{"script":"export const meta = {name: 'x'}","save_as":"x"}`,
+	})
+	if m.workflow != nil {
+		t.Fatalf("the tool-call trace opened a run: %+v", m.workflow)
+	}
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "success",
+		Args:   `{"continue_run_id":"wf_1","reply":{"go":true}}`,
+		Output: `<workflow_result name="review-changes" run_id="wf_1">…`,
+	})
+	if m.workflow.Status != "running" || m.workflow.Summary != "" {
+		t.Fatalf("the tool-call completion settled the run: status=%q summary=%q", m.workflow.Status, m.workflow.Summary)
+	}
+}
+
+func TestWorkflowPanelPausedAtCheckpoint(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "review:bugs", "Review", "running", false))
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "review:bugs", "Review", "success", false))
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args: `{"run_id":"wf_1","workflow":"review-changes","kind":"checkpoint","phase":"Review",` +
+			`"checkpoint_id":"cp-1","message":"3 findings — verify which?"}`,
+		Output: `{"findings":3}`,
+	})
+	// The progress trace records the ask; only the lifecycle trace pauses.
+	if m.workflow.Status != "running" {
+		t.Fatalf("a checkpoint progress trace must not pause the run by itself: %q", m.workflow.Status)
+	}
+	if n := len(m.workflow.Logs); n != 1 || m.workflow.Logs[0].Message != "⏸ 3 findings — verify which?" {
+		t.Fatalf("checkpoint log = %+v", m.workflow.Logs)
+	}
+
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-1", "3 findings — verify which?"))
+	// The tool call returns at the checkpoint right after: that generic
+	// completion must not mark the paused run done.
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "success",
+		Args:   `{"name":"review-changes"}`,
+		Output: `<workflow_checkpoint name="review-changes" run_id="wf_1" checkpoint_id="cp-1">`,
+	})
+	w := m.workflow
+	if w.Status != "paused" || w.CheckpointID != "cp-1" || w.PausedAt.IsZero() {
+		t.Fatalf("paused state = %+v", w)
+	}
+	if want := "paused at cp-1 — waiting for orchestrator: 3 findings — verify which?"; w.headline() != want {
+		t.Fatalf("headline = %q, want %q", w.headline(), want)
+	}
+	// Nothing runs while paused, so nothing animates.
+	if m.hasRunningDelegation() {
+		t.Fatal("a paused run must not keep the chrome animating")
+	}
+
+	tree := stripANSIForTest(strings.Join(m.workflowTreeLines(70, 0), "\n"))
+	for _, want := range []string{"⏸ workflow review-changes", "paused at cp-1", "waiting for orchestrator: 3 findings", "⏸ 3 findings"} {
+		if !strings.Contains(tree, want) {
+			t.Fatalf("panel missing %q:\n%s", want, tree)
+		}
+	}
+	// The footer collapses to the one line that says what it is waiting on.
+	summary := m.workflowSummaryLines(90, footerBudget(40)-2)
+	if len(summary) != 1 || !strings.Contains(stripANSIForTest(summary[0]), "waiting for orchestrator") {
+		t.Fatalf("paused footer = %q", summary)
+	}
+	if !strings.Contains(strings.Join(m.sidePanelHeaderParts(48), "\n"), "paused") {
+		t.Fatal("the side panel subtitle should say the run is paused")
+	}
+}
+
+func TestWorkflowPanelReplayedCheckpointDoesNotPause(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args: `{"run_id":"wf_1","workflow":"review-changes","kind":"checkpoint","checkpoint_id":"cp-1",` +
+			`"message":"go on?","cached":true}`,
+	})
+	if m.workflow.Status != "running" {
+		t.Fatalf("status = %q", m.workflow.Status)
+	}
+	if got := m.workflow.Logs[0].Message; got != "⏸ replayed · go on?" {
+		t.Fatalf("replayed checkpoint log = %q", got)
+	}
+	// The finish trace's "cached" is a count, not a bool; the rest of the
+	// payload must still decode.
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "success",
+		Args:   `{"run_id":"wf_1","workflow":"review-changes","agents":2,"failed":0,"cached":2}`,
+		Output: "2 agents · 0 failed · 2 replayed",
+	})
+	if m.workflow.Status != "done" || m.workflow.Summary != "2 agents · 0 failed · 2 replayed" {
+		t.Fatalf("finish not applied: %+v", m.workflow)
+	}
+}
+
+// A paused run outlives the turn that started it: the next turn is usually
+// the orchestrator answering it. One the registry no longer holds is over.
+func TestWorkflowPausedRunSurvivesTheNextTurn(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.workflowRuns = nil // no registry to ask: trust the traces
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-1", "pick a fix"))
+	m.startAgentActivity("coding", "continue it")
+	if m.workflow == nil || m.workflow.Status != "paused" {
+		t.Fatalf("the paused run was cleared by the next turn: %+v", m.workflow)
+	}
+
+	// With a registry that does not hold the run (the idle reaper stopped it,
+	// or it was never registered), the tree goes like any finished one.
+	m.workflowRuns = agent.NewWorkflowRuns()
+	m.startAgentActivity("coding", "something else")
+	if m.workflow != nil {
+		t.Fatalf("a paused run that is no longer live must be cleared: %+v", m.workflow)
+	}
+}
+
+// A continue of a paused run reports "running" again with resumed:true; the
+// panel keeps the run's agents, phases and log instead of starting over.
+func TestWorkflowResumedRunKeepsItsState(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "review:bugs", "Review", "success", false))
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args:   `{"run_id":"wf_1","workflow":"review-changes","kind":"log","phase":"Review"}`,
+		Output: "1 finding",
+	})
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-1", "verify?"))
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: `{"run_id":"wf_1","workflow":"review-changes","resumed":true}`,
+	})
+	w := m.workflow
+	if w.Status != "running" || w.CheckpointID != "" {
+		t.Fatalf("resumed run state = %+v", w)
+	}
+	if len(w.Agents) != 1 || len(w.Logs) != 1 || len(w.Phases) != 2 || w.Description == "" {
+		t.Fatalf("a continue reset the run: agents=%d logs=%d phases=%d desc=%q",
+			len(w.Agents), len(w.Logs), len(w.Phases), w.Description)
+	}
+	if !m.hasRunningDelegation() {
+		t.Fatal("a continued run is live again and should animate")
+	}
+
+	// A fresh start (not a continue) still replaces the run on screen, and a
+	// pause reported for some other run leaves it alone.
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: `{"run_id":"wf_2","workflow":"other"}`,
+	})
+	if m.workflow.RunID != "wf_2" || len(m.workflow.Agents) != 0 {
+		t.Fatalf("a new run did not replace the old one: %+v", m.workflow)
+	}
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-2", "stale"))
+	if m.workflow.Status != "running" {
+		t.Fatalf("a pause for another run changed this one: %q", m.workflow.Status)
+	}
+}
+
+func TestWorkflowPanelDynamicPhases(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args: `{"run_id":"wf_1","workflow":"review-changes","kind":"phase","phase":"Fix",` +
+			`"detail":"patch the confirmed bugs","dynamic":true}`,
+		Output: "Fix",
+	})
+	// A declared phase entered with a detail keeps its plan-time identity.
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow-progress", Status: "success",
+		Args: `{"run_id":"wf_1","workflow":"review-changes","kind":"phase","phase":"Review","detail":"three lenses","dynamic":false}`,
+	})
+	fix := m.workflow.phaseEntry("Fix")
+	if !fix.Dynamic || fix.Detail != "patch the confirmed bugs" {
+		t.Fatalf("dynamic phase entry = %+v", fix)
+	}
+	if review := m.workflow.phaseEntry("Review"); review.Dynamic || review.Detail != "three lenses" {
+		t.Fatalf("declared phase entry = %+v", review)
+	}
+	tree := stripANSIForTest(strings.Join(m.workflowTreeLines(80, 0), "\n"))
+	if !strings.Contains(tree, "+Fix") {
+		t.Fatalf("a runtime phase should carry the + marker:\n%s", tree)
+	}
+	if strings.Contains(tree, "+Review") || strings.Contains(tree, "+Verify") {
+		t.Fatalf("declared phases must not carry the + marker:\n%s", tree)
+	}
+	if !strings.Contains(tree, "patch the confirmed bugs") {
+		t.Fatalf("the phase detail should render when it fits:\n%s", tree)
+	}
+}
+
+func TestWorkflowPanelTitleShowsSize(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "running",
+		Args: `{"run_id":"wf_1","workflow":"audit","size":"large","size_agents":30,"budget_tokens":500000}`,
+	})
+	title := stripANSIForTest(m.workflowTreeLines(80, 0)[0])
+	if !strings.Contains(title, "workflow audit · large · 500k budget") {
+		t.Fatalf("title = %q", title)
+	}
+	// Narrow: the budget gives way first, and the title still fits one row.
+	for _, width := range []int{36, 28, 24} {
+		title := m.workflowTreeLines(width, 0)[0]
+		if w := len([]rune(stripANSIForTest(title))); w > width {
+			t.Fatalf("width %d: title is %d cells: %q", width, w, stripANSIForTest(title))
+		}
+	}
+	if title := stripANSIForTest(m.workflowTreeLines(36, 0)[0]); strings.Contains(title, "budget") {
+		t.Fatalf("width 36: the budget should have given way: %q", title)
+	}
+	// A run that reported no size keeps the old title.
+	m.applyToolTraceToObservability(wfStartTrace())
+	if title := stripANSIForTest(m.workflowTreeLines(80, 0)[0]); strings.Contains(title, "review-changes ·") {
+		t.Fatalf("no size reported, no size shown: %q", title)
+	}
+}
+
+// /clear and /resume stop the session's paused runs; a paused tree must not
+// keep claiming to wait for an orchestrator that can no longer answer.
+func TestConversationResetDropsAPausedRun(t *testing.T) {
+	m := newWorkflowModel(t)
+	runs := m.workflowRuns
+	m.applyToolTraceToObservability(wfStartTrace())
+	m.applyToolTraceToObservability(wfPausedTrace("wf_1", "cp-1", "go?"))
+	m.resetConversationState()
+	if m.workflow != nil {
+		t.Fatalf("a paused tree survived the reset: %+v", m.workflow)
+	}
+	if m.workflowRuns != runs {
+		t.Fatal("the registry lasts the whole session; a reset empties it, it does not replace it")
+	}
+	// A nil registry is safe to reset (hosts and tests that never made one).
+	m.workflowRuns = nil
+	m.resetConversationState()
+}

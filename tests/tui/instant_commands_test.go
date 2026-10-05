@@ -39,6 +39,13 @@ func TestIsInstantCommand_Classification(t *testing.T) {
 		{"/remote stop", true},
 		{"/exit", true},
 		{"/quit", true},
+		// Workflow toggles only touch session or config state; running a
+		// saved template starts a turn.
+		{"/ultracode", true},
+		{"/ultracode on", true},
+		{"/workflows size", true},
+		{"/workflows size large", true},
+		{"/workflows run audit check the auth package", false},
 		// /plan and /compact have mixed sub-commands.
 		{"/plan", true},
 		{"/plan refactor module", false},

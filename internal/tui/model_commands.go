@@ -190,6 +190,8 @@ func (m Model) dispatchCommand(input string) (tea.Model, tea.Cmd) {
 		} else {
 			m.showBanner("ultra off", "success")
 		}
+	case "/ultracode":
+		return m.handleUltracodeCommand(fields)
 	case "/approve":
 		if m.pendingPlan == "" {
 			m.showBanner("no pending plan — run a plan prompt first", "info")
@@ -351,7 +353,7 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 	// re-queued as prompts by the agentDoneMsg handler).
 	m.steering.Drain()
 	m.parallelAgents = nil
-	m.workflow = nil
+	m.clearSettledWorkflow()
 	m.ensureSession()
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,

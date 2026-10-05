@@ -512,6 +512,8 @@ func (m Model) sidePanelTodoLines() []string {
 func (m Model) sidePanelHeaderParts(width int) []string {
 	subtitle := "Operational tool activity"
 	switch {
+	case m.workflow != nil && m.workflow.Status == "paused":
+		subtitle = "Workflow · paused, waiting for the orchestrator"
 	case m.workflow != nil:
 		subtitle = "Workflow · phase-by-phase progress"
 	case m.cfg.UltraActive():

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"spettro/internal/commands"
+	"spettro/internal/config"
 )
 
 type commandDef struct {
@@ -49,8 +50,10 @@ var allCommands = []commandDef{
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
 	{"/ultra", "toggle Ultra: fan hard tasks out across a swarm of parallel sub-agents"},
-	{"/workflows", "list, show, and run saved multi-agent workflow scripts"},
-	{"/workflows run", "run a saved workflow by name (optionally with JSON args)"},
+	{"/ultracode", "toggle ultracode for this session: substantive tasks run as multi-agent workflows by default"},
+	{"/workflows", "list, show, and run saved multi-agent workflow templates"},
+	{"/workflows run", "adapt and run a saved workflow template (JSON args or a task in plain words)"},
+	{"/workflows size", "show or set the workflow size guideline (small/medium/large/unbounded)"},
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/stats", "show session token usage and prompt-cache metrics"},
@@ -90,6 +93,17 @@ var thinkingCommands = []commandDef{
 	{"/thinking x-high", "extra-high reasoning effort (~32k thinking tokens on Anthropic)"},
 	{"/thinking max", "maximum reasoning effort (~100k thinking tokens on Anthropic)"},
 }
+
+// workflowSizeCommands is the /workflows size picker. The descriptions come
+// from the engine's tier table (workflowSizeDescription) so the menu cannot
+// drift from what scripts actually see.
+var workflowSizeCommands = func() []commandDef {
+	out := make([]commandDef, 0, len(config.WorkflowSizes))
+	for _, tier := range config.WorkflowSizes {
+		out = append(out, commandDef{"/workflows size " + tier, workflowSizeDescription(tier)})
+	}
+	return out
+}()
 
 var thinkCommands = []commandDef{
 	{"/think off", "no extended thinking (default)"},
@@ -283,6 +297,7 @@ func isInstantCommand(input string) bool {
 		"/budget",
 		"/thinking", "/think",
 		"/ultra",
+		"/ultracode",
 		"/login",
 		"/logout",
 		"/connect",
@@ -302,7 +317,8 @@ func isInstantCommand(input string) bool {
 		return true
 	case "/workflow", "/workflows":
 		// Listing, showing and locating saved workflows is local display
-		// state; "run" dispatches an LLM turn and so is not instant.
+		// state, and "size" only writes config (read when the next run
+		// starts); "run" dispatches an LLM turn and so is not instant.
 		if len(fields) == 1 {
 			return true
 		}
@@ -358,8 +374,13 @@ const helpText = `commands:
   /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
   /thinking <l>  alias of /think
   /ultra [on|off] toggle Ultra: swarm of parallel sub-agents for hard tasks (any model)
-  /workflows     list, show, or run saved workflow scripts ("ultracode" in a
-                 message gives the agent the workflow tool for that turn)
+  /ultracode [on|off] toggle ultracode for this session: substantive tasks
+                 run as multi-agent workflows by default (not saved)
+  /workflows     list, show, or run saved workflow templates ("ultracode" in a
+                 message gives the agent the workflow tool for that turn;
+                 with it, "+500k" sets the turn's workflow token budget)
+  /workflows run <name> [json | task]  adapt a saved template to the task and run it
+  /workflows size [tier]  show/set the size guideline: small|medium|large|unbounded
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /goal <obj>   run autonomously until the objective is met

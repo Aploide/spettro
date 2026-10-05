@@ -130,6 +130,11 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	if m.steering == nil {
 		m.steering = agent.NewSteeringQueue()
 	}
+	// Same for paused workflow runs: one registry per Model, so a run the
+	// orchestrator paused in this turn can be continued in the next.
+	if m.workflowRuns == nil {
+		m.workflowRuns = agent.NewWorkflowRuns()
+	}
 	events := newRunEventQueue()
 	m.runEvents = events
 	usageCh := make(chan agent.UsageEvent, 16)
@@ -209,6 +214,11 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		MaxOutputTokens: m.cfg.MaxOutputTokens,
 		Thinking:        pm.ConfiguredThinking(providerName, modelName, m.cfg.ThinkingLevel),
 		Ultra:           m.cfg.UltraActive(),
+		// Workflows: the session's standing ultracode opt-in, the configured
+		// size tier, and the registry paused runs live in between turns.
+		Ultracode:       m.ultracode,
+		WorkflowSize:    m.cfg.WorkflowSizeTier(),
+		WorkflowRuns:    m.workflowRuns,
 		RequiredReads:   mentionedFiles,
 		Images:          images,
 		History:         history,

@@ -4,26 +4,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
+	"spettro/internal/config"
 	"spettro/internal/workflow"
 )
 
-const workflowsUsage = "usage: /workflows <list|show|run|where> [name] [args-json]"
+const workflowsUsage = "usage: /workflows <list|show|run|size|where> [name] [args-json | task]"
 
 const workflowsHelp = `workflow commands:
-  /workflows                     list saved workflows (project first, then global)
-  /workflows show <name>         print a saved workflow's header and source
-  /workflows run <name> [json]   run a saved workflow, optionally with JSON args
+  /workflows                     list saved workflow templates (project first, then global)
+  /workflows show <name>         print a saved workflow's header, params and source
+  /workflows run <name> [json | task]
+                                 have the agent adapt a saved template to the task
+                                 and run it: JSON args, or a task in plain words
+  /workflows size [tier]         show or set the size guideline:
+                                 small | medium | large | unbounded
   /workflows where               show the directories scanned for saved workflows
 
-Workflows are JavaScript orchestration scripts: the model writes one, and
-Spettro executes its phases, fan-outs and loops exactly as written. Write
-"ultracode" in any message to give the agent the workflow tool for that turn.
+Workflows are JavaScript orchestration scripts the model writes for the task
+at hand. Spettro runs their phases, fan-outs and loops, and a script can adapt
+as it goes: plan its work-list at runtime, open phases nobody declared, or
+pause at a checkpoint() so the agent reads the interim results and decides
+the next step before the run continues.
 
-Saved scripts live in .spettro/workflows/<name>.js (project) or
+Write "ultracode" in a message to give the agent the workflow tool for that
+turn, or run /ultracode to make orchestrating through workflows its standing
+default for the session. With workflows on, "+500k" (or "+1.5m") in a message
+sets the token budget the turn's workflows share.
+
+Saved scripts are templates: the agent reads one, adapts it to the task —
+filling its declared params and discovering work-lists at runtime — and runs
+the adapted copy. They live in .spettro/workflows/<name>.js (project) or
 ~/.spettro/workflows/<name>.js (global); a project script shadows a global
 one with the same name.`
 
@@ -39,6 +54,8 @@ func (m Model) handleWorkflowsCommand(input string) (tea.Model, tea.Cmd) {
 		return m.runWorkflowsShow(fields[2:])
 	case "run", "start":
 		return m.runWorkflowsRun(input, fields[2:])
+	case "size":
+		return m.runWorkflowsSize(fields[2:])
 	case "where", "paths":
 		var b strings.Builder
 		b.WriteString("workflow search paths (first match wins):\n")
@@ -83,8 +100,11 @@ func (m Model) runWorkflowsList() (tea.Model, tea.Cmd) {
 			}
 			fmt.Fprintf(&b, "  %-24s      phases: %s\n", "", strings.Join(titles, " → "))
 		}
+		if len(s.Meta.Params) > 0 {
+			fmt.Fprintf(&b, "  %-24s      params: %s\n", "", workflowParamsSummary(s.Meta.Params))
+		}
 	}
-	b.WriteString("\nrun one with /workflows run <name>")
+	b.WriteString("\nrun one with /workflows run <name> [json args | task]")
 	m.pushSystemMsg(strings.TrimRight(b.String(), "\n"))
 	m.refreshViewport()
 	return m, nil
@@ -106,6 +126,12 @@ func (m Model) runWorkflowsShow(args []string) (tea.Model, tea.Cmd) {
 		fmt.Fprintf(&b, "%s — %s\n", meta.Name, meta.Description)
 		for _, p := range meta.Phases {
 			fmt.Fprintf(&b, "  · %s%s\n", p.Title, optionalDetail(p.Detail))
+		}
+		if len(meta.Params) > 0 {
+			b.WriteString("params:\n")
+			for _, p := range meta.Params {
+				fmt.Fprintf(&b, "  · %s%s\n", workflowParamSignature(p), optionalDetail(p.Description))
+			}
 		}
 		b.WriteString("\n")
 	} else {
@@ -130,9 +156,15 @@ func optionalDetail(detail string) string {
 // tool call to make keeps one execution path — the model reviews the result,
 // re-dispatches failures, and integrates the outcome exactly as it would for a
 // workflow it wrote itself.
+//
+// A saved workflow is a template, not a recording. The task it was written for
+// is rarely the one at hand, and a script that replays last month's file list
+// audits the wrong code with full confidence. So the agent is asked to read the
+// template, adapt whatever is task-specific or stale, and run the adapted copy
+// inline — running it by name only when it fits as it stands.
 func (m Model) runWorkflowsRun(input string, args []string) (tea.Model, tea.Cmd) {
 	if len(args) == 0 {
-		m.showBanner("usage: /workflows run <name> [args-json]", "error")
+		m.showBanner("usage: /workflows run <name> [args-json | task]", "error")
 		return m, nil
 	}
 	name := args[0]
@@ -147,27 +179,185 @@ func (m Model) runWorkflowsRun(input string, args []string) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 
-	rawArgs := restAfterFields(input, 3)
-	if rawArgs != "" && !json.Valid([]byte(rawArgs)) {
-		m.showBanner("workflow args must be valid JSON", "error")
+	rawArgs, task, err := splitWorkflowRunInput(restAfterFields(input, 3))
+	if err != nil {
+		m.showBanner(err.Error(), "error")
 		return m, nil
 	}
 
-	var prompt strings.Builder
-	prompt.WriteString("ultracode: run the saved workflow ")
-	prompt.WriteString(jsonQuote(name))
-	prompt.WriteString(" — ")
-	prompt.WriteString(meta.Description)
-	prompt.WriteString(".\nCall the workflow tool with {\"name\": ")
-	prompt.WriteString(jsonQuote(name))
-	if rawArgs != "" {
-		prompt.WriteString(", \"args\": ")
-		prompt.WriteString(rawArgs)
-	}
-	prompt.WriteString("}. Do not rewrite the script; run it as saved, then review the result and act on it.")
-
 	m.showBanner("running workflow "+name+" ("+filepath.Base(path)+")", "info")
-	return m.handlePrompt(prompt.String())
+	return m.handlePrompt(workflowRunPrompt(name, path, meta, rawArgs, task))
+}
+
+// splitWorkflowRunInput reads what follows "/workflows run <name>": JSON
+// becomes the run's args, anything else is the task in the user's own words,
+// which the agent maps onto the template's params. Text that opens like JSON
+// but does not parse is a typo in args, not a task, and is refused rather
+// than handed over as prose.
+func splitWorkflowRunInput(rest string) (rawArgs, task string, err error) {
+	rest = strings.TrimSpace(rest)
+	switch {
+	case rest == "":
+		return "", "", nil
+	case json.Valid([]byte(rest)):
+		return rest, "", nil
+	case strings.HasPrefix(rest, "{") || strings.HasPrefix(rest, "["):
+		return "", "", fmt.Errorf("workflow args look like JSON but do not parse")
+	}
+	return "", rest, nil
+}
+
+// workflowRunPrompt is the request /workflows run sends: adapt the saved
+// template to the task and run it. It keeps the "ultracode" keyword, so the
+// run is pre-approved — the user asked for it by name.
+func workflowRunPrompt(name, path string, meta workflow.Meta, rawArgs, task string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ultracode: run the saved workflow %s — %s.\n", jsonQuote(name), meta.Description)
+	if task != "" {
+		fmt.Fprintf(&b, "Task: %s\n", task)
+	}
+	fmt.Fprintf(&b, "Read the saved template (script_path %s) and check it fits the task. "+
+		"Adapt anything task-specific or stale — work-lists must be discovered at runtime, never replayed "+
+		"from a hardcoded list — and run the adapted script inline; or, if it fits as-is, run it by name "+
+		"with {\"name\": %s", jsonQuote(path), jsonQuote(name))
+	if rawArgs != "" {
+		b.WriteString(", \"args\": " + rawArgs)
+	}
+	b.WriteString("}.\n")
+	if len(meta.Params) > 0 {
+		b.WriteString("Declared params: " + workflowParamsSummary(meta.Params) + ".\n")
+	} else {
+		b.WriteString("Declared params: none.\n")
+	}
+	if rawArgs != "" {
+		b.WriteString("Use these args whichever way you run it: " + rawArgs + "\n")
+	}
+	b.WriteString("Then review the result and act on it.")
+	return b.String()
+}
+
+// workflowParamSignature renders one declared param as "name (type,
+// required)" or "name (type, default x)".
+func workflowParamSignature(p workflow.ParamMeta) string {
+	typ := p.Type
+	if typ == "" {
+		typ = "any"
+	}
+	attrs := []string{typ}
+	switch {
+	case p.Required:
+		attrs = append(attrs, "required")
+	case p.Default != nil:
+		if def, err := json.Marshal(p.Default); err == nil {
+			attrs = append(attrs, "default "+string(def))
+		}
+	}
+	return p.Name + " (" + strings.Join(attrs, ", ") + ")"
+}
+
+// workflowParamsSummary is every declared param on one line, descriptions
+// included, for listings and the run prompt.
+func workflowParamsSummary(params []workflow.ParamMeta) string {
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		parts = append(parts, workflowParamSignature(p)+optionalDetail(p.Description))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// runWorkflowsSize shows or sets the workflow size guideline. The tier is a
+// planning target the agent sizes its scripts around (and scripts read as
+// the size global), not a cap, so the listing spells out what each tier
+// means rather than leaving "large" to guesswork.
+func (m Model) runWorkflowsSize(args []string) (tea.Model, tea.Cmd) {
+	if len(args) == 0 {
+		current := m.cfg.WorkflowSizeTier()
+		var b strings.Builder
+		if m.cfg.WorkflowSize == "" {
+			fmt.Fprintf(&b, "workflow size: %s (default)\n", current)
+		} else {
+			fmt.Fprintf(&b, "workflow size: %s\n", current)
+		}
+		for _, tier := range config.WorkflowSizes {
+			mark := " "
+			if tier == current {
+				mark = "*"
+			}
+			fmt.Fprintf(&b, "  %s %-10s %s\n", mark, tier, workflowSizeDescription(tier))
+		}
+		b.WriteString("\nset it with /workflows size <" + strings.Join(config.WorkflowSizes, "|") + ">. " +
+			"It is a guideline the agent plans around, not a hard limit.")
+		m.pushSystemMsg(b.String())
+		m.refreshViewport()
+		return m, nil
+	}
+	tier := strings.ToLower(strings.TrimSpace(args[0]))
+	if !slices.Contains(config.WorkflowSizes, tier) {
+		m.showBanner("usage: /workflows size <"+strings.Join(config.WorkflowSizes, "|")+">", "error")
+		return m, nil
+	}
+	if err := m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.WorkflowSize = tier
+		return nil
+	}); err != nil {
+		m.showBanner("could not save workflow size: "+err.Error(), "error")
+		return m, nil
+	}
+	msg := "workflow size set to " + tier + " — " + workflowSizeDescription(tier)
+	if m.thinking {
+		// The tier is captured when a run starts, like the thinking level.
+		msg += " (applies from the next message)"
+	}
+	m.showBanner(msg, "success")
+	return m, nil
+}
+
+// workflowSizeDescription spells out a tier from the engine's own table, so
+// the numbers shown here are the ones scripts see.
+func workflowSizeDescription(tier string) string {
+	s := workflow.ResolveSize(tier)
+	agents := fmt.Sprintf("~%d agents per run", s.Agents)
+	if s.Agents <= 0 {
+		agents = "no agent guideline"
+	}
+	out := fmt.Sprintf("%s, fan-outs up to %d wide", agents, s.Fanout)
+	if s.Concurrency > 0 {
+		out += fmt.Sprintf(", %d at a time", s.Concurrency)
+	}
+	return out
+}
+
+// handleUltracodeCommand toggles the session's standing ultracode opt-in:
+// /ultracode [on|off], no argument flips it. While it is on every turn
+// behaves as if the message said "ultracode" — the agent orchestrates
+// substantive work through workflows by default and its runs need no
+// consent prompt. It lasts for this session only, on purpose: a mode that
+// multiplies the work every message does should not survive a restart
+// unnoticed.
+func (m Model) handleUltracodeCommand(fields []string) (tea.Model, tea.Cmd) {
+	next := !m.ultracode
+	if len(fields) >= 2 {
+		switch strings.ToLower(strings.TrimSpace(fields[1])) {
+		case "on":
+			next = true
+		case "off":
+			next = false
+		default:
+			m.showBanner("usage: /ultracode [on|off]", "error")
+			return m, nil
+		}
+	}
+	m.ultracode = next
+	suffix := ""
+	if m.thinking {
+		suffix = " (applies from the next message)"
+	}
+	if next {
+		m.showBanner("ultracode on — substantive tasks run as workflows by default, for this session"+suffix, "success")
+	} else {
+		m.showBanner("ultracode off"+suffix, "success")
+	}
+	return m, nil
 }
 
 func jsonQuote(s string) string {

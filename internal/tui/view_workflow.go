@@ -75,9 +75,65 @@ func agentStatusGlyph(status string) (string, lipgloss.Style) {
 	}
 }
 
+// workflowTitleStyle is the run's title colour and marker. A paused run gets
+// its own: it is neither working (nothing animates, nothing is spending) nor
+// finished — it is waiting on the orchestrator, and must not read as either.
+func workflowTitleStyle(status string) (lipgloss.Style, string) {
+	pal := theme.Current()
+	switch status {
+	case "failed":
+		return lipgloss.NewStyle().Bold(true).Foreground(pal.Error), "✗"
+	case "running":
+		return lipgloss.NewStyle().Bold(true).Foreground(pal.Info), "◆"
+	case "paused":
+		return lipgloss.NewStyle().Bold(true).Foreground(pal.Warning), "⏸"
+	default:
+		return lipgloss.NewStyle().Bold(true).Foreground(pal.Success), "✓"
+	}
+}
+
+// pausedLabel is "paused at cp-2", or just "paused" when the trace named no
+// checkpoint.
+func (w *workflowRun) pausedLabel() string {
+	if w.CheckpointID == "" {
+		return "paused"
+	}
+	return "paused at " + w.CheckpointID
+}
+
+// waitingLine is what a paused run is waiting for, in the script's words.
+func (w *workflowRun) waitingLine() string {
+	if w.CheckpointMessage == "" {
+		return "waiting for orchestrator"
+	}
+	return "waiting for orchestrator: " + w.CheckpointMessage
+}
+
+// sizeLabel is the run's size tier and token budget for its title:
+// "large · 500k budget". Empty when the run reported neither.
+func (w *workflowRun) sizeLabel(withBudget bool) string {
+	var parts []string
+	if w.Size != "" {
+		parts = append(parts, w.Size)
+	}
+	if withBudget && w.BudgetTokens > 0 {
+		parts = append(parts, compactTokenCount(w.BudgetTokens)+" budget")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// compactTokenCount is formatTokenCount without the ".0" of a round number:
+// a "+500k" directive reads back as "500k", not "500.0k".
+func compactTokenCount(n int) string {
+	return strings.Replace(formatTokenCount(n), ".0", "", 1)
+}
+
 // workflowHeadline is the one-line summary shown in the panel title and in the
 // compact footer block.
 func (w *workflowRun) headline() string {
+	if w.Status == "paused" {
+		return w.pausedLabel() + " — " + w.waitingLine()
+	}
 	running, done, failed, cached := w.counts()
 	parts := []string{fmt.Sprintf("%d running", running), fmt.Sprintf("%d done", done)}
 	if failed > 0 {
@@ -93,6 +149,9 @@ func (w *workflowRun) headline() string {
 // spell them out. Clipping "1 failed" to "1 fai…" would hide the one number
 // that matters, so the narrow case gets its own form rather than a truncation.
 func (w *workflowRun) compactHeadline() string {
+	if w.Status == "paused" {
+		return w.pausedLabel()
+	}
 	running, done, failed, _ := w.counts()
 	out := fmt.Sprintf("%d▶ %d✓", running, done)
 	if failed > 0 {
@@ -137,16 +196,7 @@ func (m Model) workflowTreeLines(width, maxRows int) []string {
 	}
 	budget := max(width, 24)
 
-	var titleStyle lipgloss.Style
-	var marker string
-	switch w.Status {
-	case "failed":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Error), "✗"
-	case "running":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Info), "◆"
-	default:
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Success), "✓"
-	}
+	titleStyle, marker := workflowTitleStyle(w.Status)
 
 	running, done, failed, _ := w.counts()
 	total := running + done + failed
@@ -154,13 +204,32 @@ func (m Model) workflowTreeLines(width, maxRows int) []string {
 	// onto a second line and knocks the whole tree out of alignment.
 	name := truncateLabel(w.Name, max(10, budget/2))
 	headline := w.headline()
+	if w.Status == "paused" {
+		// The message gets a line of its own below; the title only says
+		// where the run stopped.
+		headline = w.pausedLabel()
+	}
 	prefix := marker + " workflow " + name
+	// The size tier (and budget) sit after the name — they say how big this
+	// run is allowed to grow — but give way, budget first, before even the
+	// compact headline would have to be clipped.
+	need := 1 + lipgloss.Width(w.compactHeadline())
+	for _, withBudget := range []bool{true, false} {
+		if size := w.sizeLabel(withBudget); size != "" && lipgloss.Width(prefix+" · "+size)+need <= budget {
+			prefix += " · " + size
+			break
+		}
+	}
 	if lipgloss.Width(prefix)+1+lipgloss.Width(headline) > budget {
 		headline = w.compactHeadline()
 	}
 	title := titleStyle.Render(prefix) + " " +
 		styleMuted.Render(truncateLabel(headline, max(4, budget-lipgloss.Width(prefix)-1)))
 	head := []string{title}
+	if w.Status == "paused" {
+		head = append(head, lipgloss.NewStyle().Foreground(theme.Current().Warning).
+			Render("  "+truncateLabel(strings.ReplaceAll(w.waitingLine(), "\n", " "), budget-2)))
+	}
 	if w.Description != "" {
 		head = append(head, styleMuted.Render("  "+truncateLabel(w.Description, budget-2)))
 	}
@@ -293,10 +362,24 @@ func (m Model) workflowPhaseGroup(w *workflowRun, phase string, budget int) work
 	case pDone > 0:
 		glyph, style = "▸", lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Text)
 	}
-	head := "  " + style.Render(glyph+" "+truncateLabel(title, max(8, budget/2)))
+	entry := w.phaseEntry(phase)
+	head := "  " + style.Render(glyph+" ")
+	if entry.Dynamic {
+		// A phase the script opened at runtime, not one meta planned: a dim
+		// "+" says the run grew this stage after seeing interim results.
+		head += styleMuted.Render("+")
+	}
+	head += style.Render(truncateLabel(title, max(8, budget/2)))
 	if len(agents) > 0 {
 		head += "  " + progressBar(10, pDone, pFailed, len(agents)) + " " +
 			styleMuted.Render(fmt.Sprintf("%d/%d", pDone+pFailed, len(agents)))
+	}
+	// The phase's detail, when there is room for enough of it to say
+	// something; a few clipped letters would only be noise.
+	if entry.Detail != "" {
+		if room := budget - lipgloss.Width(head) - 3; room >= 10 {
+			head += styleMuted.Render(" — " + truncateLabel(strings.ReplaceAll(entry.Detail, "\n", " "), room))
+		}
 	}
 	group := workflowGroup{header: head}
 	for _, a := range agents {
@@ -400,24 +483,17 @@ func (m Model) workflowSummaryLines(width, rows int) []string {
 	running, done, failed, _ := w.counts()
 	total := running + done + failed
 
-	var titleStyle lipgloss.Style
-	var marker string
-	switch w.Status {
-	case "failed":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Error), "✗"
-	case "running":
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Info), "◆"
-	default:
-		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(theme.Current().Success), "✓"
-	}
+	titleStyle, marker := workflowTitleStyle(w.Status)
 	head := titleStyle.Render(marker + " " + truncateLabel(w.Name, max(10, budget/3)))
 
 	// A finished run collapses to one line: the detail stopped being live and
-	// the conversation needs the rows back.
+	// the conversation needs the rows back. So does a paused one — nothing in
+	// it moves until the orchestrator answers — and its line says what the
+	// run is waiting on, not a result it does not have yet.
 	if w.Status != "running" {
 		tail := w.Summary
-		if tail == "" {
-			tail = w.headline()
+		if tail == "" || w.Status == "paused" {
+			tail = strings.ReplaceAll(w.headline(), "\n", " ")
 		}
 		return []string{head + " " + styleMuted.Render(truncateLabel(tail, max(6, budget-lipgloss.Width(head)-1)))}
 	}
