@@ -71,6 +71,9 @@ type acpWorkflow struct {
 	status       string
 	checkpointID string
 	waiting      string
+	// stopReason is why a stopped run was stopped (by the orchestrator,
+	// the idle reaper, the session ending), shown on its closed card.
+	stopReason string
 
 	// turn is the prompt turn that announced callID. A run paused at a
 	// checkpoint outlives its turn; when a later turn continues it, the card
@@ -203,6 +206,14 @@ func (w *acpWorkflow) render() string {
 	}
 	switch w.status {
 	case "", "running", "success", "error":
+	case "stopped":
+		// A deliberate stop, not a failure: the card closes as completed,
+		// so this line is what tells it apart from a run that finished.
+		b.WriteString("■ stopped")
+		if w.stopReason != "" {
+			b.WriteString(": " + w.stopReason)
+		}
+		b.WriteString("\n\n")
 	case "paused":
 		// The run is alive but idle until the orchestrating model answers
 		// its checkpoint, which may only happen in a later turn. Saying so
@@ -306,12 +317,71 @@ func (c *acpWorkflowCards) putLocked(w *acpWorkflow) {
 	c.runs[w.runID] = w
 }
 
-// reset forgets every card, for a session whose live runs were just stopped
-// (/clear): nothing is left for a later trace to re-attach to.
-func (c *acpWorkflowCards) reset() {
+// stoppedCard is what closing a stopped run's card sends: the card's tool
+// call and its final content, rendered while the cards' lock was held.
+type stoppedCard struct {
+	callID acpsdk.ToolCallId
+	body   string
+}
+
+// stopCardLocked marks w stopped for reason, takes it out of the session and
+// renders what closing its card shows. Every field a trace writes is written
+// under c.mu (onWorkflowTool holds it), so marking and rendering under it
+// too is safe even while the turn that last showed the card still runs.
+// Caller holds c.mu.
+func (c *acpWorkflowCards) stopCardLocked(w *acpWorkflow, reason string) stoppedCard {
+	if c.runs[w.runID] == w {
+		delete(c.runs, w.runID)
+	}
+	w.status = "stopped"
+	w.stopReason = reason
+	return stoppedCard{callID: w.callID, body: w.render()}
+}
+
+// stop takes runID's card out of the session, marked stopped for reason. ok
+// is false when there is none: the run finished, or its card was taken.
+func (c *acpWorkflowCards) stop(runID, reason string) (card stoppedCard, ok bool) {
+	if c == nil || runID == "" {
+		return stoppedCard{}, false
+	}
 	c.mu.Lock()
-	c.runs = map[string]*acpWorkflow{}
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	w := c.runs[runID]
+	if w == nil {
+		return stoppedCard{}, false
+	}
+	return c.stopCardLocked(w, reason), true
+}
+
+// stopAll takes every card out of the session, each marked stopped for
+// reason, for a session whose live runs are being stopped (/clear, the
+// session closing, the connection ending): nothing is left for a later trace
+// to re-attach to.
+func (c *acpWorkflowCards) stopAll(reason string) []stoppedCard {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]stoppedCard, 0, len(c.runs))
+	for _, w := range c.runs {
+		out = append(out, c.stopCardLocked(w, reason))
+	}
+	return out
+}
+
+// close closes a stopped run's card through notify. Such a run was stopped
+// while no turn was driving it — paused at a checkpoint when the idle reaper
+// or /clear stopped it — so no turn's sessionUpdate can carry this. The card
+// closes as completed, not failed: a deliberate stop is not an error, and its
+// "■ stopped: <reason>" line says what happened. A card no turn ever
+// announced, or a nil notify, sends nothing.
+func (sc stoppedCard) close(notify func(acpsdk.SessionUpdate)) {
+	if sc.callID == "" || notify == nil {
+		return
+	}
+	notify(acpsdk.UpdateToolCall(
+		sc.callID,
+		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),
+		acpsdk.WithUpdateContent(toolOutputContent(sc.body, nil)),
+	))
 }
 
 // Three different payloads travel under these trace names, and they disagree
@@ -356,6 +426,14 @@ type acpWorkflowPausedArgs struct {
 	acpWorkflowArgs
 	CheckpointID string `json:"checkpoint_id"`
 	Message      string `json:"message"`
+}
+
+// acpWorkflowStoppedArgs is the lifecycle trace of a run stopped on purpose
+// (status "stopped"): Reason says by whom or why — the orchestrator's stop,
+// the idle reaper, the session ending.
+type acpWorkflowStoppedArgs struct {
+	acpWorkflowArgs
+	Reason string `json:"reason"`
 }
 
 // acpWorkflowProgressArgs is a phase(), log() or checkpoint() notification.
@@ -446,8 +524,10 @@ func (t *turnState) announceWorkflowLocked(w *acpWorkflow, rawInput any) {
 // before the trace's own change is applied, so the closed card shows the run
 // as that turn left it (paused at its checkpoint). It reports whether this
 // turn may take the card: a turn that has ended can still receive a trace (a
-// paused run stopped later reports through the turn that started it), but it
-// cannot show anything, so it must not take the card from a turn that can.
+// run whose turn was cancelled under it reports its stop through that turn),
+// but it cannot show anything, so it must not take the card from a turn that
+// can. A paused run stopped while detached sends no trace at all; its card is
+// closed through the registry's stop hook instead (see stoppedCard.close).
 // Caller holds t.mu.
 func (t *turnState) takeWorkflowLocked(w *acpWorkflow) bool {
 	if w.callID == "" || w.turn == t {
@@ -644,10 +724,14 @@ func (t *turnState) pauseWorkflowLocked(cards *acpWorkflowCards, args acpWorkflo
 }
 
 // finishWorkflowLocked handles every other lifecycle status. "success" and
-// "error" close the card. Statuses that plainly mean the run ended without
-// finishing close it as failed; anything else is a status this code does not
-// know, which must neither close the card nor read as done, so it is shown
-// and the card stays open. Caller holds t.mu and cards.mu.
+// "error" close the card. "stopped" is a deliberate stop (the orchestrator
+// answered a checkpoint with stop, the idle reaper, the session ending): it
+// closes the card as completed — the run did what it was told — with a
+// "■ stopped: <reason>" line, so it reads neither as done nor as a failure.
+// Statuses that plainly mean the run ended without finishing close it as
+// failed; anything else is a status this code does not know, which must
+// neither close the card nor read as done, so it is shown and the card stays
+// open. Caller holds t.mu and cards.mu.
 func (t *turnState) finishWorkflowLocked(cards *acpWorkflowCards, args acpWorkflowArgs, tr agent.ToolTrace) bool {
 	w := t.workflowForLocked(cards, args.RunID)
 	if w == nil {
@@ -658,7 +742,12 @@ func (t *turnState) finishWorkflowLocked(cards *acpWorkflowCards, args acpWorkfl
 	switch tr.Status {
 	case "success":
 		status = acpsdk.ToolCallStatusCompleted
-	case "error", "failed", "stopped", "cancelled", "canceled":
+	case "stopped":
+		status = acpsdk.ToolCallStatusCompleted
+		var stopped acpWorkflowStoppedArgs
+		_ = json.Unmarshal([]byte(tr.Args), &stopped)
+		w.stopReason = strings.TrimSpace(stopped.Reason)
+	case "error", "failed", "cancelled", "canceled":
 		status = acpsdk.ToolCallStatusFailed
 	default:
 		w.status = tr.Status

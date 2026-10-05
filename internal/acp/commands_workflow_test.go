@@ -96,12 +96,21 @@ func TestWorkflowSizeCommand(t *testing.T) {
 }
 
 // /clear starts the conversation over; a run paused at a checkpoint waits for
-// the old one, so it is stopped and its card forgotten.
+// the old one, so it is stopped, and its card is closed on the wire — as a
+// deliberate stop, not a failure — and forgotten. Merely forgetting the card
+// left the editor showing it "waiting for orchestrator" for good.
 func TestClearStopsSessionWorkflows(t *testing.T) {
 	s := testSession(t)
+	rec := newWireRecorder(t)
+	s.id = "sess-wf"
+	s.notify = rec.b.sessionNotifier(s.id)
 	runs := s.liveWorkflowRunsLocked()
 	cards := s.workflowCardsLocked()
-	cards.runs["wf_1"] = &acpWorkflow{runID: "wf_1", name: "audit", status: "paused"}
+	turn := rec.turn(cards)
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow", "paused",
+		`{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1","message":"fix which?"}`, ""))
+	callID := cards.runs["wf_1"].callID
 	cfg := config.UserConfig{}
 
 	if _, _, handled := handleSlashCommand(s, &cfg, provider.NewManager(), "/clear"); !handled {
@@ -115,6 +124,16 @@ func TestClearStopsSessionWorkflows(t *testing.T) {
 	}
 	if next := s.liveWorkflowRunsLocked(); next == nil || next == runs {
 		t.Fatal("the next turn must get a fresh registry")
+	}
+	// Two updates from the turn (open, pause), then the close.
+	ups := rec.updates(t, 3)
+	last := ups[len(ups)-1]
+	if last.ToolCallID != string(callID) || last.Status != "completed" {
+		t.Fatalf("/clear must close the paused card as completed, last update = %+v", last)
+	}
+	if !strings.Contains(last.text(), "■ stopped: the conversation was cleared") ||
+		strings.Contains(last.text(), "waiting for orchestrator") {
+		t.Fatalf("the closed card must say why it stopped:\n%s", last.text())
 	}
 }
 

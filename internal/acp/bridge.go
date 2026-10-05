@@ -126,13 +126,43 @@ type acpSession struct {
 	// workflowCards is the editor-side view of those runs: each run's card
 	// state, kept across turns for the same reason (see acpWorkflowCards).
 	workflowCards *acpWorkflowCards
+	// notify sends a session/update for this session outside any prompt
+	// turn. A paused run can be stopped while no turn is running — by the
+	// idle reaper, or by /clear — and its card must still be closed; no
+	// turn's sessionUpdate is there to do it. Nil (sessions built by tests)
+	// drops the update.
+	notify func(acpsdk.SessionUpdate)
+}
+
+// sessionNotifier returns the notify function for session sid: a
+// session/update on the bridge's connection, under a context of its own
+// because no request is in flight to borrow one from. ACP allows
+// session/update notifications outside a prompt turn.
+func (b *bridge) sessionNotifier(sid string) func(acpsdk.SessionUpdate) {
+	return func(update acpsdk.SessionUpdate) {
+		if b.conn == nil {
+			return
+		}
+		_ = b.conn.SessionUpdate(context.Background(), acpsdk.SessionNotification{
+			SessionId: acpsdk.SessionId(sid),
+			Update:    update,
+		})
+	}
 }
 
 // liveWorkflowRunsLocked returns the session's workflow-run registry,
 // creating it on first use. Caller holds the bridge mutex.
+//
+// A new registry is told to report runs it stops while they are detached —
+// paused at a checkpoint, their tool call long returned — so their cards can
+// be closed: such a run's finish trace has no turn to travel through (its
+// observer was unbound when the call returned), so without the hook the card
+// would read "paused … waiting for orchestrator" for the rest of the session
+// and its state would never leave the session's cards.
 func (s *acpSession) liveWorkflowRunsLocked() *agent.WorkflowRuns {
 	if s.workflowRuns == nil {
 		s.workflowRuns = agent.NewWorkflowRuns()
+		s.workflowRuns.SetOnStopped(workflowStopHook(s.workflowCardsLocked(), s.notify))
 	}
 	return s.workflowRuns
 }
@@ -146,20 +176,51 @@ func (s *acpSession) workflowCardsLocked() *acpWorkflowCards {
 	return s.workflowCards
 }
 
+// workflowStopHook is a session registry's stop hook: it closes the card of
+// a detached run the registry stopped, with the registry's reason. The
+// registry calls it off its own lock, from the reaper's timer or a StopAll
+// goroutine; the cards have a lock of their own, and a run whose card is
+// already gone (taken by /clear, or never announced) is ignored.
+func workflowStopHook(cards *acpWorkflowCards, notify func(acpsdk.SessionUpdate)) func(runID, name, reason string) {
+	return func(runID, _, reason string) {
+		if card, ok := cards.stop(runID, reason); ok {
+			card.close(notify)
+		}
+	}
+}
+
 // stopWorkflowsLocked stops every workflow run the session holds — a paused
 // one would otherwise sit on its goroutine until the idle reaper got to it —
-// and forgets their cards. The stop happens off the caller's goroutine: the
-// caller holds the bridge mutex, and a stopping run reports through
-// callbacks that may need it. Caller holds the bridge mutex.
-func (s *acpSession) stopWorkflowsLocked() {
+// and forgets their cards. reason is what the cards say about the stop; ""
+// forgets them without a word, for a session the editor has closed and will
+// not draw again.
+//
+// The cards leave the session here, synchronously, so the next turn starts
+// with none to re-attach to; closing them on the wire and stopping the runs
+// happen off the caller's goroutine: the caller holds the bridge mutex, and a
+// stopping run reports through callbacks that may need it. Taking the cards
+// first also means the registry's stop hook finds nothing left to close, so
+// no card is closed twice. Caller holds the bridge mutex.
+func (s *acpSession) stopWorkflowsLocked(reason string) {
 	runs := s.workflowRuns
 	s.workflowRuns = nil
+	var open []stoppedCard
 	if s.workflowCards != nil {
-		s.workflowCards.reset()
+		open = s.workflowCards.stopAll(reason)
 	}
-	if runs != nil {
-		go runs.StopAll()
+	notify := s.notify
+	if reason == "" {
+		notify = nil
 	}
+	if runs == nil && (len(open) == 0 || notify == nil) {
+		return
+	}
+	go func() {
+		for _, card := range open {
+			card.close(notify)
+		}
+		runs.StopAll()
+	}()
 }
 
 var _ acpsdk.Agent = (*bridge)(nil)
@@ -274,6 +335,7 @@ func (b *bridge) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 		manifest:  manifest,
 		mediaDir:  filepath.Join(session.SessionDir(b.opts.GlobalDir, sid), "acp-media"),
 		startedAt: time.Now(),
+		notify:    b.sessionNotifier(sid),
 	}
 	b.mu.Lock()
 	b.sessions[sid] = s
@@ -800,8 +862,9 @@ func (b *bridge) CloseSession(_ context.Context, params acpsdk.CloseSessionReque
 		delete(b.sessions, string(params.SessionId))
 		// A run paused at a checkpoint waits for a turn of this session,
 		// and there will be none: stop it now rather than leave it to the
-		// idle reaper.
-		s.stopWorkflowsLocked()
+		// idle reaper. The editor closed the session, so its cards are
+		// dropped rather than closed on the wire.
+		s.stopWorkflowsLocked("")
 	}
 	b.mu.Unlock()
 	if !ok {
@@ -822,6 +885,11 @@ func (b *bridge) stopAllWorkflows() {
 		if s.workflowRuns != nil {
 			all = append(all, s.workflowRuns)
 			s.workflowRuns = nil
+		}
+		// The connection is going away: drop the cards first, so the
+		// registries' stop hooks do not write to it on the way out.
+		if s.workflowCards != nil {
+			s.workflowCards.stopAll("")
 		}
 	}
 	b.mu.Unlock()

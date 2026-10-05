@@ -714,9 +714,9 @@ func TestACPWorkflowLogTailIsBounded(t *testing.T) {
 	}
 }
 
-// A trace reaching a turn that has ended (a paused run stopped later reports
-// through the turn that started it) must not take the card away from the turn
-// now showing it.
+// A trace reaching a turn that has ended (a run whose turn was cancelled
+// under it reports its stop through that turn) must not take the card away
+// from the turn now showing it.
 func TestACPWorkflowDeadTurnDoesNotStealCard(t *testing.T) {
 	cards := newACPWorkflowCards()
 	// Both turns are silent (cancelled contexts drop every notification); a
@@ -733,5 +733,72 @@ func TestACPWorkflowDeadTurnDoesNotStealCard(t *testing.T) {
 	}
 	if len(w.logs) != 1 {
 		t.Fatal("the late trace's content must still be recorded")
+	}
+}
+
+// A run the orchestrator stops (continue_run_id + stop:true) reports status
+// "stopped" with a reason. That is a deliberate end, not a failure: the card
+// closes as completed and says it was stopped and why, instead of reading as
+// done or as failed.
+func TestACPWorkflowStoppedClosesAsCompleted(t *testing.T) {
+	rec := newWireRecorder(t)
+	cards := newACPWorkflowCards()
+	turn := rec.turn(cards)
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	callID := turn.workflow.callID
+	if !turn.onWorkflowTool(wfTrace("workflow", "stopped",
+		`{"run_id":"wf_1","workflow":"audit","reason":"stopped by the orchestrator"}`, "0 agents")) {
+		t.Fatal("a stopped trace must be claimed")
+	}
+	if _, ok := cards.runs["wf_1"]; ok || turn.workflow != nil {
+		t.Fatal("a stopped run must leave the session's cards and the turn")
+	}
+	ups := rec.updates(t, 2)
+	last := ups[len(ups)-1]
+	if last.ToolCallID != string(callID) || last.Status != "completed" {
+		t.Fatalf("a stopped run's card must close as completed, last update = %+v", last)
+	}
+	if !strings.Contains(last.text(), "■ stopped: stopped by the orchestrator") {
+		t.Fatalf("the card must say why the run stopped:\n%s", last.text())
+	}
+}
+
+// A paused run is detached: its tool call returned and its observer is
+// unbound, so when the idle reaper (or StopAll) stops it no finish trace can
+// reach any turn. The registry's stop hook must close the card instead, on a
+// session update of its own, and take it out of the session's cards. Before
+// the hook the card read "paused … waiting for orchestrator" for good and
+// its state stayed in the session for the rest of it.
+func TestACPWorkflowStopHookClosesDetachedCard(t *testing.T) {
+	rec := newWireRecorder(t)
+	cards := newACPWorkflowCards()
+	turn := rec.turn(cards)
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow", "paused",
+		`{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1","message":"fix which?"}`, ""))
+	callID := cards.runs["wf_1"].callID
+
+	hook := workflowStopHook(cards, rec.b.sessionNotifier("sess-wf"))
+	hook("wf_1", "audit", "paused for over 30m with no continue")
+	if _, ok := cards.runs["wf_1"]; ok {
+		t.Fatal("a reaped run's card must leave the session's cards")
+	}
+	ups := rec.updates(t, 3)
+	last := ups[2]
+	if last.ToolCallID != string(callID) || last.Status != "completed" {
+		t.Fatalf("a reaped run's card must close as completed, update = %+v", last)
+	}
+	if !strings.Contains(last.text(), "■ stopped: paused for over 30m with no continue") ||
+		strings.Contains(last.text(), "waiting for orchestrator") {
+		t.Fatalf("the closed card must say why it stopped:\n%s", last.text())
+	}
+
+	// A second report for the same run (or one for a run whose card is
+	// already gone) sends nothing.
+	hook("wf_1", "audit", "the session ended")
+	hook("wf_unknown", "x", "the session ended")
+	time.Sleep(50 * time.Millisecond)
+	if n := len(rec.updates(t, 3)); n != 3 {
+		t.Fatalf("a run without a card must not produce updates, got %d", n)
 	}
 }

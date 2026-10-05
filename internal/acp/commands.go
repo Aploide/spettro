@@ -211,7 +211,7 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		s.history = nil
 		// A workflow paused at a checkpoint is waiting for the cleared
 		// conversation to answer it; the fresh one never will.
-		s.stopWorkflowsLocked()
+		s.stopWorkflowsLocked("the conversation was cleared")
 		return "conversation history cleared", false, true
 	}
 	return "", false, false

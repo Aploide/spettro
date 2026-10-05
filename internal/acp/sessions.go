@@ -136,6 +136,7 @@ func (b *bridge) restoreSession(sessionID acpsdk.SessionId, reqCwd string) (*acp
 		startedAt:   startedAt,
 		storedGoal:  state.Metadata.Goal,
 		storedStats: state.Metadata.Stats,
+		notify:      b.sessionNotifier(string(sessionID)),
 	}
 	b.mu.Lock()
 	b.sessions[string(sessionID)] = s
