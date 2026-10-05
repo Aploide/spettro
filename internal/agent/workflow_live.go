@@ -20,11 +20,75 @@ type WorkflowRuns struct {
 	// ended holds tombstones for runs the registry stopped on its own,
 	// keyed by run id: see noteEnded.
 	ended map[string]string
+	// onStopped is the host's hook for runs stopped while detached; see
+	// SetOnStopped.
+	onStopped func(runID, name, reason string)
+	// turnLocal marks a registry runToolLoop made for one turn because the
+	// host owns none. Its runs are stopped when the turn ends, so a
+	// checkpoint must tell the model to answer it in the same turn rather
+	// than promise it the half hour a host-owned run waits.
+	turnLocal bool
 }
+
+// Reasons a run was stopped on purpose, carried by the "stopped" finish trace
+// and SetOnStopped. Hosts show them after "stopped: ", so they read as the
+// cause, not as a sentence of their own.
+const (
+	workflowStopOrchestrator = "stopped by the orchestrator"
+	workflowStopSessionEnded = "the session ended"
+	workflowStopTurnEnded    = "the turn ended"
+)
 
 // NewWorkflowRuns returns an empty registry.
 func NewWorkflowRuns() *WorkflowRuns {
 	return &WorkflowRuns{runs: map[string]*liveWorkflow{}}
+}
+
+// SetOnStopped registers fn to be told when a run that is detached — paused
+// at a checkpoint, its tool call long returned — is stopped by the idle
+// reaper or by StopAll.
+//
+// Such a run's finish trace reaches nobody: no turn is bound to it, and a
+// trace for a turn that ended must never be delivered. Without this hook a
+// host's paused panel or card would keep saying "waiting for orchestrator"
+// for a run that no longer exists. A run a tool call is driving when it
+// stops is not reported here: its finish trace reaches the host as usual.
+//
+// fn is called on a goroutine of its own, after the run has finalized (its
+// transcript is written and Paused no longer lists it), and never under the
+// registry's lock — so a host may call back into the registry, or post into
+// its own event loop, from fn without deadlocking against the StopAll it is
+// itself running. nil unregisters.
+func (w *WorkflowRuns) SetOnStopped(fn func(runID, name, reason string)) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.onStopped = fn
+	w.mu.Unlock()
+}
+
+// notifyStopped reports a detached run that was stopped, once it has
+// finalized; see SetOnStopped.
+func (w *WorkflowRuns) notifyStopped(run *liveWorkflow, reason string) {
+	if w == nil || run == nil {
+		return
+	}
+	w.mu.Lock()
+	fn := w.onStopped
+	w.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	go func() {
+		run.wait(workflowStopAllGrace)
+		fn(run.runID, run.name, reason)
+	}()
+}
+
+// isTurnLocal reports whether the registry dies with the turn; see turnLocal.
+func (w *WorkflowRuns) isTurnLocal() bool {
+	return w != nil && w.turnLocal
 }
 
 // PausedWorkflow describes one run waiting on the orchestrator, for hosts
@@ -151,6 +215,13 @@ func (w *WorkflowRuns) endedReason(runID string) (string, bool) {
 // their result and close their journal, so a process exiting right after
 // still leaves a complete transcript to resume from.
 func (w *WorkflowRuns) StopAll() {
+	w.stopAll(workflowStopSessionEnded)
+}
+
+// stopAll is StopAll with the reason the finish trace and SetOnStopped give:
+// a host ending a session, or runToolLoop ending the turn a turn-local
+// registry belonged to.
+func (w *WorkflowRuns) stopAll(reason string) {
 	if w == nil {
 		return
 	}
@@ -158,8 +229,15 @@ func (w *WorkflowRuns) StopAll() {
 	runs := w.runs
 	w.runs = map[string]*liveWorkflow{}
 	w.mu.Unlock()
+	var detached []*liveWorkflow
 	for _, r := range runs {
-		r.stopWith("stopped by the host: the turn or session the run belonged to ended")
+		if r.claimDetached() {
+			detached = append(detached, r)
+		}
+		r.stopWith(reason)
+	}
+	for _, r := range detached {
+		w.notifyStopped(r, reason)
 	}
 	deadline := time.Now().Add(workflowStopAllGrace)
 	for _, r := range runs {

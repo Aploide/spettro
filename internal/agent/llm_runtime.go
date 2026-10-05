@@ -357,12 +357,10 @@ type toolRuntime struct {
 	workflowPreapproved bool
 	// workflowSize is the size tier a run gets when the call names none.
 	workflowSize string
-	// workflowBudget is the turn's token budget directive (0: none), and
-	// workflowTurnRuns the runs started this turn, whose spend it is shared
-	// across.
-	workflowBudget   int
-	workflowMu       sync.Mutex
-	workflowTurnRuns []*liveWorkflow
+	// workflowPool is the turn's token budget directive, shared by the runs
+	// the turn starts; nil when the user set none.
+	workflowPool *workflowPool
+	workflowMu   sync.Mutex
 	// workflowRuns holds the runs paused at a checkpoint, for continue.
 	workflowRuns    *WorkflowRuns
 	shellTimeoutSec int
@@ -640,15 +638,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	runtime.goalMode = cfg.GoalMode
 	runtime.workflowPreapproved = cfg.WorkflowPreapproved
 	runtime.workflowSize = cfg.WorkflowSize
-	runtime.workflowBudget = cfg.WorkflowBudget
+	runtime.workflowPool = newWorkflowPool(cfg.WorkflowBudget)
 	runtime.workflowRuns = cfg.WorkflowRuns
 	if runtime.workflowRuns == nil && cfg.DelegationDepth == 0 {
 		// Without a host registry a paused run can still be continued later
 		// in this turn, but it must not outlive it: nothing would ever
 		// continue or stop it.
 		turnRuns := NewWorkflowRuns()
+		turnRuns.turnLocal = true
 		runtime.workflowRuns = turnRuns
-		defer turnRuns.StopAll()
+		defer turnRuns.stopAll(workflowStopTurnEnded)
 	}
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	// Project state (.spettro/) comes from the main checkout when this run

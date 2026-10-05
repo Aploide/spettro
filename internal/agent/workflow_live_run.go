@@ -57,8 +57,9 @@ type liveWorkflow struct {
 	// cannot stop the run after it was continued and paused again.
 	pauseGen int
 	idle     *time.Timer
-	// stopReason, when set, replaces the cancellation error in the finish
-	// trace: a run the orchestrator or the idle reaper stopped did not fail.
+	// stopReason, when set, turns the cancellation error into a "stopped"
+	// finish trace carrying it: a run the orchestrator, the idle reaper or
+	// the host stopped did not fail.
 	stopReason string
 
 	finalOnce sync.Once
@@ -93,6 +94,14 @@ func (l *liveWorkflow) stopWith(reason string) {
 	}
 	l.mu.Unlock()
 	l.stop()
+}
+
+// stoppedBecause is the reason the run was stopped on purpose; "" if it was
+// not.
+func (l *liveWorkflow) stoppedBecause() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stopReason
 }
 
 // wait blocks until the run has settled and been finalized, or d elapses.
@@ -141,11 +150,15 @@ func (l *liveWorkflow) finalize() {
 		reason := l.stopReason
 		l.mu.Unlock()
 		l.finalErr = err
-		finishErr := err
 		if err != nil && reason != "" {
-			finishErr = fmt.Errorf("%s", reason)
+			// Stopped on purpose — by the orchestrator, the idle reaper or
+			// the host — so the error is the stop's own cancellation, not a
+			// failure, and hosts must not paint it red. They get a status
+			// of its own, with the reason.
+			l.observer.stopped(res, reason)
+		} else {
+			l.observer.finish(res, err)
 		}
-		l.observer.finish(res, finishErr)
 		if l.journal != nil {
 			if encoded, err := json.MarshalIndent(res.Value, "", "  "); err == nil {
 				_ = l.journal.WriteFile("result.json", string(encoded))
@@ -165,6 +178,21 @@ func (l *liveWorkflow) claim() error {
 	}
 	l.busy = true
 	return nil
+}
+
+// claimDetached claims the run for the caller if no tool call is driving it
+// and it sits paused — the state in which its finish trace can reach no host
+// (see WorkflowRuns.SetOnStopped). Claiming it in the same critical section
+// refuses a continue racing the stop instead of resuming a run being torn
+// down.
+func (l *liveWorkflow) claimDetached() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.paused || l.busy {
+		return false
+	}
+	l.busy = true
+	return true
 }
 
 func (l *liveWorkflow) release() {
@@ -226,7 +254,11 @@ func (l *liveWorkflow) reap(gen int) {
 	if stale {
 		return
 	}
-	reason := fmt.Sprintf("stopped after %s paused at a checkpoint with no continue", workflowIdleTimeout)
-	l.registry.noteEnded(l.runID, reason)
+	idle := formatIdle(workflowIdleTimeout)
+	l.registry.noteEnded(l.runID, fmt.Sprintf("stopped after %s paused at a checkpoint with no continue", idle))
+	reason := fmt.Sprintf("paused for over %s with no continue", idle)
 	l.stopWith(reason)
+	// A reaped run is detached by definition: no turn hears its finish
+	// trace, so the host is told directly.
+	l.registry.notifyStopped(l, reason)
 }

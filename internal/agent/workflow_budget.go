@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -64,4 +66,75 @@ func BudgetDirectiveSpans(task string) [][2]int {
 		})
 	}
 	return spans
+}
+
+// workflowPool is a turn's "+500k"-style budget directive: one pool of tokens
+// shared by the workflow runs the turn starts, not a fresh grant per run.
+//
+// It is enforced where tokens are spent, not only where a run starts. A run's
+// engine budget is a fixed figure taken when it starts, and a pooled run can
+// keep spending long after that: it may pause at a checkpoint while the model
+// starts another run, and then be continued — so a run that started with the
+// whole pool, spent a fifth of it and paused, could otherwise spend the rest a
+// second time after a later run used it. Every pooled run's workflowRunner
+// therefore asks the pool before each agent it starts, and the pool counts
+// what all its runs have spent so far, however many times each was continued.
+//
+// A run continued in a later turn stays bound to the pool of the turn that
+// started it: its budget was granted against that directive, and a later
+// directive (or none) is about that turn's own new runs.
+type workflowPool struct {
+	limit int
+
+	mu   sync.Mutex
+	runs []*liveWorkflow
+}
+
+func newWorkflowPool(limit int) *workflowPool {
+	if limit <= 0 {
+		return nil
+	}
+	return &workflowPool{limit: limit}
+}
+
+// add counts run's spend against the pool. Every run the turn starts is
+// added, a run with an explicit budget_tokens too: that run is not limited by
+// the pool, but what it spends is still spent from the turn's budget.
+func (p *workflowPool) add(run *liveWorkflow) {
+	if p == nil || run == nil {
+		return
+	}
+	p.mu.Lock()
+	p.runs = append(p.runs, run)
+	p.mu.Unlock()
+}
+
+// spent is what the pool's runs have spent so far.
+func (p *workflowPool) spent() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	runs := append([]*liveWorkflow(nil), p.runs...)
+	p.mu.Unlock()
+	total := 0
+	for _, run := range runs {
+		total += run.handle.Snapshot().Tokens
+	}
+	return total
+}
+
+// left is what remains of the pool; zero or less once it is spent.
+func (p *workflowPool) left() int {
+	if p == nil {
+		return 0
+	}
+	return p.limit - p.spent()
+}
+
+// errSpent is what an agent a pooled run tries to start gets once the pool
+// is spent. The engine resolves the agent() to null and counts it failed, so
+// the script carries on with what it has rather than dying mid-wave.
+func (p *workflowPool) errSpent() error {
+	return fmt.Errorf("workflow: the turn's token budget of %d is spent (%d used); no further agent starts in this run", p.limit, p.spent())
 }

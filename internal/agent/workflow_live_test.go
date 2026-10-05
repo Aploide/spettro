@@ -283,18 +283,14 @@ func TestWorkflowContinueStop(t *testing.T) {
 	if srv.hits.Load() != 1 {
 		t.Fatalf("no agent may run after the stop, got %d requests", srv.hits.Load())
 	}
-	fin := log.find(workflowTraceName, "error")
-	if len(fin) != 1 {
-		t.Fatalf("want one finish trace, got %v", log.find(workflowTraceName, ""))
+	// A deliberate stop is not a failure: hosts get a "stopped" lifecycle
+	// status with the reason, never "error".
+	if got := log.find(workflowTraceName, "error"); len(got) != 0 {
+		t.Fatalf("a stop must not be reported as a failure: %v", got)
 	}
-	var finOut string
-	for _, tr := range log.all() {
-		if tr.Name == workflowTraceName && tr.Status == "error" {
-			finOut = tr.Output
-		}
-	}
-	if !strings.Contains(finOut, "stopped by the orchestrator") {
-		t.Fatalf("finish trace should say who stopped it, got %q", finOut)
+	fin := log.find(workflowTraceName, "stopped")
+	if len(fin) != 1 || fin[0]["reason"] != "stopped by the orchestrator" || fin[0]["run_id"] != runID || fin[0]["workflow"] != "triage" {
+		t.Fatalf("want one stopped finish trace with the reason, got %v", log.find(workflowTraceName, ""))
 	}
 }
 
@@ -496,8 +492,8 @@ func TestRunToolLoopStopsTurnLocalWorkflowRuns(t *testing.T) {
 	// No host registry: the paused run belongs to the turn and is stopped —
 	// and its transcript finalized — when the turn's loop returns.
 	cwd, ls := turn(nil)
-	if body, _ := json.Marshal(ls.requests()[1]); !strings.Contains(string(body), "workflow_checkpoint") {
-		t.Fatalf("the checkpoint should reach the model as the tool result: %s", body)
+	if body, _ := json.Marshal(ls.requests()[1]); !strings.Contains(string(body), "workflow_checkpoint") || !strings.Contains(string(body), "Answer it in this turn") {
+		t.Fatalf("the checkpoint should reach the model as the tool result, saying it dies with the turn: %s", body)
 	}
 	results, _ := filepath.Glob(filepath.Join(cwd, ".spettro", "workflow-runs", "*", "result.json"))
 	if len(results) != 1 {
@@ -518,7 +514,7 @@ func TestRunToolLoopStopsTurnLocalWorkflowRuns(t *testing.T) {
 func TestWorkflowBudgetPoolIsSharedAcrossTurnRuns(t *testing.T) {
 	srv := newSubagentServer(t, func(string) string { return "ok" })
 	rt, log := workflowTestRuntime(t, t.TempDir(), srv, NewWorkflowRuns())
-	rt.workflowBudget = 1000
+	rt.workflowPool = newWorkflowPool(1000)
 	script := `export const meta = {name: 'spend', description: 'two agents'}
 await agent('a', {label: 'a'})
 await agent('b', {label: 'b'})
@@ -531,16 +527,11 @@ return budget.total`
 	if !strings.Contains(out, "<returned>\n1000\n") {
 		t.Fatalf("the first run should get the whole pool:\n%s", out)
 	}
-	spent := 0
-	rt.workflowMu.Lock()
-	for _, run := range rt.workflowTurnRuns {
-		spent += run.handle.Snapshot().Tokens
-	}
-	rt.workflowMu.Unlock()
+	spent := rt.workflowPool.spent()
 	if spent <= 0 {
 		t.Fatal("the run spent no tokens; the test cannot tell a shared pool from a fresh one")
 	}
-	if got, want := rt.workflowBudgetLeft(), 1000-spent; got != want {
+	if got, want := rt.workflowPool.left(), 1000-spent; got != want {
 		t.Fatalf("budget left = %d, want %d", got, want)
 	}
 	out, err = callWorkflow(t, context.Background(), rt, map[string]any{"script": script})
@@ -558,15 +549,102 @@ return budget.total`
 	if err != nil || !strings.Contains(out, "<returned>\n77\n") {
 		t.Fatalf("an explicit budget_tokens overrides the pool: %v\n%s", err, out)
 	}
-
-	// A spent pool never reads as "no budget".
-	rt.workflowBudget = 1
-	if got := rt.workflowBudgetLeft(); got != 1 {
-		t.Fatalf("a spent pool = %d, want 1", got)
+	if newWorkflowPool(0) != nil {
+		t.Fatal("no directive, no pool")
 	}
-	rt.workflowBudget = 0
-	if got := rt.workflowBudgetLeft(); got != 0 {
-		t.Fatalf("no directive = %d, want 0", got)
+}
+
+// A spent pool stops spending: the agent that would overrun it is refused
+// inside the run, and a new run is refused outright rather than started with
+// a token budget of 1 — which used to let its whole first fan-out wave
+// dispatch before any spend was recorded.
+func TestWorkflowSpentPoolRefusesAgentsAndRuns(t *testing.T) {
+	srv := newSubagentServer(t, func(string) string { return "ok" })
+	rt, log := workflowTestRuntime(t, t.TempDir(), srv, NewWorkflowRuns())
+	rt.workflowPool = newWorkflowPool(10)
+	// One wave, one agent at a time: every agent() passes the engine's own
+	// budget check when the wave is built (nothing is spent yet), so only a
+	// check where each agent actually starts can stop the ones queued behind
+	// the first — which spends more than the whole pool.
+	wave := `export const meta = {name: 'wave', description: 'a fan-out'}
+return await parallel([1, 2, 3, 4].map(i => () => agent('item ' + i, {label: 'item'})))`
+	out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": wave, "max_concurrency": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits := srv.hits.Load(); hits != 1 {
+		t.Fatalf("only the agent that started before the pool ran out may run, got %d requests:\n%s", hits, out)
+	}
+	if !strings.Contains(out, "3 failed") {
+		t.Fatalf("the refused agents should resolve to null and count as failed:\n%s", out)
+	}
+	var said bool
+	for _, tr := range log.all() {
+		if tr.Name == "agent" && tr.Status == "error" && strings.Contains(tr.Output, "token budget of 10 is spent") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatal("a refused agent's trace should say the pool is spent")
+	}
+
+	_, err = callWorkflow(t, context.Background(), rt, map[string]any{"script": wave})
+	if err == nil || !strings.Contains(err.Error(), "token budget of 10 is spent") || !strings.Contains(err.Error(), "budget_tokens") {
+		t.Fatalf("a run started against a spent pool must be refused, got %v", err)
+	}
+	if hits := srv.hits.Load(); hits != 1 {
+		t.Fatalf("a refused run must not dispatch anything, got %d requests", hits)
+	}
+	// The way out the error names still works.
+	if _, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": wave, "budget_tokens": 100000}); err != nil {
+		t.Fatalf("an explicit budget_tokens runs past a spent pool: %v", err)
+	}
+}
+
+// A pooled run paused at a checkpoint, then continued after a later run spent
+// the rest of the pool, must not spend the pool a second time: the pool is
+// checked when each agent starts, not only when the run started.
+func TestWorkflowPoolBindsContinuedRuns(t *testing.T) {
+	srv := newSubagentServer(t, func(task string) string {
+		if strings.Contains(task, "fix:") {
+			return "patched"
+		}
+		return "bug-1"
+	})
+	runs := NewWorkflowRuns()
+	rt, _ := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	rt.workflowPool = newWorkflowPool(100)
+
+	out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": checkpointScript})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pausedRun := checkpointRunID(t, out)
+	// A second run in the same turn spends what the first left, and more.
+	spend := `export const meta = {name: 'spend', description: 'two agents'}
+await agent('a', {label: 'a'})
+await agent('b', {label: 'b'})
+return 'spent'`
+	if _, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": spend}); err != nil {
+		t.Fatal(err)
+	}
+	if left := rt.workflowPool.left(); left > 0 {
+		t.Fatalf("the test needs a spent pool, %d left", left)
+	}
+	before := srv.hits.Load()
+
+	// Continued from a later turn: the run stays bound to the pool it started
+	// under, so its fix agent is refused.
+	later, _ := workflowTestRuntime(t, rt.cwd, srv, runs)
+	out, err = callWorkflow(t, context.Background(), later, map[string]any{"continue_run_id": pausedRun, "reply": map[string]any{"fix": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits := srv.hits.Load(); hits != before {
+		t.Fatalf("a continued run spent past the pool: %d → %d requests\n%s", before, hits, out)
+	}
+	if !strings.Contains(out, "1 failed") || strings.Contains(out, "patched") {
+		t.Fatalf("the refused fix agent should resolve to null:\n%s", out)
 	}
 }
 
@@ -665,7 +743,7 @@ func TestRenderWorkflowCheckpoint(t *testing.T) {
 	out := renderWorkflowCheckpoint("wf_1", workflow.Meta{Name: "audit"}, workflow.Checkpoint{
 		ID: "cp-2", Message: "Which to fix?", Phase: "Verify",
 		Data: map[string]any{"confirmed": []any{"a"}},
-	}, workflow.Result{Agents: 4, Failed: 1, Cached: 2, Tokens: 900, Phases: []string{"Find", "Verify"}, Logs: logs})
+	}, workflow.Result{Agents: 4, Failed: 1, Cached: 2, Tokens: 900, Phases: []string{"Find", "Verify"}, Logs: logs}, false)
 	for _, want := range []string{
 		`<workflow_checkpoint name="audit" run_id="wf_1" checkpoint_id="cp-2" phase="Verify">`,
 		"<message>Which to fix?</message>",
@@ -686,7 +764,7 @@ func TestRenderWorkflowCheckpoint(t *testing.T) {
 
 	auto := renderWorkflowCheckpoint("wf_1", workflow.Meta{Name: "audit"}, workflow.Checkpoint{
 		ID: "cp-1", Message: "phase Find finished; next: Verify", Auto: true,
-	}, workflow.Result{})
+	}, workflow.Result{}, false)
 	if !strings.Contains(auto, `auto="true"`) || strings.Contains(auto, "<data>") || strings.Contains(auto, "; phases:") {
 		t.Fatalf("auto checkpoint render:\n%s", auto)
 	}
@@ -712,7 +790,7 @@ func TestWorkflowGuidanceVariants(t *testing.T) {
 		{"budget under the toggle", LLMAgent{Ultracode: true}, "go +1.5m", true, true, 1_500_000},
 	}
 	for _, c := range cases {
-		g := c.agent.workflowGuidanceFor(c.task)
+		g := c.agent.workflowGuidanceFor(c.task, nil)
 		if g.Enabled != c.enabled || g.Ultracode != c.ultracode || g.BudgetTokens != c.budget {
 			t.Errorf("%s: guidance = %+v", c.name, g)
 		}
@@ -802,5 +880,329 @@ func TestRunInjectsWorkflowGuidanceVariant(t *testing.T) {
 	system, tools = run(LLMAgent{Ultracode: true, DelegationDepth: 1}, "ultracode audit the parser")
 	if strings.Contains(system, "WORKFLOWS are available") || contains(tools, workflowToolID) {
 		t.Fatal("a sub-agent must never get workflow guidance or the tool")
+	}
+}
+
+// stoppedCalls records SetOnStopped notifications.
+type stoppedCalls struct {
+	ch chan [3]string
+}
+
+func watchStopped(runs *WorkflowRuns) *stoppedCalls {
+	s := &stoppedCalls{ch: make(chan [3]string, 8)}
+	runs.SetOnStopped(func(runID, name, reason string) {
+		// The run must already be gone when hosts hear about it, so a host
+		// redrawing from Paused() in the callback does not see it again.
+		if len(runs.Paused()) != 0 {
+			reason = "STILL LISTED: " + reason
+		}
+		s.ch <- [3]string{runID, name, reason}
+	})
+	return s
+}
+
+func (s *stoppedCalls) next(t *testing.T) [3]string {
+	t.Helper()
+	select {
+	case got := <-s.ch:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetOnStopped was not called")
+	}
+	return [3]string{}
+}
+
+func (s *stoppedCalls) none(t *testing.T) {
+	t.Helper()
+	select {
+	case got := <-s.ch:
+		t.Fatalf("SetOnStopped called for a run a tool call was driving: %v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A paused run stopped by the host has no turn to hear its finish trace, so
+// the host is told through SetOnStopped — after the run has finalized.
+func TestWorkflowStopAllNotifiesDetachedRuns(t *testing.T) {
+	srv := newSubagentServer(t, func(string) string { return "bug-1" })
+	runs := NewWorkflowRuns()
+	stopped := watchStopped(runs)
+	rt, log := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": checkpointScript})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := checkpointRunID(t, out)
+	tracesBefore := len(log.all())
+
+	runs.StopAll()
+	if got := stopped.next(t); got != [3]string{runID, "triage", "the session ended"} {
+		t.Fatalf("SetOnStopped got %v", got)
+	}
+	if n := len(log.all()); n != tracesBefore {
+		t.Fatalf("the finished turn's callback was called for a detached run (%d → %d traces)", tracesBefore, n)
+	}
+}
+
+func TestWorkflowIdleReaperNotifiesHost(t *testing.T) {
+	saved := workflowIdleTimeout
+	workflowIdleTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { workflowIdleTimeout = saved })
+
+	srv := newSubagentServer(t, func(string) string { return "bug-1" })
+	runs := NewWorkflowRuns()
+	stopped := watchStopped(runs)
+	rt, _ := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	out, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": checkpointScript})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := checkpointRunID(t, out)
+	got := stopped.next(t)
+	if got[0] != runID || got[1] != "triage" || got[2] != "paused for over 30ms with no continue" {
+		t.Fatalf("SetOnStopped got %v", got)
+	}
+}
+
+// A run a tool call is driving when the host stops it reports through its
+// finish trace — "stopped", with the reason — and not through SetOnStopped.
+func TestWorkflowStopAllWhileDrivenTracesStopped(t *testing.T) {
+	srv := newSubagentServer(t, nil) // members never answer
+	runs := NewWorkflowRuns()
+	stopped := watchStopped(runs)
+	rt, log := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	script := `export const meta = {name: 'slow', description: 'one slow agent'}
+return await agent('take forever', {label: 'slow'})`
+	done := make(chan error, 1)
+	go func() {
+		_, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": script})
+		done <- err
+	}()
+	select {
+	case <-srv.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent never started")
+	}
+	runs.StopAll()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "was stopped (the session ended)") {
+			t.Fatalf("the driving call should say the run was stopped, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("StopAll did not stop the driven run")
+	}
+	fin := log.find(workflowTraceName, "stopped")
+	if len(fin) != 1 || fin[0]["reason"] != "the session ended" || fin[0]["workflow"] != "slow" {
+		t.Fatalf("want a stopped finish trace, got %v", log.find(workflowTraceName, ""))
+	}
+	if got := log.find(workflowTraceName, "error"); len(got) != 0 {
+		t.Fatalf("a host stop is not a failure: %v", got)
+	}
+	stopped.none(t)
+}
+
+// The checkpoint result must not promise a turn-local run half an hour: the
+// run dies with the turn, so the model has to answer it before ending it.
+func TestRenderWorkflowCheckpointTurnLocal(t *testing.T) {
+	cp := workflow.Checkpoint{ID: "cp-1", Message: "go on?"}
+	local := renderWorkflowCheckpoint("wf_1", workflow.Meta{Name: "x"}, cp, workflow.Result{}, true)
+	if strings.Contains(local, "30 minutes") || !strings.Contains(local, "Answer it in this turn") || !strings.Contains(local, "stopped when your turn ends") {
+		t.Fatalf("turn-local checkpoint text:\n%s", local)
+	}
+	hosted := renderWorkflowCheckpoint("wf_1", workflow.Meta{Name: "x"}, cp, workflow.Result{}, false)
+	if !strings.Contains(hosted, "30 minutes") || strings.Contains(hosted, "Answer it in this turn") {
+		t.Fatalf("host-owned checkpoint text:\n%s", hosted)
+	}
+}
+
+// pausedRunAgent runs one LLMAgent turn of the stock agent id against
+// scripted replies and returns the requests the model saw.
+func runAgentTurn(t *testing.T, a LLMAgent, agentID, cwd, task string, replies ...loopReply) []map[string]any {
+	t.Helper()
+	manifest := config.DefaultAgentManifest()
+	spec, ok := manifest.AgentByID(agentID)
+	if !ok {
+		t.Fatalf("no %s agent", agentID)
+	}
+	pm, url, ls := newLoopServer(t, replies...)
+	a.Spec = spec
+	a.Manifest = &manifest
+	a.ProviderManager = pm
+	a.ProviderName = func() string { return url }
+	a.ModelName = func() string { return "m" }
+	a.CWD = cwd
+	if _, err := a.Run(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	return ls.requests()
+}
+
+func requestSystemAndTools(body map[string]any) (string, []string) {
+	msgs, _ := body["messages"].([]any)
+	first, _ := msgs[0].(map[string]any)
+	system, _ := first["content"].(string)
+	var tools []string
+	list, _ := body["tools"].([]any)
+	for _, tl := range list {
+		fn, _ := tl.(map[string]any)["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		tools = append(tools, name)
+	}
+	return system, tools
+}
+
+// The cross-turn answer the orchestrator-in-the-loop design hinges on: a run
+// paused in a keyword turn is continued in a later turn whose message ("yes,
+// fix them") carries no keyword, with the toggle off. The paused run alone
+// brings the tool back, and the prompt names it; sub-agents never get it.
+func TestPausedRunIsContinuableOnAKeywordFreeTurn(t *testing.T) {
+	cwd := t.TempDir()
+	runs := NewWorkflowRuns()
+	t.Cleanup(runs.StopAll)
+	script := "export const meta = {name: 'ask', description: 'asks once'}\nconst a = await checkpoint('Fix these?', {found: ['bug-1']})\nreturn {answer: a}"
+	start, _ := json.Marshal(map[string]any{"script": script})
+
+	runAgentTurn(t, LLMAgent{WorkflowRuns: runs}, "coding", cwd, "ultracode: triage the parser",
+		loopReply{toolName: workflowToolID, toolArgs: string(start)},
+		loopReply{content: "Found bug-1. Fix it?"})
+	paused := runs.Paused()
+	if len(paused) != 1 {
+		t.Fatalf("the first turn should leave the run paused: %+v", paused)
+	}
+	runID := paused[0].RunID
+
+	cont, _ := json.Marshal(map[string]any{"continue_run_id": runID, "reply": map[string]any{"fix": true}})
+	reqs := runAgentTurn(t, LLMAgent{WorkflowRuns: runs}, "coding", cwd, "yes, fix them",
+		loopReply{toolName: workflowToolID, toolArgs: string(cont)},
+		loopReply{content: "done"})
+	system, tools := requestSystemAndTools(reqs[0])
+	if !contains(tools, workflowToolID) {
+		t.Fatalf("a paused run must bring the workflow tool back on a keyword-free turn (tools %v)", tools)
+	}
+	for _, want := range []string{"run_id " + runID, "checkpoint_id cp-1", "Fix these?", "paused at a checkpoint, waiting for you", "Availability is not an instruction"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("the prompt should carry %q:\n%s", want, system)
+		}
+	}
+	if strings.Contains(system, "ULTRACODE is on") || strings.Contains(system, "the user asked for one in their own words") {
+		t.Fatal("a paused run alone gets the judge variant, without claiming the user asked")
+	}
+	result, _ := json.Marshal(reqs[1])
+	if !strings.Contains(string(result), "workflow_result") || !strings.Contains(string(result), `\"fix\": true`) {
+		t.Fatalf("the continue should reach the run and finish it: %s", result)
+	}
+	if p := runs.Paused(); len(p) != 0 {
+		t.Fatalf("the continued run should have settled: %+v", p)
+	}
+
+	// Nothing paused any more: the next keyword-free turn is back to normal.
+	reqs = runAgentTurn(t, LLMAgent{WorkflowRuns: runs}, "coding", cwd, "thanks", loopReply{content: "ok"})
+	if _, tools := requestSystemAndTools(reqs[0]); contains(tools, workflowToolID) {
+		t.Fatal("with no paused run and no request, the tool stays off")
+	}
+}
+
+func TestPausedRunNeverGrantsSubagentsTheTool(t *testing.T) {
+	srv := newSubagentServer(t, func(string) string { return "bug-1" })
+	runs := NewWorkflowRuns()
+	t.Cleanup(runs.StopAll)
+	rt, _ := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	if _, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": checkpointScript}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Paused()) != 1 {
+		t.Fatal("setup: no paused run")
+	}
+	reqs := runAgentTurn(t, LLMAgent{WorkflowRuns: runs, DelegationDepth: 1}, "coding", t.TempDir(), "yes, fix them", loopReply{content: "ok"})
+	system, tools := requestSystemAndTools(reqs[0])
+	if contains(tools, workflowToolID) || strings.Contains(system, "WORKFLOWS are available") || strings.Contains(system, "paused at a checkpoint") {
+		t.Fatal("a sub-agent must never get the workflow tool or guidance, paused runs or not")
+	}
+}
+
+// The ultracode toggle reaches every agent the user talks to; an agent that
+// cannot change files is pointed at research and review, and one that cannot
+// read is not told to scout inline.
+func TestUltracodeGuidanceFollowsTheAgentsRole(t *testing.T) {
+	cwd := t.TempDir()
+	prompt := func(agentID string) string {
+		reqs := runAgentTurn(t, LLMAgent{Ultracode: true}, agentID, cwd, "look into the parser", loopReply{content: "ok"})
+		system, tools := requestSystemAndTools(reqs[0])
+		if !contains(tools, workflowToolID) {
+			t.Fatalf("%s: the toggle should grant the tool", agentID)
+		}
+		return system
+	}
+	coding := prompt("coding")
+	if !strings.Contains(coding, "understand → design → implement → review") || !strings.Contains(coding, "Scout inline first") {
+		t.Fatal("the coding agent keeps the implement guidance")
+	}
+	for _, id := range []string{"plan", "ask"} {
+		system := prompt(id)
+		if strings.Contains(system, "implement → review") || !strings.Contains(system, "never to implement") || !strings.Contains(system, "must not modify anything") {
+			t.Fatalf("%s: ultracode must not tell a non-implementing agent to implement through workflows", id)
+		}
+	}
+	if plan := prompt("plan"); strings.Contains(plan, "Scout inline first") || !strings.Contains(plan, "no file tools of your own") {
+		t.Fatal("the planner has no read tools and must not be told to scout inline")
+	}
+	if ask := prompt("ask"); !strings.Contains(ask, "Scout inline first") {
+		t.Fatal("the ask agent can read and scouts inline")
+	}
+}
+
+func TestWorkflowGuidanceCheckpointAndTemplateWording(t *testing.T) {
+	for _, g := range []workflowGuidance{{Enabled: true}, {Enabled: true, Ultracode: true}} {
+		text := g.prompt()
+		if strings.Contains(text, "non-interactive hosts") || strings.Contains(text, "resume replays, ") {
+			t.Fatal("checkpoint() does not resolve to null on resume or on any host the model runs under")
+		}
+		if !strings.Contains(text, "replays your earlier reply without pausing") {
+			t.Fatal("the prompt should say what a resumed run does with answered checkpoints")
+		}
+		if strings.Contains(text, "/workflows show") || !strings.Contains(text, `"show": true`) {
+			t.Fatal("the model cannot run /workflows show; it reads templates through the tool")
+		}
+	}
+	paused := workflowGuidance{Enabled: true, Paused: []PausedWorkflow{{RunID: "wf_1", Name: "audit", CheckpointID: "cp-2", Message: "Fix\nthese?"}}}.prompt()
+	if !strings.Contains(paused, `- run_id wf_1 ("audit") at checkpoint_id cp-2: Fix these?`) {
+		t.Fatalf("paused line:\n%s", paused)
+	}
+}
+
+// A saved template is readable through the tool even where the file tools
+// cannot reach it (a global template, outside the workspace), without running
+// anything and under any permission.
+func TestWorkflowShowReturnsTemplateSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := t.TempDir()
+	script := `export const meta = {name: 'audit', description: 'audits a package', params: {pkg: {type: 'string', required: true, description: 'package to audit'}}}
+return await agent('audit ' + args.pkg)`
+	path, err := workflow.Save(cwd, "audit", "global", script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, log := workflowTestRuntime(t, cwd, nil, NewWorkflowRuns())
+	rt.permission = config.PermissionAskFirst
+	if _, _, err := rt.resolvePath(path); err == nil {
+		t.Fatal("setup: the global template should be outside the workspace")
+	}
+	for _, args := range []map[string]any{{"name": "audit", "show": true}, {"script_path": path, "show": true}} {
+		out, err := callWorkflow(t, context.Background(), rt, args)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		for _, want := range []string{"<workflow_template name=\"audit\"", "pkg (string, required)", "agent('audit ' + args.pkg)", "Nothing was run"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%v: show lacks %q:\n%s", args, want, out)
+			}
+		}
+	}
+	if len(log.all()) != 0 {
+		t.Fatal("show must not start a run")
+	}
+	if _, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": script, "show": true}); err == nil {
+		t.Fatal("show needs a saved script to read")
 	}
 }

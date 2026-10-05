@@ -294,26 +294,66 @@ func fanOutTools(allowed []string, ultra bool, workflows workflowGuidance, depth
 
 // workflowGuidanceFor decides, once per run, how workflows apply to task:
 // whether the tool is granted, which guidance variant the prompt carries,
-// and the size and budget it states.
+// and the size and budget it states. allowed is the run's resolved tool list,
+// which says what kind of agent the guidance is for.
 //
 // Ultracode — the keyword in the message, or the host's session toggle —
 // selects the standing-mode guidance; a plain-English request ("use a
 // workflow") gets the judge-it guidance. A "+500k" budget directive is only
 // honoured on a turn that has workflows at all: elsewhere "+500k" is just
 // text.
-func (a LLMAgent) workflowGuidanceFor(task string) workflowGuidance {
+//
+// A run paused at a checkpoint in the host's registry grants the tool on its
+// own. The checkpoint result tells the model to answer it, and the model very
+// often does that by ending its turn to ask the user — whose reply ("yes, fix
+// 1 and 3") then carries no keyword. Without the tool on that turn the
+// continue the whole design hinges on would be refused, and the run would sit
+// paused until the idle reaper stopped it. Such a turn gets the judge-it
+// guidance (unless ultracode is on anyway) and no pre-approval for new runs:
+// answering a question is not a request for more spending. Sub-agents never
+// get any of it — Run clears the guidance below depth 0.
+func (a LLMAgent) workflowGuidanceFor(task string, allowed []string) workflowGuidance {
 	ultracode := a.Ultracode || WorkflowPreapproved(task)
+	requested := a.Workflows || ultracode || WorkflowRequested(task)
 	g := workflowGuidance{
-		Enabled:   a.Workflows || ultracode || WorkflowRequested(task),
+		Requested: requested,
 		Ultracode: ultracode,
+		Research:  !slices.ContainsFunc(allowed, isWorkflowEditTool),
+		NoRead:    !slices.ContainsFunc(allowed, isWorkflowReadTool),
 		SizeTier:  a.WorkflowSize,
 	}
+	if a.DelegationDepth == 0 {
+		g.Paused = a.WorkflowRuns.Paused()
+	}
+	g.Enabled = requested || len(g.Paused) > 0
 	if g.Enabled {
 		if tokens, ok := ParseBudgetDirective(task); ok {
 			g.BudgetTokens = tokens
 		}
 	}
 	return g
+}
+
+// isWorkflowEditTool reports whether tool lets an agent change files itself,
+// which is what separates an implementing agent from a planner or a read-only
+// Q&A agent for the standing-mode guidance. The shell counts: an agent with
+// bash can edit through it. Retired aliases count as their canonical tool.
+func isWorkflowEditTool(tool string) bool {
+	switch tool {
+	case "file-write", "file-edit", "multi-edit", "rename-symbol", "bash", "shell-exec", "pty-start":
+		return true
+	}
+	return false
+}
+
+// isWorkflowReadTool reports whether tool lets an agent look at the code
+// itself, so it can scout a work-list inline before writing a script.
+func isWorkflowReadTool(tool string) bool {
+	switch tool {
+	case "file-read", "grep", "glob", "ls", "repo-search", "lsp", "bash", "shell-exec":
+		return true
+	}
+	return false
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -330,10 +370,11 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	var fanOutPrompt string
 	// Workflows are a per-turn opt-in: the user writes the keyword or asks in
 	// their own words, or the host's ultracode toggle stands in for the
-	// keyword on every turn. Detection lives in the runner so every surface
+	// keyword on every turn; a run paused at a checkpoint also keeps the tool
+	// for as long as it waits. Detection lives in the runner so every surface
 	// (TUI, ACP, goal, Telegram, headless) honours it without each one
 	// re-implementing it.
-	workflows := a.workflowGuidanceFor(task)
+	workflows := a.workflowGuidanceFor(task, allowedTools)
 	if a.DelegationDepth != 0 {
 		workflows = workflowGuidance{}
 	}

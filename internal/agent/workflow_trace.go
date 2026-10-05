@@ -134,6 +134,20 @@ func (o *workflowObserver) finish(res workflow.Result, err error) {
 	}, output)
 }
 
+// stopped closes the lifecycle of a run stopped on purpose — by the
+// orchestrator, the idle reaper or the host. It is a status of its own, not
+// "error": the run did not fail, and hosts render it as a neutral end with
+// the reason rather than as a red failure.
+func (o *workflowObserver) stopped(res workflow.Result, reason string) {
+	o.emit(workflowTraceName, "stopped", map[string]any{
+		"reason": reason,
+		"agents": res.Agents,
+		"failed": res.Failed,
+		"cached": res.Cached,
+		"tokens": res.Tokens,
+	}, "stopped: "+reason)
+}
+
 func (o *workflowObserver) handle(ev workflow.Event) {
 	switch ev.Kind {
 	case workflow.EventPhase:
@@ -276,7 +290,13 @@ const workflowCheckpointLogLines = 20
 // message and data come first, then just enough progress to judge them, then
 // the exact call that answers — a model that has to guess the continue
 // syntax will guess wrong.
-func renderWorkflowCheckpoint(runID string, meta workflow.Meta, cp workflow.Checkpoint, snap workflow.Result) string {
+//
+// turnLocal says the run lives in a registry that dies with the turn (a host
+// that owns none: headless, remote relays). There the model must answer
+// before it ends its turn — ending it to ask the user stops the run — and
+// being promised the half hour a host-owned run waits would tell it the
+// opposite.
+func renderWorkflowCheckpoint(runID string, meta workflow.Meta, cp workflow.Checkpoint, snap workflow.Result, turnLocal bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<workflow_checkpoint name=%q run_id=%q checkpoint_id=%q phase=%q", meta.Name, runID, cp.ID, cp.Phase)
 	if cp.Auto {
@@ -310,6 +330,10 @@ func renderWorkflowCheckpoint(runID string, meta workflow.Meta, cp workflow.Chec
 		fmt.Fprintf(&b, "The run finished a phase and is paused before the next one. Review what it did, then call the workflow tool with {\"continue_run_id\":%q} to go on into the next phase, or {\"continue_run_id\":%q,\"stop\":true} to end the run here.", runID, runID)
 	} else {
 		fmt.Fprintf(&b, "The run is paused and waiting for you. Read the data, then call the workflow tool with {\"continue_run_id\":%q,\"reply\":<value>} to continue (the script receives reply as checkpoint()'s return value), or {\"continue_run_id\":%q,\"stop\":true} to stop it.", runID, runID)
+	}
+	if turnLocal {
+		b.WriteString(" No agent runs while it waits. Answer it in this turn: the run is stopped when your turn ends, so do not end the turn to ask the user about it — decide yourself, or stop the run and ask (its journal stays resumable with resume_from_run_id).")
+		return b.String()
 	}
 	fmt.Fprintf(&b, " No agent runs while it waits; a run left paused for %s is stopped (its journal stays resumable with resume_from_run_id).", formatIdle(workflowIdleTimeout))
 	return b.String()
