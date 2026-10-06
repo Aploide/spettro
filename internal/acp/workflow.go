@@ -349,8 +349,9 @@ type acpWorkflowMeta struct {
 	// Attach counts the turns that have shown this run's card, this one
 	// included: 1 for the card that opened it.
 	Attach int `json:"attach"`
-	// Summary is the run's closing line ("3 agents · 0 failed · 1 replayed"),
-	// on the update that closes a run that finished.
+	// Summary is the line the text of a succeeded or failed run's closing
+	// update opens with: the tally ("3 agents · 0 failed · 1 replayed") for a
+	// success, the error for a failure. A stop has StoppedReason instead.
 	Summary         string                  `json:"summary,omitempty"`
 	Phases          []acpWorkflowMetaPhase  `json:"phases"`
 	Members         []acpWorkflowMetaMember `json:"members"`
@@ -750,9 +751,12 @@ func (t *turnState) takeWorkflowLocked(w *acpWorkflow) bool {
 	}
 	// The closed card points at the one about to replace it, and that one
 	// back at it. Only a run with an ID can reach here from another turn
-	// (the session keys its cards by run ID), so the next ID is known.
+	// (the session keys its cards by run ID), so the next ID is known; the
+	// guard keeps a "workflow--2" from ever going out if that changes.
 	meta := w.metaView()
-	meta.ContinuedIn = string(w.cardID(w.attach + 1))
+	if w.runID != "" {
+		meta.ContinuedIn = string(w.cardID(w.attach + 1))
+	}
 	t.sessionUpdate(acpsdk.UpdateToolCall(
 		w.callID,
 		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),

@@ -343,9 +343,9 @@ version for it.
 | `stoppedReason` | Only when stopped: why (the orchestrator's stop, the idle limit, `/clear`, the session closing). |
 | `attach` | Which card of the run this is: `1` for the card that opened it, `2` for the card a later turn opened to continue it, and so on. |
 | `continuedFrom` | On a continuing card: the ID of the card the earlier turn closed. |
-| `continuedIn` | On that closed card (`completed`, text starting "continued in a later turn"): the ID of the card that took over. |
-| `summary` | On the update that closes a finished run: its closing line, as at the top of the text (`5 agents · 1 failed · 1 replayed`). |
-| `phases[]` | In the text's order: declared phases, then phases entered undeclared, then a phase with an empty `title` for agents dispatched outside any phase (the text's "(no phase)"). `dynamic` marks a phase the script added at runtime. `done` counts members that finished either way, failed ones included, as the text's "d/n done" does; `total` counts all of them. |
+| `continuedIn` | On that closed card (`completed`, text starting "continued in a later turn"): the ID of the card that took over. The rest of that card's metadata stays as the earlier turn left the run, so its `status` is usually still `paused`: a card with `continuedIn` is superseded, not waiting. |
+| `summary` | On the update that closes a run that succeeded or failed: the line at the top of the text. That is the tally (`5 agents · 1 failed · 1 replayed`) for a success, and the error for a failure. A stopped run has `stoppedReason` instead. |
+| `phases[]` | In the text's order: declared phases, then phases entered undeclared, then a phase with an empty `title` for agents dispatched outside any phase (the text's "(no phase)"). `detail` is the phase's detail line, left out when it has none. `dynamic` marks a phase the script added at runtime. `done` counts members that finished either way, failed ones included, as the text's "d/n done" does; `total` counts all of them. |
 | `members[]` | One per `agent()` call, phase by phase in the text's order. `status` is `running`, `done`, `failed` or `pending`; an unknown member status is `pending`. `replayed` marks a member whose result was replayed from the journal. |
 | `counts` | `agents`, `failed` and `replayed` across all members. |
 | `logTail`, `droppedLogLines` | The last 40 `log()` and checkpoint lines, and how many earlier lines were dropped. |

@@ -1079,3 +1079,36 @@ func TestACPWorkflowMetaShape(t *testing.T) {
 		t.Fatalf("log tail = %d lines from %q, dropped %d", len(m.LogTail), m.LogTail[0], m.DroppedLogLines)
 	}
 }
+
+// A run without an ID gets a per-turn "wf-N" card; it carries the meta all the
+// same, with an empty runId. A failed run's summary is the error the text
+// opens with, not a tally.
+func TestACPWorkflowMetaWithoutRunID(t *testing.T) {
+	rec := newWireRecorder(t)
+	turn := rec.turn(newACPWorkflowCards())
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"workflow":"audit","phases":[{"title":"Scan"}]}`, ""))
+	turn.onWorkflowTool(wfTrace("agent", "error", `{"agent":"gp#1","task":"scan a","workflow":"audit","phase":"Scan"}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow", "error", `{"workflow":"audit"}`, "script threw: boom"))
+	ups := rec.updates(t, 3)
+	var metas []acpWorkflowMeta
+	for _, u := range ups {
+		if !strings.HasPrefix(u.ToolCallID, "wf-") {
+			continue
+		}
+		m, ok := u.workflow(t)
+		if !ok {
+			t.Fatalf("card update without %s meta: %+v", workflowMetaKey, u)
+		}
+		if m.RunID != "" || m.Name != "audit" || m.Attach != 1 || m.ContinuedFrom != "" || m.ContinuedIn != "" {
+			t.Fatalf("meta header = %+v", m)
+		}
+		assertMetaMatchesText(t, u, m)
+		metas = append(metas, m)
+	}
+	if len(metas) != 3 {
+		t.Fatalf("want 3 card updates with meta, got %d", len(metas))
+	}
+	if last := metas[2]; last.Status != "failed" || last.Summary != "script threw: boom" || last.Counts.Failed != 1 {
+		t.Fatalf("failed run meta = %+v", last)
+	}
+}
