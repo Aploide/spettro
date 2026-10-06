@@ -736,7 +736,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	ta.Placeholder = "enter message…"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
-	ta.SetHeight(3)
+	shapeInput(&ta)
 	ta.SetStyles(textareaStyles(pal, cfg.CursorBlink))
 	ta.Focus()
 
@@ -943,4 +943,20 @@ var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "�
 
 func agentTickCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return agentTickMsg{} })
+}
+
+// shapeInput gives the input textarea its shape. No prompt column: the box is
+// the frame, and a gutter bar beside the text only narrowed it. The box starts
+// one line tall and grows with the draft, soft wraps included, the way Claude
+// Code's does; recalcLayout caps it (inputMaxRows), past which it scrolls
+// inside itself. MaxHeight alone would also stop input at that many lines, so
+// the content limit is set apart from it — CharLimit is the real bound on a
+// draft. Tests build their model through this too, so a measured frame is the
+// real one.
+func shapeInput(ta *textarea.Model) {
+	ta.Prompt = ""
+	ta.DynamicHeight = true
+	ta.MinHeight = 1
+	ta.MaxHeight = 1
+	ta.MaxContentHeight = inputMaxContentRows
 }

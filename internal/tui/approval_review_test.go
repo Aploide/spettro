@@ -44,7 +44,7 @@ func pickerRows(frame string) []string {
 			continue
 		}
 		if in {
-			if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "╰") {
+			if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "└") {
 				break
 			}
 			rows = append(rows, strings.TrimSpace(line))

@@ -188,7 +188,7 @@ def layout_problems(text, height):
         problems.append(f"row 0 is not the header: {rows[0]!r}")
     if "ctx" not in rows[-1]:
         problems.append(f"last row is not the status bar: {rows[-1]!r}")
-    if not rows[-2].startswith("╰"):
+    if not rows[-2].startswith("└"):
         problems.append(f"row {height - 2} is not the input box's bottom border: {rows[-2]!r}")
     return problems
 

@@ -162,14 +162,16 @@ func TestEyesAreNotInTheFixedFrame(t *testing.T) {
 // The eight rows the overlay used to reserve now belong to the conversation.
 func TestViewportGainsTheEyeRows(t *testing.T) {
 	m := footerModel(120, 40)
-	if got, want := m.vp.Height(), 40-1-2-6-1; got != want {
+	// header, separators, the input box (one text row and its border) and
+	// the status bar.
+	if got, want := m.vp.Height(), 40-1-2-3-1; got != want {
 		t.Fatalf("viewport height = %d, want %d (no eye rows reserved)", got, want)
 	}
 
 	m.thinking = true
 	m.agentStartAt = time.Now()
 	m = m.recalcLayout()
-	if got, want := m.vp.Height(), 40-1-2-6-1-1; got != want {
+	if got, want := m.vp.Height(), 40-1-2-3-1-1; got != want {
 		t.Fatalf("viewport height while working = %d, want %d (one indicator row)", got, want)
 	}
 }

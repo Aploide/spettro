@@ -206,20 +206,44 @@ func (m Model) viewHeader() string {
 	permW := lipgloss.Width(permText)
 	maxMetaWidth := max(m.width-logoW-permW-8, 0)
 	metaText := truncateLabel(modelLabel+"  "+provLabel, maxMetaWidth)
-	right := lipgloss.NewStyle().Foreground(mc).Render(permText)
-	if metaText != "" {
-		right = styleMuted.Render(metaText) + "  " + right
+	// The right-hand tags in display order. Each has a drop rank: on a narrow
+	// terminal the lowest-ranked go first, until the active agent's name fits
+	// in the centre. The header is the only place the agent is named — the
+	// input box no longer carries a label — so it must never be the part
+	// that is cut.
+	type headerTag struct {
+		text string
+		rank int // lower drops first
 	}
-	if thinkingTag != "" {
-		right = styleMuted.Render(thinkingTag) + "  " + right
+	var tags []headerTag
+	if sandboxTag != "" {
+		tags = append(tags, headerTag{styleMuted.Render(sandboxTag), 0})
 	}
 	if ultraSuspended {
-		right = styleMuted.Render(ultraTag) + "  " + right
+		tags = append(tags, headerTag{styleMuted.Render(ultraTag), 3})
 	} else if ultraTag != "" {
-		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
+		tags = append(tags, headerTag{lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag), 3})
 	}
-	if sandboxTag != "" {
-		right = styleMuted.Render(sandboxTag) + "  " + right
+	if thinkingTag != "" {
+		tags = append(tags, headerTag{styleMuted.Render(thinkingTag), 1})
+	}
+	if metaText != "" {
+		tags = append(tags, headerTag{styleMuted.Render(metaText), 2})
+	}
+	tags = append(tags, headerTag{lipgloss.NewStyle().Foreground(mc).Render(permText), 4})
+	joinTags := func(minRank int) string {
+		var parts []string
+		for _, tg := range tags {
+			if tg.rank >= minRank {
+				parts = append(parts, tg.text)
+			}
+		}
+		return strings.Join(parts, "  ")
+	}
+	modeW := lipgloss.Width(m.mode)
+	right := joinTags(0)
+	for minRank := 1; minRank <= 5 && m.width-logoW-lipgloss.Width(right)-2 < modeW+2; minRank++ {
+		right = joinTags(minRank)
 	}
 	rightW := lipgloss.Width(right)
 	availableCenter := max(m.width-logoW-rightW-2, 0)
@@ -559,7 +583,7 @@ func (m Model) inputTextareaView() string {
 }
 
 // boxContentWidth is the room inside the input box for a box width cells
-// wide: the rounded border and one cell of padding on each side.
+// wide: the border and one cell of padding on each side.
 func boxContentWidth(width int) int {
 	return max(width-4, 1)
 }
@@ -580,14 +604,10 @@ func (m Model) viewInput(width int) string {
 // or in its place the plan/steer/approval picker or the question form.
 func (m Model) viewInputBox(width int) string {
 	mc := m.currentColor()
-	agentLabel := m.mode
-	if spec, ok := m.manifest.AgentByID(m.mode); ok {
-		agentLabel = spec.ID
-	}
-	prompt := modePrompt(m.mode)
-	label := lipgloss.NewStyle().Foreground(mc).Bold(true).Render(prompt + " " + agentLabel)
-
-	lines := []string{label}
+	// No agent label row: the header already marks the active agent, and a
+	// second label inside the box cost a row on every frame. The border keeps
+	// the agent's colour, so the box still says whose turn it is.
+	var lines []string
 	if m.showPlanApproval {
 		lines = append(lines, m.renderApprovalPicker(
 			"Execute this plan?",
@@ -610,8 +630,7 @@ func (m Model) viewInputBox(width int) string {
 	} else if m.pendingQuestion != nil {
 		lines = append(lines, m.renderQuestionForm())
 	} else if m.pendingAuth != nil {
-		// The dialog decides for itself whether the label row fits.
-		lines = m.approvalDialogLines(label, boxContentWidth(width))
+		lines = m.approvalDialogLines(boxContentWidth(width))
 	} else {
 		if chips := m.renderAttachmentChips(mc); chips != "" {
 			lines = append(lines, chips)
@@ -622,7 +641,7 @@ func (m Model) viewInputBox(width int) string {
 		lines = append(lines, m.inputTextareaView())
 	}
 	boxStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
+		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(mc).
 		Width(width).
 		PaddingLeft(1).PaddingRight(1)

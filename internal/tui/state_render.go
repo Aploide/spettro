@@ -374,7 +374,10 @@ func (m Model) recalcLayout() Model {
 	// row taller), pushing the frame past the bottom of the terminal. The
 	// dialogs keep themselves inside the terminal (questionBlockBudget,
 	// approvalLayout), so measuring can never squeeze the conversation away.
-	m.ta.SetWidth(m.paneWidth() - 6)
+	// The cap moves with the terminal; SetWidth then re-fits the height to
+	// the draft within it.
+	m.ta.MaxHeight = inputMaxRows(m.height, headerH+sepH+statusH+m.parallelFooterHeight()+m.workingIndicatorHeight())
+	m.ta.SetWidth(m.paneWidth() - 4)
 	_, input := m.cachedInput(m.paneWidth())
 	inputH := len(input.rows)
 
@@ -398,4 +401,20 @@ func (m Model) recalcLayout() Model {
 	}
 
 	return m
+}
+
+// inputMaxContentRows bounds a draft's wrapped rows. It is far past anything
+// typed or pasted under the 8000-character limit; it exists only because the
+// textarea would otherwise block input at its viewport height.
+const inputMaxContentRows = 100000
+
+// inputMaxRows is how tall the input box's text may grow on a terminal height
+// rows high, with chrome rows taken by everything else around it: half the
+// terminal, so the transcript keeps the other half — and on a short terminal
+// no more than what is left after the chrome, the box's own border and one
+// transcript row, so a long draft can never push the frame past the bottom
+// edge. Past the cap the draft scrolls inside the box.
+func inputMaxRows(height, chrome int) int {
+	const border, transcript = 2, 1
+	return max(min(height/2, height-chrome-border-transcript), 1)
 }

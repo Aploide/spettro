@@ -37,7 +37,7 @@ func TestWorkingIndicatorSitsAboveTheInputBox(t *testing.T) {
 	if !strings.Contains(lines[row], "(0m 12s · ↓ 2.9k tokens)") {
 		t.Fatalf("indicator is missing its elapsed/token tail: %q", lines[row])
 	}
-	if !strings.HasPrefix(strings.TrimSpace(lines[row+1]), "╭") {
+	if !strings.HasPrefix(strings.TrimSpace(lines[row+1]), "┌") {
 		t.Fatalf("the indicator must sit immediately above the input box, got %q", lines[row+1])
 	}
 
