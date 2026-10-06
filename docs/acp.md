@@ -84,8 +84,11 @@ Then open the Agent Panel and pick *Spettro* as the agent.
     <tier>` does the same from the prompt.
 
   Changing a selector calls `session/set_config_option`; the equivalent slash
-  commands (`/mode`, `/models`, `/permission`, `/thinking`) push a
-  `config_option_update` back so the selectors stay in sync. This supersedes
+  commands (`/mode`, `/models`, `/permission`, `/thinking`, `/ultra`,
+  `/workflow-size`, `/plan`) push a `config_option_update` back so the
+  selectors stay in sync. `/plan <task>` switches the session to plan mode
+  for good and runs the task there, so its update arrives before the turn's
+  output. This supersedes
   the deprecated `session/set_mode` "modes" mechanism, which current clients
   no longer render.
 - **Streaming** — the model's reasoning streams live as

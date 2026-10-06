@@ -753,6 +753,70 @@ func TestACPEndToEnd_UltraSuspendedUnderAskFirst(t *testing.T) {
 	}
 }
 
+// "/plan <task>" leaves the session in plan mode, so the editor's Mode
+// selector must hear about it before the turn runs; a second "/plan <task>"
+// changes nothing and sends no update.
+func TestACPEndToEnd_PlanTaskUpdatesModeSelector(t *testing.T) {
+	llm := newScriptedLLM(t, llmReply{content: "Plan: write README.md."}, llmReply{content: "Plan: add tests."})
+	h := newACPHarness(t, llm, config.PermissionRestricted)
+	h.initialize()
+	sid := h.newSession("coding")
+
+	before := len(h.updates(sid, "config_option_update"))
+	if r, err := h.prompt(sid, "/plan add a readme"); err != nil || r.StopReason != acpsdk.StopReasonEndTurn {
+		t.Fatalf("/plan <task>: %v %s", err, jsonString(r))
+	}
+	updates := h.updates(sid, "config_option_update")
+	if len(updates) != before+1 {
+		t.Fatalf("got %d config updates after /plan <task>, want 1", len(updates)-before)
+	}
+	if got := modeOf(updates[len(updates)-1]); got != "plan" {
+		t.Fatalf("Mode selector shows %q after /plan <task>, want plan", got)
+	}
+	// The update precedes the turn's output, so the chip flips as the turn
+	// starts rather than after it.
+	var sawUpdate bool
+	for _, u := range h.updates(sid, "") {
+		switch u["sessionUpdate"] {
+		case "config_option_update":
+			sawUpdate = modeOf(u) == "plan"
+		case "agent_message_chunk":
+			if !sawUpdate {
+				t.Fatal("the turn answered before the Mode selector was updated")
+			}
+		}
+	}
+	if got := answersOf(h, sid); !strings.Contains(got, "Plan: write README.md.") {
+		t.Fatalf("plan turn answer = %q", got)
+	}
+	// The task, not the command, reaches the model.
+	bodies := llm.requestBodies()
+	if last := bodies[len(bodies)-1]; !strings.Contains(last, "add a readme") || strings.Contains(last, "/plan add a readme") {
+		t.Errorf("model request does not carry the bare task:\n%.400s", last)
+	}
+
+	before = len(h.updates(sid, "config_option_update"))
+	if _, err := h.prompt(sid, "/plan add tests"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(h.updates(sid, "config_option_update")) - before; n != 0 {
+		t.Errorf("/plan <task> already in plan mode sent %d config updates, want 0", n)
+	}
+}
+
+// modeOf reads the mode selector's current value out of a
+// config_option_update.
+func modeOf(update map[string]any) string {
+	opts, _ := update["configOptions"].([]any)
+	for _, o := range opts {
+		if opt, _ := o.(map[string]any); opt != nil && opt["id"] == configIDMode {
+			v, _ := opt["currentValue"].(string)
+			return v
+		}
+	}
+	return ""
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

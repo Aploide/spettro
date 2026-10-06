@@ -512,15 +512,28 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	shownTask := ""
 
 	if strings.HasPrefix(trimmedTask, "/") {
-		// /plan <task> runs the plan agent on the task as a one-shot turn
-		// (mirrors the TUI); bare /plan is a mode switch handled by the
-		// extended slash-command set below.
+		// /plan <task> switches the session to plan mode and runs the task
+		// in it; bare /plan is a mode switch handled by the extended
+		// slash-command set below. The session stays in plan mode after the
+		// turn, so the editor's Mode selector is told now, before the turn
+		// starts: otherwise it keeps showing the old mode while every later
+		// turn runs under the plan agent.
 		if fields := strings.Fields(trimmedTask); fields[0] == "/plan" && len(fields) > 1 {
+			var options []acpsdk.SessionConfigOption
 			b.mu.Lock()
-			if _, ok := s.manifest.AgentByID("plan"); ok {
+			if _, ok := s.manifest.AgentByID("plan"); ok && s.agentID != "plan" {
 				s.agentID = "plan"
+				options = buildConfigOptions(s, &cfg, b.opts.Providers)
 			}
 			b.mu.Unlock()
+			if options != nil {
+				_ = b.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+					SessionId: params.SessionId,
+					Update: acpsdk.SessionUpdate{ConfigOptionUpdate: &acpsdk.SessionConfigOptionUpdate{
+						ConfigOptions: options,
+					}},
+				})
+			}
 			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
 			task = trimmedTask
 			typed = strings.TrimSpace(strings.TrimPrefix(typed, "/plan"))
