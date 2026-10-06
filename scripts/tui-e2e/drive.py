@@ -5,8 +5,8 @@ The binary runs in a pty of the requested size with an isolated HOME (under
 OUTDIR), talking to the fake server, in ask-first mode so every approval
 dialog appears. A pyte screen emulates the terminal, so each snapshot is the
 text a user would see at that size. The scenario: submit a prompt, page and
-expand the first approval's preview, approve everything, answer the
-ask-user form, then toggle tool details (ctrl+o), full output (ctrl+g),
+expand the first approval's preview, open and page its full review, approve
+everything with "Allow once", answer the ask-user form, then toggle tool details (ctrl+o), full output (ctrl+g),
 page the transcript, toggle the side panel (ctrl+b), open the slash menu and
 the @ palette, and resize the terminal three times.
 
@@ -193,6 +193,25 @@ def layout_problems(text, height):
     return problems
 
 
+def review_problems(text, height):
+    """Structural checks for the full-screen approval review, which replaces
+    the main screen: its title on the first row and its key hints, ending in
+    "esc back", on the last."""
+    rows = text.split("\n")
+    problems = []
+    if not rows[0].lstrip().startswith("Review full"):
+        problems.append(f"row 0 is not the review title: {rows[0]!r}")
+    if "esc back" not in rows[-1]:
+        problems.append(f"last row is not the review's key hints: {rows[-1]!r}")
+    return problems
+
+
+def approval_open(text):
+    """An approval dialog is on screen. Its option list is drawn at every
+    size; the "allow this command?" title is not (40x15 drops it)."""
+    return "Allow once" in text and "Deny" in text
+
+
 def is_idle(text):
     """The run is over: the empty input shows its placeholder and the
     working indicator ("… (0m 05s · ↓ 1.1k tokens)") is gone."""
@@ -242,14 +261,24 @@ def main():
     term = Term([binary], env, work, width, height)
     report = {"size": f"{width}x{height}", "snapshots": [], "problems": []}
 
-    def shot(name):
+    def shot(name, check=layout_problems):
         text = term.text()
         path = os.path.join(outdir, f"{len(report['snapshots']):02d}-{name}.txt")
         with open(path, "w") as f:
             f.write(text + "\n")
-        problems = layout_problems(text, term.height)
+        problems = check(text, term.height)
         report["snapshots"].append({"name": name, "file": path, "problems": problems})
         report["problems"].extend(f"{name}: {p}" for p in problems)
+
+    def allow_once(pause=1.0):
+        """Approve the open dialog with "Allow once". When part of the call is
+        hidden the dialog preselects "Review full …" instead, so Enter alone
+        would open the review rather than approve: move to the option first."""
+        for _ in range(8):
+            if "› Allow once" in term.text():
+                break
+            term.send("\x1b[B", 0.2)  # down
+        term.send("\r", pause)
 
     def need(needle, name, timeout=30):
         if term.wait_for(needle, timeout):
@@ -265,8 +294,9 @@ def main():
         term.send("write the files")
         term.send("\r", 1.0)
 
-        # The first approval: a 2000-line heredoc. Page and expand its preview.
-        if need("allow this command?", "approval-heredoc"):
+        # The first approval: a 2000-line heredoc. Page and expand its preview,
+        # open the full review the dialog offers for it, then approve.
+        if need("Allow once", "approval-heredoc"):
             shot("approval-heredoc")
             for _ in range(3):
                 term.send("\x1b[6~")  # pgdn
@@ -274,7 +304,14 @@ def main():
             term.send("\x0f", 0.4)  # ctrl+o
             shot("approval-heredoc-expanded")
             term.send("\x0f", 0.4)
-            term.send("\r", 1.0)  # allow once
+            if "Review full" in term.text():
+                term.send("v", 0.8)
+                shot("approval-review", review_problems)
+                for _ in range(3):
+                    term.send("\x1b[6~")  # pgdn
+                shot("approval-review-scrolled", review_problems)
+                term.send("\x1b", 0.8)  # esc back to the dialog
+            allow_once()
 
         # Approve every further call and answer the question, until idle.
         deadline = time.time() + 60
@@ -284,10 +321,10 @@ def main():
             if "enter answers" in text or "enter records" in text:
                 shot("ask-user")
                 term.send("\r", 1.0)
-            elif "allow this command?" in text:
+            elif approval_open(text):
                 approvals += 1
                 shot(f"approval-{approvals}")
-                term.send("\r", 1.0)
+                allow_once()
             else:
                 time.sleep(0.2)
         if not is_idle(term.text()):

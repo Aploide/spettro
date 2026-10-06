@@ -20,14 +20,18 @@ scripts/tui-e2e/run.sh      # prints one summary line per size and the output di
   the output directory, the fake server as a local endpoint, and `ask-first`
   permission so every approval dialog appears;
 - submits a prompt, pages (`PgDn`) and expands (`Ctrl+O`) the first
-  approval's preview, approves every call, answers the ask-user form, then
+  approval's preview, opens its full review (`v`, paged, `Esc` back),
+  approves every call with "Allow once" (selected explicitly: when part of a
+  call is hidden the dialog preselects "Review full …", so `Enter` alone
+  would open the review instead), answers the ask-user form, then
   toggles tool details (`Ctrl+O`), full output (`Ctrl+G`), pages the
   transcript (`PgUp`), toggles the side panel (`Ctrl+B`), opens the slash
   menu and the `@` palette, and resizes the terminal three times;
 - saves the screen after each step as `NN-name.txt` and checks that the
   header, the input box's bottom border and the status bar are on the first,
   second-last and last rows: a frame taller or wider than the terminal
-  scrolls or wraps, which moves exactly those rows.
+  scrolls or wraps, which moves exactly those rows. The review screen gets
+  its own check: its title on the first row, its key hints on the last.
 
 The scripted conversation (see `SCRIPT` in `fake_openai.py`): a 2000-line
 heredoc, a file-write of a whole generated file under a very deep path, a
