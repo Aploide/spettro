@@ -216,6 +216,16 @@ func (b *bridge) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 		cfg = fresh
 		b.opts.Providers.SetAPIKeys(cfg.APIKeys)
 	}
+
+	// A resumed session needs its commands as much as a loaded one: without
+	// them a client reopening a chat shows an empty slash palette until the
+	// first prompt re-announces. Deferred past the response for the same
+	// reason as in LoadSession.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		b.announceCommands(context.Background(), params.SessionId)
+	}()
+
 	b.mu.Lock()
 	options := buildConfigOptions(s, &cfg, b.opts.Providers)
 	b.mu.Unlock()

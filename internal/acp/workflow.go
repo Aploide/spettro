@@ -81,6 +81,9 @@ type acpWorkflow struct {
 	// gets its own ID).
 	turn   *turnState
 	attach int
+	// continuedFrom is the ID of the card the previous turn closed when this
+	// one took the run over, "" for a run's first card.
+	continuedFrom string
 }
 
 func (w *acpWorkflow) addPhase(title string) {
@@ -188,6 +191,45 @@ func agentGlyph(status string) string {
 	return "·"
 }
 
+// acpWorkflowPhaseView is one phase as the card shows it: its members and
+// their tally. render() writes it as text and meta() as structure, so the two
+// cannot disagree about what a phase holds.
+type acpWorkflowPhaseView struct {
+	// title is "" for the bucket of agents dispatched outside a phase.
+	title   string
+	detail  string
+	dynamic bool
+	members []acpWorkflowAgent
+	// finished counts members that ended either way, failed included: the
+	// "d/n done" the text shows. failed counts those that errored.
+	finished int
+	failed   int
+}
+
+func (w *acpWorkflow) phaseViews() []acpWorkflowPhaseView {
+	order := w.phaseOrder()
+	views := make([]acpWorkflowPhaseView, 0, len(order))
+	for _, phase := range order {
+		info := w.phaseInfo[phase]
+		v := acpWorkflowPhaseView{title: phase, detail: info.detail, dynamic: info.dynamic}
+		for _, a := range w.agents {
+			if a.Phase != phase {
+				continue
+			}
+			v.members = append(v.members, a)
+			switch a.Status {
+			case "error":
+				v.failed++
+				v.finished++
+			case "success":
+				v.finished++
+			}
+		}
+		views = append(views, v)
+	}
+	return views
+}
+
 func (w *acpWorkflow) render() string {
 	var b strings.Builder
 	if w.description != "" {
@@ -230,42 +272,27 @@ func (w *acpWorkflow) render() string {
 	default:
 		fmt.Fprintf(&b, "status: %s\n\n", w.status)
 	}
-	for _, phase := range w.phaseOrder() {
-		title := phase
+	for _, p := range w.phaseViews() {
+		title := p.title
 		if title == "" {
 			title = "(no phase)"
 		}
-		info := w.phaseInfo[phase]
-		if info.dynamic {
+		if p.dynamic {
 			title += " (added at runtime)"
 		}
-		var members []acpWorkflowAgent
-		done, failed := 0, 0
-		for _, a := range w.agents {
-			if a.Phase != phase {
-				continue
-			}
-			members = append(members, a)
-			switch a.Status {
-			case "error":
-				failed++
-			case "success":
-				done++
-			}
-		}
-		if len(members) == 0 {
+		if len(p.members) == 0 {
 			fmt.Fprintf(&b, "○ %s — pending\n", title)
 		} else {
-			fmt.Fprintf(&b, "▸ %s — %d/%d done", title, done+failed, len(members))
-			if failed > 0 {
-				fmt.Fprintf(&b, ", %d failed", failed)
+			fmt.Fprintf(&b, "▸ %s — %d/%d done", title, p.finished, len(p.members))
+			if p.failed > 0 {
+				fmt.Fprintf(&b, ", %d failed", p.failed)
 			}
 			b.WriteString("\n")
 		}
-		if info.detail != "" {
-			fmt.Fprintf(&b, "    ↳ %s\n", info.detail)
+		if p.detail != "" {
+			fmt.Fprintf(&b, "    ↳ %s\n", p.detail)
 		}
-		for _, a := range members {
+		for _, a := range p.members {
 			label := a.Label
 			if a.Cached {
 				label = "replayed · " + label
@@ -283,6 +310,191 @@ func (w *acpWorkflow) render() string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// workflowMetaKey carries the card's state as structure in the _meta of every
+// tool_call and tool_call_update the card sends. The text content stays what
+// it was, for clients (and the TUI) that only read it; a client that knows
+// this key reads the run from here instead of parsing render()'s lines.
+// Clients detect it by its presence, so it does not bump extensionsVersion.
+// workflowMetaVersion is the payload's own version, raised only by a change
+// an older reader would misread.
+const (
+	workflowMetaKey     = "spettro.app/workflow"
+	workflowMetaVersion = 1
+)
+
+// acpWorkflowMeta is the `_meta["spettro.app/workflow"]` payload. Fields the
+// card always has are always sent, empty or zero when the run gave none, so a
+// client need not tell a missing field from an empty one.
+type acpWorkflowMeta struct {
+	Version     int    `json:"version"`
+	RunID       string `json:"runId"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Size        string `json:"size"`
+	// SizeAgents is the size tier's agent guideline, 0 for none.
+	SizeAgents int `json:"sizeAgents"`
+	// BudgetTokens is the token pool the run draws on, 0 for none.
+	BudgetTokens int `json:"budgetTokens"`
+	// Status is the run's lifecycle status (see workflowMetaStatus).
+	Status        string                `json:"status"`
+	PausedAt      *acpWorkflowMetaPause `json:"pausedAt,omitempty"`
+	StoppedReason string                `json:"stoppedReason,omitempty"`
+	// ContinuedFrom is the ID of the card an earlier turn closed when this
+	// turn continued the run; ContinuedIn, on that closed card, is the ID of
+	// the card that took over.
+	ContinuedFrom string `json:"continuedFrom,omitempty"`
+	ContinuedIn   string `json:"continuedIn,omitempty"`
+	// Attach counts the turns that have shown this run's card, this one
+	// included: 1 for the card that opened it.
+	Attach int `json:"attach"`
+	// Summary is the run's closing line ("3 agents · 0 failed · 1 replayed"),
+	// on the update that closes a run that finished.
+	Summary         string                  `json:"summary,omitempty"`
+	Phases          []acpWorkflowMetaPhase  `json:"phases"`
+	Members         []acpWorkflowMetaMember `json:"members"`
+	Counts          acpWorkflowMetaCounts   `json:"counts"`
+	LogTail         []string                `json:"logTail"`
+	DroppedLogLines int                     `json:"droppedLogLines"`
+}
+
+type acpWorkflowMetaPause struct {
+	CheckpointID string `json:"checkpointId"`
+	Message      string `json:"message"`
+}
+
+// acpWorkflowMetaPhase is one phase. Title is "" for the agents dispatched
+// outside any phase (the text calls them "(no phase)"). Done counts members
+// that finished either way, failed ones included, as the text's "d/n done"
+// does; Failed counts those that errored and Total all of them.
+type acpWorkflowMetaPhase struct {
+	Title   string `json:"title"`
+	Detail  string `json:"detail,omitempty"`
+	Dynamic bool   `json:"dynamic"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+	Failed  int    `json:"failed"`
+}
+
+// acpWorkflowMetaMember is one agent() call. Status is "running", "done",
+// "failed" or "pending"; a status the runtime reports that this code does
+// not know is "pending", as its "·" glyph in the text is.
+type acpWorkflowMetaMember struct {
+	Instance string `json:"instance"`
+	Task     string `json:"task"`
+	Phase    string `json:"phase"`
+	Status   string `json:"status"`
+	Replayed bool   `json:"replayed"`
+}
+
+type acpWorkflowMetaCounts struct {
+	Agents   int `json:"agents"`
+	Failed   int `json:"failed"`
+	Replayed int `json:"replayed"`
+}
+
+// workflowMetaStatus names a run's lifecycle status for the meta: "running",
+// "paused", "stopped", "success", "failed" or "cancelled". A status this code
+// does not know passes through as it came, as the text's "status: <s>" line
+// shows it, so a client must treat any other value as an open run.
+func workflowMetaStatus(status string) string {
+	switch status {
+	case "", "running":
+		return "running"
+	case "error", "failed":
+		return "failed"
+	case "cancelled", "canceled":
+		return "cancelled"
+	}
+	return status
+}
+
+func workflowMemberStatus(status string) string {
+	switch status {
+	case "success":
+		return "done"
+	case "error":
+		return "failed"
+	case "running":
+		return "running"
+	}
+	return "pending"
+}
+
+// metaView is the card's state as the meta payload, read from the same fields
+// and phase views render() uses.
+func (w *acpWorkflow) metaView() acpWorkflowMeta {
+	m := acpWorkflowMeta{
+		Version:         workflowMetaVersion,
+		RunID:           w.runID,
+		Name:            w.name,
+		Description:     w.description,
+		Size:            w.size,
+		SizeAgents:      w.sizeAgents,
+		BudgetTokens:    w.budget,
+		Status:          workflowMetaStatus(w.status),
+		ContinuedFrom:   w.continuedFrom,
+		Attach:          w.attach,
+		Phases:          []acpWorkflowMetaPhase{},
+		Members:         []acpWorkflowMetaMember{},
+		LogTail:         append([]string{}, w.logs...),
+		DroppedLogLines: w.dropped,
+	}
+	switch m.Status {
+	case "paused":
+		m.PausedAt = &acpWorkflowMetaPause{CheckpointID: w.checkpointID, Message: w.waiting}
+	case "stopped":
+		m.StoppedReason = w.stopReason
+	}
+	for _, p := range w.phaseViews() {
+		m.Phases = append(m.Phases, acpWorkflowMetaPhase{
+			Title: p.title, Detail: p.detail, Dynamic: p.dynamic,
+			Done: p.finished, Total: len(p.members), Failed: p.failed,
+		})
+		// Members are listed phase by phase, in the order the text shows them.
+		for _, a := range p.members {
+			m.Members = append(m.Members, acpWorkflowMetaMember{
+				Instance: a.Instance, Task: a.Label, Phase: a.Phase,
+				Status: workflowMemberStatus(a.Status), Replayed: a.Cached,
+			})
+			m.Counts.Agents++
+			if a.Status == "error" {
+				m.Counts.Failed++
+			}
+			if a.Cached {
+				m.Counts.Replayed++
+			}
+		}
+	}
+	return m
+}
+
+// meta is the card's _meta as a tool call carries it.
+func (w *acpWorkflow) meta() map[string]any {
+	return workflowMeta(w.metaView())
+}
+
+func workflowMeta(m acpWorkflowMeta) map[string]any {
+	return map[string]any{workflowMetaKey: m}
+}
+
+// The SDK has helpers for every tool-call field but _meta.
+func withStartMeta(meta map[string]any) acpsdk.ToolCallStartOpt {
+	return func(tc *acpsdk.SessionUpdateToolCall) { tc.Meta = meta }
+}
+
+func withUpdateMeta(meta map[string]any) acpsdk.ToolCallUpdateOpt {
+	return func(tu *acpsdk.SessionToolCallUpdate) { tu.Meta = meta }
+}
+
+// cardID is the tool call ID of the attach-th card shown for a run with an
+// ID: the run's ID for the first, plus the attach count for later ones.
+func (w *acpWorkflow) cardID(attach int) acpsdk.ToolCallId {
+	if attach <= 1 {
+		return acpsdk.ToolCallId("workflow-" + w.runID)
+	}
+	return acpsdk.ToolCallId(fmt.Sprintf("workflow-%s-%d", w.runID, attach))
 }
 
 // acpWorkflowCards is a session's workflow cards, keyed by run_id. It
@@ -322,6 +534,7 @@ func (c *acpWorkflowCards) putLocked(w *acpWorkflow) {
 type stoppedCard struct {
 	callID acpsdk.ToolCallId
 	body   string
+	meta   map[string]any
 }
 
 // stopCardLocked marks w stopped for reason, takes it out of the session and
@@ -335,7 +548,7 @@ func (c *acpWorkflowCards) stopCardLocked(w *acpWorkflow, reason string) stopped
 	}
 	w.status = "stopped"
 	w.stopReason = reason
-	return stoppedCard{callID: w.callID, body: w.render()}
+	return stoppedCard{callID: w.callID, body: w.render(), meta: w.meta()}
 }
 
 // stop takes runID's card out of the session, marked stopped for reason. ok
@@ -381,6 +594,7 @@ func (sc stoppedCard) close(notify func(acpsdk.SessionUpdate)) {
 		sc.callID,
 		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),
 		acpsdk.WithUpdateContent(toolOutputContent(sc.body, nil)),
+		withUpdateMeta(sc.meta),
 	))
 }
 
@@ -498,13 +712,10 @@ func (t *turnState) announceWorkflowLocked(w *acpWorkflow, rawInput any) {
 		return
 	}
 	w.attach++
-	switch {
-	case w.runID == "":
+	if w.runID == "" {
 		w.callID = t.nextToolCallIDLocked("wf")
-	case w.attach == 1:
-		w.callID = acpsdk.ToolCallId("workflow-" + w.runID)
-	default:
-		w.callID = acpsdk.ToolCallId(fmt.Sprintf("workflow-%s-%d", w.runID, w.attach))
+	} else {
+		w.callID = w.cardID(w.attach)
 	}
 	w.turn = t
 	t.workflow = w
@@ -512,6 +723,7 @@ func (t *turnState) announceWorkflowLocked(w *acpWorkflow, rawInput any) {
 		acpsdk.WithStartKind(acpsdk.ToolKindThink),
 		acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
 		acpsdk.WithStartContent(toolOutputContent(w.render(), nil)),
+		withStartMeta(w.meta()),
 	}
 	if rawInput != nil {
 		opts = append(opts, acpsdk.WithStartRawInput(rawInput))
@@ -536,13 +748,31 @@ func (t *turnState) takeWorkflowLocked(w *acpWorkflow) bool {
 	if t.ctx != nil && t.ctx.Err() != nil {
 		return false
 	}
+	// The closed card points at the one about to replace it, and that one
+	// back at it. Only a run with an ID can reach here from another turn
+	// (the session keys its cards by run ID), so the next ID is known.
+	meta := w.metaView()
+	meta.ContinuedIn = string(w.cardID(w.attach + 1))
 	t.sessionUpdate(acpsdk.UpdateToolCall(
 		w.callID,
 		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),
 		acpsdk.WithUpdateContent(toolOutputContent("continued in a later turn\n\n"+w.render(), nil)),
+		withUpdateMeta(workflowMeta(meta)),
 	))
+	w.continuedFrom = string(w.callID)
 	w.callID = ""
 	return true
+}
+
+// refreshWorkflowLocked re-sends w's card, still in progress, with its
+// current text and meta. Caller holds t.mu.
+func (t *turnState) refreshWorkflowLocked(w *acpWorkflow) {
+	t.sessionUpdate(acpsdk.UpdateToolCall(
+		w.callID,
+		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress),
+		acpsdk.WithUpdateContent(toolOutputContent(w.render(), nil)),
+		withUpdateMeta(w.meta()),
+	))
 }
 
 // onWorkflowTool folds a workflow trace into the live tool call. It reports
@@ -640,11 +870,7 @@ func (t *turnState) onWorkflowTool(tr agent.ToolTrace) (handled bool) {
 		// Not handled: the sub-agent still deserves its own tool call.
 		handled = false
 	}
-	t.sessionUpdate(acpsdk.UpdateToolCall(
-		w.callID,
-		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress),
-		acpsdk.WithUpdateContent(toolOutputContent(w.render(), nil)),
-	))
+	t.refreshWorkflowLocked(w)
 	return handled
 }
 
@@ -690,11 +916,7 @@ func (t *turnState) startWorkflowLocked(cards *acpWorkflowCards, args acpWorkflo
 	if w.turn == t && w.callID != "" {
 		// Continued in the turn that paused it: the card is already here.
 		t.workflow = w
-		t.sessionUpdate(acpsdk.UpdateToolCall(
-			w.callID,
-			acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress),
-			acpsdk.WithUpdateContent(toolOutputContent(w.render(), nil)),
-		))
+		t.refreshWorkflowLocked(w)
 		return
 	}
 	t.announceWorkflowLocked(w, rawJSON(tr.Args))
@@ -715,11 +937,7 @@ func (t *turnState) pauseWorkflowLocked(cards *acpWorkflowCards, args acpWorkflo
 	w.status = "paused"
 	w.checkpointID = paused.CheckpointID
 	w.waiting = strings.TrimSpace(paused.Message)
-	t.sessionUpdate(acpsdk.UpdateToolCall(
-		w.callID,
-		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress),
-		acpsdk.WithUpdateContent(toolOutputContent(w.render(), nil)),
-	))
+	t.refreshWorkflowLocked(w)
 	return true
 }
 
@@ -751,25 +969,24 @@ func (t *turnState) finishWorkflowLocked(cards *acpWorkflowCards, args acpWorkfl
 		status = acpsdk.ToolCallStatusFailed
 	default:
 		w.status = tr.Status
-		t.sessionUpdate(acpsdk.UpdateToolCall(
-			w.callID,
-			acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress),
-			acpsdk.WithUpdateContent(toolOutputContent(w.render(), nil)),
-		))
+		t.refreshWorkflowLocked(w)
 		return true
 	}
 	w.status = tr.Status
 	body := w.render()
+	meta := w.metaView()
 	// A stopped card's render already ends with its "■ stopped: <reason>"
 	// line; the trace's output says the same thing again.
 	if summary := strings.TrimSpace(tr.Output); summary != "" && tr.Status != "stopped" {
 		body = summary + "\n\n" + body
+		meta.Summary = summary
 	}
 	t.sessionUpdate(acpsdk.UpdateToolCall(
 		w.callID,
 		acpsdk.WithUpdateStatus(status),
 		acpsdk.WithUpdateContent(toolOutputContent(body, nil)),
 		acpsdk.WithUpdateRawOutput(map[string]any{"output": tr.Output}),
+		withUpdateMeta(workflowMeta(meta)),
 	))
 	if cards.getLocked(w.runID) == w {
 		delete(cards.runs, w.runID)

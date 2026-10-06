@@ -116,6 +116,43 @@ func TestACPEndToEnd_HandshakeAndSessionLifecycle(t *testing.T) {
 	}
 }
 
+// session/resume announces the slash commands the way session/new and
+// session/load do. Without it a client reopening a stored chat showed an
+// empty command palette until its first prompt re-announced them.
+func TestACPEndToEnd_ResumeAnnouncesCommands(t *testing.T) {
+	llm := newScriptedLLM(t, llmReply{content: "Hi there."})
+	h := newACPHarness(t, llm, config.PermissionYOLO)
+	h.initialize()
+	sid := h.newSession("")
+	h.waitForUpdate(sid, "available_commands_update")
+	if r, err := h.prompt(sid, "hello"); err != nil || r.StopReason != acpsdk.StopReasonEndTurn {
+		t.Fatalf("first turn: %v %s", err, jsonString(r))
+	}
+	if _, err := h.conn.CloseSession(h.ctx(), acpsdk.CloseSessionRequest{SessionId: sid}); err != nil {
+		t.Fatalf("session/close: %v", err)
+	}
+
+	before := len(h.updates(sid, "available_commands_update"))
+	if _, err := h.conn.ResumeSession(h.ctx(), acpsdk.ResumeSessionRequest{SessionId: sid, Cwd: h.cwd}); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(h.updates(sid, "available_commands_update")) <= before {
+		if time.Now().After(deadline) {
+			t.Fatal("session/resume did not announce the slash commands")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cmds := h.updates(sid, "available_commands_update")
+	if last := jsonString(cmds[len(cmds)-1]); !strings.Contains(last, `"name":"ultra"`) {
+		t.Errorf("resume announced an incomplete command list: %s", last)
+	}
+	// Resume does not replay the transcript: that is what tells it from load.
+	if n := len(h.updates(sid, "user_message_chunk")); n != 0 {
+		t.Errorf("session/resume replayed %d user messages", n)
+	}
+}
+
 // assertRequestError checks err is a JSON-RPC error with the given code.
 func assertRequestError(t *testing.T, err error, code int, what string) {
 	t.Helper()

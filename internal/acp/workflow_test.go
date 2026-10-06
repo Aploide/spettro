@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -356,6 +358,21 @@ type recordedUpdate struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"content"`
+	Meta map[string]json.RawMessage `json:"_meta"`
+}
+
+// workflow decodes the update's `_meta["spettro.app/workflow"]`; ok is false
+// when it has none.
+func (u recordedUpdate) workflow(t *testing.T) (m acpWorkflowMeta, ok bool) {
+	t.Helper()
+	raw, ok := u.Meta[workflowMetaKey]
+	if !ok {
+		return m, false
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("workflow meta does not decode: %v\n%s", err, raw)
+	}
+	return m, true
 }
 
 func (u recordedUpdate) text() string {
@@ -800,5 +817,265 @@ func TestACPWorkflowStopHookClosesDetachedCard(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n := len(rec.updates(t, 3)); n != 3 {
 		t.Fatalf("a run without a card must not produce updates, got %d", n)
+	}
+}
+
+var (
+	wfPendingLine = regexp.MustCompile(`^○ (.*) — pending$`)
+	wfActiveLine  = regexp.MustCompile(`^▸ (.*) — (\d+)/(\d+) done(?:, (\d+) failed)?$`)
+	wfMemberLine  = regexp.MustCompile(`^    ([✓✗▶·]) (\S+)  (replayed · )?(.*)$`)
+)
+
+// assertMetaMatchesText reads the phases and members back out of a card's
+// text, the way a meta-less client parses them, and checks the card's meta
+// says the same: same phases in the same order with the same counts, and the
+// same members with the same states.
+func assertMetaMatchesText(t *testing.T, u recordedUpdate, m acpWorkflowMeta) {
+	t.Helper()
+	var phases []acpWorkflowMetaPhase
+	var members []acpWorkflowMetaMember
+	for _, line := range strings.Split(u.text(), "\n") {
+		var title string
+		var p acpWorkflowMetaPhase
+		if g := wfPendingLine.FindStringSubmatch(line); g != nil {
+			title = g[1]
+		} else if g := wfActiveLine.FindStringSubmatch(line); g != nil {
+			title = g[1]
+			p.Done, _ = strconv.Atoi(g[2])
+			p.Total, _ = strconv.Atoi(g[3])
+			p.Failed, _ = strconv.Atoi(g[4])
+		} else if g := wfMemberLine.FindStringSubmatch(line); g != nil {
+			status := map[string]string{"✓": "done", "✗": "failed", "▶": "running", "·": "pending"}[g[1]]
+			members = append(members, acpWorkflowMetaMember{Instance: g[2], Task: g[4], Status: status, Replayed: g[3] != ""})
+			continue
+		} else {
+			continue
+		}
+		if t, ok := strings.CutSuffix(title, " (added at runtime)"); ok {
+			title, p.Dynamic = t, true
+		}
+		if title == "(no phase)" {
+			title = ""
+		}
+		p.Title = title
+		phases = append(phases, p)
+	}
+	if len(phases) != len(m.Phases) {
+		t.Fatalf("text shows %d phases, meta %d:\ntext: %s\nmeta: %+v", len(phases), len(m.Phases), u.text(), m.Phases)
+	}
+	for i, p := range phases {
+		mp := m.Phases[i]
+		mp.Detail = ""
+		if p != mp {
+			t.Fatalf("phase %d: text %+v, meta %+v", i, p, m.Phases[i])
+		}
+	}
+	if len(members) != len(m.Members) {
+		t.Fatalf("text shows %d members, meta %d:\ntext: %s\nmeta: %+v", len(members), len(m.Members), u.text(), m.Members)
+	}
+	failed, replayed := 0, 0
+	for i, a := range members {
+		mm := m.Members[i]
+		if a.Instance != mm.Instance || a.Task != mm.Task || a.Status != mm.Status || a.Replayed != mm.Replayed {
+			t.Fatalf("member %d: text %+v, meta %+v", i, a, mm)
+		}
+		if a.Status == "failed" {
+			failed++
+		}
+		if a.Replayed {
+			replayed++
+		}
+	}
+	if want := (acpWorkflowMetaCounts{Agents: len(members), Failed: failed, Replayed: replayed}); m.Counts != want {
+		t.Fatalf("counts = %+v, the text shows %+v", m.Counts, want)
+	}
+}
+
+// workflowCardUpdates returns the workflow card's notifications among ups,
+// each with its decoded meta; every one of them must carry the meta and
+// agree with its own text.
+func workflowCardUpdates(t *testing.T, ups []recordedUpdate) ([]recordedUpdate, []acpWorkflowMeta) {
+	t.Helper()
+	var cards []recordedUpdate
+	var metas []acpWorkflowMeta
+	for _, u := range ups {
+		if !strings.HasPrefix(u.ToolCallID, "workflow-") {
+			continue
+		}
+		m, ok := u.workflow(t)
+		if !ok {
+			t.Fatalf("workflow card update without %s meta: %+v", workflowMetaKey, u)
+		}
+		if m.Version != workflowMetaVersion || m.RunID != "wf_1" || m.Name != "audit" {
+			t.Fatalf("meta header = version %d run %q name %q", m.Version, m.RunID, m.Name)
+		}
+		assertMetaMatchesText(t, u, m)
+		cards = append(cards, u)
+		metas = append(metas, m)
+	}
+	return cards, metas
+}
+
+// Every tool_call and tool_call_update a workflow card sends carries its
+// state as `_meta["spettro.app/workflow"]`, built from the state render()
+// reads: start, member and log updates, the pause, the close of the card an
+// earlier turn showed, the card the continuing turn opens, and the finish.
+func TestACPWorkflowMetaFollowsTheRun(t *testing.T) {
+	rec := newWireRecorder(t)
+	cards := newACPWorkflowCards()
+	first := rec.turn(cards)
+
+	first.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","description":"Audit the repo","size":"large","size_agents":30,"budget_tokens":500000,`+
+			`"phases":[{"title":"Scan","detail":"find candidates"},{"title":"Fix"}]}`, ""))
+	first.onWorkflowTool(wfTrace("agent", "success",
+		`{"agent":"gp#1","task":"scan a","workflow":"audit","run_id":"wf_1","phase":"Scan"}`, ""))
+	first.onWorkflowTool(wfTrace("agent", "error",
+		`{"agent":"gp#2","task":"scan b","workflow":"audit","run_id":"wf_1","phase":"Scan"}`, ""))
+	first.onWorkflowTool(wfTrace("agent", "success",
+		`{"agent":"gp#3","task":"scan c","workflow":"audit","run_id":"wf_1","phase":"Scan","cached":true}`, ""))
+	first.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"phase","phase":"Verify","detail":"2 suspects","dynamic":true}`, ""))
+	first.onWorkflowTool(wfTrace("workflow-progress", "success",
+		`{"run_id":"wf_1","workflow":"audit","kind":"log"}`, "3 findings"))
+	first.onWorkflowTool(wfTrace("workflow", "paused",
+		`{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1","message":"fix which?"}`, ""))
+
+	second := rec.turn(cards)
+	second.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit","resumed":true}`, ""))
+	second.onWorkflowTool(wfTrace("agent", "running",
+		`{"agent":"gp#4","task":"fix a","workflow":"audit","run_id":"wf_1","phase":"Fix"}`, ""))
+	second.onWorkflowTool(wfTrace("agent", "queued",
+		`{"agent":"gp#5","task":"loose","workflow":"audit","run_id":"wf_1"}`, ""))
+	second.onWorkflowTool(wfTrace("workflow", "success",
+		`{"run_id":"wf_1","workflow":"audit","agents":5,"cached":1,"failed":1,"tokens":9}`, "5 agents · 1 failed · 1 replayed"))
+
+	// First turn: start, 3 members, phase, log, pause. Second: close the old
+	// card, open the new one, 2 members, finish.
+	ups, metas := workflowCardUpdates(t, rec.updates(t, 12))
+	if len(ups) != 12 {
+		t.Fatalf("want 12 workflow card updates, got %d", len(ups))
+	}
+
+	start := metas[0]
+	if ups[0].Kind != "tool_call" || start.Status != "running" || start.Attach != 1 ||
+		start.Description != "Audit the repo" || start.Size != "large" || start.SizeAgents != 30 || start.BudgetTokens != 500000 {
+		t.Fatalf("start meta = %+v", start)
+	}
+	if len(start.Phases) != 2 || start.Phases[0].Detail != "find candidates" || start.Phases[0].Total != 0 {
+		t.Fatalf("declared phases = %+v", start.Phases)
+	}
+
+	paused := metas[6]
+	if paused.Status != "paused" || paused.PausedAt == nil ||
+		*paused.PausedAt != (acpWorkflowMetaPause{CheckpointID: "cp-1", Message: "fix which?"}) {
+		t.Fatalf("paused meta = %+v", paused)
+	}
+	if scan := paused.Phases[0]; scan != (acpWorkflowMetaPhase{Title: "Scan", Detail: "find candidates", Done: 3, Total: 3, Failed: 1}) {
+		t.Fatalf("Scan phase = %+v", scan)
+	}
+	if verify := paused.Phases[2]; verify.Title != "Verify" || !verify.Dynamic || verify.Detail != "2 suspects" {
+		t.Fatalf("runtime-added phase = %+v", verify)
+	}
+	if len(paused.LogTail) != 1 || paused.LogTail[0] != "3 findings" || paused.DroppedLogLines != 0 {
+		t.Fatalf("log tail = %q dropped %d", paused.LogTail, paused.DroppedLogLines)
+	}
+
+	closed, closedMeta := ups[7], metas[7]
+	if closed.ToolCallID != "workflow-wf_1" || closed.Status != "completed" ||
+		closedMeta.ContinuedIn != "workflow-wf_1-2" || closedMeta.Status != "paused" || closedMeta.Attach != 1 {
+		t.Fatalf("the earlier turn's closed card: %+v meta %+v", closed, closedMeta)
+	}
+	opened, openedMeta := ups[8], metas[8]
+	if opened.Kind != "tool_call" || opened.ToolCallID != "workflow-wf_1-2" ||
+		openedMeta.ContinuedFrom != "workflow-wf_1" || openedMeta.Attach != 2 || openedMeta.Status != "running" ||
+		openedMeta.PausedAt != nil || openedMeta.Counts.Agents != 3 {
+		t.Fatalf("the continuing turn's card: %+v meta %+v", opened, openedMeta)
+	}
+
+	done := metas[11]
+	if ups[11].Status != "completed" || done.Status != "success" || done.Summary != "5 agents · 1 failed · 1 replayed" ||
+		done.ContinuedFrom != "workflow-wf_1" {
+		t.Fatalf("finished meta = %+v", done)
+	}
+	if done.Counts != (acpWorkflowMetaCounts{Agents: 5, Failed: 1, Replayed: 1}) {
+		t.Fatalf("counts = %+v", done.Counts)
+	}
+	last := done.Members[len(done.Members)-1]
+	if last.Instance != "gp#5" || last.Phase != "" || last.Status != "pending" {
+		t.Fatalf("an unknown member status must read as pending, outside any phase: %+v", last)
+	}
+	if loose := done.Phases[len(done.Phases)-1]; loose.Title != "" || loose.Total != 1 {
+		t.Fatalf("the no-phase bucket = %+v", loose)
+	}
+}
+
+// A run's end states each have their meta status: a stop (by trace or by the
+// stop hook for a detached run) says why, a failure reads "failed", and a
+// status this code does not know passes through on a card that stays open.
+func TestACPWorkflowMetaEndStates(t *testing.T) {
+	cases := []struct {
+		status, args, wantStatus, wantCard, wantReason string
+	}{
+		{"stopped", `{"run_id":"wf_1","workflow":"audit","reason":"at the orchestrator's request"}`,
+			"stopped", "completed", "at the orchestrator's request"},
+		{"error", `{"run_id":"wf_1","workflow":"audit"}`, "failed", "failed", ""},
+		{"canceled", `{"run_id":"wf_1","workflow":"audit"}`, "cancelled", "failed", ""},
+		{"draining", `{"run_id":"wf_1","workflow":"audit"}`, "draining", "in_progress", ""},
+	}
+	for _, tc := range cases {
+		rec := newWireRecorder(t)
+		turn := rec.turn(newACPWorkflowCards())
+		turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+		turn.onWorkflowTool(wfTrace("workflow", tc.status, tc.args, "1 agent"))
+		ups, metas := workflowCardUpdates(t, rec.updates(t, 2))
+		u, m := ups[len(ups)-1], metas[len(metas)-1]
+		if u.Status != tc.wantCard || m.Status != tc.wantStatus || m.StoppedReason != tc.wantReason {
+			t.Errorf("%s: card %q meta status %q reason %q, want %q %q %q",
+				tc.status, u.Status, m.Status, m.StoppedReason, tc.wantCard, tc.wantStatus, tc.wantReason)
+		}
+		if tc.status == "stopped" && m.Summary != "" {
+			t.Errorf("a stopped card's reason is its summary; meta summary = %q", m.Summary)
+		}
+	}
+
+	// A paused run reaped while detached closes through the stop hook, and
+	// that update carries the meta too.
+	rec := newWireRecorder(t)
+	cards := newACPWorkflowCards()
+	turn := rec.turn(cards)
+	turn.onWorkflowTool(wfTrace("workflow", "running", `{"run_id":"wf_1","workflow":"audit"}`, ""))
+	turn.onWorkflowTool(wfTrace("workflow", "paused", `{"run_id":"wf_1","workflow":"audit","checkpoint_id":"cp-1"}`, ""))
+	workflowStopHook(cards, rec.b.sessionNotifier("sess-wf"))("wf_1", "audit", "the conversation was cleared")
+	_, metas := workflowCardUpdates(t, rec.updates(t, 3))
+	if m := metas[2]; m.Status != "stopped" || m.StoppedReason != "the conversation was cleared" || m.PausedAt != nil {
+		t.Fatalf("reaped card meta = %+v", m)
+	}
+}
+
+// The meta's arrays are never null, so a client can iterate them without a
+// guard, and the log tail is the same bounded tail the text shows.
+func TestACPWorkflowMetaShape(t *testing.T) {
+	w := &acpWorkflow{runID: "wf_1", name: "audit"}
+	raw, err := json.Marshal(w.meta())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"phases":[]`, `"members":[]`, `"logTail":[]`, `"status":"running"`, `"version":1`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("empty card meta missing %s: %s", want, raw)
+		}
+	}
+	for _, absent := range []string{"pausedAt", "stoppedReason", "continuedFrom", "continuedIn", "summary"} {
+		if strings.Contains(string(raw), absent) {
+			t.Errorf("empty card meta carries %s: %s", absent, raw)
+		}
+	}
+	for i := range maxWorkflowLogLines + 5 {
+		w.addLog(fmt.Sprintf("round %d", i))
+	}
+	m := w.metaView()
+	if len(m.LogTail) != maxWorkflowLogLines || m.DroppedLogLines != 5 || m.LogTail[0] != "round 5" {
+		t.Fatalf("log tail = %d lines from %q, dropped %d", len(m.LogTail), m.LogTail[0], m.DroppedLogLines)
 	}
 }

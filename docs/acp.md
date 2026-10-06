@@ -142,7 +142,10 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   card as `completed`, not `failed`, with a `■ stopped: <reason>` line. A
   paused run stopped while no turn is running has no turn to report
   through, so that close arrives as a `session/update` of its own, outside
-  any prompt turn. Closing the session stops its paused runs.
+  any prompt turn. Closing the session stops its paused runs. Every
+  notification the card sends also carries the run as structure, so a
+  client need not parse the text; see
+  [Workflow card metadata](#workflow-card-metadata).
 - **Permissions** — every approval the runtime asks for (shell commands,
   file writes and edits, network access) is routed through
   `session/request_permission` on the tool call's own card, so the editor
@@ -245,8 +248,10 @@ Then open the Agent Panel and pick *Spettro* as the agent.
     `role: line` history (capped at 32 KiB) so the model has the prior
     context before any new messages are added.
   - `session/resume` — restores the session under its original ID and
-    re-announces config options, but skips the replay (the client already
-    holds the transcript).
+    re-announces config options and, shortly after the response, the slash
+    commands (`available_commands_update`, as `session/new` and
+    `session/load` do), but skips the replay (the client already holds the
+    transcript).
   - `session/list` — enumerates the on-disk store, optionally filtered to
     the request's `cwd`, newest first. Each entry carries the session id,
     project path, title (first user prompt preview), and `updatedAt`.
@@ -289,6 +294,64 @@ diffed. Every clipped value ends with a note saying how much was left out.
 **Streaming** above), and approval decisions are not reported separately:
 the card either waits on the permission prompt or fails with the policy's
 reason. Workflow runs are one long-lived card, see **Workflows** above.
+
+### Workflow card metadata
+
+Every `tool_call` and `tool_call_update` of a workflow run's card — the
+start, each member, phase and log update, the pause, the close of a card an
+earlier turn showed, and the finish, including a close sent outside any turn —
+carries the card's state in `_meta["spettro.app/workflow"]`. It is built from
+the same state as the card's text, so the two always agree; the text is
+unchanged for clients that only read it. A client detects the metadata by its
+presence (an older Spettro does not send it) and needs no new extension
+version for it.
+
+```json
+{
+  "version": 1,
+  "runId": "wf_1",
+  "name": "audit",
+  "description": "Audit the repo",
+  "size": "large",
+  "sizeAgents": 30,
+  "budgetTokens": 500000,
+  "status": "paused",
+  "pausedAt": { "checkpointId": "cp-1", "message": "fix which?" },
+  "attach": 1,
+  "phases": [
+    { "title": "Scan", "detail": "find candidates", "dynamic": false, "done": 3, "total": 3, "failed": 1 },
+    { "title": "Verify", "dynamic": true, "done": 0, "total": 0, "failed": 0 }
+  ],
+  "members": [
+    { "instance": "gp#1", "task": "scan a", "phase": "Scan", "status": "done", "replayed": false },
+    { "instance": "gp#2", "task": "scan b", "phase": "Scan", "status": "failed", "replayed": false },
+    { "instance": "gp#3", "task": "scan c", "phase": "Scan", "status": "done", "replayed": true }
+  ],
+  "counts": { "agents": 3, "failed": 1, "replayed": 1 },
+  "logTail": ["3 findings"],
+  "droppedLogLines": 0
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | The payload's own version, `1`. It changes only for a change an older reader would misread. |
+| `runId`, `name`, `description` | The run's ID (empty for a run that has none; its card ID is then `wf-N`), the workflow's name and its description. |
+| `size`, `sizeAgents`, `budgetTokens` | The [size tier](workflows.md#sizing), its agent guideline (`0` for none) and the token budget (`0` for none). |
+| `status` | `running`, `paused`, `stopped`, `success`, `failed` or `cancelled`. A status Spettro does not know passes through as it came, on a card that stays `in_progress`: treat any other value as an open run. |
+| `pausedAt` | Only while paused: the checkpoint the run waits at and its message. |
+| `stoppedReason` | Only when stopped: why (the orchestrator's stop, the idle limit, `/clear`, the session closing). |
+| `attach` | Which card of the run this is: `1` for the card that opened it, `2` for the card a later turn opened to continue it, and so on. |
+| `continuedFrom` | On a continuing card: the ID of the card the earlier turn closed. |
+| `continuedIn` | On that closed card (`completed`, text starting "continued in a later turn"): the ID of the card that took over. |
+| `summary` | On the update that closes a finished run: its closing line, as at the top of the text (`5 agents · 1 failed · 1 replayed`). |
+| `phases[]` | In the text's order: declared phases, then phases entered undeclared, then a phase with an empty `title` for agents dispatched outside any phase (the text's "(no phase)"). `dynamic` marks a phase the script added at runtime. `done` counts members that finished either way, failed ones included, as the text's "d/n done" does; `total` counts all of them. |
+| `members[]` | One per `agent()` call, phase by phase in the text's order. `status` is `running`, `done`, `failed` or `pending`; an unknown member status is `pending`. `replayed` marks a member whose result was replayed from the journal. |
+| `counts` | `agents`, `failed` and `replayed` across all members. |
+| `logTail`, `droppedLogLines` | The last 40 `log()` and checkpoint lines, and how many earlier lines were dropped. |
+
+Arrays are always present (empty, never `null`). The fields optional above are
+left out when they do not apply.
 
 ## Permissions
 
@@ -421,7 +484,7 @@ Spettro advertises its extension surface in the `initialize` response
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "methods": ["_spettro/account/status", "..."],
   "clientMethods": ["_spettro/question/ask"]
 }
@@ -432,7 +495,7 @@ Nothing is called on the client until it mirrors the ones it implements back
 in its own `initialize` request `_meta`, using the same key and shape:
 
 ```json
-{ "_meta": { "spettro.app/extensions": { "version": 3, "methods": ["_spettro/question/ask"] } } }
+{ "_meta": { "spettro.app/extensions": { "version": 4, "methods": ["_spettro/question/ask"] } } }
 ```
 
 Client capabilities from `initialize` (`elicitation.form` in particular) are
@@ -580,6 +643,7 @@ prompt turn, so a client starts one with an ordinary prompt
 | Kinds, titles, locations, size limits, diffs | `internal/acp/tools.go` |
 | Permission requests, which card they attach to, "always allow" labels | `internal/acp/permission.go` (unit tests in `permission_test.go`) |
 | Toolbar selectors | `internal/acp/config_options.go` |
+| Workflow run cards, their text and `_meta["spettro.app/workflow"]` | `internal/acp/workflow.go` |
 | Workflow extension methods (`_spettro/workflow/*`) | `internal/acp/ext_workflow.go` |
 | File changes reported by the runtime (`ToolTrace.FileChanges`, `ShellApprovalRequest.Change`) | `internal/agent/file_changes.go` |
 | The asking agent and its directory on every approval request (`ShellApprovalRequest.AgentID`, `CWD`) | `toolRuntime.askApproval` in `internal/agent/llm_runtime_ext.go` |
