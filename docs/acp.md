@@ -616,8 +616,8 @@ and running it again later. Spettro serves these extension methods
 `.spettro/workflows` and `~/.spettro/workflows` folders as the TUI's
 `/workflows`.
 
-The file methods (`list`, `read`, `write`, `delete`) also take the
-project they are about, as `sessionId` (the project that session was
+The file methods (`list`, `read`, `write`, `delete`) and `runs` also take
+the project they are about, as `sessionId` (the project that session was
 opened on) or an absolute `cwd`; the table leaves these out. With
 neither, the process working directory is used. A `sessionId` this
 connection does not hold is an error, not a silent fall back.
@@ -629,7 +629,7 @@ connection does not hold is an error, not a silent fall back.
 | `_spettro/workflow/write` | `name` (defaults to `meta.name`), `scope` (`"global"` for `~/.spettro/workflows`, anything else for the project), `script` | the saved workflow's fields. A script that fails validation is refused with the compile error. |
 | `_spettro/workflow/delete` | `name`, `scope` (`project`, `global`, or empty for the first match) | `deleted`, and `path` when a file was removed |
 | `_spettro/workflow/validate` | `script` | `ok`, `error`, and the parsed `name`, `description`, `whenToUse`, `phases[]`. `ok: false` is a normal answer, not a call failure. |
-| `_spettro/workflow/runs` | `limit` (default 50) | `runs[]` (`runId`, `dir`, `modifiedAt` in unix ms), newest first, across every stored session, for [resuming](workflows.md#resuming-a-run) |
+| `_spettro/workflow/runs` | `limit` (default 50) | `runs[]` (`runId`, `dir`, `modifiedAt` in unix ms), newest first, from the stored sessions opened on that project (and any open session on it that has not been saved yet), for [resuming](workflows.md#resuming-a-run) |
 
 Running is not among them. A run needs the model, the manifest, the
 permission level and the sub-agent machinery, which all belong to a

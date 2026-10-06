@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"spettro/internal/session"
 )
 
 const goodScript = `export const meta = {
@@ -204,5 +207,70 @@ func TestWorkflowWriteFallsBackToMetaName(t *testing.T) {
 	}
 	if res.Name != "demo" {
 		t.Fatalf("name = %q, want the header's own name", res.Name)
+	}
+}
+
+// Runs are listed for the scope's project only: a "recent runs" list in one
+// repo must not offer to resume a run another repo's script produced. A
+// session still in its first turn has no stored metadata yet, so its own cwd
+// places it.
+func TestWorkflowRunsHonourProjectScope(t *testing.T) {
+	b, cwd := projectBridge(t)
+	other := t.TempDir()
+	ctx := context.Background()
+
+	addRun := func(sessionID, runID string) {
+		t.Helper()
+		dir := filepath.Join(session.SessionDir(b.opts.GlobalDir, sessionID), "workflows", runID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveMeta := func(sessionID, project string) {
+		t.Helper()
+		if err := session.Save(b.opts.GlobalDir, session.State{Metadata: session.Metadata{
+			ID: sessionID, ProjectPath: project, ProjectHash: session.ProjectHash(project),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveMeta("here", cwd)
+	addRun("here", "run-here")
+	saveMeta("there", other)
+	addRun("there", "run-there")
+	// Open on this project, nothing persisted but its run directory.
+	b.sessions["live"] = &acpSession{id: "live", cwd: cwd}
+	addRun("live", "run-live")
+	// Neither stored nor open: no way to tell its project.
+	addRun("orphan", "run-orphan")
+
+	ids := func(res WorkflowRunsResult) string {
+		var names []string
+		for _, r := range res.Runs {
+			names = append(names, r.RunID)
+		}
+		slices.Sort(names)
+		return strings.Join(names, ",")
+	}
+	for _, tc := range []struct {
+		name  string
+		scope workflowScopeArgs
+		want  string
+	}{
+		{"cwd", workflowScopeArgs{Cwd: cwd}, "run-here,run-live"},
+		{"session", workflowScopeArgs{SessionID: "live"}, "run-here,run-live"},
+		{"process cwd", workflowScopeArgs{}, "run-here,run-live"},
+		{"other project", workflowScopeArgs{Cwd: other}, "run-there"},
+	} {
+		res, err := b.workflowRuns(ctx, workflowRunsArgs{workflowScopeArgs: tc.scope})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := ids(res); got != tc.want {
+			t.Errorf("%s: runs = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if _, err := b.workflowRuns(ctx, workflowRunsArgs{workflowScopeArgs: workflowScopeArgs{SessionID: "nope"}}); err == nil {
+		t.Error("an unknown sessionId must not fall back to the process cwd")
 	}
 }

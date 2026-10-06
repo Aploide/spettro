@@ -8,6 +8,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"spettro/internal/session"
 	"spettro/internal/workflow"
 )
 
@@ -338,12 +339,19 @@ type WorkflowRunsResult struct {
 	Runs []WorkflowRunInfo `json:"runs"`
 }
 
+// workflowRuns lists the runs of the sessions opened on the scope's project,
+// like every other workflow method: a client showing "recent runs" for one
+// repo must not offer to resume a run another repo's script produced.
 func (b *bridge) workflowRuns(_ context.Context, args workflowRunsArgs) (WorkflowRunsResult, error) {
+	cwd, err := b.resolveCwd(args.workflowScopeArgs)
+	if err != nil {
+		return WorkflowRunsResult{}, err
+	}
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	root := filepath.Join(b.opts.GlobalDir, "sessions")
+	root := session.SessionsDir(b.opts.GlobalDir)
 	var runs []WorkflowRunInfo
 	sessions, err := os.ReadDir(root)
 	if err != nil {
@@ -351,7 +359,7 @@ func (b *bridge) workflowRuns(_ context.Context, args workflowRunsArgs) (Workflo
 		return WorkflowRunsResult{Runs: runs}, nil
 	}
 	for _, se := range sessions {
-		if !se.IsDir() {
+		if !se.IsDir() || !b.sessionInProject(se.Name(), cwd) {
 			continue
 		}
 		dir := filepath.Join(root, se.Name(), "workflows")
@@ -386,4 +394,18 @@ func (b *bridge) workflowRuns(_ context.Context, args workflowRunsArgs) (Workflo
 		runs = runs[:limit]
 	}
 	return WorkflowRunsResult{Runs: runs}, nil
+}
+
+// sessionInProject reports whether the stored session id was opened on the
+// project cwd. The metadata says so when it has been written (session/list
+// matches the same way); a session still in its first turn has none yet, so
+// an open session's own cwd counts too.
+func (b *bridge) sessionInProject(id, cwd string) bool {
+	if meta, err := session.LoadMetadata(b.opts.GlobalDir, id); err == nil {
+		return meta.ProjectPath == cwd || meta.ProjectHash == session.ProjectHash(cwd)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.sessions[id]
+	return ok && s.cwd == cwd
 }
