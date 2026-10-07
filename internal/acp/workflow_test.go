@@ -191,6 +191,8 @@ func TestACPWorkflowRunPromptIsATemplate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "audit.js"), []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The prompt JSON-quotes the path, which doubles Windows backslashes.
+	quotedPath, _ := json.Marshal(filepath.Join(dir, "audit.js"))
 	if err := os.WriteFile(filepath.Join(dir, "plain.js"),
 		[]byte("export const meta = {name: 'plain', description: 'No params'}\nreturn 1"), 0o644); err != nil {
 		t.Fatal(err)
@@ -204,7 +206,7 @@ func TestACPWorkflowRunPromptIsATemplate(t *testing.T) {
 			name:  "json args keep their whitespace",
 			input: "/workflows run audit   {\"focus\": \"auth  and   session\",\n \"base\": \"dev\"}",
 			want: []string{
-				"ultracode", "template", `"show": true`, filepath.Join(dir, "audit.js"),
+				"ultracode", "template", `"show": true`, string(quotedPath),
 				"adapt anything task-specific or stale", "discovered at runtime",
 				`"args": {"focus": "auth  and   session",` + "\n" + ` "base": "dev"}`,
 				`base (string, default "main") — branch to diff against`,

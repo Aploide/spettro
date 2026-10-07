@@ -1105,16 +1105,20 @@ func TestPausedRunIsContinuableOnAKeywordFreeTurn(t *testing.T) {
 
 func TestPausedRunNeverGrantsSubagentsTheTool(t *testing.T) {
 	srv := newSubagentServer(t, func(string) string { return "bug-1" })
+	// Both dirs exist before StopAll is registered, so it runs (and closes
+	// the paused run's journal) before they are removed: Windows cannot
+	// remove an open file.
+	cwd, turnDir := t.TempDir(), t.TempDir()
 	runs := NewWorkflowRuns()
 	t.Cleanup(runs.StopAll)
-	rt, _ := workflowTestRuntime(t, t.TempDir(), srv, runs)
+	rt, _ := workflowTestRuntime(t, cwd, srv, runs)
 	if _, err := callWorkflow(t, context.Background(), rt, map[string]any{"script": checkpointScript}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runs.Paused()) != 1 {
 		t.Fatal("setup: no paused run")
 	}
-	reqs := runAgentTurn(t, LLMAgent{WorkflowRuns: runs, DelegationDepth: 1}, "coding", t.TempDir(), "yes, fix them", loopReply{content: "ok"})
+	reqs := runAgentTurn(t, LLMAgent{WorkflowRuns: runs, DelegationDepth: 1}, "coding", turnDir, "yes, fix them", loopReply{content: "ok"})
 	system, tools := requestSystemAndTools(reqs[0])
 	if contains(tools, workflowToolID) || strings.Contains(system, "WORKFLOWS are available") || strings.Contains(system, "paused at a checkpoint") {
 		t.Fatal("a sub-agent must never get the workflow tool or guidance, paused runs or not")
