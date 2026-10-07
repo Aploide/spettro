@@ -104,7 +104,6 @@ var toolWordings = map[string]toolWording{
 	"exit-worktree":      {"Exited", "Exiting", "worktree", "worktrees"},
 	"send-message":       {"Sent", "Sending", "message", "messages"},
 	"agent":              {"Delegated", "Delegating", "task", "tasks"},
-	"ultra":              {"Ran", "Running", "swarm", "swarms"},
 	"workflow":           {"Ran", "Running", "workflow", "workflows"},
 	"lsp":                {"Queried", "Querying", "the language server", ""},
 	"skill":              {"Loaded", "Loading", "skill", "skills"},

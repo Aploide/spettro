@@ -198,7 +198,7 @@ type toolDiffMsg struct {
 type parallelAgentEntry struct {
 	ID       string
 	Label    string
-	Kind     string // "worker", "microagent", or "swarm" (Ultra fan-out member)
+	Kind     string // "worker" or "microagent"
 	Instance int
 	Task     string
 	Status   string
@@ -508,7 +508,22 @@ type Model struct {
 	parallelAgents []parallelAgentEntry
 	// workflow is the most recent workflow run, kept after it finishes so the
 	// panel still shows the whole tree until the next turn clears it.
-	workflow         *workflowRun
+	workflow *workflowRun
+	// parkedWorkflows holds runs a newer run displaced from the screen while
+	// they were paused (or still running), keyed by run id, so a later
+	// continue brings back their tree. Pruned at each turn start like the
+	// run on screen (clearSettledWorkflow).
+	parkedWorkflows map[string]*workflowRun
+	// workflowRuns holds the session's workflow runs paused at a checkpoint,
+	// so the orchestrating model can continue one in a later turn. A paused
+	// run is a goroutine mid-script and outlives the turn that started it;
+	// the Model owns it like the steering queue, and stops every one when
+	// the conversation goes away (/clear, /resume, quit). Pointer: survives
+	// Bubble Tea's value copies.
+	workflowRuns *agent.WorkflowRuns
+	// workflowStops carries the registry's reports of detached runs it
+	// stopped (idle reaper, StopAll) to Update; see watchWorkflowRuns.
+	workflowStops    chan workflowStoppedMsg
 	tickCount        int
 	sideCursor       int
 	sideDetailScroll int
@@ -721,7 +736,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	ta.Placeholder = "enter message…"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
-	ta.SetHeight(3)
+	shapeInput(&ta)
 	ta.SetStyles(textareaStyles(pal, cfg.CursorBlink))
 	ta.Focus()
 
@@ -783,9 +798,13 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		tickArmed:    true, // Init sends the first tick
 		themeAuto:    wanted == theme.AutoKind,
 		livePerm:     &livePermission{},
+		workflowRuns: agent.NewWorkflowRuns(),
 		notifier:     notify.New(!cfg.NotificationsDisabled, time.Duration(cfg.NotifyQuietSec)*time.Second),
 	}
 	m.livePerm.set(cfg.Permission)
+	if cmd := m.watchWorkflowRuns(); cmd != nil {
+		m.startupCmds = append(m.startupCmds, cmd)
+	}
 	if m.modelUpdates != nil {
 		m.startupCmds = append(m.startupCmds, waitForModelsChanged(m.modelUpdates))
 	}
@@ -924,4 +943,20 @@ var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "�
 
 func agentTickCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return agentTickMsg{} })
+}
+
+// shapeInput gives the input textarea its shape. No prompt column: the box is
+// the frame, and a gutter bar beside the text only narrowed it. The box starts
+// one line tall and grows with the draft, soft wraps included, the way Claude
+// Code's does; recalcLayout caps it (inputMaxRows), past which it scrolls
+// inside itself. MaxHeight alone would also stop input at that many lines, so
+// the content limit is set apart from it — CharLimit is the real bound on a
+// draft. Tests build their model through this too, so a measured frame is the
+// real one.
+func shapeInput(ta *textarea.Model) {
+	ta.Prompt = ""
+	ta.DynamicHeight = true
+	ta.MinHeight = 1
+	ta.MaxHeight = 1
+	ta.MaxContentHeight = inputMaxContentRows
 }

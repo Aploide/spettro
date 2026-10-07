@@ -48,6 +48,11 @@ func Serve(ctx context.Context, opts Options) error {
 	conn := acpsdk.NewAgentSideConnection(bridge, os.Stdout, os.Stdin)
 	conn.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	bridge.conn = conn
+	// Workflow runs paused at a checkpoint wait for a turn that can no longer
+	// come once the client is gone. Stop them on the way out, as closing
+	// each session would have, rather than leave them parked for the idle
+	// reaper in a process embedding Serve that keeps running.
+	defer bridge.stopAllWorkflows()
 
 	select {
 	case <-ctx.Done():

@@ -629,6 +629,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, waitForRemoteSubmit(nm.remoteServer))
 		}
 		return nm, tea.Batch(cmds...)
+	case workflowStoppedMsg:
+		m.applyWorkflowStopped(msg)
+		cmds = append(cmds, waitForWorkflowStop(m.workflowStops))
 	case remoteInterruptMsg:
 		if m.thinking {
 			m.interruptRun("Interrupted by remote client.", false)

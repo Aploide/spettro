@@ -81,7 +81,7 @@ parallel sessions throttled together do not retry in lockstep. Early
 retries can come before the `Retry-After`, since that is the worst-case
 refill time. Once a request has waited about 3 minutes in all, the 429 is
 reported as an error, and the model fallback chain, if configured, is
-offered. It is not retried again: an `ultra` or `workflow` sub-agent that
+offered. It is not retried again: a `workflow` sub-agent that
 hits it fails instead of being re-run from scratch.
 
 ## Configuration

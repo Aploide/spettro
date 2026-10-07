@@ -9,10 +9,10 @@ import (
 )
 
 // builtinToolNames is every tool name the TUI may have to label: the
-// built-ins of the default manifest, the fan-out tools the runtime adds on
+// built-ins of the default manifest, the fan-out tool the runtime adds on
 // its own, and every retired name a resumed session may still contain.
 func builtinToolNames() []string {
-	names := []string{"ultra", "workflow", "approval"}
+	names := []string{"workflow", "approval"}
 	for _, t := range config.DefaultAgentManifest().Tools {
 		if t.IsBuiltin() {
 			names = append(names, t.ID)

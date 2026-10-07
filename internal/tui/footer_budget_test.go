@@ -24,13 +24,6 @@ func footerModel(width, height int) Model {
 	return m
 }
 
-func footerSwarm(m *Model, members int) {
-	for i := 1; i <= members; i++ {
-		m.applyToolTraceToObservability(swarmTrace(fmt.Sprintf("code#%d", i),
-			fmt.Sprintf("refactor internal/pkg%d/main.go", i), "running"))
-	}
-}
-
 func footerWorkers(m *Model, n int) {
 	for i := 1; i <= n; i++ {
 		m.applyToolTraceToObservability(agent.ToolTrace{
@@ -53,7 +46,7 @@ func footerTodos(m *Model, n int) {
 }
 
 // The footer is an annotation on the conversation, never a replacement for it.
-// Whatever is running — a swarm, a workflow, a dozen delegations, a long todo
+// Whatever is running — a workflow, a dozen delegations, a long todo
 // list, or all of them at once — the region below the transcript stays inside
 // one budget derived from the terminal height.
 func TestFooterNeverBloatsTheUI(t *testing.T) {
@@ -61,7 +54,6 @@ func TestFooterNeverBloatsTheUI(t *testing.T) {
 		name string
 		seed func(*Model)
 	}{
-		{"swarm", func(m *Model) { footerSwarm(m, 20) }},
 		{"workflow", func(m *Model) {
 			m.applyToolTraceToObservability(wfStartTrace())
 			for i := 1; i <= 20; i++ {
@@ -77,7 +69,6 @@ func TestFooterNeverBloatsTheUI(t *testing.T) {
 				m.applyToolTraceToObservability(wfAgentTrace(fmt.Sprintf("general-purpose#%d", i),
 					fmt.Sprintf("verify:%d", i), "Verify", "running", false))
 			}
-			footerSwarm(m, 12)
 			footerWorkers(m, 9)
 			footerTodos(m, 25)
 		}},
@@ -113,7 +104,6 @@ func TestFooterOwnsUpToWhatItHides(t *testing.T) {
 		m.applyToolTraceToObservability(wfAgentTrace(fmt.Sprintf("general-purpose#%d", i),
 			fmt.Sprintf("verify:%d", i), "Verify", "running", false))
 	}
-	footerSwarm(&m, 10)
 	footerWorkers(&m, 6)
 	footerTodos(&m, 9)
 	got := m.renderParallelAgents()
@@ -133,7 +123,7 @@ func TestFooterOneLineForms(t *testing.T) {
 
 	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
 	for _, a := range m.parallelAgents {
-		if a.Status == "running" && a.Kind != "swarm" {
+		if a.Status == "running" {
 			active = append(active, a)
 		}
 	}
@@ -155,29 +145,28 @@ func TestFooterOneLineForms(t *testing.T) {
 	}
 }
 
-// A finished swarm is history. It collapses to a single line so it stops
-// costing the transcript anything while the next turn runs.
-func TestSwarmBlockCollapsesWhenDone(t *testing.T) {
+// An agent trace is a plain delegation whatever extra flags it carries: the
+// "swarm" flag of the removed Ultra fan-out no longer means anything, so a
+// trace with it is listed while running and dropped when done, and no
+// banner points at a swarm view that does not exist.
+func TestAgentTraceHasNoSwarmKind(t *testing.T) {
 	m := footerModel(110, 40)
-	footerSwarm(&m, 6)
-	live := lipgloss.Height(m.renderSwarmBlock(90, 6))
-	for i := 1; i <= 6; i++ {
-		m.applyToolTraceToObservability(swarmTrace(fmt.Sprintf("code#%d", i),
-			fmt.Sprintf("refactor internal/pkg%d/main.go", i), "success"))
+	trace := func(status string) agent.ToolTrace {
+		return agent.ToolTrace{AgentID: "code#1", Name: "agent", Status: status,
+			Args: `{"agent":"code#1","task":"fix a.go","parent_agent_id":"coding","swarm":true}`}
 	}
-	done := m.renderSwarmBlock(90, 6)
-	if h := lipgloss.Height(done); h != 3 { // one line plus the border
-		t.Fatalf("a finished swarm takes %d rows, want 3:\n%s", h, done)
+	m.applyToolTraceToObservability(trace("running"))
+	if len(m.parallelAgents) != 1 || m.parallelAgents[0].Kind != "worker" {
+		t.Fatalf("want one worker entry, got %+v", m.parallelAgents)
 	}
-	if live <= 3 {
-		t.Fatalf("a running swarm should show more than the collapsed form, got %d rows", live)
+	if m.banner != "" {
+		t.Fatalf("no banner for a delegation, got %q", m.banner)
 	}
-	if !strings.Contains(done, "6 done") {
-		t.Fatalf("the collapsed swarm loses the result:\n%s", done)
+	if got := stripANSIForTest(m.renderParallelAgents()); !strings.Contains(got, "code#1") {
+		t.Fatalf("the running delegation is listed in the footer:\n%s", got)
 	}
-	// The side panel still has the whole thing.
-	full := strings.Join(m.sidePanelSwarmLines(48), "\n")
-	if !strings.Contains(full, "code#5") {
-		t.Fatalf("the side panel must keep every member:\n%s", full)
+	m.applyToolTraceToObservability(trace("success"))
+	if len(m.parallelAgents) != 0 {
+		t.Fatalf("a finished delegation leaves the list, got %+v", m.parallelAgents)
 	}
 }

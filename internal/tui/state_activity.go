@@ -10,15 +10,6 @@ import (
 	"spettro/internal/session"
 )
 
-func (m *Model) hasSwarmAgents() bool {
-	for _, a := range m.parallelAgents {
-		if a.Kind == "swarm" {
-			return true
-		}
-	}
-	return false
-}
-
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return
@@ -47,7 +38,6 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		ID            string `json:"id"`
 		Task          string `json:"task"`
 		ParentAgentID string `json:"parent_agent_id"`
-		Swarm         bool   `json:"swarm"`
 	}
 	_ = json.Unmarshal([]byte(t.Args), &args)
 	agentID := args.Agent
@@ -69,12 +59,7 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 			}
 		}
 		kind := "worker"
-		if args.Swarm {
-			kind = "swarm"
-			if !m.showSidePanel && !m.hasSwarmAgents() {
-				m.showBanner("ultra swarm started — press ctrl+b to watch each agent", "info")
-			}
-		} else if parent, ok := m.manifest.AgentByID(args.ParentAgentID); ok && parent.Mode == "worker" {
+		if parent, ok := m.manifest.AgentByID(args.ParentAgentID); ok && parent.Mode == "worker" {
 			kind = "microagent"
 		}
 		entry := parallelAgentEntry{
@@ -105,14 +90,8 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 	agentType := "worker"
 	for i, a := range m.parallelAgents {
 		if a.ID == agentID && a.Status == "running" {
-			if a.Kind == "swarm" {
-				// Swarm members stay listed with their outcome so the side
-				// panel shows the whole fan-out, not just what's still running.
-				m.parallelAgents[i].Status = status
-				agentType = "swarm"
-			} else {
-				m.parallelAgents = append(m.parallelAgents[:i], m.parallelAgents[i+1:]...)
-			}
+			agentType = a.Kind
+			m.parallelAgents = append(m.parallelAgents[:i], m.parallelAgents[i+1:]...)
 			break
 		}
 	}
@@ -198,8 +177,9 @@ func summarizeAgentToolOutput(output string) string {
 func (m *Model) startAgentActivity(agentID, task string) {
 	// A finished workflow's tree survives the turn that produced it — the run
 	// summary is worth reading after the agent has replied — and is cleared
-	// here, when the next turn begins.
-	m.workflow = nil
+	// here, when the next turn begins — unless it is paused at a checkpoint,
+	// waiting for the turn that is starting to continue it.
+	m.clearSettledWorkflow()
 	m.ensureSession()
 	m.currentRunKey = fmt.Sprintf("run:%s:%d", agentID, time.Now().UnixNano())
 	m.upsertActivity(activityItem{

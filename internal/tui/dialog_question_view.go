@@ -435,9 +435,8 @@ const questionCustomFieldMaxLines = 3
 // touches only this render's copy.
 func (m Model) questionCustomField(width int) []string {
 	m.ta.SetWidth(max(width, 12))
-	// The shared input is three rows tall; inline it grows with the draft
-	// instead, so an empty field is one line rather than two blank ones under
-	// the row it replaced.
+	// Inline the field grows with the draft only up to its own small cap,
+	// not the input box's, so a long draft cannot crowd out the options.
 	m.ta.SetHeight(min(max(m.ta.LineCount(), 1), questionCustomFieldMaxLines))
 	return strings.Split(m.ta.View(), "\n")
 }

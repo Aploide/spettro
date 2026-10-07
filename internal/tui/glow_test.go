@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"spettro/internal/config"
 	"spettro/internal/theme"
 )
 
@@ -266,5 +267,65 @@ func TestHighlightUltracodeLightsPlainEnglishRequests(t *testing.T) {
 		if got := highlightUltracode(in, 0); got != in {
 			t.Fatalf("%q should not light up: %q", in, got)
 		}
+	}
+}
+
+// A "+500k" budget directive glows only when it will be honoured — when
+// workflows are on for the message — and then exactly the directive does.
+func TestHighlightBudgetDirectives(t *testing.T) {
+	const in = "audit the parser +500k please"
+	if got := highlightWorkflowInput(in, 0, false); got != in {
+		t.Fatalf("a directive must stay plain while workflows are off: %q", got)
+	}
+	lit := highlightWorkflowInput(in, 0, true)
+	if lit == in || stripANSIForTest(lit) != in {
+		t.Fatalf("the directive should glow without changing the text: %q", lit)
+	}
+	if !strings.HasPrefix(lit, "audit the parser ") || !strings.HasSuffix(lit, " please") {
+		t.Fatalf("only the directive may be styled: %q", lit)
+	}
+	// Not directives: arithmetic, a glued "+", a bare number.
+	for _, plain := range []string{"x = a+500k", "add +5 to it", "C++ code"} {
+		if got := highlightWorkflowInput(plain, 0, true); got != plain {
+			t.Fatalf("%q is not a directive and must stay plain: %q", plain, got)
+		}
+	}
+	// With the keyword in the message, both light up.
+	both := highlightWorkflowInput("ultracode +1.5m", 0, true)
+	if both == "ultracode +1.5m" || stripANSIForTest(both) != "ultracode +1.5m" {
+		t.Fatalf("keyword and directive should both glow: %q", both)
+	}
+}
+
+func TestBudgetDirectivesLiveOnlyWithWorkflows(t *testing.T) {
+	cases := []struct {
+		input string
+		ultra bool
+		perm  config.PermissionLevel
+		want  bool
+	}{
+		{"audit this +500k", false, config.PermissionRestricted, false},
+		{"ultracode: audit this +500k", false, config.PermissionRestricted, true},
+		{"use a workflow for this +2M", false, config.PermissionRestricted, true},
+		{"audit this +500k", true, config.PermissionRestricted, true},
+		{"audit this", false, config.PermissionRestricted, false},
+		// A suspended ultra (ask-first, where workflows cannot run) does
+		// not make a bare directive live; the keyword still does.
+		{"audit this +500k", true, config.PermissionAskFirst, false},
+		{"ultracode: audit this +500k", true, config.PermissionAskFirst, true},
+	}
+	for _, c := range cases {
+		m := NewModelForTesting()
+		m.cfg.Ultra = c.ultra
+		m.cfg.Permission = c.perm
+		m.SetTextareaValueForTesting(c.input)
+		if got := m.budgetDirectivesLive(); got != c.want {
+			t.Errorf("budgetDirectivesLive(%q, ultra=%v, %s) = %v, want %v", c.input, c.ultra, c.perm, got, c.want)
+		}
+	}
+	// The animation gate agrees: with ultra live, a directive alone needs
+	// frames; without it, a directive without the keyword never glows.
+	if !inputMayGlow("audit +500k", true) || inputMayGlow("audit +500k", false) {
+		t.Fatal("inputMayGlow disagrees with when a directive can glow")
 	}
 }

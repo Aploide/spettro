@@ -203,14 +203,25 @@ func decodeFirstRune(s string) (rune, int) {
 // already-rendered text, leaving every other byte — including the cursor cell
 // — exactly as it was.
 func highlightUltracode(rendered string, frame int) string {
+	return highlightWorkflowInput(rendered, frame, false)
+}
+
+// highlightWorkflowInput is highlightUltracode plus token-budget directives
+// ("+500k", "+1.5m"). A directive only does something when workflows are on
+// for the message, so it lights up only then: budgets is that verdict, made
+// by the caller from the whole input — the keyword may have scrolled out of
+// the rendered view — or from ultra, the standing mode /ultra switches on.
+// Lighting a "+500k" the run will ignore would promise a budget nobody
+// enforces.
+func highlightWorkflowInput(rendered string, frame int, budgets bool) string {
 	if rendered == "" {
 		return rendered
 	}
 	// Cheap gate before tokenising: every activating phrase contains one of
-	// these, so a line with none of them cannot match.
+	// these, and every directive a "+", so a line with none cannot match.
 	lower := strings.ToLower(rendered)
 	if !strings.Contains(lower, agent.WorkflowKeyword) && !strings.Contains(lower, "workflow") &&
-		!strings.Contains(lower, "agent") {
+		!strings.Contains(lower, "agent") && (!budgets || !strings.Contains(rendered, "+")) {
 		return rendered
 	}
 	tokens := tokenizeANSI(rendered)
@@ -224,6 +235,11 @@ func highlightUltracode(rendered string, frame int) string {
 		}
 	}
 	spans := agent.WorkflowActivationSpans(string(plain))
+	if budgets {
+		// Same contract as the keyword: the spans come from the parser that
+		// decides the budget, so what glows is exactly what will be honoured.
+		spans = append(spans, agent.BudgetDirectiveSpans(string(plain))...)
+	}
 	if len(spans) == 0 {
 		return rendered
 	}

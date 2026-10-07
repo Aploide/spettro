@@ -15,10 +15,10 @@ import (
 	"spettro/internal/lsp"
 )
 
-// Subagent workspace isolation. When a delegation (agent tool) or swarm
-// (ultra tool) call sets isolation="worktree", each subagent runs in its own
-// git worktree under <repo>/.spettro/worktrees/, on a branch named after the
-// subagent. Concurrent subagents therefore never trip over each other's edits
+// Subagent workspace isolation. When a delegation (agent tool) or a workflow
+// member (agent() in a workflow script) sets isolation="worktree", each
+// subagent runs in its own git worktree under <repo>/.spettro/worktrees/, on
+// a branch named after the subagent. Concurrent subagents therefore never trip over each other's edits
 // in the shared checkout. When a subagent finishes, its branch is merged back
 // into the main checkout and both the branch and the worktree are deleted; a
 // merge conflict preserves the branch and worktree and reports them so the
@@ -30,8 +30,8 @@ const (
 )
 
 // workspaceMu serializes every git mutation of the main checkout (worktree
-// add/remove, branch delete, merge). Parallel agent tool calls and swarm
-// merges would otherwise race on the repository index and ref locks.
+// add/remove, branch delete, merge). Parallel agent tool calls and workflow
+// member merges would otherwise race on the repository index and ref locks.
 var workspaceMu sync.Mutex
 
 // agentWorkspace is one isolated worktree+branch pair owned by a subagent.

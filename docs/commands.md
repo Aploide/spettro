@@ -27,10 +27,11 @@
 | `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
 | `/budget <n\|0>` | Set request token budget (`0` = unlimited). |
 | `/thinking <off\|low\|medium\|high\|x-high\|max>` | Set the reasoning/thinking level for the active model. Maps to Anthropic's thinking token budget and to `reasoning_effort` on OpenAI and OpenAI-compatible backends. Hidden for models the catalog does not flag as reasoning-capable; if a model rejects the chosen level, Spettro silently retries at a lower one. |
-| `/ultra [on\|off]` | Toggle [Ultra mode](ultra.md): the top-level agent fans hard tasks out across a swarm of parallel sub-agents (works with any model; sub-agents inherit the active model). Requires the `restricted` or `yolo` permission level — refused under `ask-first`. |
+| `/ultra [on\|off]` | Toggle [ultra](workflows.md#ultra-and-ultracode) (no argument flips it). Ultracode: substantive tasks run as dynamic workflows, as if every message contained the `ultracode` keyword. Saved to `~/.spettro/config.json` as `ultra`. The status bar shows `ultra` while it is on. It is suspended while the agent the message goes to would run under `ask-first` (status bar `ultra:suspended`, dimmed), since workflows need `restricted` or `yolo`; the setting stays saved. An agent's own permission counts: under the default user-level `ask-first`, `coding` (whose own level is `restricted`) still runs with ultra, while `plan` and `ask` are suspended. Writing `ultracode` in a message turns the mode on for that turn only. |
 | `/workflows` | List saved [workflow](workflows.md) scripts from `.spettro/workflows` and `~/.spettro/workflows`, with their descriptions and phases. |
 | `/workflows show <name>` | Print a saved workflow's header and source. |
-| `/workflows run <name> [json]` | Run a saved workflow, optionally with a JSON `args` value. Dispatches a turn instructing the agent to invoke it, so the model reviews and acts on the result. |
+| `/workflows run <name> [json \| text]` | Run a saved workflow as a [template](workflows.md#templates): dispatches a turn in which the agent reads the script, adapts anything task-specific or stale, and runs it (by name with the JSON `args` when it fits as it is). Text that is not JSON is passed along as the task description. |
+| `/workflows size [small\|medium\|large\|unbounded]` | Show or set the workflow [size tier](workflows.md#sizing), a guideline for how many agents one workflow should use. Saved to `~/.spettro/config.json` as `workflow_size`. |
 | `/workflows where` | Show the directories scanned for saved workflows. |
 | `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
 | `/approve` | Execute pending plan through `coding` agent. |

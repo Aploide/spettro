@@ -299,7 +299,7 @@ func backgroundWorkRunning() bool {
 func mayCheckpoint(allowed map[string]struct{}) bool {
 	for tool := range allowed {
 		switch name := CanonicalToolName(tool); {
-		case isMutatingTool(name), name == "agent", name == ultraToolID, name == workflowToolID:
+		case isMutatingTool(name), name == "agent", name == workflowToolID:
 			return true
 		}
 	}

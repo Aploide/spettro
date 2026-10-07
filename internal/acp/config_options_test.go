@@ -1,7 +1,10 @@
 package acp
 
 import (
+	"strings"
 	"testing"
+
+	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
@@ -220,9 +223,143 @@ func TestApplyConfigOption_Ultra(t *testing.T) {
 		t.Fatal("expected error for invalid ultra value")
 	}
 
-	// Ask-first permission must reject enabling (approval prompts would flood).
+	// Ask-first does not refuse the toggle: it is saved, and UltraActive
+	// keeps it suspended until the permission allows workflows.
+	cfg.Ultra = false
 	cfg.Permission = config.PermissionAskFirst
-	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err == nil {
-		t.Fatal("expected error enabling ultra under ask-first permission")
+	if err := b.applyConfigOption(s, &cfg, configIDUltra, "true"); err != nil {
+		t.Fatalf("apply ultra=true under ask-first: %v", err)
+	}
+	if !cfg.Ultra || cfg.UltraActive() {
+		t.Fatalf("under ask-first: Ultra=%v UltraActive=%v, want saved but suspended", cfg.Ultra, cfg.UltraActive())
+	}
+	if saved, err := config.Load(); err != nil || !saved.Ultra {
+		t.Fatalf("ultra not persisted under ask-first: %v %v", saved.Ultra, err)
+	}
+}
+
+// The ultra option describes the ultracode mode (never the removed swarm),
+// and says when ask-first suspends a saved "on", so the toggle does not
+// claim a mode that is not in effect.
+func TestUltraConfigOptionDescription(t *testing.T) {
+	desc := func(cfg config.UserConfig) string {
+		o := ultraConfigOption(&cfg)
+		if o.Boolean == nil || o.Boolean.Description == nil {
+			t.Fatal("ultra option has no description")
+		}
+		return *o.Boolean.Description
+	}
+	cases := []struct {
+		cfg       config.UserConfig
+		suspended bool
+	}{
+		{config.UserConfig{Ultra: false, Permission: config.PermissionAskFirst}, false},
+		{config.UserConfig{Ultra: true, Permission: config.PermissionRestricted}, false},
+		{config.UserConfig{Ultra: true, Permission: config.PermissionYOLO}, false},
+		{config.UserConfig{Ultra: true, Permission: config.PermissionAskFirst}, true},
+	}
+	for _, tc := range cases {
+		d := desc(tc.cfg)
+		if !strings.Contains(d, "Ultracode: substantive tasks run as dynamic workflows") {
+			t.Errorf("%+v: description = %q", tc.cfg, d)
+		}
+		if strings.Contains(strings.ToLower(d), "swarm") {
+			t.Errorf("%+v: description mentions the swarm: %q", tc.cfg, d)
+		}
+		if got := strings.Contains(d, "suspended"); got != tc.suspended {
+			t.Errorf("%+v: suspended note = %v, want %v (%q)", tc.cfg, got, tc.suspended, d)
+		}
+	}
+}
+
+func workflowSizeOption(t *testing.T, opts []acpsdk.SessionConfigOption) *acpsdk.SessionConfigOptionSelect {
+	t.Helper()
+	for _, o := range opts {
+		if o.Select != nil && o.Select.Id == configIDWorkflowSize {
+			return o.Select
+		}
+	}
+	t.Fatal("no workflow_size select option was produced")
+	return nil
+}
+
+// The workflow size selector is always present, lists the tiers smallest
+// first, and shows medium when no tier was ever chosen.
+func TestBuildConfigOptions_WorkflowSize(t *testing.T) {
+	s := configTestSession(t)
+	cases := []struct {
+		configured, current string
+	}{
+		{"", "medium"},
+		{"small", "small"},
+		{"unbounded", "unbounded"},
+	}
+	for _, tc := range cases {
+		cfg := config.UserConfig{WorkflowSize: tc.configured}
+		sel := workflowSizeOption(t, buildConfigOptions(s, &cfg, provider.NewManager()))
+		if string(sel.CurrentValue) != tc.current {
+			t.Errorf("configured %q: current = %q, want %q", tc.configured, sel.CurrentValue, tc.current)
+		}
+		if sel.Category != nil {
+			t.Errorf("workflow_size must be ungrouped, got category %v", *sel.Category)
+		}
+		opts := *sel.Options.Ungrouped
+		var values []string
+		for _, o := range opts {
+			values = append(values, string(o.Value))
+			if o.Description == nil || *o.Description == "" {
+				t.Errorf("tier %s has no description", o.Value)
+			}
+		}
+		if strings.Join(values, ",") != strings.Join(config.WorkflowSizes, ",") {
+			t.Errorf("tiers = %v", values)
+		}
+	}
+}
+
+func TestApplyConfigOption_WorkflowSize(t *testing.T) {
+	s := configTestSession(t)
+	cfg := config.UserConfig{}
+	b := &bridge{opts: Options{Providers: provider.NewManager()}}
+
+	before := sharedSettings(&cfg)
+	for _, tc := range []struct{ value, want string }{
+		{"large", "large"},
+		{" SMALL ", "small"},
+		{"medium", "medium"},
+	} {
+		if err := b.applyConfigOption(s, &cfg, configIDWorkflowSize, tc.value); err != nil {
+			t.Fatalf("apply %q: %v", tc.value, err)
+		}
+		if cfg.WorkflowSize != tc.want {
+			t.Fatalf("apply %q: cfg = %q", tc.value, cfg.WorkflowSize)
+		}
+		saved, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.WorkflowSize != tc.want {
+			t.Fatalf("apply %q: persisted = %q", tc.value, saved.WorkflowSize)
+		}
+	}
+	for _, bad := range []string{"huge", "", "medium-ish"} {
+		if err := b.applyConfigOption(s, &cfg, configIDWorkflowSize, bad); err == nil {
+			t.Fatalf("expected an error for workflow size %q", bad)
+		}
+	}
+	if cfg.WorkflowSize != "medium" {
+		t.Fatalf("a rejected value changed the tier: %q", cfg.WorkflowSize)
+	}
+
+	// The tier lives in the user config, so a change from one session must
+	// reach the others' selectors (syncOtherSessions keys off this).
+	cfg.WorkflowSize = "large"
+	if sharedSettings(&cfg) == before {
+		t.Fatal("sharedSettings must change with the workflow size")
+	}
+	// "" and "medium" are the same tier: switching between them is no change.
+	a, c := config.UserConfig{}, config.UserConfig{WorkflowSize: "medium"}
+	if sharedSettings(&a) != sharedSettings(&c) {
+		t.Fatal("an unset tier and medium must fingerprint alike")
 	}
 }

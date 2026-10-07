@@ -40,8 +40,9 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "jobs", Description: "list or kill background shell jobs", Input: hintInput("[list] | kill <id>|all")},
 	{Name: "hooks", Description: "list effective runtime hooks"},
 	{Name: "diff", Description: "show diffs of files modified this session", Input: hintInput("[path ...]")},
-	{Name: "ultra", Description: "toggle Ultra swarm mode", Input: hintInput("[on|off]")},
-	{Name: "workflows", Description: "list, show, or run saved workflow scripts", Input: hintInput("[list|show <name>|run <name> [json]|where]")},
+	{Name: "ultra", Description: "toggle ultra (ultracode: substantive tasks run as dynamic workflows)", Input: hintInput("[on|off]")},
+	{Name: "workflows", Description: "list, show, or run saved workflow templates", Input: hintInput("[list|show <name>|run <name> [json | task]|size [tier]|where]")},
+	{Name: "workflow-size", Description: "show or set the size tier workflow runs plan around", Input: hintInput("[small|medium|large|unbounded]")},
 	{Name: "plan", Description: "switch to plan mode", Input: hintInput("[task]")},
 	{Name: "permissions", Description: "show/set permission level and debug", Input: hintInput("[yolo|restricted|ask-first] | debug <on|off>")},
 	{Name: "skills", Description: "list Agent Skills and where each comes from"},
@@ -207,6 +208,9 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		// sessions this process serves still reference theirs.
 		jobs.Spool().Remove(historySpoolIDs(s.history)...)
 		s.history = nil
+		// A workflow paused at a checkpoint is waiting for the cleared
+		// conversation to answer it; the fresh one never will.
+		s.stopWorkflowsLocked("the conversation was cleared")
 		return "conversation history cleared", false, true
 	}
 	return "", false, false
@@ -345,10 +349,14 @@ const acpHelpText = `commands:
   /jobs [list] | /jobs kill <id>|all  background shell jobs
   /hooks                list effective runtime hooks
   /diff [path...]       diffs of files modified this session
-  /ultra [on|off]       toggle Ultra swarm mode
-  /workflows            list, show, or run saved workflow scripts
-                        (write "ultracode" in a message to give the agent
-                        the workflow tool for that turn)
+  /ultra [on|off]       toggle ultra, saved in your config (ultracode:
+                        substantive tasks run as dynamic workflows; needs
+                        restricted or yolo). Write "ultracode" in a message
+                        to get the same for that turn only
+  /workflows            list, show, or run saved workflow templates
+  /workflows run <name> [json | task]  adapt a saved template to the task and run it
+  /workflow-size [tier] show or set the workflow size guideline
+                        (small | medium | large | unbounded)
   /plan [task]          switch to plan mode
   /permissions          show/set permission level, debug details
   /skills               list Agent Skills and where each comes from

@@ -23,7 +23,11 @@ import (
 //     conversation's occupancy would block the first prompt of a short
 //     resumed one with "context limit reached";
 //   - a pending plan and plan-edit mode: the next prompt must not run or
-//     edit the previous conversation's plan.
+//     edit the previous conversation's plan;
+//   - workflow runs paused at a checkpoint: only the conversation that
+//     started one can answer it, so they are stopped (their journals stay,
+//     so a later resume_from_run_id still replays the finished work), and a
+//     paused tree stops claiming to wait.
 func (m *Model) resetConversationState() {
 	m.convHistory = nil
 	m.autoCompactNoopLen = 0
@@ -31,6 +35,11 @@ func (m *Model) resetConversationState() {
 	m.compactWarningLevel = 0
 	m.pendingPlan = ""
 	m.planEditing = false
+	m.workflowRuns.StopAll()
+	if m.workflow != nil && m.workflow.Status == "paused" {
+		m.workflow = nil
+	}
+	m.parkedWorkflows = nil
 }
 
 func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
@@ -41,7 +50,7 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	m.activityFeed = nil
 	m.activityDropped = 0
 	m.parallelAgents = nil
-	m.workflow = nil
+	m.dropWorkflows()
 	m.recentApprovals = nil
 	for i, ev := range events {
 		at := ev.At
@@ -191,7 +200,7 @@ func (m Model) updateResume(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.sessionID = state.Metadata.ID
 			m.todos = state.Todos
 			m.parallelAgents = nil
-			m.workflow = nil
+			m.dropWorkflows()
 			m.activityFeed = nil
 			m.activityDropped = 0
 			// The carried history, context gauge and pending plan belong to

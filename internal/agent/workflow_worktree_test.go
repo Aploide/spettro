@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"spettro/internal/workflow"
@@ -67,4 +69,55 @@ func TestWorkflowRunnerWithoutIsolationTouchesNothing(t *testing.T) {
 		t.Fatal("a call without isolation must not get a worktree")
 	}
 	runner.EndCall(context.Background(), req, nil)
+}
+
+// TestWorkflowRunnerReportsPreservedWorktree: a member that edited its
+// worktree and then failed keeps that work on a branch. The branch must be
+// reported like a merge conflict is, or nobody learns it exists; a failed
+// member that changed nothing leaves nothing to report.
+func TestWorkflowRunnerReportsPreservedWorktree(t *testing.T) {
+	repo := testGitRepo(t)
+	runner := &workflowRunner{rt: &toolRuntime{cwd: repo}}
+	ctx := context.Background()
+
+	failed := workflow.Request{Index: 1, Instance: "general-purpose#1", Isolation: "worktree"}
+	if err := runner.BeginCall(ctx, failed); err != nil {
+		t.Fatalf("BeginCall: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runner.workspaceFor(1).subCWD, "half.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner.EndCall(ctx, failed, errors.New("provider unavailable"))
+	notes := runner.mergeNotes()
+	if len(notes) != 1 || !strings.Contains(notes[0], "general-purpose#1") || !isPreservedNote(notes[0]) {
+		t.Fatalf("a failed member's kept worktree must be reported, got %v", notes)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "half.txt")); !os.IsNotExist(err) {
+		t.Fatal("a failed member's work must not be merged")
+	}
+
+	clean := workflow.Request{Index: 2, Instance: "general-purpose#2", Isolation: "worktree"}
+	if err := runner.BeginCall(ctx, clean); err != nil {
+		t.Fatalf("BeginCall: %v", err)
+	}
+	runner.EndCall(ctx, clean, errors.New("provider unavailable"))
+	if got := runner.mergeNotes(); len(got) != 1 {
+		t.Fatalf("a failed member that changed nothing must add no note, got %v", got)
+	}
+}
+
+// TestRenderSeparatesPreservedFromConflicts: a conflict is finished work to
+// merge by hand; a failed member's branch is unfinished work to inspect. The
+// result must not tell the model to merge the latter.
+func TestRenderSeparatesPreservedFromConflicts(t *testing.T) {
+	preserved := "general-purpose#3: " + preservedNoteMarker + ` — branch "spettro/x" kept at /tmp/x — subagent failed`
+	conflict := `general-purpose#4: workspace merge conflict — branch "spettro/y" kept at /tmp/y`
+	out := renderWorkflowResult("wf_1", "/tmp/run", "inline", workflow.Meta{Name: "m"}, workflow.Result{}, []string{preserved})
+	if strings.Contains(out, "merge it, fix conflicts") || !strings.Contains(out, "Do not merge it blindly") {
+		t.Fatalf("preserved only:\n%s", out)
+	}
+	out = renderWorkflowResult("wf_1", "/tmp/run", "inline", workflow.Meta{Name: "m"}, workflow.Result{}, []string{conflict})
+	if !strings.Contains(out, "merge it, fix conflicts") || strings.Contains(out, "Do not merge it blindly") {
+		t.Fatalf("conflict only:\n%s", out)
+	}
 }

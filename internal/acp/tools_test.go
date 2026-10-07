@@ -121,9 +121,9 @@ func TestToolCallTitles(t *testing.T) {
 			t.Errorf("title(%s %s) = %q, want %q", tc.name, tc.args, got, tc.want)
 		}
 	}
-	// Swarm members are attributed.
+	// Workflow members (instance names like "code#3") are attributed.
 	if got := toolCallTitle(agent.ToolTrace{AgentID: "code#3", Name: "file-read", Args: `{"path":"x"}`}); got != "[code#3] Read x" {
-		t.Errorf("swarm title = %q", got)
+		t.Errorf("member title = %q", got)
 	}
 }
 

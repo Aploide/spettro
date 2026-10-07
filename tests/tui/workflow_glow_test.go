@@ -70,3 +70,23 @@ func TestInputBoxLeavesOrdinaryTextAlone(t *testing.T) {
 		}
 	}
 }
+
+// A "+500k" token budget lights up in the input box only when the message
+// also turns workflows on — the only time the run honours it.
+func TestInputBoxLightsBudgetDirectivesWithWorkflows(t *testing.T) {
+	runs := func(text string) int {
+		m := tui.NewModelForTesting()
+		m.SetTextareaValueForTesting(text)
+		return len(sgr.FindAllString(m.ViewInputForTesting(100), -1))
+	}
+	if _, ok := agent.ParseBudgetDirective("ultracode audit +500k"); !ok {
+		t.Fatal("+500k is no longer a budget directive; the test case is stale")
+	}
+	// Same length either way, so any extra runs come from the directive.
+	if lit, plain := runs("ultracode audit +500k"), runs("ultracode audit xxxxx"); lit <= plain {
+		t.Fatalf("the directive does not glow next to the keyword: %d SGR runs vs %d", lit, plain)
+	}
+	if lit, plain := runs("plain audit +500k"), runs("plain audit xxxxx"); lit != plain {
+		t.Fatalf("without workflows the directive must stay plain: %d SGR runs vs %d", lit, plain)
+	}
+}

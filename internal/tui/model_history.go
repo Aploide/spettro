@@ -130,6 +130,13 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	if m.steering == nil {
 		m.steering = agent.NewSteeringQueue()
 	}
+	// Same for paused workflow runs: one registry per Model, so a run the
+	// orchestrator paused in this turn can be continued in the next.
+	var watchRuns tea.Cmd
+	if m.workflowRuns == nil {
+		m.workflowRuns = agent.NewWorkflowRuns()
+		watchRuns = m.watchWorkflowRuns()
+	}
 	events := newRunEventQueue()
 	m.runEvents = events
 	usageCh := make(chan agent.UsageEvent, 16)
@@ -208,7 +215,13 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		MaxTokens:       m.cfg.TokenBudget,
 		MaxOutputTokens: m.cfg.MaxOutputTokens,
 		Thinking:        pm.ConfiguredThinking(providerName, modelName, m.cfg.ThinkingLevel),
-		Ultra:           m.cfg.UltraActive(),
+		// Workflows: ultra, the standing ultracode mode (/ultra, saved, and
+		// suspended while this run would be ask-first, where workflows
+		// cannot run), the configured size tier, and the registry paused
+		// runs live in between turns.
+		Ultracode:       m.ultraActiveFor(spec),
+		WorkflowSize:    m.cfg.WorkflowSizeTier(),
+		WorkflowRuns:    m.workflowRuns,
 		RequiredReads:   mentionedFiles,
 		Images:          images,
 		History:         history,
@@ -279,6 +292,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	a.CheckpointPrepare = checkpointPrepare
 
 	return m, tea.Batch(
+		watchRuns,
 		waitForRunEvents(events),
 		waitForUsage(usageCh),
 		waitForShellApproval(approvalCh),

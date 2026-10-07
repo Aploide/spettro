@@ -165,15 +165,28 @@ type LLMAgent struct {
 	// provider manager's per-model default.
 	MaxOutputTokens int
 	Thinking        provider.ThinkingLevel
-	// Ultra, when true on a top-level run, injects the ultra fan-out tool and
-	// swarm guidance so the agent decomposes hard tasks across many parallel
-	// sub-agents. Read once at run construction (the system prompt must stay
-	// byte-stable per run); ignored on sub-agents.
-	Ultra bool
 	// Workflows forces the workflow tool on for this run. Hosts normally leave
 	// it false and let the "ultracode" keyword in the task turn it on;
 	// ignored on sub-agents, which never orchestrate.
-	Workflows     bool
+	Workflows bool
+	// Ultracode is the host's standing ultracode toggle — /ultra, persisted
+	// as config.UserConfig.Ultra. Hosts pass it only when the run's
+	// effective permission is not ask-first (where every workflow call is
+	// refused): cfg.UltraActive() where the run takes the user's level, the
+	// TUI's per-agent rule where a spec's own level applies. Every turn then behaves as if the
+	// user had written the keyword: the workflow tool is granted, runs are
+	// pre-approved, and the agent is told to orchestrate substantive work
+	// through workflows by default. Read once at run construction (the
+	// system prompt must stay byte-stable per run); ignored on sub-agents.
+	Ultracode bool
+	// WorkflowSize is the configured size tier for workflow runs
+	// (config.WorkflowSizeTier); empty means medium.
+	WorkflowSize string
+	// WorkflowRuns holds workflow runs paused at a checkpoint so a later
+	// tool call — in this turn or a later one — can continue them. Hosts own
+	// one per session; nil gives each run a turn-local registry, so a paused
+	// run cannot outlive the turn that started it.
+	WorkflowRuns  *WorkflowRuns
 	RequiredReads []string
 	Images        []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,
@@ -221,7 +234,7 @@ type LLMAgent struct {
 	DelegationDepth int
 	ParentAgentID   string
 	// InstanceID, when set, replaces Spec.ID as the agent identity on emitted
-	// ToolTraces (e.g. "code#3" for the third member of an Ultra swarm) so
+	// ToolTraces (e.g. "general-purpose#3" for a workflow's third member) so
 	// hosts can tell concurrent same-type sub-agents apart. Prompt, tool, and
 	// handoff resolution still use Spec.ID.
 	InstanceID string
@@ -251,30 +264,109 @@ type LLMAgent struct {
 	Steering *SteeringQueue
 }
 
-// fanOutTools grants the orchestration tools a run is entitled to and returns
-// the guidance to append to its system prompt.
+// fanOutTools grants the orchestration tool a run is entitled to — the
+// workflow tool, when workflows apply to the turn — and returns the guidance
+// to append to its system prompt.
 //
-// Both tools bypass the manifest's PrimaryOnly/handoff gating by design — any
-// top-level agent on any model may fan out — and neither is ever granted to a
-// sub-agent, which is what stops a swarm from spawning swarms.
-func fanOutTools(allowed []string, ultra, workflows bool, depth int) ([]string, string) {
-	if depth != 0 {
+// The tool bypasses the manifest's PrimaryOnly/handoff gating by design — any
+// top-level agent on any model may fan out — and is never granted to a
+// sub-agent, which is what stops a workflow member from starting workflows
+// of its own. The same rule keeps the ultracode guidance off sub-agents: a
+// member told to run a workflow for every task would only be told to do
+// something it cannot.
+func fanOutTools(allowed []string, workflows workflowGuidance, depth int) ([]string, string) {
+	if depth != 0 || !workflows.Enabled {
 		return allowed, ""
 	}
-	prompt := ""
-	if ultra {
-		if !slices.Contains(allowed, ultraToolID) {
-			allowed = append(allowed, ultraToolID)
-		}
-		prompt += ultraPromptSection
+	if !slices.Contains(allowed, workflowToolID) {
+		allowed = append(allowed, workflowToolID)
 	}
-	if workflows {
-		if !slices.Contains(allowed, workflowToolID) {
-			allowed = append(allowed, workflowToolID)
-		}
-		prompt += workflowPromptSection
+	return allowed, workflows.prompt()
+}
+
+// workflowGuidanceFor decides, once per run, how workflows apply to task:
+// whether the tool is granted, which guidance variant the prompt carries,
+// and the size and budget it states. allowed is the run's resolved tool list,
+// which says what kind of agent the guidance is for.
+//
+// Ultracode — the keyword in the message, or the host's /ultra toggle —
+// selects the standing-mode guidance; a plain-English request ("use a
+// workflow") gets the judge-it guidance. A "+500k" budget directive is only
+// honoured on a turn that has workflows at all: elsewhere "+500k" is just
+// text.
+//
+// A run paused at a checkpoint in the host's registry grants the tool on its
+// own. The checkpoint result tells the model to answer it, and the model very
+// often does that by ending its turn to ask the user — whose reply ("yes, fix
+// 1 and 3") then carries no keyword. Without the tool on that turn the
+// continue the whole design hinges on would be refused, and the run would sit
+// paused until the idle reaper stopped it. Such a turn gets the judge-it
+// guidance (unless ultracode is on anyway) and no pre-approval for new runs:
+// answering a question is not a request for more spending. Sub-agents never
+// get any of it — Run clears the guidance below depth 0.
+func (a LLMAgent) workflowGuidanceFor(task string, allowed []string) workflowGuidance {
+	ultracode := a.Ultracode || WorkflowPreapproved(task)
+	requested := a.Workflows || ultracode || WorkflowRequested(task)
+	g := workflowGuidance{
+		Requested: requested,
+		Ultracode: ultracode,
+		Research:  !slices.ContainsFunc(allowed, isWorkflowEditTool),
+		NoRead:    !slices.ContainsFunc(allowed, isWorkflowReadTool),
+		SizeTier:  a.WorkflowSize,
 	}
-	return allowed, prompt
+	if a.DelegationDepth == 0 {
+		g.Paused = a.WorkflowRuns.Paused()
+	}
+	g.Enabled = requested || len(g.Paused) > 0
+	if g.Enabled {
+		if tokens, ok := ParseBudgetDirective(task); ok {
+			g.BudgetTokens = tokens
+		}
+	}
+	return g
+}
+
+// ultraTurnReminder is appended to the user's message when the /ultra toggle,
+// not the message itself, is what turned ultracode on.
+//
+// The system prompt already carries the standing-mode guidance, but a live
+// run showed that is not enough on its own: with /ultra on, "review
+// calc/calc.go for bugs" was done solo, while the same request with the
+// keyword in it ran a workflow. A word in the user's own turn outweighs a
+// paragraph in the system prompt, so the toggle says it there too — the way
+// Claude Code confirms a standing ultracode with a reminder on each turn.
+// It rides on the user message, not the system prompt, so the cached prefix
+// is untouched; and a message that already has the keyword needs no echo.
+func ultraTurnReminder(a LLMAgent, task string, g workflowGuidance) string {
+	if !a.Ultracode || a.DelegationDepth != 0 || !g.Ultracode || WorkflowPreapproved(task) {
+		return ""
+	}
+	if g.Research {
+		return "\n\n<system-reminder>ultra is on (the user's /ultra toggle): the standing ultracode opt-in applies to this message. Investigate it with a workflow — several independent angles, findings verified — unless it is conversational.</system-reminder>"
+	}
+	return "\n\n<system-reminder>ultra is on (the user's /ultra toggle): the standing ultracode opt-in applies to this message. Author and run a workflow for it unless it is conversational or a trivial mechanical edit.</system-reminder>"
+}
+
+// isWorkflowEditTool reports whether tool lets an agent change files itself,
+// which is what separates an implementing agent from a planner or a read-only
+// Q&A agent for the standing-mode guidance. The shell counts: an agent with
+// bash can edit through it. Retired aliases count as their canonical tool.
+func isWorkflowEditTool(tool string) bool {
+	switch tool {
+	case "file-write", "file-edit", "multi-edit", "rename-symbol", "bash", "shell-exec", "pty-start":
+		return true
+	}
+	return false
+}
+
+// isWorkflowReadTool reports whether tool lets an agent look at the code
+// itself, so it can scout a work-list inline before writing a script.
+func isWorkflowReadTool(tool string) bool {
+	switch tool {
+	case "file-read", "grep", "glob", "ls", "repo-search", "lsp", "bash", "shell-exec":
+		return true
+	}
+	return false
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -289,12 +381,19 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
 	var fanOutPrompt string
-	// Workflows are a per-turn opt-in: the user writes the keyword in their
-	// message, or a host sets the flag. Detection lives in the runner so every
-	// surface (TUI, ACP, goal, Telegram, headless) honours the keyword without
-	// each one re-implementing it.
-	allowedTools, fanOutPrompt = fanOutTools(allowedTools, a.Ultra, a.Workflows || WorkflowRequested(task), a.DelegationDepth)
+	// Workflows are a per-turn opt-in: the user writes the keyword or asks in
+	// their own words, or the host's /ultra toggle stands in for the
+	// keyword on every turn; a run paused at a checkpoint also keeps the tool
+	// for as long as it waits. Detection lives in the runner so every surface
+	// (TUI, ACP, goal, Telegram, headless) honours it without each one
+	// re-implementing it.
+	workflows := a.workflowGuidanceFor(task, allowedTools)
+	if a.DelegationDepth != 0 {
+		workflows = workflowGuidance{}
+	}
+	allowedTools, fanOutPrompt = fanOutTools(allowedTools, workflows, a.DelegationDepth)
 	systemPrompt += fanOutPrompt
+	task += ultraTurnReminder(a, task, workflows)
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
@@ -314,9 +413,13 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	res, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt: systemPrompt,
 		UserTask:     task,
-		// The keyword is a standing yes; a plain-English request is not, and
-		// the workflow tool confirms before spending on the latter.
-		WorkflowPreapproved: a.Workflows || WorkflowPreapproved(task),
+		// The keyword (or the /ultra toggle) is a standing yes; a
+		// plain-English request is not, and the workflow tool confirms before
+		// spending on the latter.
+		WorkflowPreapproved: a.Workflows || workflows.Ultracode,
+		WorkflowSize:        workflows.SizeTier,
+		WorkflowBudget:      workflows.BudgetTokens,
+		WorkflowRuns:        a.WorkflowRuns,
 		History:             a.History,
 		Messages:            a.Messages,
 		CWD:                 a.CWD,

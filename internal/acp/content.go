@@ -53,6 +53,11 @@ type turnState struct {
 	// workflow is the in-flight workflow run whose tool call is rewritten as
 	// the run progresses; nil outside a workflow.
 	workflow *acpWorkflow
+	// workflows is the session's workflow cards by run_id (see
+	// acpWorkflowCards): a run paused at a checkpoint in one turn and
+	// continued in another keeps its card's state. Nil gives the turn a set
+	// of its own.
+	workflows *acpWorkflowCards
 }
 
 // openToolCall is a tool call the editor has been told is running.

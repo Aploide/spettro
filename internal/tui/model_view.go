@@ -185,9 +185,16 @@ func (m Model) viewHeader() string {
 		m.activeModelSupportsReasoning() {
 		thinkingTag = "thinking:" + level
 	}
-	ultraTag := ""
-	if m.cfg.UltraActive() {
+	// Ultra (the standing ultracode mode) changes what every message does,
+	// so it stays on screen for as long as it is on — dimmed and marked
+	// suspended while the agent would run ask-first, where workflows cannot
+	// run. One tag: /ultra and the mode it switches are the same thing.
+	ultraTag, ultraSuspended := "", false
+	if m.cfg.Ultra {
 		ultraTag = "ultra"
+		if !m.ultraActive() {
+			ultraTag, ultraSuspended = "ultra:suspended", true
+		}
 	}
 	sandboxTag := ""
 	if m.sandboxState != nil {
@@ -199,18 +206,44 @@ func (m Model) viewHeader() string {
 	permW := lipgloss.Width(permText)
 	maxMetaWidth := max(m.width-logoW-permW-8, 0)
 	metaText := truncateLabel(modelLabel+"  "+provLabel, maxMetaWidth)
-	right := lipgloss.NewStyle().Foreground(mc).Render(permText)
-	if metaText != "" {
-		right = styleMuted.Render(metaText) + "  " + right
+	// The right-hand tags in display order. Each has a drop rank: on a narrow
+	// terminal the lowest-ranked go first, until the active agent's name fits
+	// in the centre. The header is the only place the agent is named — the
+	// input box no longer carries a label — so it must never be the part
+	// that is cut.
+	type headerTag struct {
+		text string
+		rank int // lower drops first
+	}
+	var tags []headerTag
+	if sandboxTag != "" {
+		tags = append(tags, headerTag{styleMuted.Render(sandboxTag), 0})
+	}
+	if ultraSuspended {
+		tags = append(tags, headerTag{styleMuted.Render(ultraTag), 3})
+	} else if ultraTag != "" {
+		tags = append(tags, headerTag{lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag), 3})
 	}
 	if thinkingTag != "" {
-		right = styleMuted.Render(thinkingTag) + "  " + right
+		tags = append(tags, headerTag{styleMuted.Render(thinkingTag), 1})
 	}
-	if ultraTag != "" {
-		right = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(ultraTag) + "  " + right
+	if metaText != "" {
+		tags = append(tags, headerTag{styleMuted.Render(metaText), 2})
 	}
-	if sandboxTag != "" {
-		right = styleMuted.Render(sandboxTag) + "  " + right
+	tags = append(tags, headerTag{lipgloss.NewStyle().Foreground(mc).Render(permText), 4})
+	joinTags := func(minRank int) string {
+		var parts []string
+		for _, tg := range tags {
+			if tg.rank >= minRank {
+				parts = append(parts, tg.text)
+			}
+		}
+		return strings.Join(parts, "  ")
+	}
+	modeW := lipgloss.Width(m.mode)
+	right := joinTags(0)
+	for minRank := 1; minRank <= 5 && m.width-logoW-lipgloss.Width(right)-2 < modeW+2; minRank++ {
+		right = joinTags(minRank)
 	}
 	rightW := lipgloss.Width(right)
 	availableCenter := max(m.width-logoW-rightW-2, 0)
@@ -546,11 +579,11 @@ func clampTextLines(lines []string, maxLines, width int) []string {
 // place the input is drawn goes through here so the effect cannot appear in
 // one input state and vanish in another.
 func (m Model) inputTextareaView() string {
-	return highlightUltracode(m.ta.View(), m.eyeFrame)
+	return highlightWorkflowInput(m.ta.View(), m.eyeFrame, m.budgetDirectivesLive())
 }
 
 // boxContentWidth is the room inside the input box for a box width cells
-// wide: the rounded border and one cell of padding on each side.
+// wide: the border and one cell of padding on each side.
 func boxContentWidth(width int) int {
 	return max(width-4, 1)
 }
@@ -571,14 +604,10 @@ func (m Model) viewInput(width int) string {
 // or in its place the plan/steer/approval picker or the question form.
 func (m Model) viewInputBox(width int) string {
 	mc := m.currentColor()
-	agentLabel := m.mode
-	if spec, ok := m.manifest.AgentByID(m.mode); ok {
-		agentLabel = spec.ID
-	}
-	prompt := modePrompt(m.mode)
-	label := lipgloss.NewStyle().Foreground(mc).Bold(true).Render(prompt + " " + agentLabel)
-
-	lines := []string{label}
+	// No agent label row: the header already marks the active agent, and a
+	// second label inside the box cost a row on every frame. The border keeps
+	// the agent's colour, so the box still says whose turn it is.
+	var lines []string
 	if m.showPlanApproval {
 		lines = append(lines, m.renderApprovalPicker(
 			"Execute this plan?",
@@ -601,8 +630,7 @@ func (m Model) viewInputBox(width int) string {
 	} else if m.pendingQuestion != nil {
 		lines = append(lines, m.renderQuestionForm())
 	} else if m.pendingAuth != nil {
-		// The dialog decides for itself whether the label row fits.
-		lines = m.approvalDialogLines(label, boxContentWidth(width))
+		lines = m.approvalDialogLines(boxContentWidth(width))
 	} else {
 		if chips := m.renderAttachmentChips(mc); chips != "" {
 			lines = append(lines, chips)
@@ -613,7 +641,7 @@ func (m Model) viewInputBox(width int) string {
 		lines = append(lines, m.inputTextareaView())
 	}
 	boxStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
+		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(mc).
 		Width(width).
 		PaddingLeft(1).PaddingRight(1)
@@ -662,7 +690,7 @@ func renderGlare(text string, frame int, agentColor color.Color) string {
 }
 
 // footerBudget is the total number of rows everything between the transcript
-// and the input may occupy: workflow, swarm, delegations and todos combined.
+// and the input may occupy: workflow, delegations and todos combined.
 //
 // Each of those used to size itself independently, so a run with a workflow
 // and a todo list could eat two thirds of a short terminal between them. They
@@ -673,7 +701,7 @@ func footerBudget(height int) int {
 }
 
 // showsParallelFooter reports whether the block drawn by renderParallelAgents
-// (workflow, swarm, delegations, todos) sits between the transcript and the
+// (workflow, delegations, todos) sits between the transcript and the
 // input. The side panel carries the same information while it is open, and
 // the @/$ completion palette takes the block's place while the user is
 // picking a completion: it is short-lived, and on a small terminal it needs
@@ -760,11 +788,10 @@ func (m Model) parallelFooterBudget() int {
 }
 
 // renderParallelAgents draws everything that sits between the transcript and
-// the input: the workflow summary, the Ultra swarm, ordinary delegations, and
-// the todo list. Swarms and workflows get their own bordered blocks — a
-// fan-out of twenty agents mixed into the plain delegation list was
-// unreadable, and the two are different enough that sharing one flat list
-// helped nobody.
+// the input: the workflow summary, ordinary delegations, and the todo list.
+// A workflow gets its own bordered block — a fan-out of twenty agents mixed
+// into the plain delegation list was unreadable, and the two are different
+// enough that sharing one flat list helped nobody.
 //
 // Whatever is here is an annotation on the conversation, never a replacement
 // for it, so the whole region is bounded and each block takes only what the
@@ -785,15 +812,13 @@ func (m Model) renderParallelAgents() string {
 
 	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
 	for _, a := range m.parallelAgents {
-		// Swarm members have their own block above; listing them here too
-		// would double every row of a fan-out.
-		if a.Status == "running" && a.Kind != "swarm" {
+		if a.Status == "running" {
 			active = append(active, a)
 		}
 	}
-	// Delegations and todos are shown nowhere else, so a swarm must not be
-	// able to push them off the screen entirely: one row each is held back,
-	// which is what their one-line forms need.
+	// Delegations and todos are shown nowhere else, so a workflow must not
+	// be able to push them off the screen entirely: one row each is held
+	// back, which is what their one-line forms need.
 	reserved := 0
 	if len(active) > 0 {
 		reserved++
@@ -803,9 +828,6 @@ func (m Model) renderParallelAgents() string {
 	}
 	if rows := remaining - reserved - 2; rows >= 2 {
 		spend(m.renderWorkflowBlock(paneW, rows))
-	}
-	if rows := remaining - reserved - 2; rows >= 2 {
-		spend(m.renderSwarmBlock(paneW, rows))
 	}
 	if remaining <= 0 || (len(active) == 0 && len(m.todos) == 0) {
 		return strings.Join(blocks, "\n")
@@ -876,10 +898,10 @@ func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
 	return lines
 }
 
-// delegationRow renders one ordinary (non-swarm) sub-agent.
+// delegationRow renders one ordinary (non-workflow) sub-agent.
 func (m Model) delegationRow(a parallelAgentEntry) string {
 	agentColor := modeColor("")
-	if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
+	if spec, ok := m.manifest.AgentByID(instanceSpecID(a.ID)); ok {
 		agentColor = modeColor(spec.Color)
 	}
 	label := a.ID

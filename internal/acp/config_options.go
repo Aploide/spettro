@@ -1,12 +1,14 @@
 package acp
 
 import (
+	"fmt"
 	"strings"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/workflow"
 )
 
 // Session config option IDs. These are the stable identifiers echoed back by
@@ -17,12 +19,15 @@ const (
 	configIDPermission = "permission"
 	configIDThinking   = "thinking"
 	configIDUltra      = "ultra"
+	// configIDWorkflowSize is the size tier workflow runs plan around
+	// (config.WorkflowSize).
+	configIDWorkflowSize = "workflow_size"
 )
 
 // buildConfigOptions renders Spettro's live state (agent mode, model,
-// permission level, thinking level) as ACP session configuration options —
-// the mechanism modern clients (Zed, ...) use to draw the mode/model/permission
-// selectors in their editor toolbar. This supersedes the deprecated
+// permission level, thinking level, ultra, workflow size) as ACP session
+// configuration options — the mechanism modern clients (Zed, ...) use to draw
+// the mode/model/permission selectors in their editor toolbar. This supersedes the deprecated
 // SessionModeState "modes" field, which newer clients no longer render.
 //
 // Order matters: the array is the agent's preferred priority, so mode and
@@ -40,6 +45,7 @@ func buildConfigOptions(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		permissionConfigOption(cfg),
 		thinkingConfigOption(cfg),
 		ultraConfigOption(cfg),
+		workflowSizeConfigOption(cfg),
 	}
 }
 
@@ -195,14 +201,68 @@ func thinkingConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 
 func ultraConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
 	// Ultra is a boolean config option so clients render an on/off toggle
-	// instead of a two-entry dropdown.
+	// instead of a two-entry dropdown. The toggle shows the saved setting;
+	// when it is on but ask-first suspends it (UltraActive), the description
+	// says so, since the toggle alone would claim a mode that is not in
+	// effect. Options are rebuilt after every permission change, so the note
+	// comes and goes with it.
+	desc := "Ultracode: substantive tasks run as dynamic workflows"
+	if cfg.Ultra && !cfg.UltraActive() {
+		desc += " (suspended under Ask first — workflows need Restricted or YOLO)"
+	}
 	return acpsdk.SessionConfigOption{Boolean: &acpsdk.SessionConfigOptionBoolean{
 		Id:           configIDUltra,
 		Name:         "Ultra",
-		Description:  new("Swarm of parallel sub-agents for hard tasks (works with any model)"),
+		Description:  new(desc),
 		CurrentValue: cfg.Ultra,
 		Type:         "boolean",
 	}}
+}
+
+// workflowSizeConfigOption is the workflow size tier as a select. It is shown
+// whether or not workflows are in use this turn: the toolbar is built once
+// per config update, and a control that appeared only once a message said
+// "ultracode" would flicker in and out. Each option's description gives the
+// tier's agent guideline, read from workflow.SizeTiers so it cannot drift
+// from what the engine tells scripts.
+func workflowSizeConfigOption(cfg *config.UserConfig) acpsdk.SessionConfigOption {
+	options := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(config.WorkflowSizes))
+	for _, tier := range config.WorkflowSizes {
+		options = append(options, acpsdk.SessionConfigSelectOption{
+			Name:        strings.ToUpper(tier[:1]) + tier[1:],
+			Value:       acpsdk.SessionConfigValueId(tier),
+			Description: new(workflowSizeSummary(tier)),
+		})
+	}
+	return acpsdk.SessionConfigOption{Select: &acpsdk.SessionConfigOptionSelect{
+		Id:           configIDWorkflowSize,
+		Name:         "Workflow size",
+		Description:  new("How many agents a workflow run plans around (a guideline, not a cap)"),
+		CurrentValue: acpsdk.SessionConfigValueId(cfg.WorkflowSizeTier()),
+		Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &options},
+		Type:         "select",
+	}}
+}
+
+// workflowSizeSummary describes a size tier in a few words, for the config
+// option and /workflow-size.
+func workflowSizeSummary(tier string) string {
+	size := workflow.ResolveSize(tier)
+	if size.Agents <= 0 {
+		return fmt.Sprintf("no agent guideline · fan-outs up to ~%d wide", size.Fanout)
+	}
+	return fmt.Sprintf("~%d agents per run · fan-outs up to ~%d wide", size.Agents, size.Fanout)
+}
+
+// validWorkflowSize normalises a tier name and reports whether it is one.
+func validWorkflowSize(value string) (string, bool) {
+	tier := strings.ToLower(strings.TrimSpace(value))
+	for _, t := range config.WorkflowSizes {
+		if t == tier {
+			return tier, true
+		}
+	}
+	return "", false
 }
 
 // applyConfigOption mutates session/config state in response to a
@@ -286,11 +346,9 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 		default:
 			return acpsdk.NewInvalidParams(map[string]any{"error": "invalid ultra value: " + value})
 		}
-		// A swarm runs many sub-agents concurrently; per-action approval
-		// prompts would flood the client, so Ultra requires restricted or yolo.
-		if enabled && cfg.Permission == config.PermissionAskFirst {
-			return acpsdk.NewInvalidParams(map[string]any{"error": "ultra requires the Restricted or YOLO permission level — change Permission first"})
-		}
+		// Not refused under ask-first: the setting is saved and UltraActive
+		// keeps it suspended until Permission is Restricted or YOLO (the
+		// option's description says so), matching /ultra.
 		if _, err := config.Update(func(c *config.UserConfig) error {
 			c.Ultra = enabled
 			return nil
@@ -298,6 +356,20 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 			return err
 		}
 		cfg.Ultra = enabled
+		return nil
+
+	case configIDWorkflowSize:
+		tier, ok := validWorkflowSize(value)
+		if !ok {
+			return acpsdk.NewInvalidParams(map[string]any{"error": "invalid workflow size: " + value + " (use " + strings.Join(config.WorkflowSizes, ", ") + ")"})
+		}
+		if _, err := config.Update(func(c *config.UserConfig) error {
+			c.WorkflowSize = tier
+			return nil
+		}); err != nil {
+			return err
+		}
+		cfg.WorkflowSize = tier
 		return nil
 	}
 	return acpsdk.NewInvalidParams(map[string]any{"error": "unknown config option: " + configID})

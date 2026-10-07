@@ -51,12 +51,11 @@ func IsPlanningEyeModeForTesting(mode string) bool {
 func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
-	// Match New()'s input height: the default (6 rows) makes every rendered
-	// frame three lines taller than the real one, which hides layout overflow
-	// from tests that measure the view. The gutter has to match for the same
-	// reason — it is columns the real input does not spend.
+	// Match New()'s input shape: a different height or gutter makes every
+	// rendered frame differ from the real one, which hides layout overflow
+	// from tests that measure the view.
 	ta.ShowLineNumbers = false
-	ta.SetHeight(3)
+	shapeInput(&ta)
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
 	cfg := config.Default()
 	// Point at a reasoning-capable catalog model so thinking-level commands
@@ -70,6 +69,9 @@ func NewModelForTesting() Model {
 		cfg:       cfg,
 		providers: pm,
 		store:     &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
+		// Like New: the panel asks this registry whether a paused run is
+		// still alive.
+		workflowRuns: agent.NewWorkflowRuns(),
 	}
 }
 

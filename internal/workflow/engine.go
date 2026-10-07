@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,9 +97,30 @@ type Options struct {
 	// "general-purpose#7" rather than "agent#7", which matters because those
 	// names are how a user tells concurrent members apart.
 	DefaultAgentType string
+	// Checkpoints makes checkpoint() pause the run for the orchestrator: Next
+	// returns the checkpoint and Resume answers it. A host without an
+	// orchestrator in the loop leaves it false, and checkpoint() then resolves
+	// immediately to null with a "checkpoint skipped" log line. Run always
+	// runs with it off.
+	Checkpoints bool
+	// AutoCheckpoint (with Checkpoints) also pauses at every phase boundary:
+	// a phase() call entering a phase not seen before, once at least one agent
+	// has run, raises a checkpoint with Auto set and data {finished_phase,
+	// next_phase, agents, failed}. The script does not see it; the reply is
+	// the host's to interpret (a {stop:true} reply means the host stops the
+	// run).
+	AutoCheckpoint bool
+	// SizeTier names the run's size guideline (see SizeTiers); empty or
+	// unknown means medium. It is exposed to the script as the size global.
+	SizeTier string
+	// SizeAgents overrides the tier's agent guideline when positive.
+	SizeAgents int
 }
 
 func (o Options) withDefaults() Options {
+	if o.MaxConcurrency <= 0 {
+		o.MaxConcurrency = ResolveSize(o.SizeTier).Concurrency
+	}
 	if o.MaxConcurrency <= 0 {
 		o.MaxConcurrency = min(16, max(1, runtime.NumCPU()-2))
 	}
@@ -149,43 +172,137 @@ func Validate(script string) (Meta, error) {
 // script's first line, so reported error line numbers match what the author
 // wrote.
 func compileScript(name, script string) (*goja.Program, error) {
-	return goja.Compile(name+".workflow.js", "(async function(){"+stripMetaExport(script)+"\n})()", true)
+	prog, err := goja.Compile(name+".workflow.js", "(async function(){"+stripMetaExport(script)+"\n})()", true)
+	if err != nil {
+		return nil, fmt.Errorf("%w%s", err, syntaxContext(script, err))
+	}
+	return prog, nil
+}
+
+// syntaxErrLineRe pulls the position out of goja's "Line 99:215 …" message.
+var syntaxErrLineRe = regexp.MustCompile(`Line (\d+):(\d+)`)
+
+// syntaxContext quotes the line a syntax error points at, and names the
+// commonest cause when it fits.
+//
+// A position alone is not enough for the model that wrote the script: a live
+// run spent several turns counting columns on a 300-character prompt line to
+// find that a backtick quoted inside a template literal had closed it. Seeing
+// the line, with a marker at the column, makes that a one-step fix.
+func syntaxContext(script string, err error) string {
+	m := syntaxErrLineRe.FindStringSubmatch(err.Error())
+	if m == nil {
+		return ""
+	}
+	lineNo, _ := strconv.Atoi(m[1])
+	col, _ := strconv.Atoi(m[2])
+	lines := strings.Split(script, "\n")
+	if lineNo < 1 || lineNo > len(lines) {
+		return ""
+	}
+	line := lines[lineNo-1]
+	if lineNo == 1 {
+		col -= len("(async function(){")
+	}
+	// Show a window around the column so a long prompt line stays readable.
+	start := max(0, min(col-1, len(line))-60)
+	end := min(len(line), start+120)
+	snippet := line[start:end]
+	caret := max(0, min(col-1, len(line))-start)
+	out := fmt.Sprintf("\n  line %d: %s\n  %s^", lineNo, snippet, strings.Repeat(" ", len(fmt.Sprintf("line %d: ", lineNo))+caret))
+	if strings.Count(line, "`") > 2 {
+		out += "\n  hint: this line has more than two backticks — a backtick inside a template literal ends it; escape it as \\` or quote with ' instead"
+	}
+	return out
 }
 
 // Run executes a workflow script to completion.
+//
+// It is the non-interactive host: checkpoints are off (checkpoint() resolves
+// to null and logs that it was skipped), so the run never pauses and Run
+// returns only once the script settles.
 func Run(ctx context.Context, script string, opts Options) (Result, error) {
-	opts = opts.withDefaults()
-	if opts.Runner == nil {
-		return Result{}, fmt.Errorf("workflow: no agent runner configured")
+	opts.Checkpoints = false
+	opts.AutoCheckpoint = false
+	h, err := Start(ctx, script, opts)
+	if err != nil {
+		return Result{}, err
 	}
-	sh := &shared{opts: opts, sem: make(chan struct{}, opts.MaxConcurrency)}
-	value, meta, err := sh.execute(ctx, script, opts.Args, 0)
-	res := Result{
-		Meta:   meta,
-		Value:  value,
-		Agents: int(sh.agents.Load()),
-		Failed: int(sh.failed.Load()),
-		Cached: opts.Journal.Hits(),
-		Tokens: int(sh.tokens.Load()),
-		Logs:   sh.snapshotLogs(),
-		Phases: sh.snapshotPhases(),
+	for {
+		// Next cannot fail on a background context, and with checkpoints off
+		// it never returns one; answering null keeps Run total regardless.
+		step, err := h.Next(context.Background())
+		if err != nil {
+			return h.Snapshot(), err
+		}
+		if step.Result != nil {
+			return *step.Result, step.Err
+		}
+		_ = h.Resume(step.Checkpoint.ID, nil)
 	}
-	return res, err
 }
 
 // shared is the state every script in a run — the top-level one and any
 // workflow() children — contends on: the concurrency slot pool, the agent
-// counter, the token budget, and the journal.
+// counter, the token budget, the journal, and the checkpoint queue.
 type shared struct {
 	opts   Options
+	size   Size
 	sem    chan struct{}
 	agents atomic.Int64
 	failed atomic.Int64
 	tokens atomic.Int64
+	cpSeq  atomic.Int64
+	// sizeWarned makes the size-guideline note a one-off: the first agent
+	// past the guideline is news, the fortieth is noise.
+	sizeWarned atomic.Bool
 
 	mu     sync.Mutex
 	logs   []string
 	phases []string
+	meta   Meta
+
+	// Checkpoint state; see checkpoint.go.
+	queue    []*pendingCheckpoint
+	surfaced *pendingCheckpoint
+	active   int
+	busy     int
+	settled  bool
+	wake     chan struct{}
+}
+
+func newShared(opts Options) *shared {
+	size := ResolveSize(opts.SizeTier)
+	if opts.SizeAgents > 0 {
+		size.Agents = opts.SizeAgents
+	}
+	return &shared{
+		opts: opts,
+		size: size,
+		sem:  make(chan struct{}, opts.MaxConcurrency),
+		wake: make(chan struct{}),
+		// The top-level script's loop is busy from before it runs, and its
+		// token is never given back: when its promise settles the loop exits
+		// without parking, so the run never looks quiet between the script
+		// returning and Start settling the run.
+		busy: 1,
+	}
+}
+
+// snapshot is the run's Result so far, without a Value.
+func (s *shared) snapshot() Result {
+	s.mu.Lock()
+	meta := s.meta
+	s.mu.Unlock()
+	return Result{
+		Meta:   meta,
+		Agents: int(s.agents.Load()),
+		Failed: int(s.failed.Load()),
+		Cached: s.opts.Journal.Hits(),
+		Tokens: int(s.tokens.Load()),
+		Logs:   s.snapshotLogs(),
+		Phases: s.snapshotPhases(),
+	}
 }
 
 func (s *shared) snapshotLogs() []string {
@@ -208,15 +325,17 @@ func (s *shared) addLog(line string) {
 	}
 }
 
-func (s *shared) addPhase(title string) {
+// addPhase records a phase title and reports whether it is new to the run.
+func (s *shared) addPhase(title string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, p := range s.phases {
 		if p == title {
-			return
+			return false
 		}
 	}
 	s.phases = append(s.phases, title)
+	return true
 }
 
 func (s *shared) emit(ev Event) {
@@ -250,20 +369,68 @@ type vmRun struct {
 	// watchdog reads it to tell "waiting on agents" from "looping".
 	syncStart atomic.Int64
 
+	// meta is this script's own header: phase() reads its declared phases.
+	meta Meta
+	// jsonParse is the runtime's JSON.parse, captured before the script runs
+	// so a script reassigning JSON cannot break checkpoint replies.
+	jsonParse goja.Callable
+
 	mu       sync.Mutex
 	phase    string
 	inflight atomic.Int64
+
+	// jobMu orders senders against the loop's exit: once exited is set no job
+	// is queued any more, so the exit can drain what is queued and give back
+	// its busy tokens (see shared.busy) without a late sender leaking one.
+	jobMu  sync.Mutex
+	exited bool
 }
 
 // post hands a closure to the script goroutine. Everything that touches the
 // goja runtime — resolving a promise, most of all — must go through here:
 // a goja.Runtime is not safe to touch from two goroutines, and the loop below
 // is the single one allowed to.
+//
+// A queued job counts as busy (see shared.busy) from before it is queued
+// until the loop has run it, so the run cannot look quiet while a resolution
+// is on its way to the script.
 func (r *vmRun) post(ctx context.Context, fn func()) {
+	r.sh.hold()
+	r.send(ctx, fn)
+}
+
+// send queues a job whose busy token the caller already holds, giving the
+// token back if the job can no longer run.
+func (r *vmRun) send(ctx context.Context, fn func()) {
+	r.jobMu.Lock()
+	defer r.jobMu.Unlock()
+	if r.exited {
+		r.sh.release()
+		return
+	}
 	select {
 	case r.jobs <- fn:
 	case <-r.done:
+		r.sh.release()
 	case <-ctx.Done():
+		r.sh.release()
+	}
+}
+
+// exit ends the script loop: senders stop queueing, and the tokens of jobs
+// that will never run now are given back.
+func (r *vmRun) exit() {
+	close(r.done)
+	r.jobMu.Lock()
+	defer r.jobMu.Unlock()
+	r.exited = true
+	for {
+		select {
+		case <-r.jobs:
+			r.sh.release()
+		default:
+			return
+		}
 	}
 }
 
@@ -286,6 +453,17 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	if err != nil {
 		return nil, Meta{}, fmt.Errorf("workflow: %w", err)
 	}
+	if depth == 0 {
+		s.mu.Lock()
+		s.meta = meta
+		s.mu.Unlock()
+	}
+	// Declared params are checked before anything runs, so a template missing
+	// an input fails at the door with the names of what is missing.
+	args, err = applyParams(meta, args, depth)
+	if err != nil {
+		return nil, meta, err
+	}
 	r := &vmRun{
 		sh:     s,
 		vm:     goja.New(),
@@ -293,8 +471,9 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 		done:   make(chan struct{}),
 		depth:  depth,
 		nested: depth > 0,
+		meta:   meta,
 	}
-	defer close(r.done)
+	defer r.exit()
 
 	if err := r.bindGlobals(ctx, args); err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, err)
@@ -312,6 +491,11 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	program, err := compileScript(meta.Name, script)
 	if err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: script does not parse: %w", meta.Name, err)
+	}
+	// A workflow() child can be scheduled while the run is paused; its first
+	// synchronous stretch waits for the answer like any other script code.
+	if err := s.waitThawed(ctx); err != nil {
+		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, err)
 	}
 	leave := r.enterJS()
 	val, err := r.vm.RunProgram(program)
@@ -353,10 +537,26 @@ const idlePoll = 50 * time.Millisecond
 
 // pump drives the script's event loop: run queued resolutions until the
 // script's promise settles. Nothing else touches the runtime while this runs.
+//
+// The loop holds a busy token (see shared.busy) whenever it is not blocked
+// waiting for work: it gives it back only right before it blocks with the
+// promise still pending, and takes one again — a queued job's own, or a fresh
+// one — as soon as it wakes. A loop that exits therefore exits holding it.
 func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 	timer := time.NewTimer(idlePoll)
 	defer timer.Stop()
 	for promise.State() == goja.PromiseStatePending {
+		// Paused at a checkpoint the host has surfaced: run nothing until it
+		// is answered, so the paused run cannot emit progress into a turn
+		// that has ended, nor start work the orchestrator has not seen.
+		if wait := r.sh.frozen(); wait != nil {
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -364,14 +564,18 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 			}
 		}
 		timer.Reset(idlePoll)
+		r.sh.release()
 		select {
 		case job := <-r.jobs:
+			// The job's busy token becomes the loop's while it runs.
 			if err := r.runJob(job); err != nil {
 				return nil, err
 			}
 		case <-ctx.Done():
+			r.sh.hold()
 			return nil, ctx.Err()
 		case <-timer.C:
+			r.sh.hold()
 			// No work arrived. If nothing is in flight and no resolution is
 			// queued, the script is awaiting something that can never settle
 			// (a bare `new Promise(() => {})`, say) — report that instead of
@@ -492,6 +696,9 @@ func (r *vmRun) bindGlobals(ctx context.Context, args any) error {
 	if _, err := vm.RunString(prelude); err != nil {
 		return fmt.Errorf("workflow prelude: %w", err)
 	}
+	if parse, ok := goja.AssertFunction(vm.Get("JSON").ToObject(vm).Get("parse")); ok {
+		r.jsonParse = parse
+	}
 	if args == nil {
 		if err := vm.Set("args", goja.Undefined()); err != nil {
 			return err
@@ -509,16 +716,7 @@ func (r *vmRun) bindGlobals(ctx context.Context, args any) error {
 	}); err != nil {
 		return err
 	}
-	if err := vm.Set("phase", func(call goja.FunctionCall) goja.Value {
-		title := strings.TrimSpace(call.Argument(0).String())
-		if title == "" {
-			return goja.Undefined()
-		}
-		r.setPhase(title)
-		r.sh.addPhase(title)
-		r.sh.emit(Event{Kind: EventPhase, Phase: title, Nested: r.nested})
-		return goja.Undefined()
-	}); err != nil {
+	if err := vm.Set("phase", r.jsPhase(ctx)); err != nil {
 		return err
 	}
 	if err := vm.Set("agent", r.jsAgent(ctx)); err != nil {
@@ -527,7 +725,81 @@ func (r *vmRun) bindGlobals(ctx context.Context, args any) error {
 	if err := vm.Set("workflow", r.jsWorkflow(ctx)); err != nil {
 		return err
 	}
+	if err := vm.Set("checkpoint", r.jsCheckpoint(ctx)); err != nil {
+		return err
+	}
+	if err := vm.Set("size", r.sizeObject()); err != nil {
+		return err
+	}
 	return vm.Set("budget", r.budgetObject())
+}
+
+// jsPhase implements phase(title, {detail}?): start a progress group.
+//
+// A title need not be declared in meta.phases — a script that discovers its
+// work at runtime discovers its phases too — but the event says whether it
+// was, so a host that drew the declared plan up front can mark the newcomer.
+func (r *vmRun) jsPhase(ctx context.Context) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		arg := call.Argument(0)
+		if goja.IsUndefined(arg) || goja.IsNull(arg) {
+			return goja.Undefined()
+		}
+		title := strings.TrimSpace(arg.String())
+		if title == "" {
+			return goja.Undefined()
+		}
+		detail := ""
+		switch opts := call.Argument(1).Export().(type) {
+		case string:
+			detail = strings.TrimSpace(opts)
+		case map[string]any:
+			detail = stringField(opts, "detail")
+		}
+		dynamic := true
+		for _, p := range r.meta.Phases {
+			if p.Title == title {
+				dynamic = false
+				if detail == "" {
+					detail = p.Detail
+				}
+				break
+			}
+		}
+		prev := r.currentPhase()
+		r.setPhase(title)
+		isNew := r.sh.addPhase(title)
+		r.sh.emit(Event{Kind: EventPhase, Phase: title, Detail: detail, Dynamic: dynamic, Nested: r.nested})
+		opts := r.sh.opts
+		if isNew && opts.Checkpoints && opts.AutoCheckpoint && r.sh.agents.Load() > 0 {
+			r.autoCheckpoint(ctx, prev, title)
+		}
+		return goja.Undefined()
+	}
+}
+
+// sizeObject builds the size global: the run's size guideline, which the
+// prelude's plan() also reads for its default cap.
+func (r *vmRun) sizeObject() *goja.Object {
+	vm := r.vm
+	sz := r.sh.size
+	infinity := vm.Get("Infinity")
+	obj := vm.NewObject()
+	_ = obj.Set("tier", sz.Tier)
+	if sz.Agents > 0 {
+		_ = obj.Set("agents", sz.Agents)
+	} else {
+		_ = obj.Set("agents", infinity)
+	}
+	_ = obj.Set("fanout", sz.Fanout)
+	_ = obj.Set("spawned", func() int64 { return r.sh.agents.Load() })
+	_ = obj.Set("remaining", func() goja.Value {
+		if sz.Agents <= 0 {
+			return infinity
+		}
+		return vm.ToValue(max(int64(sz.Agents)-r.sh.agents.Load(), 0))
+	})
+	return obj
 }
 
 func (r *vmRun) budgetObject() *goja.Object {
@@ -616,6 +888,13 @@ func (r *vmRun) jsAgent(ctx context.Context) func(goja.FunctionCall) goja.Value 
 		if index > r.sh.opts.MaxAgents {
 			panic(vm.NewGoError(fmt.Errorf("agent(): this run already started %d agents, the cap is %d — the script is probably looping", index, r.sh.opts.MaxAgents)))
 		}
+		if sz := r.sh.size; sz.Agents > 0 && index > sz.Agents && r.sh.sizeWarned.CompareAndSwap(false, true) {
+			// A guideline, not a cap: the run continues, but the overrun is
+			// on the record for the orchestrator reading the result.
+			line := fmt.Sprintf("size guideline (%s: ~%d agents) exceeded", sz.Tier, sz.Agents)
+			r.sh.addLog(line)
+			r.sh.emit(Event{Kind: EventLog, Phase: r.currentPhase(), Message: line, Nested: r.nested})
+		}
 
 		phase := opts.Phase
 		if phase == "" {
@@ -639,19 +918,32 @@ func (r *vmRun) jsAgent(ctx context.Context) func(goja.FunctionCall) goja.Value 
 
 		promise, resolve, _ := vm.NewPromise()
 		r.inflight.Add(1)
+		admitted := r.sh.admit()
 		go func() {
 			defer r.inflight.Add(-1)
+			if !admitted {
+				if err := r.sh.enterDispatch(ctx); err != nil {
+					r.sh.failed.Add(1)
+					r.post(ctx, func() { resolve(goja.Null()) })
+					return
+				}
+			}
 			text, value, err := r.sh.dispatch(ctx, req, r.nested)
+			// The answer is queued for the script before the dispatch stops
+			// counting as in flight, so there is no instant at which the run
+			// looks quiet with an answer on its way — a checkpoint surfacing
+			// then would be handed to the host just before the script ran on.
 			r.post(ctx, func() {
 				switch {
 				case err != nil:
 					resolve(goja.Null())
 				case req.Schema != nil:
-					resolve(vm.ToValue(value))
+					resolve(r.plainValue(value))
 				default:
 					resolve(vm.ToValue(text))
 				}
 			})
+			r.sh.leaveDispatch()
 		}()
 		return vm.ToValue(promise)
 	}
@@ -669,8 +961,18 @@ func labelFor(label, prompt string) string {
 }
 
 // dispatch runs one request against the Runner: journal replay first, then a
-// concurrency slot, then the call itself with schema retries.
+// concurrency slot, then the call itself with schema retries. The caller has
+// already passed the pause gate and leaves it once the answer is queued.
+//
+// Nothing starts on a cancelled context. A run that has settled cancels its
+// context first, and a dispatch still on its way (scheduled late, or released
+// from the gate by the settle) would otherwise report an agent starting after
+// the run finished, or hand the Runner a context that is already dead.
 func (s *shared) dispatch(ctx context.Context, req Request, nested bool) (string, any, error) {
+	if err := ctx.Err(); err != nil {
+		s.failed.Add(1)
+		return "", nil, err
+	}
 	key := callKey(req)
 	if entry, ok := s.opts.Journal.Take(key); ok {
 		req.Instance = entry.Instance
@@ -680,6 +982,13 @@ func (s *shared) dispatch(ctx context.Context, req Request, nested bool) (string
 		s.emit(Event{Kind: EventAgentStart, Phase: req.Phase, Label: req.Label, Instance: req.Instance, AgentType: req.AgentType, Index: req.Index, Cached: true, Nested: nested})
 		value, err := decodeCached(entry.Output, req.Schema)
 		if err == nil {
+			// Re-recorded in this run's journal, so a run resumed from this
+			// one replays it too rather than paying for it again (see the
+			// same note on replayed checkpoint answers).
+			_ = s.opts.Journal.Append(JournalEntry{
+				Kind: JournalKindAgent, Key: key, Index: req.Index, Label: req.Label, Phase: req.Phase,
+				Instance: req.Instance, AgentType: req.AgentType, Output: entry.Output, Tokens: entry.Tokens,
+			})
 			s.emit(Event{Kind: EventAgentDone, Phase: req.Phase, Label: req.Label, Instance: req.Instance, AgentType: req.AgentType, Index: req.Index, Output: entry.Output, Cached: true, Nested: nested})
 			return entry.Output, value, nil
 		}
@@ -697,10 +1006,15 @@ func (s *shared) dispatch(ctx context.Context, req Request, nested bool) (string
 		s.failed.Add(1)
 		return "", nil, ctx.Err()
 	}
+	// With a slot free and the context done, select picks either at random.
+	if err := ctx.Err(); err != nil {
+		s.failed.Add(1)
+		return "", nil, err
+	}
 
 	text, value, err := s.callScoped(ctx, req)
 	entry := JournalEntry{
-		Key: key, Index: req.Index, Label: req.Label, Phase: req.Phase,
+		Kind: JournalKindAgent, Key: key, Index: req.Index, Label: req.Label, Phase: req.Phase,
 		Instance: req.Instance, AgentType: req.AgentType, Output: text,
 	}
 	if err != nil {
@@ -782,61 +1096,103 @@ func (s *shared) callWithSchema(ctx context.Context, req Request) (string, any, 
 	return "", nil, fmt.Errorf("structured output never parsed after %d attempts: %v", attempts, lastErr)
 }
 
-// jsWorkflow implements the workflow() global: run a saved workflow, or a
-// script file, as a sub-step of this one.
+// jsWorkflow implements the workflow() global: run a saved workflow, a script
+// file, or a script generated at runtime, as a sub-step of this one.
 func (r *vmRun) jsWorkflow(ctx context.Context) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		vm := r.vm
 		if r.depth > 0 {
 			panic(vm.NewGoError(fmt.Errorf("workflow(): sub-workflows cannot nest further — inline the work instead")))
 		}
-		script, err := r.resolveSubWorkflow(call.Argument(0))
+		sub, err := r.resolveSubWorkflow(call.Argument(0))
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
-		var subArgs any
+		subArgs := sub.args
 		if a := call.Argument(1); !goja.IsUndefined(a) && !goja.IsNull(a) {
 			subArgs = a.Export()
 		}
 
 		promise, resolve, reject := vm.NewPromise()
+		if sub.inline {
+			// A generated stage is usually written by an agent earlier in the
+			// run, so a broken one is an expected failure the script should be
+			// able to catch and retry — a rejection, with the reason, rather
+			// than a throw that only a try around the call itself would see.
+			if _, err := Validate(sub.script); err != nil {
+				reject(vm.NewGoError(fmt.Errorf("workflow(): the generated script is invalid: %w", err)))
+				return vm.ToValue(promise)
+			}
+		}
 		r.inflight.Add(1)
+		// The child's script loop is busy from now (see shared.busy): taken
+		// here, on the parent's loop, which is itself busy, so the run never
+		// looks quiet while the child is still to be scheduled. The child's
+		// pump parks and wakes on this token; once the child is done it is
+		// given back only after the parent's resolution is queued.
+		r.sh.hold()
 		go func() {
 			defer r.inflight.Add(-1)
-			value, _, err := r.sh.execute(ctx, script, subArgs, r.depth+1)
+			value, _, err := r.sh.execute(ctx, sub.script, subArgs, r.depth+1)
 			r.post(ctx, func() {
 				if err != nil {
 					reject(vm.NewGoError(err))
 					return
 				}
-				resolve(vm.ToValue(value))
+				resolve(r.plainValue(value))
 			})
+			r.sh.release()
 		}()
 		return vm.ToValue(promise)
 	}
 }
 
-func (r *vmRun) resolveSubWorkflow(arg goja.Value) (string, error) {
+// subWorkflow is a resolved workflow() reference.
+type subWorkflow struct {
+	script string
+	// args are the reference object's own args ({script, args}), used when
+	// the call passes none as its second argument.
+	args   any
+	inline bool
+}
+
+func (r *vmRun) resolveSubWorkflow(arg goja.Value) (subWorkflow, error) {
+	const usage = "workflow(): a saved workflow name, {scriptPath}, or {script} is required"
 	if goja.IsUndefined(arg) || goja.IsNull(arg) {
-		return "", fmt.Errorf("workflow(): a saved workflow name or {scriptPath} is required")
+		return subWorkflow{}, fmt.Errorf(usage)
 	}
 	if ref, ok := arg.Export().(map[string]any); ok {
-		path, _ := ref["scriptPath"].(string)
-		if strings.TrimSpace(path) == "" {
-			return "", fmt.Errorf("workflow(): the reference object needs a scriptPath")
+		sub := subWorkflow{args: ref["args"]}
+		if source, ok := ref["script"].(string); ok && strings.TrimSpace(source) != "" {
+			sub.script, sub.inline = source, true
+			return sub, nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("workflow(): read %s: %w", path, err)
+		if path, _ := ref["scriptPath"].(string); strings.TrimSpace(path) != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return subWorkflow{}, fmt.Errorf("workflow(): read %s: %w", path, err)
+			}
+			sub.script = string(data)
+			return sub, nil
 		}
-		return string(data), nil
+		if name, _ := ref["name"].(string); strings.TrimSpace(name) != "" {
+			script, err := r.loadSaved(name)
+			sub.script = script
+			return sub, err
+		}
+		return subWorkflow{}, fmt.Errorf("workflow(): the reference object needs a script, a scriptPath or a name")
 	}
 	name := strings.TrimSpace(arg.String())
 	if name == "" {
-		return "", fmt.Errorf("workflow(): a saved workflow name or {scriptPath} is required")
+		return subWorkflow{}, fmt.Errorf(usage)
 	}
+	script, err := r.loadSaved(name)
+	return subWorkflow{script: script}, err
+}
+
+func (r *vmRun) loadSaved(name string) (string, error) {
 	if r.sh.opts.Resolve == nil {
 		return "", fmt.Errorf("workflow(): saved workflows are not available in this run")
 	}
-	return r.sh.opts.Resolve(name)
+	return r.sh.opts.Resolve(strings.TrimSpace(name))
 }

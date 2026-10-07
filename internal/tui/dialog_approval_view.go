@@ -162,7 +162,6 @@ func approvalSummaryFits(label string, width int) bool {
 
 // approvalLayout is the approval dialog cut to the rows the terminal has.
 type approvalLayout struct {
-	showLabel    bool // the agent label row
 	showReason   bool // the "why:" row
 	showSegments bool // the "remembers:" (or permission-debug "segments:") row
 	previewRows  int  // preview rows on screen; may be 0 when there is no room
@@ -189,8 +188,7 @@ func (m Model) approvalLayout(contentW int) approvalLayout {
 // block (which yields to the dialog, see parallelFooterBudget), the input box
 // border and a minimum of transcript. The summary row and the picker always
 // get theirs. What is left goes, in order, to: the preview footer (so a
-// preview is never hidden without saying so), the reason, the agent label,
-// the preview itself (up to its collapsed cap unless expanded), and the
+// preview is never hidden without saying so), the reason, the preview itself (up to its collapsed cap unless expanded), and the
 // segments row. That row is shown when "Allow always" would remember more
 // than the command (approvalRemembersOther) or permission debug is on; when
 // it is needed and gets no room, the review offers what it would say.
@@ -218,7 +216,6 @@ func (m Model) approvalLayoutFor(contentW, controlRows int) approvalLayout {
 
 	footerReserved := lay.previewTotal > 0 && take()
 	lay.showReason = strings.TrimSpace(req.request.Reason) != "" && take()
-	lay.showLabel = take()
 
 	if lay.previewTotal > 0 {
 		limit := approvalCommandCollapsedLines
@@ -306,16 +303,13 @@ func (m Model) approvalHidesContent(contentW int) bool {
 	return approvalIsFileChange(req.request) || lay.previewTotal == 0
 }
 
-// approvalDialogLines renders the dialog's rows, label included, for a
-// content area contentW cells wide. Every row is at most contentW cells, so
-// the input box never has to wrap one (which would break the height budget).
-func (m Model) approvalDialogLines(label string, contentW int) []string {
+// approvalDialogLines renders the dialog's rows for a content area contentW
+// cells wide. Every row is at most contentW cells, so the input box never has
+// to wrap one (which would break the height budget).
+func (m Model) approvalDialogLines(contentW int) []string {
 	req := m.pendingAuth.request
 	lay := m.approvalLayout(contentW)
 	var lines []string
-	if lay.showLabel {
-		lines = append(lines, label)
-	}
 	lines = append(lines, styleWarn.Render(approvalSummaryRow(req, contentW)))
 	if lay.showReason {
 		lines = append(lines, styleMuted.Render(termtext.Fit("  why: "+termtext.SingleLine(req.Reason), contentW)))

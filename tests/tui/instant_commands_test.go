@@ -39,6 +39,15 @@ func TestIsInstantCommand_Classification(t *testing.T) {
 		{"/remote stop", true},
 		{"/exit", true},
 		{"/quit", true},
+		// /ultra and /workflows size only touch saved config; running a
+		// saved template starts a turn.
+		{"/ultra", true},
+		{"/ultra on", true},
+		// There is no /ultracode command: it is unknown, so not instant.
+		{"/ultracode", false},
+		{"/workflows size", true},
+		{"/workflows size large", true},
+		{"/workflows run audit check the auth package", false},
 		// /plan and /compact have mixed sub-commands.
 		{"/plan", true},
 		{"/plan refactor module", false},

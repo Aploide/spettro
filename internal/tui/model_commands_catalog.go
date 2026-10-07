@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"spettro/internal/commands"
+	"spettro/internal/config"
 )
 
 type commandDef struct {
@@ -48,9 +49,10 @@ var allCommands = []commandDef{
 	{"/telegram", "Telegram relay: setup, allow, start/stop, status (alias /tg)"},
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
-	{"/ultra", "toggle Ultra: fan hard tasks out across a swarm of parallel sub-agents"},
-	{"/workflows", "list, show, and run saved multi-agent workflow scripts"},
-	{"/workflows run", "run a saved workflow by name (optionally with JSON args)"},
+	{"/ultra", "toggle ultra (saved) — ultracode: substantive tasks run as dynamic workflows"},
+	{"/workflows", "list, show, and run saved multi-agent workflow templates"},
+	{"/workflows run", "adapt and run a saved workflow template (JSON args or a task in plain words)"},
+	{"/workflows size", "show or set the workflow size guideline (small/medium/large/unbounded)"},
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/stats", "show session token usage and prompt-cache metrics"},
@@ -82,6 +84,13 @@ var permissionCommands = []commandDef{
 	{"/permission ask-first", "always ask before executing"},
 }
 
+// ultraCommands is the /ultra picker. A bare /ultra flips the mode, which is
+// easy to do by accident; the picker lets the user say which way they mean.
+var ultraCommands = []commandDef{
+	{"/ultra on", "ultracode: substantive tasks run as dynamic workflows (saved)"},
+	{"/ultra off", "back to ordinary turns; \"ultracode\" in a message still opts in"},
+}
+
 var thinkingCommands = []commandDef{
 	{"/thinking off", "no extended thinking (default)"},
 	{"/thinking low", "low reasoning effort (~2k thinking tokens on Anthropic)"},
@@ -90,6 +99,17 @@ var thinkingCommands = []commandDef{
 	{"/thinking x-high", "extra-high reasoning effort (~32k thinking tokens on Anthropic)"},
 	{"/thinking max", "maximum reasoning effort (~100k thinking tokens on Anthropic)"},
 }
+
+// workflowSizeCommands is the /workflows size picker. The descriptions come
+// from the engine's tier table (workflowSizeDescription) so the menu cannot
+// drift from what scripts actually see.
+var workflowSizeCommands = func() []commandDef {
+	out := make([]commandDef, 0, len(config.WorkflowSizes))
+	for _, tier := range config.WorkflowSizes {
+		out = append(out, commandDef{"/workflows size " + tier, workflowSizeDescription(tier)})
+	}
+	return out
+}()
 
 var thinkCommands = []commandDef{
 	{"/think off", "no extended thinking (default)"},
@@ -302,7 +322,8 @@ func isInstantCommand(input string) bool {
 		return true
 	case "/workflow", "/workflows":
 		// Listing, showing and locating saved workflows is local display
-		// state; "run" dispatches an LLM turn and so is not instant.
+		// state, and "size" only writes config (read when the next run
+		// starts); "run" dispatches an LLM turn and so is not instant.
 		if len(fields) == 1 {
 			return true
 		}
@@ -357,9 +378,13 @@ const helpText = `commands:
   /budget [n|0]  set token budget per request (0 = unlimited)
   /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
   /thinking <l>  alias of /think
-  /ultra [on|off] toggle Ultra: swarm of parallel sub-agents for hard tasks (any model)
-  /workflows     list, show, or run saved workflow scripts ("ultracode" in a
-                 message gives the agent the workflow tool for that turn)
+  /ultra [on|off] toggle ultra (saved) — ultracode: substantive tasks run as
+                 dynamic workflows by default (needs restricted or yolo)
+  /workflows     list, show, or run saved workflow templates ("ultracode" in a
+                 message gives the agent the workflow tool for that turn;
+                 with it, "+500k" sets the turn's workflow token budget)
+  /workflows run <name> [json | task]  adapt a saved template to the task and run it
+  /workflows size [tier]  show/set the size guideline: small|medium|large|unbounded
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /goal <obj>   run autonomously until the objective is met

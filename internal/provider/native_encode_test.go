@@ -77,7 +77,7 @@ func TestNativeEncoderConcurrentConversations(t *testing.T) {
 	}
 }
 
-// Sub-agent fan-out: the main agent and ultra's 32 sub-agents take turns on
+// Sub-agent fan-out: the main agent and 32 fan-out sub-agents take turns on
 // the Manager's one encoder, and each conversation keeps its lane, so an
 // unchanged history encodes nothing again.
 func TestNativeEncoderKeepsALanePerFanOutConversation(t *testing.T) {
