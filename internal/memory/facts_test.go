@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseFactLine(t *testing.T) {
@@ -213,10 +214,13 @@ func TestStaleHints(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, "Makefile"), []byte("all:\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// StaleHints reads the real clock, so the recent fact is dated relative
+	// to it; a fixed date would itself go stale after staleAfterDays.
+	recent := time.Now().AddDate(0, 0, -3).Format(dateLayout)
 	facts := []Fact{
 		{ID: "m-1", Text: "build with scripts/old-build.sh", Added: "2025-01-01", Used: "2025-01-01"},
 		{ID: "m-2", Text: "Makefile drives the build", Added: "2025-01-01", Used: "2025-01-01"},
-		{ID: "m-3", Text: "uses scripts/gone.sh daily", Added: "2026-07-20", Used: "2026-07-20"},
+		{ID: "m-3", Text: "uses scripts/gone.sh daily", Added: recent, Used: recent},
 	}
 	hints := StaleHints(facts, cwd)
 	if len(hints) != 1 || !strings.Contains(hints[0], "m-1") {
