@@ -462,6 +462,85 @@ func appendReasoning(out []ReasoningBlock, text, signature, redacted, providerNa
 	})
 }
 
+// claudeVersion parses a Claude model ID into its family and generation:
+// ("opus", 4, 7) from "claude-opus-4-7", ("sonnet", 3, 7) from
+// "claude-3-7-sonnet-20250219". Provider prefixes ("anthropic/",
+// "us.anthropic."), dotted versions ("claude-opus-4.7"), dates and
+// platform suffixes ("@20251101", ":0", "[1m]") are ignored. ok is false
+// for IDs that are not Claude models (MiniMax and other models served over
+// the Anthropic protocol).
+func claudeVersion(modelName string) (family string, major, minor int, ok bool) {
+	s := strings.ToLower(modelName)
+	i := strings.LastIndex(s, "claude-")
+	if i < 0 {
+		return "", 0, 0, false
+	}
+	s = s[i+len("claude-"):]
+	if j := strings.IndexAny(s, "@:["); j >= 0 {
+		s = s[:j]
+	}
+	haveMajor, done := false, false
+	for tok := range strings.SplitSeq(strings.ReplaceAll(s, ".", "-"), "-") {
+		n, err := strconv.Atoi(tok)
+		switch {
+		case err != nil:
+			if family == "" {
+				family = tok
+			}
+			done = done || haveMajor
+		case done || len(tok) > 2:
+			// A date snapshot ("20250514") ends the version.
+			done = true
+		case !haveMajor:
+			major, haveMajor = n, true
+		default:
+			minor, done = n, true
+		}
+	}
+	return family, major, minor, haveMajor
+}
+
+// anthropicAdaptiveThinking reports whether modelName is a Claude model that
+// takes adaptive thinking (thinking.type "adaptive" plus
+// output_config.effort) instead of a thinking.budget_tokens budget: Claude
+// 4.6 and later. From 4.7 on (and on every Fable and Mythos model) a budget
+// is rejected with a 400; on 4.6 it is deprecated. Older Claude models and
+// non-Claude models behind the Anthropic protocol keep the budget.
+func anthropicAdaptiveThinking(modelName string) bool {
+	family, major, minor, ok := claudeVersion(modelName)
+	if !ok {
+		return false
+	}
+	if family == "fable" || family == "mythos" {
+		return true
+	}
+	return major > 4 || major == 4 && minor >= 6
+}
+
+// adaptiveEffort maps a ThinkingLevel to the output_config.effort value sent
+// to a model that thinks adaptively, "" for off or unset (no thinking
+// config at all: Opus 4.6-4.8 and Sonnet 4.6/5 then answer without
+// thinking, while models that always think use their default effort).
+func adaptiveEffort(modelName string, level ThinkingLevel) string {
+	switch level {
+	case ThinkingLow:
+		return "low"
+	case ThinkingMedium:
+		return "medium"
+	case ThinkingHigh:
+		return "high"
+	case ThinkingXHigh:
+		// xhigh arrived with Claude 4.7; 4.6 tops out at high below max.
+		if _, major, minor, _ := claudeVersion(modelName); major == 4 && minor == 6 {
+			return "high"
+		}
+		return "xhigh"
+	case ThinkingMax:
+		return "max"
+	}
+	return ""
+}
+
 // Thinking budget bounds: Anthropic requires budget_tokens >= 1024 and
 // below max_tokens; the rest of max_tokens is left for the answer.
 const (
@@ -520,7 +599,10 @@ func toolTurnLacksThinking(providerName, modelName string, msgs []Message) bool 
 // signature is not valid for any other model), and only where the wire
 // format carries them:
 //   - Anthropic: signed thinking / redacted_thinking blocks, while extended
-//     thinking is enabled — required on the in-progress tool-use turn.
+//     thinking is enabled — required on the in-progress tool-use turn. A
+//     model that thinks adaptively gets them back whatever the level: the
+//     newest ones think even with no thinking config, and dropping their
+//     blocks edits the history they are bound to.
 //   - OpenAI-compatible chat: reasoning_content, which reasoning models such
 //     as DeepSeek and Kimi expect back during a tool loop.
 //   - OpenAI Responses: not replayable inline (fantasy drops reasoning items
@@ -531,7 +613,7 @@ func replayReasoning(providerName, apiKind, modelName string, req Request, block
 		return nil
 	}
 	anthropicAPI := isAnthropicAPI(providerName, apiKind)
-	if anthropicAPI && ThinkingBudgetTokens(req.Thinking) <= 0 {
+	if anthropicAPI && ThinkingBudgetTokens(req.Thinking) <= 0 && !anthropicAdaptiveThinking(modelName) {
 		return nil
 	}
 	var parts []fantasy.MessagePart
@@ -697,15 +779,26 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 		call.MaxOutputTokens = &maxTokens
 	}
 	// Fantasy threads thinking config via per-provider ProviderOptions.
-	// Anthropic takes a token budget (thinking.budget_tokens); OpenAI and
-	// every OpenAI-compatible backend take a reasoning_effort enum. On the
-	// Anthropic path both "off" and empty send nothing (no thinking config
-	// means extended thinking disabled). On OpenAI-style paths an explicit
-	// "off" sends reasoning_effort "none" so models that reason by default
-	// actually stop, while empty (never set) sends nothing and keeps the
-	// provider default; a server that rejects "none" is retried without the
-	// field by the manager's downgrade ladder.
-	if isAnthropicAPI(providerName, apiKind) {
+	// Anthropic takes a token budget (thinking.budget_tokens), or on Claude
+	// 4.6 and later adaptive thinking with an output_config.effort enum;
+	// OpenAI and every OpenAI-compatible backend take a reasoning_effort
+	// enum. On the Anthropic path both "off" and empty send nothing (no
+	// thinking config means extended thinking disabled). On OpenAI-style
+	// paths an explicit "off" sends reasoning_effort "none" so models that
+	// reason by default actually stop, while empty (never set) sends nothing
+	// and keeps the provider default; a server that rejects "none" is retried
+	// without the field by the manager's downgrade ladder.
+	if isAnthropicAPI(providerName, apiKind) && anthropicAdaptiveThinking(modelName) {
+		// No budget to fit under max_tokens, and an adaptive turn may
+		// legitimately carry no thinking block, so neither fitThinkingBudget
+		// nor toolTurnLacksThinking applies.
+		if effort := adaptiveEffort(modelName, ThinkingLevel(req.Thinking)); effort != "" {
+			e := fantasyanthropic.Effort(effort)
+			call.ProviderOptions = fantasy.ProviderOptions{
+				fantasyanthropic.Name: &fantasyanthropic.ProviderOptions{Effort: &e},
+			}
+		}
+	} else if isAnthropicAPI(providerName, apiKind) {
 		budget := int64(ThinkingBudgetTokens(ThinkingLevel(req.Thinking)))
 		if budget > 0 && toolTurnLacksThinking(providerName, modelName, req.Messages) {
 			// The in-progress tool-use turn came from another model (a
