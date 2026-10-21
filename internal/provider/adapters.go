@@ -254,8 +254,16 @@ func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (
 	// Honour the runtime "thinking level" when the model supports extended
 	// thinking. Anthropic requires thinking.budget_tokens < max_tokens, so we
 	// also bump max_tokens above the budget when needed. Off levels (or empty)
-	// are sent as a disabled config to make intent explicit.
-	if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
+	// are sent as a disabled config to make intent explicit. Claude 4.6 and
+	// later think adaptively instead (see anthropicAdaptiveThinking); off
+	// sends nothing there, as the newest models reject a disabled config.
+	if anthropicAdaptiveThinking(model) {
+		if effort := adaptiveEffort(model, ThinkingLevel(req.Thinking)); effort != "" {
+			adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+			params.Thinking.OfAdaptive = &adaptive
+			params.OutputConfig = anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(effort)}
+		}
+	} else if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
 		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
 		// Ensure max_tokens > thinking.budget_tokens. Add headroom for the
 		// actual answer (4k) on top of the thinking budget.

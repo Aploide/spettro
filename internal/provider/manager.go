@@ -741,7 +741,11 @@ func isThinkingLevelError(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "budget_tokens") || strings.Contains(msg, "thinking.enabled") || strings.Contains(msg, "extended thinking") {
+	// "thinking.type.enabled is not supported for this model" and rejected
+	// output_config.effort values come from Claude models that think
+	// adaptively.
+	if strings.Contains(msg, "budget_tokens") || strings.Contains(msg, "thinking.enabled") || strings.Contains(msg, "thinking.type") ||
+		strings.Contains(msg, "output_config.effort") || strings.Contains(msg, "extended thinking") {
 		return true
 	}
 	// "When `thinking` is enabled, a final `assistant` message must start
